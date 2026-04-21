@@ -679,23 +679,24 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # ── 顶部导航栏（三个按钮平均占满，无标题无状态灯）──
+        # ── 顶部导航栏（Tab 式整体导航，底部蓝色指示条）──
         nav_bar = QFrame()
-        nav_bar.setFixedHeight(36)
-        nav_bar.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 2px solid #333333; }")
+        nav_bar.setFixedHeight(38)
+        nav_bar.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 1px solid #2a2a2a; }")
         nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setSpacing(2)
-        nav_layout.setContentsMargins(2, 2, 2, 2)
+        nav_layout.setSpacing(1)
+        nav_layout.setContentsMargins(8, 4, 8, 0)
 
-        # 导航按钮样式（占满整栏）
+        # 导航按钮样式（Tab 式：无边框，底部指示条标识选中）
         menu_button_style = """
             QPushButton {
-                background-color: #252525; color: #FFFFFF; border: 1px solid #333333;
-                border-radius: 4px; padding: 6px 8px; font-size: 12px; font-weight: normal;
+                background-color: transparent; color: #999999;
+                border: none; border-bottom: 3px solid transparent;
+                border-radius: 0px; padding: 4px 12px 6px 12px; font-size: 12px; font-weight: normal;
             }
-            QPushButton:hover { background-color: #333333; border-color: #444444; }
-            QPushButton:checked { background-color: #1565C0; border-color: #1976D2; color: #FFFFFF; }
-            QPushButton:checked:hover { background-color: #1976D2; }
+            QPushButton:hover { color: #ffffff; background-color: #252525; }
+            QPushButton:checked { color: #ffffff; border-bottom: 3px solid #3b82f6; }
+            QPushButton:checked:hover { background-color: #252525; }
         """
 
         # 运行服务按钮（首页）
