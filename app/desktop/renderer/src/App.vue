@@ -50,12 +50,22 @@ async function getBackend(): Promise<any> {
 
 async function callBackend(method: string, ...args: any[]): Promise<any> {
   const backend = await getBackend();
-  if (!backend) return null;
-  const result = await backend[method](...args);
-  if (typeof result === "string") {
-    try { return JSON.parse(result); } catch { return result; }
+  if (!backend) {
+    console.warn("[callBackend] backend not available, method:", method);
+    return null;
   }
-  return result;
+  console.log("[callBackend]", method, args);
+  try {
+    const result = await backend[method](...args);
+    console.log("[callBackend]", method, "result type:", typeof result, "preview:", typeof result === "string" ? result.substring(0, 200) : result);
+    if (typeof result === "string") {
+      try { return JSON.parse(result); } catch { return result; }
+    }
+    return result;
+  } catch (e) {
+    console.error("[callBackend]", method, "error:", e);
+    return null;
+  }
 }
 
 // ── 响应式状态 ──
@@ -323,13 +333,25 @@ async function loadCloudModels(source: "openrouter" | "anthropic" | "ollama") {
     } else {
       payload = { source, apiKey: apiKey.value };
     }
+    console.log("[loadCloudModels] calling listModels with:", JSON.stringify(payload));
     const result = await callBackend("listModels", JSON.stringify(payload));
-    if (!result.ok) {
-      showNotice(result.error || "模型列表加载失败", "warn");
+    console.log("[loadCloudModels] result:", JSON.stringify(result));
+    // 后台加载模式：listModels 立即返回 {ok:true, loading:true}，
+    // 实际结果通过 modelsLoaded 信号异步返回，由 onMounted 中连接的信号处理器处理
+    if (result && result.loading) {
+      // 等待信号返回，不做额外处理
+      return;
+    }
+    // 兼容：如果同步返回了结果（旧逻辑），直接处理
+    if (!result || !result.ok) {
+      showNotice(result?.error || "模型列表加载失败", "warn");
       return;
     }
     cloudModels.value = result.models || [];
     showNotice(`已加载 ${cloudModels.value.length} 个${source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : " Ollama"}模型`, "ok");
+  } catch (e) {
+    console.error("[loadCloudModels] error:", e);
+    showNotice("模型列表加载异常", "warn");
   } finally {
     loadingModels.value = false;
   }
@@ -369,6 +391,25 @@ onMounted(async () => {
           isBusy.value = payload.busy;
         }
       } catch {}
+    });
+
+    backend.modelsLoaded.connect((jsonStr: string) => {
+      try {
+        const payload = JSON.parse(jsonStr);
+        console.log("[modelsLoaded] signal received:", jsonStr?.substring(0, 200));
+        loadingModels.value = false;
+        if (!payload || !payload.ok) {
+          showNotice(payload?.error || "模型列表加载失败", "warn");
+          return;
+        }
+        cloudModels.value = payload.models || [];
+        const source = (payload.models?.[0]?.provider) || "ollama";
+        const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : " Ollama";
+        showNotice(`已加载 ${cloudModels.value.length} 个${label}模型`, "ok");
+      } catch (e) {
+        console.error("[modelsLoaded] parse error:", e);
+        loadingModels.value = false;
+      }
     });
   }
 });
