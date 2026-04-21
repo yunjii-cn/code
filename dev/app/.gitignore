@@ -1,0 +1,3 @@
+# dev/app/ 子目录的 .gitignore
+# 运行时环境和敏感信息已在根目录 .gitignore 中排除
+# 这里只处理 app/ 内部的开发临时文件
