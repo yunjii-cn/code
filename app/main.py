@@ -770,6 +770,19 @@ class MainWindow(QMainWindow):
         self.web_view = QWebEngineView()
         self.web_view.setStyleSheet("background-color: #0d0d0d;")
 
+        # 防止白色闪屏：初始隐藏 web_view，用深色占位
+        self.web_view.setVisible(False)
+        self._loading_label = QLabel("正在加载...")
+        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._loading_label.setStyleSheet("color: #666; font-size: 14px; background-color: #0d0d0d; border: none;")
+        page_layout.addWidget(self._loading_label, 1)
+
+        # 设置 WebEngine 页面背景色为深色（防止渲染白色闪烁）
+        self.web_view.page().setBackgroundColor(Qt.GlobalColor.black)
+
+        # 页面加载完成后显示 web_view，隐藏占位标签
+        self.web_view.loadFinished.connect(self._on_web_load_finished)
+
         # QWebChannel 桥接
         self.channel = QWebChannel()
         self.bridge = BackendBridge()
@@ -1053,6 +1066,12 @@ class MainWindow(QMainWindow):
 
         t = threading.Thread(target=_check, daemon=True)
         t.start()
+
+    def _on_web_load_finished(self, ok: bool):
+        """Vue 前端加载完成，隐藏占位标签，显示 web_view"""
+        if ok:
+            self._loading_label.setVisible(False)
+            self.web_view.setVisible(True)
 
     def _load_frontend(self):
         """加载 Vue 前端到 QWebEngineView"""

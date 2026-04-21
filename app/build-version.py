@@ -283,13 +283,14 @@ def _deploy_to_dev(release_dir: Path):
     """
     release_name = release_dir.name
     
-    # 1. 复制 EXE 文件到 dev/ 根目录（删除旧 EXE）
+    # 1. 复制 EXE 文件到 dev/ 根目录（保留旧版 EXE，方便 git 回滚切换）
     new_exe = release_dir / f"{release_name}.exe"
     if new_exe.exists():
-        # 删除 dev/ 下旧的 EXE
-        for old_exe in DEV_DIR.glob("云集智能编程工作站v*.exe"):
-            print(f"  删除旧 EXE: {old_exe.name}")
-            old_exe.unlink()
+        # 仅当同名 EXE 已存在时才替换
+        existing = DEV_DIR / new_exe.name
+        if existing.exists():
+            existing.unlink()
+            print(f"  替换同名 EXE: {new_exe.name}")
         shutil.copy2(str(new_exe), str(DEV_DIR / new_exe.name))
         print(f"  ✓ 复制 EXE: {new_exe.name}")
     
@@ -300,7 +301,7 @@ def _deploy_to_dev(release_dir: Path):
         if old_internal.exists():
             print(f"  替换旧 _internal/")
             shutil.rmtree(str(old_internal), ignore_errors=True)
-        shutil.copytree(str(new_internal), str(old_internal))
+        shutil.copytree(str(new_internal), str(old_internal), dirs_exist_ok=True)
         print(f"  ✓ 复制 _internal/")
     
     print(f"  ✓ 部署完成，EXE 在 {DEV_DIR}")
