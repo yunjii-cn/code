@@ -423,10 +423,10 @@ onMounted(async () => {
 
         <label class="field">
           <span>运行模式</span>
-          <select v-model="runMode">
-            <option value="cloud">云端（OpenRouter / Anthropic）</option>
-            <option value="ollama">Ollama（本地）</option>
-          </select>
+          <div class="mode-switch">
+            <button :class="['mode-btn', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">☁️ 云端</button>
+            <button :class="['mode-btn', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">🦙 Ollama</button>
+          </div>
         </label>
 
         <template v-if="runMode === 'cloud'">
@@ -449,20 +449,27 @@ onMounted(async () => {
           <label class="field">
             <span>Ollama 模型</span>
             <div class="model-loader">
-              <select v-if="cloudModels.length > 0" v-model="ollamaModel">
-                <option value="">选择本地模型...</option>
-                <option v-for="m in cloudModels" :key="m.id" :value="m.id">
-                  {{ m.name }}{{ m.toolSupport === true ? " ★" : m.toolSupport === false ? " (不支持工具调用)" : "" }}
-                </option>
-              </select>
-              <input v-else v-model="ollamaModel" placeholder="例如 qwen3:4b" />
+              <input v-model="ollamaModel" placeholder="例如 qwen3:4b" />
               <button class="btn-blue" @click="loadCloudModels('ollama')" :disabled="loadingModels">
-                {{ loadingModels ? "加载中..." : "刷新" }}
+                {{ loadingModels ? "加载中..." : "刷新模型" }}
               </button>
             </div>
           </label>
+          <!-- 模型列表（自动加载后显示） -->
+          <div v-if="cloudModels.length > 0" class="model-list">
+            <button
+              v-for="m in cloudModels"
+              :key="m.id"
+              :class="['model-item', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false }]"
+              @click="ollamaModel = m.id"
+            >
+              <span class="model-name">{{ m.name }}</span>
+              <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
+              <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
+            </button>
+          </div>
           <p v-if="ollamaModel && selectedOllamaModelToolSupport === false" class="hint warn">
-            ⚠ 该模型不支持工具调用（Tool Calling），编程功能将受限。建议选择带 ★ 标记的模型（如 qwen3、llama3.1 等）。
+            ⚠ 该模型不支持工具调用（Tool Calling），编程功能将受限。建议选择带 ★ 标记的模型。
           </p>
           <p v-else-if="ollamaModel && selectedOllamaModelToolSupport === true" class="hint ok">
             ★ 该模型支持工具调用，可使用全功能编程。
@@ -670,6 +677,100 @@ onMounted(async () => {
   font-size: 12px;
   font-weight: 500;
   color: #888888;
+}
+
+.mode-switch {
+  display: flex;
+  gap: 4px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-weight: 500;
+}
+
+.mode-btn:hover {
+  background: #252525;
+  color: #ccc;
+}
+
+.mode-btn.active {
+  background: #1565C0;
+  border-color: #1976D2;
+  color: #fff;
+}
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.model-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: #1a1a1a;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s;
+  text-align: left;
+}
+
+.model-item:hover {
+  background: #252525;
+  border-color: #444;
+}
+
+.model-item.selected {
+  background: #1e3a8a;
+  border-color: #3b82f6;
+  color: #fff;
+}
+
+.model-item.no-tool {
+  opacity: 0.6;
+}
+
+.model-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-weight: 600;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.tool-badge.ok {
+  background: #1e3a8a;
+  color: #60a5fa;
+}
+
+.tool-badge.no {
+  background: #7f1d1d;
+  color: #fca5a5;
 }
 
 .setting-actions,
