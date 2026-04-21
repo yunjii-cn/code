@@ -1,0 +1,94 @@
+# ============================================
+# Git管理范围说明
+# ============================================
+# 仓库根目录: dev/
+#
+# 推送内容：
+# - app/          (纯净整合包/资源包，不含运行时)
+# - ver/          (稳定版 EXE)
+# - .gitignore
+#
+# 不推送（用户通过部署维护功能自动安装）：
+# - app/nodejs/       (Node.js 运行时，~190MB)
+# - app/bun/          (Bun 运行时，~104MB)
+# - app/node_modules/ (npm 依赖，~500MB)
+# - app/.venv/        (Python 虚拟环境)
+# - app/.env          (含 API 密钥，敏感信息)
+# - *.exe             (dev/ 下的开发测试 EXE)
+#
+# 用户获取稳定 EXE 的方式：
+# - ver/ 目录下的稳定版本 EXE（推送）
+# - 或直接由开发者提供
+# ============================================
+
+# ── dev/ 下的临时 EXE（不推送），但 ver/ 下的稳定 EXE 要推送 ──
+/*.exe
+!ver/*.exe
+
+# ── 运行时环境（由部署维护功能自动安装，不推送）──
+app/nodejs/
+app/bun/
+app/node_modules/
+app/.venv/
+app/env_install_status.json
+
+# ── 敏感信息 ──
+app/.env
+app/.env.*
+!app/.env.example
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+/build/
+*.spec
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.windsurf/
+.cursorignore
+.cursorindexingignore
+
+# ── OS 生成文件 ──
+Thumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ── 日志 ──
+*.log
+logs/
+
+# ── 临时文件 ──
+temp/
+tmp/
+*.tmp
+*.bak
+*.cache
+
+# ── 大型压缩包 ──
+*.zip
+*.7z
+*.tar.gz
+*.whl
+
+# ── 修复脚本（开发临时文件）──
+app/fix_all_bundle_imports.cjs
+app/fix_bundle_imports.cjs
+app/fix_bundle_imports_v2.cjs
+app/fix_bundle_imports_v3.cjs
+
+# ── 版本历史（不提交到 Git）──
+app/version_history.json

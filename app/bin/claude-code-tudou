@@ -1,0 +1,554 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import http from "node:http";
+
+const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const isRecoveryMode = process.env.CLAUDE_CODE_FORCE_RECOVERY_CLI === "1";
+const entrypoint = isRecoveryMode
+  ? "./src/localRecoveryCli.ts"
+  : "./src/entrypoints/cli.tsx";
+
+const args = process.argv.slice(2);
+
+// ── 读取 .env 文件中的配置 ──
+function readDotEnv() {
+  const envPath = resolve(rootDir, ".env");
+  if (!existsSync(envPath)) return {};
+  const content = readFileSync(envPath, "utf-8");
+  const result = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    result[key] = val;
+  }
+  return result;
+}
+
+// ── Anthropic ↔ Ollama 格式转换代理（支持 Tool Calling） ──
+// 将 Anthropic Messages API 格式转换为 Ollama /api/chat 格式，
+// 并将 Ollama 响应（包括 tool_calls）转换回 Anthropic 格式。
+function startOllamaProxy(targetBaseUrl, ollamaModel) {
+  const targetUrl = new URL(targetBaseUrl);
+  const model = ollamaModel || "qwen3:8b";
+
+  const proxyServer = http.createServer((req, res) => {
+    // 只处理 POST /v1/messages
+    if (req.method === "POST" && req.url?.startsWith("/v1/messages")) {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        let bodyStr = Buffer.concat(chunks).toString("utf-8");
+        let anthropicBody;
+
+        try {
+          anthropicBody = JSON.parse(bodyStr);
+        } catch {
+          res.writeHead(400);
+          res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON" } }));
+          return;
+        }
+
+        // ── 转换 Anthropic Messages → Ollama Chat ──
+        const ollamaMessages = [];
+
+        // system 提取
+        let systemPrompt = "";
+        if (typeof anthropicBody.system === "string") {
+          systemPrompt = anthropicBody.system;
+        } else if (Array.isArray(anthropicBody.system)) {
+          systemPrompt = anthropicBody.system
+            .map((b) => (b.type === "text" ? b.text : ""))
+            .filter(Boolean)
+            .join("\n");
+        }
+
+        // 转换 messages（包括 tool_use 和 tool_result）
+        if (Array.isArray(anthropicBody.messages)) {
+          for (const msg of anthropicBody.messages) {
+            if (msg.role === "user") {
+              // 检查 content 中是否有 tool_result
+              const toolResults = [];
+              const textParts = [];
+              if (Array.isArray(msg.content)) {
+                for (const block of msg.content) {
+                  if (block.type === "tool_result") {
+                    toolResults.push(block);
+                  } else if (block.type === "text") {
+                    textParts.push(block.text);
+                  }
+                }
+              } else if (typeof msg.content === "string") {
+                textParts.push(msg.content);
+              }
+
+              // tool_result 转换为 Ollama 的 tool role
+              for (const tr of toolResults) {
+                const content = typeof tr.content === "string"
+                  ? tr.content
+                  : Array.isArray(tr.content)
+                    ? tr.content.map(b => b.type === "text" ? b.text : "").filter(Boolean).join("\n")
+                    : "";
+                ollamaMessages.push({
+                  role: "tool",
+                  name: tr.tool_use_id || "unknown",
+                  content: content || "(no output)",
+                });
+              }
+
+              // 普通文本
+              const text = textParts.filter(Boolean).join("\n");
+              if (text) ollamaMessages.push({ role: "user", content: text });
+
+            } else if (msg.role === "assistant") {
+              // 检查 content 中是否有 tool_use
+              const toolCalls = [];
+              const textParts = [];
+              if (Array.isArray(msg.content)) {
+                for (const block of msg.content) {
+                  if (block.type === "tool_use") {
+                    toolCalls.push(block);
+                  } else if (block.type === "text") {
+                    textParts.push(block.text);
+                  }
+                }
+              } else if (typeof msg.content === "string") {
+                textParts.push(msg.content);
+              }
+
+              // 构建 Ollama assistant message
+              const assistantMsg = { role: "assistant", content: "" };
+              const ollamaToolCalls = [];
+
+              // 文本内容
+              const text = textParts.filter(Boolean).join("\n");
+              if (text) assistantMsg.content = text;
+
+              // tool_use 转换为 Ollama 的 tool_calls 格式
+              for (const tc of toolCalls) {
+                let args = {};
+                if (tc.input) {
+                  args = typeof tc.input === "string" ? JSON.parse(tc.input) : tc.input;
+                }
+                ollamaToolCalls.push({
+                  function: {
+                    name: tc.name,
+                    arguments: args,
+                  },
+                });
+              }
+
+              if (ollamaToolCalls.length > 0) {
+                assistantMsg.tool_calls = ollamaToolCalls;
+              }
+              ollamaMessages.push(assistantMsg);
+            }
+          }
+        }
+
+        // 转换 Anthropic tools → Ollama tools 格式
+        const ollamaTools = [];
+        if (Array.isArray(anthropicBody.tools)) {
+          for (const tool of anthropicBody.tools) {
+            if (tool.type === "custom") continue; // 跳过 Anthropic 专有类型
+            ollamaTools.push({
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description || "",
+                parameters: tool.input_schema || { type: "object", properties: {} },
+              },
+            });
+          }
+        }
+
+        // 确定是否流式
+        const stream = anthropicBody.stream === true;
+
+        const ollamaBody = {
+          model: model,
+          messages: ollamaMessages,
+          stream: stream,
+          options: {
+            num_ctx: 32768,
+          },
+        };
+        if (systemPrompt) {
+          ollamaBody.system = systemPrompt;
+        }
+        if (ollamaTools.length > 0) {
+          ollamaBody.tools = ollamaTools;
+        }
+
+        const ollamaBodyStr = JSON.stringify(ollamaBody);
+
+        const proxyOpts = {
+          hostname: targetUrl.hostname,
+          port: targetUrl.port || 11434,
+          path: "/api/chat",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(ollamaBodyStr),
+          },
+        };
+
+        const proxyReq = http.request(proxyOpts, (proxyRes) => {
+          if (proxyRes.statusCode !== 200) {
+            const errChunks = [];
+            proxyRes.on("data", (c) => errChunks.push(c));
+            proxyRes.on("end", () => {
+              const errBody = Buffer.concat(errChunks).toString("utf-8");
+              const anthropicError = {
+                type: "error",
+                error: {
+                  type: "invalid_request_error",
+                  message: `Ollama error (${proxyRes.statusCode}): ${errBody}`,
+                },
+              };
+              res.writeHead(proxyRes.statusCode, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(anthropicError));
+            });
+            return;
+          }
+
+          if (stream) {
+            handleStreamResponse(proxyRes, res, model);
+          } else {
+            handleNonStreamResponse(proxyRes, res, model);
+          }
+        });
+
+        proxyReq.on("error", (err) => {
+          const anthropicError = {
+            type: "error",
+            error: { type: "api_error", message: `Proxy connection error: ${err.message}` },
+          };
+          if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(anthropicError));
+        });
+
+        proxyReq.write(ollamaBodyStr);
+        proxyReq.end();
+      });
+    } else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: "Not found" }));
+    }
+  });
+
+  // ── 处理流式响应 ──
+  function handleStreamResponse(proxyRes, res, model) {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+
+    const msgId = `msg_${Date.now().toString(36)}`;
+    let sentMessageStart = false;
+    let contentBlockIndex = 0;
+    let currentToolUseIndex = 0;
+    let hasToolCalls = false;
+    let fullContent = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    proxyRes.setEncoding("utf-8");
+    let buffer = "";
+
+    proxyRes.on("data", (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        let ollamaChunk;
+        try {
+          ollamaChunk = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+
+        if (ollamaChunk.prompt_eval_count) inputTokens = ollamaChunk.prompt_eval_count;
+        if (ollamaChunk.eval_count) outputTokens = ollamaChunk.eval_count;
+
+        if (!sentMessageStart) {
+          // 发送 message_start
+          res.write(`event: message_start\ndata: ${JSON.stringify({
+            type: "message_start",
+            message: {
+              id: msgId, type: "message", role: "assistant",
+              content: [], model: model,
+              stop_reason: null, stop_sequence: null,
+              usage: { input_tokens: inputTokens, output_tokens: 0 },
+            },
+          })}\n\n`);
+          sentMessageStart = true;
+        }
+
+        // 处理文本内容
+        if (ollamaChunk.message?.content) {
+          if (!hasToolCalls) {
+            // 如果还没遇到 tool_calls，作为文本处理
+            fullContent += ollamaChunk.message.content;
+
+            // 如果还没开始 content_block，开始一个文本块
+            if (contentBlockIndex === 0 && !ollamaChunk.message.tool_calls) {
+              res.write(`event: content_block_start\ndata: ${JSON.stringify({
+                type: "content_block_start", index: 0,
+                content_block: { type: "text", text: "" },
+              })}\n\n`);
+            }
+
+            res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta", index: 0,
+              delta: { type: "text_delta", text: ollamaChunk.message.content },
+            })}\n\n`);
+          }
+        }
+
+        // 处理 tool_calls
+        if (ollamaChunk.message?.tool_calls && ollamaChunk.message.tool_calls.length > 0) {
+          // 如果之前有文本内容块，先关闭它
+          if (contentBlockIndex === 0 && fullContent && !hasToolCalls) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+              type: "content_block_stop", index: 0,
+            })}\n\n`);
+            contentBlockIndex = 1;
+          } else if (contentBlockIndex === 0 && !fullContent) {
+            contentBlockIndex = 0;
+          }
+
+          hasToolCalls = true;
+
+          for (const tc of ollamaChunk.message.tool_calls) {
+            const toolUseId = `toolu_${Date.now().toString(36)}_${currentToolUseIndex}`;
+            const toolName = tc.function?.name || "unknown";
+            const toolInput = tc.function?.arguments || {};
+
+            // content_block_start: tool_use
+            res.write(`event: content_block_start\ndata: ${JSON.stringify({
+              type: "content_block_start",
+              index: contentBlockIndex,
+              content_block: {
+                type: "tool_use",
+                id: toolUseId,
+                name: toolName,
+                input: {},
+              },
+            })}\n\n`);
+
+            // content_block_delta: input_json_delta
+            res.write(`event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta",
+              index: contentBlockIndex,
+              delta: {
+                type: "input_json_delta",
+                partial_json: JSON.stringify(toolInput),
+              },
+            })}\n\n`);
+
+            // content_block_stop
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+              type: "content_block_stop", index: contentBlockIndex,
+            })}\n\n`);
+
+            contentBlockIndex++;
+            currentToolUseIndex++;
+          }
+        }
+
+        // 处理完成
+        if (ollamaChunk.done) {
+          // 如果有文本内容但没有 tool_calls，关闭文本块
+          if (!hasToolCalls && contentBlockIndex === 0) {
+            res.write(`event: content_block_stop\ndata: ${JSON.stringify({
+              type: "content_block_stop", index: 0,
+            })}\n\n`);
+          }
+
+          const stopReason = hasToolCalls ? "tool_use"
+            : (ollamaChunk.done_reason === "length" ? "max_tokens" : "end_turn");
+
+          res.write(`event: message_delta\ndata: ${JSON.stringify({
+            type: "message_delta",
+            delta: { stop_reason: stopReason, stop_sequence: null },
+            usage: { output_tokens: outputTokens || fullContent.length },
+          })}\n\n`);
+
+          res.write(`event: message_stop\ndata: ${JSON.stringify({
+            type: "message_stop",
+          })}\n\n`);
+        }
+      }
+    });
+
+    proxyRes.on("end", () => {
+      if (!sentMessageStart) {
+        res.write(`event: message_start\ndata: ${JSON.stringify({
+          type: "message_start",
+          message: {
+            id: msgId, type: "message", role: "assistant",
+            content: [{ type: "text", text: "" }],
+            model: model, stop_reason: "end_turn", stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
+          },
+        })}\n\n`);
+      }
+      res.end();
+    });
+  }
+
+  // ── 处理非流式响应 ──
+  function handleNonStreamResponse(proxyRes, res, model) {
+    const respChunks = [];
+    proxyRes.on("data", (c) => respChunks.push(c));
+    proxyRes.on("end", () => {
+      let fullContent = "";
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let toolCalls = [];
+      const respText = Buffer.concat(respChunks).toString("utf-8");
+
+      for (const line of respText.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const chunk = JSON.parse(trimmed);
+          if (chunk.message?.content) fullContent += chunk.message.content;
+          if (chunk.message?.tool_calls) {
+            for (const tc of chunk.message.tool_calls) {
+              toolCalls.push(tc);
+            }
+          }
+          if (chunk.prompt_eval_count) inputTokens = chunk.prompt_eval_count;
+          if (chunk.eval_count) outputTokens = chunk.eval_count;
+        } catch {}
+      }
+
+      // 构建 Anthropic 响应
+      const content = [];
+      if (fullContent) {
+        content.push({ type: "text", text: fullContent });
+      }
+
+      let toolUseIndex = 0;
+      for (const tc of toolCalls) {
+        content.push({
+          type: "tool_use",
+          id: `toolu_${Date.now().toString(36)}_${toolUseIndex}`,
+          name: tc.function?.name || "unknown",
+          input: tc.function?.arguments || {},
+        });
+        toolUseIndex++;
+      }
+
+      if (content.length === 0) {
+        content.push({ type: "text", text: "" });
+      }
+
+      const anthropicResponse = {
+        id: `msg_${Date.now().toString(36)}`,
+        type: "message",
+        role: "assistant",
+        content: content,
+        model: model,
+        stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      };
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(anthropicResponse));
+    });
+  }
+
+  return new Promise((resolve) => {
+    proxyServer.listen(0, "127.0.0.1", () => {
+      const proxyPort = proxyServer.address().port;
+      process.on("exit", () => { try { proxyServer.close(); } catch {} });
+      resolve(proxyPort);
+    });
+  });
+}
+
+// ── 主流程（异步） ──
+async function main() {
+  const dotEnv = readDotEnv();
+  const modelProvider = (process.env.MODEL_PROVIDER || dotEnv.MODEL_PROVIDER || "").toLowerCase();
+  const isOllamaMode = modelProvider === "ollama";
+
+  if (isOllamaMode) {
+    const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || dotEnv.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+    const ollamaModel = process.env.OLLAMA_MODEL || dotEnv.OLLAMA_MODEL || "qwen3:8b";
+    const proxyPort = await startOllamaProxy(ollamaBaseUrl.trim(), ollamaModel.trim());
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+    process.env.ANTHROPIC_API_KEY = "ollama-local";
+    process.env.ANTHROPIC_AUTH_TOKEN = "ollama-local";
+    process.env.ANTHROPIC_MODEL = ollamaModel.trim();
+  }
+
+  function findBun() {
+    const bunDir = resolve(rootDir, "bun");
+    const localBunPath = resolve(bunDir, "bun-windows-x64", "bun.exe");
+    if (existsSync(localBunPath)) return localBunPath;
+    return null;
+  }
+
+  function findNode() {
+    const nodeDir = resolve(rootDir, "nodejs");
+    const localNodePath = resolve(nodeDir, "node-v24.11.1-win-x64", "node.exe");
+    if (existsSync(localNodePath)) return localNodePath;
+    return "node";
+  }
+
+  const childEnv = { ...process.env };
+
+  function startWithNode() {
+    const nodePath = findNode();
+    const nodeChild = spawn(
+      nodePath,
+      ["--env-file=.env", "--no-warnings", "--import", "tsx", entrypoint, ...args],
+      { cwd: rootDir, stdio: "inherit", windowsHide: true, env: childEnv }
+    );
+    nodeChild.on("exit", (code, signal) => {
+      if (signal) { process.kill(process.pid, signal); return; }
+      process.exit(code ?? 0);
+    });
+    nodeChild.on("error", (err) => {
+      console.error(`Failed to start Node.js: ${err.message}`);
+      console.error("Please run 'scripts/1、install-env.ps1' to install dependencies.");
+      process.exit(1);
+    });
+  }
+
+  const bunPath = findBun();
+  if (bunPath) {
+    const bunChild = spawn(bunPath, ["--env-file=.env", entrypoint, ...args], {
+      cwd: rootDir, stdio: "inherit", windowsHide: true, env: childEnv,
+    });
+    bunChild.on("exit", (code, signal) => {
+      if (signal) { process.kill(process.pid, signal); return; }
+      process.exit(code ?? 0);
+    });
+    bunChild.on("error", (err) => {
+      console.error(`Failed to start Bun: ${err.message}`);
+      console.error("Falling back to Node.js...");
+      startWithNode();
+    });
+  } else {
+    startWithNode();
+  }
+}
+
+main();

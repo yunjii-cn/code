@@ -1,0 +1,20 @@
+[tool.pyinstaller]
+name = "YUNJII-CODE"
+paths = ["."]
+hiddenimports = [
+    "PyQt6",
+    "PyQt6.QtCore",
+    "PyQt6.QtGui",
+    "PyQt6.QtWidgets",
+    "PyQt6.QtWebEngineWidgets",
+    "PyQt6.QtWebChannel",
+    "psutil"
+]
+excludes = [
+    "matplotlib",
+    "scipy",
+    "numpy",
+    "tkinter",
+    "tensorflow",
+    "torch"
+]
