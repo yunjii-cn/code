@@ -32,7 +32,7 @@ import psutil
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
-    QMessageBox, QFileDialog,
+    QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
 from PyQt6.QtGui import QFont, QIcon
@@ -614,16 +614,20 @@ class MainWindow(QMainWindow):
             pass
 
         # 基础目录
-        # --onedir 打包后: EXE 在 build/发布/xxx/ 下，_internal/ 和 desktop/ 同级
+        # --onedir 打包后: EXE 在 dev/版本名/ 下，_internal/ 和 desktop/ 同级
         # 开发模式: 脚本在 dev/app/ 下
         if hasattr(sys, 'frozen'):
             # PyInstaller 打包模式：EXE 所在目录就是 base_dir
             self.base_dir = os.path.abspath(os.path.dirname(sys.executable))
-            # dev/ 根目录 = EXE 所在目录（EXE 直接放在 dev/ 下）
-            # 或 EXE 在 ver/ 子目录下
+            # dev/ 根目录 = EXE 所在目录的上级（EXE 在 dev/版本名/ 下）
             exe_dir = os.path.dirname(sys.executable)
+            parent_dir = os.path.dirname(exe_dir)
+            # 判断是否在 ver/ 子目录下
             if os.path.basename(exe_dir) == "ver":
                 self.dev_dir = os.path.dirname(exe_dir)
+            elif os.path.basename(parent_dir) == "dev" or os.path.basename(parent_dir) in os.path.basename(exe_dir):
+                # EXE 在 dev/版本名/ 下
+                self.dev_dir = parent_dir
             else:
                 self.dev_dir = exe_dir
         else:
@@ -675,47 +679,107 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # ── 顶部工具栏 ──
-        toolbar = QFrame()
-        toolbar.setFixedHeight(48)
-        toolbar.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 1px solid #2a2a2a; }")
-        tb_layout = QHBoxLayout(toolbar)
-        tb_layout.setContentsMargins(12, 0, 12, 0)
+        # ── 顶部导航栏 ──
+        nav_bar = QFrame()
+        nav_bar.setFixedHeight(48)
+        nav_bar.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 2px solid #333333; }")
+        nav_layout = QHBoxLayout(nav_bar)
+        nav_layout.setSpacing(15)
+        nav_layout.setContentsMargins(15, 0, 15, 0)
 
+        # 标题
         title = QLabel("💻 云集智能编程工作站")
         title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         title.setStyleSheet("color: #fff; border: none;")
-        tb_layout.addWidget(title)
+        nav_layout.addWidget(title)
 
-        tb_layout.addStretch()
+        nav_layout.addStretch()
 
+        # 状态标签
         self.status_label = QLabel("⏹ 就绪")
         self.status_label.setStyleSheet("color: #888; font-size: 12px; border: none;")
-        tb_layout.addWidget(self.status_label)
+        nav_layout.addWidget(self.status_label)
 
-        self.btn_deploy = QPushButton("⚙️ 部署维护")
-        self.btn_deploy.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 6px 14px; font-size: 12px; }
-            QPushButton:hover { background-color: #388E3C; }
-        """)
-        self.btn_deploy.clicked.connect(self._on_deploy)
-        tb_layout.addWidget(self.btn_deploy)
+        nav_layout.addStretch()
 
-        self.btn_update = QPushButton("🔄 软件更新")
-        self.btn_update.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 14px; font-size: 12px; }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
-        self.btn_update.clicked.connect(self._on_update)
-        tb_layout.addWidget(self.btn_update)
+        # 导航按钮样式
+        menu_button_style = """
+            QPushButton {
+                background-color: #252525; color: #FFFFFF; border: 1px solid #333333;
+                border-radius: 4px; padding: 8px 16px; font-size: 12px; font-weight: normal;
+            }
+            QPushButton:hover { background-color: #333333; border-color: #444444; }
+            QPushButton:checked { background-color: #1565C0; border-color: #1976D2; color: #FFFFFF; }
+            QPushButton:checked:hover { background-color: #1976D2; }
+        """
 
-        layout.addWidget(toolbar)
+        # 运行服务按钮（首页）
+        self.btn_home = QPushButton("🚀 运行服务")
+        self.btn_home.setCheckable(True)
+        self.btn_home.setChecked(True)
+        self.btn_home.setStyleSheet(menu_button_style)
+        self.btn_home.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_home.clicked.connect(lambda: self._switch_page(0))
+        nav_layout.addWidget(self.btn_home)
 
-        # ── 主内容区：WebEngine + 日志面板（可折叠） ──
-        self.splitter = QFrame()
-        splitter_layout = QVBoxLayout(self.splitter)
-        splitter_layout.setSpacing(0)
-        splitter_layout.setContentsMargins(0, 0, 0, 0)
+        # 部署维护按钮
+        self.btn_deploy_nav = QPushButton("⚙️ 部署维护")
+        self.btn_deploy_nav.setCheckable(True)
+        self.btn_deploy_nav.setStyleSheet(menu_button_style)
+        self.btn_deploy_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_deploy_nav.clicked.connect(lambda: self._switch_page(1))
+        nav_layout.addWidget(self.btn_deploy_nav)
+
+        # 软件更新按钮
+        self.btn_update_nav = QPushButton("🔄 软件更新")
+        self.btn_update_nav.setCheckable(True)
+        self.btn_update_nav.setStyleSheet(menu_button_style)
+        self.btn_update_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_update_nav.clicked.connect(lambda: self._switch_page(2))
+        nav_layout.addWidget(self.btn_update_nav)
+
+        layout.addWidget(nav_bar)
+
+        # ── 页面堆叠窗口 ──
+        self.page_stack = QStackedWidget()
+
+        # 页面0：首页 - 运行服务（WebEngine）
+        self.home_page = self._create_home_page()
+        self.page_stack.addWidget(self.home_page)
+
+        # 页面1：部署维护
+        self.deploy_page = self._create_deploy_page()
+        self.page_stack.addWidget(self.deploy_page)
+
+        # 页面2：软件更新
+        self.update_page = self._create_update_page()
+        self.page_stack.addWidget(self.update_page)
+
+        layout.addWidget(self.page_stack, 1)
+
+        # ── 底部状态栏 ──
+        statusbar = QFrame()
+        statusbar.setFixedHeight(28)
+        statusbar.setStyleSheet("QFrame { background-color: #1a1a1a; border-top: 1px solid #2a2a2a; }")
+        sb_layout = QHBoxLayout(statusbar)
+        sb_layout.setContentsMargins(12, 0, 12, 0)
+
+        self.env_status = QLabel("环境: 检查中...")
+        self.env_status.setStyleSheet("color: #666; font-size: 10px; border: none;")
+        sb_layout.addWidget(self.env_status)
+
+        sb_layout.addStretch()
+
+        layout.addWidget(statusbar)
+
+    # ── 页面创建 ──
+
+    def _create_home_page(self):
+        """创建首页 - 运行服务（QWebEngineView）"""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setSpacing(0)
+        page_layout.setContentsMargins(0, 0, 0, 0)
 
         # QWebEngineView 加载 Vue 前端
         self.web_view = QWebEngineView()
@@ -728,7 +792,7 @@ class MainWindow(QMainWindow):
         self.channel.registerObject("backend", self.bridge)
         self.web_view.page().setWebChannel(self.channel)
 
-        splitter_layout.addWidget(self.web_view, 1)
+        page_layout.addWidget(self.web_view, 1)
 
         # 底部日志面板（默认折叠）
         self.log_panel = QFrame()
@@ -755,29 +819,221 @@ class MainWindow(QMainWindow):
         self.log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: 1px solid #222; border-radius: 4px; padding: 4px; font-family: Consolas, monospace; font-size: 11px; }")
         log_layout.addWidget(self.log_text)
 
-        splitter_layout.addWidget(self.log_panel)
+        page_layout.addWidget(self.log_panel)
 
-        layout.addWidget(self.splitter, 1)
-
-        # ── 底部状态栏 ──
-        statusbar = QFrame()
-        statusbar.setFixedHeight(28)
-        statusbar.setStyleSheet("QFrame { background-color: #1a1a1a; border-top: 1px solid #2a2a2a; }")
-        sb_layout = QHBoxLayout(statusbar)
-        sb_layout.setContentsMargins(12, 0, 12, 0)
-
-        self.env_status = QLabel("环境: 检查中...")
-        self.env_status.setStyleSheet("color: #666; font-size: 10px; border: none;")
-        sb_layout.addWidget(self.env_status)
-
-        sb_layout.addStretch()
-
+        # 日志切换按钮（浮在首页右下角）
         self.btn_show_log = QPushButton("📋 日志")
         self.btn_show_log.setStyleSheet("QPushButton { background: #333; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 10px; }")
         self.btn_show_log.clicked.connect(lambda: self.log_panel.setVisible(not self.log_panel.isVisible()))
-        sb_layout.addWidget(self.btn_show_log)
 
-        layout.addWidget(statusbar)
+        return page
+
+    def _create_deploy_page(self):
+        """创建部署维护页面"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 标题
+        title = QLabel("⚙️ 部署维护")
+        title.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
+        title.setStyleSheet("color: #4CAF50; border: none;")
+        layout.addWidget(title)
+
+        # 环境状态区域
+        env_group = QFrame()
+        env_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; }")
+        env_layout = QVBoxLayout(env_group)
+
+        env_title = QLabel("📦 环境状态")
+        env_title.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        env_title.setStyleSheet("color: #fff; border: none;")
+        env_layout.addWidget(env_title)
+
+        self.deploy_env_labels = {}
+        checks = self.installer.check_all()
+        labels = {"node": "Node.js", "bun": "Bun", "deps": "npm 依赖", "dist": "前端构建", "electron": "Electron"}
+        for key, label_text in labels.items():
+            row = QHBoxLayout()
+            name_lbl = QLabel(f"  {label_text}")
+            name_lbl.setStyleSheet("color: #ccc; font-size: 13px; border: none;")
+            row.addWidget(name_lbl)
+            row.addStretch()
+            status_lbl = QLabel("✓ 已安装" if checks.get(key) else "✗ 未安装")
+            status_lbl.setStyleSheet(f"color: {'#4CAF50' if checks.get(key) else '#F44336'}; font-size: 13px; font-weight: bold; border: none;")
+            row.addWidget(status_lbl)
+            self.deploy_env_labels[key] = status_lbl
+            env_layout.addLayout(row)
+
+        layout.addWidget(env_group)
+
+        # 操作按钮区域
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(15)
+
+        self.btn_install_all = QPushButton("🔄 一键部署全部")
+        self.btn_install_all.setStyleSheet("""
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 8px; padding: 12px 24px; font-size: 14px; }
+            QPushButton:hover { background-color: #388E3C; }
+        """)
+        self.btn_install_all.clicked.connect(self._on_deploy)
+        btn_layout.addWidget(self.btn_install_all)
+
+        self.btn_install_node = QPushButton("📥 安装 Node.js")
+        self.btn_install_node.setStyleSheet("""
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        self.btn_install_node.clicked.connect(lambda: self._on_install_single("node"))
+        btn_layout.addWidget(self.btn_install_node)
+
+        self.btn_install_bun = QPushButton("📥 安装 Bun")
+        self.btn_install_bun.setStyleSheet("""
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        self.btn_install_bun.clicked.connect(lambda: self._on_install_single("bun"))
+        btn_layout.addWidget(self.btn_install_bun)
+
+        self.btn_install_deps = QPushButton("📥 安装依赖")
+        self.btn_install_deps.setStyleSheet("""
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        self.btn_install_deps.clicked.connect(lambda: self._on_install_single("deps"))
+        btn_layout.addWidget(self.btn_install_deps)
+
+        self.btn_build_frontend = QPushButton("🔨 构建前端")
+        self.btn_build_frontend.setStyleSheet("""
+            QPushButton { background-color: #6A1B9A; border: 2px solid #7B1FA2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton:hover { background-color: #7B1FA2; }
+        """)
+        self.btn_build_frontend.clicked.connect(lambda: self._on_install_single("dist"))
+        btn_layout.addWidget(self.btn_build_frontend)
+
+        layout.addLayout(btn_layout)
+
+        # 日志区域
+        log_group = QFrame()
+        log_group.setStyleSheet("QFrame { background-color: #0a0a0a; border: 1px solid #222; border-radius: 8px; }")
+        log_l = QVBoxLayout(log_group)
+        log_l.setContentsMargins(8, 4, 8, 4)
+
+        log_header = QHBoxLayout()
+        log_header_lbl = QLabel("📋 部署日志")
+        log_header_lbl.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; border: none;")
+        log_header.addWidget(log_header_lbl)
+        log_header.addStretch()
+        log_l.addLayout(log_header)
+
+        self.deploy_log_text = QTextEdit()
+        self.deploy_log_text.setReadOnly(True)
+        self.deploy_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
+        log_l.addWidget(self.deploy_log_text)
+
+        layout.addWidget(log_group, 1)
+
+        return page
+
+    def _create_update_page(self):
+        """创建软件更新页面"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        # 标题
+        title = QLabel("🔄 软件更新")
+        title.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
+        title.setStyleSheet("color: #1565C0; border: none;")
+        layout.addWidget(title)
+
+        # 版本信息区域
+        info_group = QFrame()
+        info_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; }")
+        info_layout = QVBoxLayout(info_group)
+
+        self.update_info_label = QLabel("点击「检查更新」查看最新版本")
+        self.update_info_label.setStyleSheet("color: #ccc; font-size: 13px; border: none;")
+        self.update_info_label.setWordWrap(True)
+        info_layout.addWidget(self.update_info_label)
+
+        layout.addWidget(info_group)
+
+        # 操作按钮
+        btn_layout = QHBoxLayout()
+
+        self.btn_check_update = QPushButton("🔍 检查更新")
+        self.btn_check_update.setStyleSheet("""
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 12px 24px; font-size: 14px; }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        self.btn_check_update.clicked.connect(self._on_update)
+        btn_layout.addWidget(self.btn_check_update)
+
+        self.btn_pull_update = QPushButton("📥 更新资源包")
+        self.btn_pull_update.setStyleSheet("""
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 8px; padding: 12px 24px; font-size: 14px; }
+            QPushButton:hover { background-color: #388E3C; }
+        """)
+        self.btn_pull_update.clicked.connect(self._do_pull_update)
+        self.btn_pull_update.setEnabled(False)
+        btn_layout.addWidget(self.btn_pull_update)
+
+        layout.addLayout(btn_layout)
+
+        # 稳定版 EXE 列表区域
+        ver_group = QFrame()
+        ver_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; }")
+        ver_layout = QVBoxLayout(ver_group)
+
+        ver_title = QLabel("📦 稳定版 EXE")
+        ver_title.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        ver_title.setStyleSheet("color: #fff; border: none;")
+        ver_layout.addWidget(ver_title)
+
+        self.ver_list_label = QLabel("暂无稳定版 EXE")
+        self.ver_list_label.setStyleSheet("color: #888; font-size: 12px; border: none;")
+        self.ver_list_label.setWordWrap(True)
+        ver_layout.addWidget(self.ver_list_label)
+
+        layout.addWidget(ver_group)
+
+        # 日志区域
+        log_group = QFrame()
+        log_group.setStyleSheet("QFrame { background-color: #0a0a0a; border: 1px solid #222; border-radius: 8px; }")
+        log_l = QVBoxLayout(log_group)
+        log_l.setContentsMargins(8, 4, 8, 4)
+
+        log_header_lbl = QLabel("📋 更新日志")
+        log_header_lbl.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; border: none;")
+        log_l.addWidget(log_header_lbl)
+
+        self.update_log_text = QTextEdit()
+        self.update_log_text.setReadOnly(True)
+        self.update_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
+        log_l.addWidget(self.update_log_text)
+
+        layout.addWidget(log_group, 1)
+
+        return page
+
+    # ── 页面切换 ──
+
+    def _switch_page(self, index):
+        """切换页面"""
+        self.btn_home.setChecked(index == 0)
+        self.btn_deploy_nav.setChecked(index == 1)
+        self.btn_update_nav.setChecked(index == 2)
+        self.page_stack.setCurrentIndex(index)
+
+        # 切换到部署维护页面时刷新环境状态
+        if index == 1:
+            self._refresh_deploy_env_status()
+        # 切换到软件更新页面时刷新稳定版列表
+        if index == 2:
+            self._refresh_ver_list()
 
     # ── 环境检查与自动加载 ──
     def _auto_check_and_load(self):
@@ -804,13 +1060,14 @@ class MainWindow(QMainWindow):
 
             # 加载前端
             QTimer.singleShot(100, self._load_frontend)
+            # 刷新部署页面状态
+            QTimer.singleShot(200, self._refresh_deploy_env_status)
 
         t = threading.Thread(target=_check, daemon=True)
         t.start()
 
     def _load_frontend(self):
         """加载 Vue 前端到 QWebEngineView"""
-        # 先注入 QWebChannel 的 qwebchannel.js
         dist_path = os.path.join(self.base_dir, "desktop", "dist", "index.html")
 
         if not os.path.exists(dist_path):
@@ -834,14 +1091,44 @@ class MainWindow(QMainWindow):
             parts.append(f"{labels.get(k, k)}:{'✓' if v else '✗'}")
         self.env_status.setText("环境: " + " | ".join(parts))
 
+    def _refresh_deploy_env_status(self):
+        """刷新部署维护页面的环境状态"""
+        if not hasattr(self, 'deploy_env_labels'):
+            return
+        checks = self.installer.check_all()
+        for key, lbl in self.deploy_env_labels.items():
+            installed = checks.get(key, False)
+            lbl.setText("✓ 已安装" if installed else "✗ 未安装")
+            lbl.setStyleSheet(f"color: {'#4CAF50' if installed else '#F44336'}; font-size: 13px; font-weight: bold; border: none;")
+
+    def _refresh_ver_list(self):
+        """刷新软件更新页面的稳定版列表"""
+        if not hasattr(self, 'ver_list_label'):
+            return
+        stable_exes = self.updater.list_stable_exes()
+        if not stable_exes:
+            self.ver_list_label.setText("暂无稳定版 EXE（ver/ 目录为空）")
+            return
+        lines = []
+        for exe in stable_exes:
+            current_marker = ""
+            if hasattr(sys, 'frozen'):
+                if exe["filename"] == os.path.basename(sys.executable):
+                    current_marker = " ← 当前"
+            lines.append(f"  {exe['filename']} ({exe['size_mb']}MB){current_marker}")
+        self.ver_list_label.setText("\n".join(lines))
+
     # ── 日志 ──
     def _append_log(self, message: str, color: str):
-        if not self.log_text:
-            return
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_text.append(f'<span style="color:#666">[{ts}]</span> <span style="color:{color}">{message}</span>')
-        sb = self.log_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        line = f'<span style="color:#666">[{ts}]</span> <span style="color:{color}">{message}</span>'
+
+        # 输出到所有可见的日志区域
+        for log_widget in [self.log_text, self.deploy_log_text, self.update_log_text]:
+            if log_widget and log_widget.isVisible():
+                log_widget.append(line)
+                sb = log_widget.verticalScrollBar()
+                sb.setValue(sb.maximum())
 
     def _update_progress(self, percent: int, label: str):
         pass  # 可扩展
@@ -869,8 +1156,8 @@ class MainWindow(QMainWindow):
     def _on_deploy(self):
         if self.is_busy:
             return
-        self.log_panel.setVisible(True)
         self.installer.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
+        self.installer.progress = lambda p, l: self.progress_signal.emit(p, l)
 
         def _deploy():
             self.log_signal.emit("━━━ 部署维护 ━━━", "#2E7D32")
@@ -879,41 +1166,74 @@ class MainWindow(QMainWindow):
             else:
                 self.log_signal.emit("⚠ 部署维护部分失败", "#FF9800")
             self._update_env_status()
+            # 刷新部署页面状态
+            QTimer.singleShot(100, self._refresh_deploy_env_status)
             # 重新加载前端
             QTimer.singleShot(500, self._load_frontend)
 
         t = threading.Thread(target=_deploy, daemon=True)
         t.start()
 
+    def _on_install_single(self, component: str):
+        """安装单个组件"""
+        if self.is_busy:
+            return
+        self.installer.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
+        self.installer.progress = lambda p, l: self.progress_signal.emit(p, l)
+
+        install_funcs = {
+            "node": self.installer.install_node,
+            "bun": self.installer.install_bun,
+            "deps": self.installer.install_deps,
+            "dist": self.installer.build_frontend,
+        }
+
+        func = install_funcs.get(component)
+        if not func:
+            return
+
+        def _install():
+            labels = {"node": "Node.js", "bun": "Bun", "deps": "npm 依赖", "dist": "前端构建"}
+            self.log_signal.emit(f"━━━ 安装 {labels.get(component, component)} ━━━", "#1976D2")
+            if func():
+                self.log_signal.emit(f"✓ {labels.get(component, component)} 安装完成", "#4CAF50")
+            else:
+                self.log_signal.emit(f"✗ {labels.get(component, component)} 安装失败", "#F44336")
+            self._update_env_status()
+            QTimer.singleShot(100, self._refresh_deploy_env_status)
+
+        t = threading.Thread(target=_install, daemon=True)
+        t.start()
+
     # ── 软件更新 ──
     def _on_update(self):
-        """打开软件更新对话框"""
-        self.log_panel.setVisible(True)
+        """检查更新"""
         self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
-
-        # 检查更新
-        self.log_signal.emit("━━━ 软件更新 ━━━", "#1565C0")
 
         if not self.updater.is_git_repo():
             self.log_signal.emit("当前不是 Git 仓库，无法检查更新", "#FF9800")
+            self.update_info_label.setText("<span style='color:#F44336'>当前不是 Git 仓库，无法检查更新</span>")
             return
 
-        def _check_and_show():
+        self.btn_check_update.setEnabled(False)
+        self.update_info_label.setText("正在检查更新...")
+
+        def _check():
             result = self.updater.check_update()
             self.update_info_signal.emit(json.dumps(result))
 
-        t = threading.Thread(target=_check_and_show, daemon=True)
+        t = threading.Thread(target=_check, daemon=True)
         t.start()
 
-        # 连接信号，收到结果后弹出对话框
         try:
-            self.update_info_signal.disconnect(self._show_update_dialog)
+            self.update_info_signal.disconnect(self._on_update_result)
         except:
             pass
-        self.update_info_signal.connect(self._show_update_dialog)
+        self.update_info_signal.connect(self._on_update_result)
 
-    def _show_update_dialog(self, info_json: str):
-        """显示更新信息对话框"""
+    def _on_update_result(self, info_json: str):
+        """更新检查结果回调"""
+        self.btn_check_update.setEnabled(True)
         try:
             info = json.loads(info_json)
         except:
@@ -924,103 +1244,33 @@ class MainWindow(QMainWindow):
         has_update = info.get("has_update", False)
         error = info.get("error", "")
 
-        # 构建信息文本
-        lines = [
-            f"<b>当前资源包版本:</b> {local}",
-            f"<b>远程最新版本:</b> {remote}",
-        ]
-
         if error:
-            lines.append(f"<br><span style='color:#FF9800'>{error}</span>")
-
-        # 列出稳定版 EXE
-        stable_exes = self.updater.list_stable_exes()
-        if stable_exes:
-            lines.append("<br><b>稳定版 EXE:</b>")
-            for exe in stable_exes:
-                current_marker = ""
-                if hasattr(sys, 'frozen'):
-                    current_exe = os.path.basename(sys.executable)
-                    if exe["filename"] == current_exe:
-                        current_marker = " <span style='color:#4CAF50'>(当前)</span>"
-                lines.append(f"  {exe['filename']} ({exe['size_mb']}MB){current_marker}")
-
-        if not stable_exes:
-            lines.append("<br><span style='color:#888'>暂无稳定版 EXE（ver/ 目录为空）</span>")
-
-        msg_text = "<br>".join(lines)
-
-        # 弹出对话框
-        dlg = QMessageBox(self)
-        dlg.setWindowTitle("软件更新")
-        dlg.setTextFormat(Qt.TextFormat.RichText)
-        dlg.setText(msg_text)
-        dlg.setStyleSheet("""
-            QMessageBox { background-color: #1a1a1a; color: #f0f0f0; }
-            QLabel { color: #f0f0f0; }
-            QPushButton { background-color: #333; border: 1px solid #555; border-radius: 4px; padding: 6px 16px; color: white; min-width: 80px; }
-            QPushButton:hover { background-color: #444; }
-        """)
-
-        # 按钮
-        if has_update:
-            btn_update = dlg.addButton("📥 更新资源包", QMessageBox.ButtonRole.AcceptRole)
-            btn_update.setStyleSheet("background-color: #1565C0; border: 1px solid #1976D2;")
-        dlg.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
-
-        # 如果有稳定版 EXE 且有多个，添加切换按钮
-        if stable_exes and hasattr(sys, 'frozen'):
-            current_exe = os.path.basename(sys.executable)
-            other_exes = [e for e in stable_exes if e["filename"] != current_exe]
-            if other_exes:
-                btn_switch = dlg.addButton("🔄 切换到最新稳定版", QMessageBox.ButtonRole.ResetRole)
-                btn_switch.setStyleSheet("background-color: #6A1B9A; border: 1px solid #7B1FA2;")
-
-        dlg.exec()
-
-        clicked = dlg.clickedButton()
-        if has_update and hasattr(self, '_update_btn_ref') is False:
-            pass  # 不会走到这里
-
-        # 判断点击了哪个按钮
-        if has_update:
-            try:
-                if clicked == btn_update:
-                    self._do_pull_update()
-            except:
-                pass
-
-        try:
-            if clicked == btn_switch and other_exes:
-                self._do_switch_exe(other_exes[0]["path"])
-        except:
-            pass
+            self.update_info_label.setText(f"<b>本地版本:</b> {local} | <b>远程版本:</b> {remote}<br><span style='color:#FF9800'>{error}</span>")
+        elif has_update:
+            self.update_info_label.setText(f"<b>本地版本:</b> {local} | <b>远程版本:</b> <span style='color:#4CAF50'>{remote}</span><br><span style='color:#4CAF50'>发现资源包更新！</span>")
+            self.btn_pull_update.setEnabled(True)
+        else:
+            self.update_info_label.setText(f"<b>本地版本:</b> {local} | <b>远程版本:</b> {remote}<br>资源包已是最新版本")
+            self.btn_pull_update.setEnabled(False)
 
     def _do_pull_update(self):
         """执行资源包更新"""
         self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
         self.updater.progress = lambda p, l: self.progress_signal.emit(p, l)
+        self.btn_pull_update.setEnabled(False)
+        self.btn_check_update.setEnabled(False)
 
         def _pull():
             if self.updater.pull_update():
-                self.log_signal.emit("✓ 资源包更新完成，部分功能可能需要重启生效", "#4CAF50")
+                self.log_signal.emit("✓ 资源包更新完成", "#4CAF50")
             else:
                 self.log_signal.emit("✗ 资源包更新失败", "#F44336")
+            self.btn_check_update.setEnabled(True)
+            # 更新后重新检查版本
+            QTimer.singleShot(500, self._on_update)
 
         t = threading.Thread(target=_pull, daemon=True)
         t.start()
-
-    def _do_switch_exe(self, exe_path: str):
-        """切换到指定稳定版 EXE"""
-        exe_name = os.path.basename(exe_path)
-        reply = QMessageBox.question(
-            self, "切换 EXE 版本",
-            f"确定要切换到 {exe_name} 吗？\n当前程序将退出并启动新版本。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            self.updater.switch_to_exe(exe_path)
 
     # ── 关闭 ──
     def closeEvent(self, event):

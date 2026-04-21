@@ -13,13 +13,10 @@
   - QWebChannel 替代 Electron IPC
   - backend.py 提供 Ollama 代理 / CLI 管理 / 配置管理
   - --onedir 模式打包（QtWebEngine 不支持 --onefile）
-  - 发布包结构: build/发布/云集智能编程工作站vX.X/
-      ├── 云集智能编程工作站.exe
-      ├── _internal/          (PyInstaller 运行时 DLL)
-      ├── desktop/dist/       (Vue 前端)
-      ├── nodejs/             (便携 Node.js)
-      ├── bun/                (便携 Bun)
-      └── ...
+  - PyInstaller 工作目录: build/ (仅构建用)
+  - 开发测试目录: dev/云集智能编程工作站vX.X/ (EXE + _internal/)
+  - 用户拿到整合包后，EXE 直接在 dev/ 下运行
+  - 部署维护功能自动安装 nodejs/bun/node_modules 等运行时
 """
 import os
 import sys
@@ -38,7 +35,8 @@ if sys.platform == "win32":
 VERSION = datetime.now().strftime("%Y.%m.%d.%H%M")
 ROOT_DIR = Path(__file__).resolve().parent  # build-version.py 在 dev/app/ 下
 DEV_APP_DIR = ROOT_DIR
-BUILD_DIR = ROOT_DIR.parent.parent / "build"  # 项目根/build/
+DEV_DIR = ROOT_DIR.parent                   # dev/ 根目录
+BUILD_DIR = ROOT_DIR.parent.parent / "build"  # 项目根/build/ (PyInstaller 工作目录)
 VERSION_HISTORY_FILE = ROOT_DIR.parent.parent / "version_history.json"
 
 
@@ -357,13 +355,27 @@ def main():
         release_name = release_dir.name
         record_version(release_name, changes)
 
+        # Step 6: 复制到 dev/ 目录（开发测试用）
+        dev_release_dir = DEV_DIR / release_name
+        print("── Step 6: 复制到 dev/ 目录 ──")
+        if dev_release_dir.exists():
+            print(f"  清理旧目录: {dev_release_dir}")
+            shutil.rmtree(str(dev_release_dir), ignore_errors=True)
+        shutil.copytree(str(release_dir), str(dev_release_dir))
+        print(f"  ✓ 已复制到 {dev_release_dir}")
+
         # 完成
-        exe_path = release_dir / f"{release_name}.exe"
+        exe_path = dev_release_dir / f"{release_name}.exe"
         print("=" * 60)
         print("  构建完成！")
         print(f"  发布目录: {release_dir}")
+        print(f"  开发目录: {dev_release_dir}")
         if exe_path.exists():
             print(f"  EXE 文件: {exe_path}")
+            size_mb = exe_path.stat().st_size / (1024 * 1024)
+            total_size = sum(f.stat().st_size for f in dev_release_dir.rglob("*") if f.is_file())
+            total_mb = total_size / (1024 * 1024)
+            print(f"  EXE 大小: {size_mb:.1f} MB | 整合包大小: {total_mb:.1f} MB")
         print(f"  版本历史: {VERSION_HISTORY_FILE}")
         print("=" * 60)
 
