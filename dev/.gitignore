@@ -4,9 +4,11 @@
 # 仓库根目录: dev/
 #
 # 目录架构（对齐参考项目）：
-#   dev/app/   = 资源整合包（EXE + _internal/ + desktop/ + ...）
-#                也是 Git 管理的核心开发目录
-#   dev/ver/   = 稳定版 EXE（手动从 app/ 复制）
+#   dev/*.exe      = 开发测试 EXE（gitignore，不推送）
+#   dev/_internal/ = PyInstaller 运行时（gitignore，不推送）
+#   dev/app/       = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
+#   dev/ver/*.exe  = 稳定版 EXE（git 跟踪，推送）
+#   dev/           = Git 仓库根目录
 #
 # 推送内容：
 # - app/ 的源代码文件 (main.py, backend.py, desktop/src/, etc.)
@@ -14,18 +16,18 @@
 # - .gitignore
 #
 # 不推送（用户通过部署维护功能自动安装）：
-# - app/nodejs/       (Node.js 运行时，~190MB)
-# - app/bun/          (Bun 运行时，~104MB)
-# - app/node_modules/ (npm 依赖，~500MB)
-# - app/_internal/    (PyInstaller 运行时 DLL)
-# - app/*.exe         (开发测试 EXE)
-# - app/.venv/        (Python 虚拟环境)
-# - app/.env          (含 API 密钥，敏感信息)
+# - *.exe            (开发测试 EXE，在 dev/ 根目录)
+# - _internal/       (PyInstaller 运行时 DLL，在 dev/ 根目录)
+# - app/nodejs/      (Node.js 运行时，~190MB)
+# - app/bun/         (Bun 运行时，~104MB)
+# - app/node_modules/(npm 依赖，~500MB)
+# - app/.venv/       (Python 虚拟环境)
+# - app/.env         (含 API 密钥，敏感信息)
 # ============================================
 
-# ── app/ 下的 EXE 和 _internal/（不推送）──
-app/*.exe
-app/_internal/
+# ── dev/ 根目录下的 EXE 和 _internal/（不推送）──
+/*.exe
+/_internal/
 
 # ── ver/ 下的稳定 EXE 要推送 ──
 !ver/*.exe

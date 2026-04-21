@@ -14,10 +14,12 @@
   - backend.py 提供 Ollama 代理 / CLI 管理 / 配置管理
   - --onedir 模式打包（QtWebEngine 不支持 --onefile）
   - PyInstaller 工作目录: build/ (仅构建用，不推送)
-  - 开发/运行目录: dev/app/ (EXE + _internal/ + desktop/ + nodejs/ + ...)
-    EXE 直接放在 dev/app/ 下，所有资源也在 dev/app/ 中
-    dev/app/ 通过 Git 管理版本，方便回滚切换
-  - 稳定版目录: dev/ver/ (手动从 app/ 复制 EXE，git 跟踪)
+  - 目录架构（对齐参考项目）:
+    dev/*.exe         = 开发测试 EXE（gitignore）
+    dev/_internal/    = PyInstaller 运行时（gitignore）
+    dev/app/          = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
+    dev/ver/*.exe     = 稳定版 EXE（git 跟踪）
+    dev/              = Git 仓库根目录
   - 部署维护功能自动安装 nodejs/bun/node_modules 等运行时
 """
 import os
@@ -270,27 +272,30 @@ def cleanup():
             pass
 
 
-# ── 部署到 dev/app/ ──
-def _deploy_to_app(release_dir: Path):
-    """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/app/ 下
+# ── 部署到 dev/ ──
+def _deploy_to_dev(release_dir: Path):
+    """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/ 下
     
-    dev/app/ 是资源整合包，EXE 直接运行在这里，与 desktop/、nodejs/ 等同级。
+    架构（对齐参考项目）:
+    - EXE 直接放在 dev/ 下（dev/云集智能编程工作站vX.X.exe）
+    - _internal/ 也在 dev/ 下（dev/_internal/）
+    - 资源文件在 dev/app/ 下（desktop/、nodejs/ 等，已存在）
     """
     release_name = release_dir.name
     
-    # 1. 复制 EXE 文件（删除旧 EXE）
+    # 1. 复制 EXE 文件到 dev/ 根目录（删除旧 EXE）
     new_exe = release_dir / f"{release_name}.exe"
     if new_exe.exists():
-        # 删除 dev/app/ 下旧的 EXE
-        for old_exe in DEV_APP_DIR.glob("云集智能编程工作站v*.exe"):
+        # 删除 dev/ 下旧的 EXE
+        for old_exe in DEV_DIR.glob("云集智能编程工作站v*.exe"):
             print(f"  删除旧 EXE: {old_exe.name}")
             old_exe.unlink()
-        shutil.copy2(str(new_exe), str(DEV_APP_DIR / new_exe.name))
+        shutil.copy2(str(new_exe), str(DEV_DIR / new_exe.name))
         print(f"  ✓ 复制 EXE: {new_exe.name}")
     
-    # 2. 替换 _internal/ 目录（PyInstaller 运行时）
+    # 2. 替换 _internal/ 目录到 dev/ 下（PyInstaller 运行时）
     new_internal = release_dir / "_internal"
-    old_internal = DEV_APP_DIR / "_internal"
+    old_internal = DEV_DIR / "_internal"
     if new_internal.exists():
         if old_internal.exists():
             print(f"  替换旧 _internal/")
@@ -298,13 +303,7 @@ def _deploy_to_app(release_dir: Path):
         shutil.copytree(str(new_internal), str(old_internal))
         print(f"  ✓ 复制 _internal/")
     
-    # 3. 复制 icon.ico（如果 release_dir 有且 dev/app/ 没有）
-    icon_src = release_dir / "icon.ico"
-    icon_dst = DEV_APP_DIR / "icon.ico"
-    if icon_src.exists() and not icon_dst.exists():
-        shutil.copy2(str(icon_src), str(icon_dst))
-    
-    print(f"  ✓ 部署完成，EXE 在 {DEV_APP_DIR}")
+    print(f"  ✓ 部署完成，EXE 在 {DEV_DIR}")
 
 
 # ── 记录版本 ──
@@ -380,26 +379,27 @@ def main():
         release_name = release_dir.name
         record_version(release_name, changes)
 
-        # Step 6: 将 EXE + _internal/ 复制到 dev/app/ 下
-        print("── Step 6: 部署到 dev/app/ ──")
-        _deploy_to_app(release_dir)
+        # Step 6: 将 EXE + _internal/ 复制到 dev/ 下
+        print("── Step 6: 部署到 dev/ ──")
+        _deploy_to_dev(release_dir)
 
         # 完成
-        exe_path = DEV_APP_DIR / f"{release_name}.exe"
+        exe_path = DEV_DIR / f"{release_name}.exe"
         print("=" * 60)
         print("  构建完成！")
         print(f"  发布目录: {release_dir}")
-        print(f"  运行目录: {DEV_APP_DIR}")
+        print(f"  运行目录: {DEV_DIR}")
         if exe_path.exists():
             print(f"  EXE 文件: {exe_path}")
             size_mb = exe_path.stat().st_size / (1024 * 1024)
             print(f"  EXE 大小: {size_mb:.1f} MB")
         # 计算 _internal/ 大小
-        internal_dir = DEV_APP_DIR / "_internal"
+        internal_dir = DEV_DIR / "_internal"
         if internal_dir.exists():
             total_size = sum(f.stat().st_size for f in internal_dir.rglob("*") if f.is_file())
             total_mb = total_size / (1024 * 1024)
             print(f"  _internal/ 大小: {total_mb:.1f} MB")
+        print(f"  资源目录: {DEV_APP_DIR}")
         print(f"  版本历史: {VERSION_HISTORY_FILE}")
         print("=" * 60)
 

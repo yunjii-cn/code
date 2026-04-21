@@ -615,39 +615,41 @@ class MainWindow(QMainWindow):
 
         # 基础目录
         # 架构（对齐参考项目）:
-        #   dev/app/  = 资源整合包（EXE + _internal/ + desktop/ + nodejs/ + ...）
-        #              也是 Git 管理的核心开发目录
-        #   dev/ver/  = 稳定版 EXE（手动从 app/ 复制）
-        #   dev/      = Git 仓库根目录
+        #   dev/*.exe          = 开发测试 EXE（gitignore）
+        #   dev/_internal/     = PyInstaller 运行时（gitignore）
+        #   dev/app/           = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
+        #   dev/ver/*.exe      = 稳定版 EXE（git 跟踪）
+        #   dev/               = Git 仓库根目录
         #
-        # --onedir 打包后: EXE 直接在 dev/app/ 下，_internal/ 也在 dev/app/ 下
+        # --onedir 打包后: EXE 在 dev/ 下，_internal/ 也在 dev/ 下
+        #   desktop/、nodejs/ 等资源在 dev/app/ 下
         # 开发模式: main.py 在 dev/app/ 下
         if hasattr(sys, 'frozen'):
-            # PyInstaller 打包模式：EXE 在 dev/app/ 下
+            # PyInstaller 打包模式：EXE 在 dev/ 下
             exe_dir = os.path.abspath(os.path.dirname(sys.executable))
-            self.base_dir = exe_dir
-            # dev/ 根目录 = app/ 的上级
-            self.dev_dir = os.path.dirname(exe_dir)
+            self.base_dir = exe_dir       # dev/ (EXE 所在目录)
+            self.app_dir = os.path.join(exe_dir, "app")  # dev/app/ (资源目录)
+            self.dev_dir = exe_dir        # dev/ = Git 仓库根
         else:
-            self.base_dir = os.path.dirname(os.path.abspath(__file__))
-            # 开发模式: main.py 在 dev/app/ 下，dev/ 是上级目录
-            self.dev_dir = os.path.dirname(self.base_dir)
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))  # dev/app/ (脚本所在)
+            self.app_dir = self.base_dir  # 开发模式: main.py 在 dev/app/ 下
+            self.dev_dir = os.path.dirname(self.base_dir)  # dev/
 
-        # 初始化后端
-        self.env_manager = EnvFileManager(os.path.join(self.base_dir, ".env"))
+        # 初始化后端（desktop/、nodejs/ 等资源在 app_dir 下）
+        self.env_manager = EnvFileManager(os.path.join(self.app_dir, ".env"))
         self.ollama_proxy = OllamaProxyServer()
         self.cli_runner = ClaudeCliRunner(
-            self.base_dir,
-            os.path.join(self.base_dir, "nodejs", NODE_DIR_NAME),
-            os.path.join(self.base_dir, "bun", BUN_DIR_NAME),
+            self.app_dir,
+            os.path.join(self.app_dir, "nodejs", NODE_DIR_NAME),
+            os.path.join(self.app_dir, "bun", BUN_DIR_NAME),
         )
-        self.installer = EnvInstaller(self.base_dir)
+        self.installer = EnvInstaller(self.app_dir)
         self.updater = SoftwareUpdater(self.dev_dir)
 
         # 状态
         self.active_session_id = _uuid()
         self.started_sessions = set()
-        self.current_workspace = self.base_dir
+        self.current_workspace = self.app_dir
         self.is_busy = False
         self.active_proc = None
 
@@ -1066,7 +1068,7 @@ class MainWindow(QMainWindow):
 
     def _load_frontend(self):
         """加载 Vue 前端到 QWebEngineView"""
-        dist_path = os.path.join(self.base_dir, "desktop", "dist", "index.html")
+        dist_path = os.path.join(self.app_dir, "desktop", "dist", "index.html")
 
         if not os.path.exists(dist_path):
             self._update_status("✗ 前端未构建")
