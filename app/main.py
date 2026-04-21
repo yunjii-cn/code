@@ -605,7 +605,7 @@ class MainWindow(QMainWindow):
         # 图标
         try:
             if hasattr(sys, 'frozen'):
-                icon_path = os.path.join(os.path.dirname(sys.executable), "icon.ico")
+                icon_path = os.path.join(os.path.dirname(sys.executable), "app", "icon.ico")
             else:
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
             if os.path.exists(icon_path):
@@ -679,34 +679,19 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # ── 顶部导航栏 ──
+        # ── 顶部导航栏（三个按钮平均占满，无标题无状态灯）──
         nav_bar = QFrame()
-        nav_bar.setFixedHeight(48)
+        nav_bar.setFixedHeight(36)
         nav_bar.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 2px solid #333333; }")
         nav_layout = QHBoxLayout(nav_bar)
-        nav_layout.setSpacing(15)
-        nav_layout.setContentsMargins(15, 0, 15, 0)
+        nav_layout.setSpacing(2)
+        nav_layout.setContentsMargins(2, 2, 2, 2)
 
-        # 标题
-        title = QLabel("💻 云集智能编程工作站")
-        title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        title.setStyleSheet("color: #fff; border: none;")
-        nav_layout.addWidget(title)
-
-        nav_layout.addStretch()
-
-        # 状态标签
-        self.status_label = QLabel("⏹ 就绪")
-        self.status_label.setStyleSheet("color: #888; font-size: 12px; border: none;")
-        nav_layout.addWidget(self.status_label)
-
-        nav_layout.addStretch()
-
-        # 导航按钮样式
+        # 导航按钮样式（占满整栏）
         menu_button_style = """
             QPushButton {
                 background-color: #252525; color: #FFFFFF; border: 1px solid #333333;
-                border-radius: 4px; padding: 8px 16px; font-size: 12px; font-weight: normal;
+                border-radius: 4px; padding: 6px 8px; font-size: 12px; font-weight: normal;
             }
             QPushButton:hover { background-color: #333333; border-color: #444444; }
             QPushButton:checked { background-color: #1565C0; border-color: #1976D2; color: #FFFFFF; }
@@ -718,7 +703,7 @@ class MainWindow(QMainWindow):
         self.btn_home.setCheckable(True)
         self.btn_home.setChecked(True)
         self.btn_home.setStyleSheet(menu_button_style)
-        self.btn_home.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_home.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.btn_home.clicked.connect(lambda: self._switch_page(0))
         nav_layout.addWidget(self.btn_home)
 
@@ -726,7 +711,7 @@ class MainWindow(QMainWindow):
         self.btn_deploy_nav = QPushButton("⚙️ 部署维护")
         self.btn_deploy_nav.setCheckable(True)
         self.btn_deploy_nav.setStyleSheet(menu_button_style)
-        self.btn_deploy_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_deploy_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.btn_deploy_nav.clicked.connect(lambda: self._switch_page(1))
         nav_layout.addWidget(self.btn_deploy_nav)
 
@@ -734,7 +719,7 @@ class MainWindow(QMainWindow):
         self.btn_update_nav = QPushButton("🔄 软件更新")
         self.btn_update_nav.setCheckable(True)
         self.btn_update_nav.setStyleSheet(menu_button_style)
-        self.btn_update_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.btn_update_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.btn_update_nav.clicked.connect(lambda: self._switch_page(2))
         nav_layout.addWidget(self.btn_update_nav)
 
@@ -832,22 +817,24 @@ class MainWindow(QMainWindow):
         """创建部署维护页面"""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 10, 12, 10)
 
         # 标题
         title = QLabel("⚙️ 部署维护")
-        title.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
         title.setStyleSheet("color: #4CAF50; border: none;")
         layout.addWidget(title)
 
-        # 环境状态区域
+        # 环境状态区域（紧凑：单行网格）
         env_group = QFrame()
-        env_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; }")
+        env_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 6px; }")
         env_layout = QVBoxLayout(env_group)
+        env_layout.setSpacing(2)
+        env_layout.setContentsMargins(8, 6, 8, 6)
 
         env_title = QLabel("📦 环境状态")
-        env_title.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        env_title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
         env_title.setStyleSheet("color: #fff; border: none;")
         env_layout.addWidget(env_title)
 
@@ -856,12 +843,13 @@ class MainWindow(QMainWindow):
         labels = {"node": "Node.js", "bun": "Bun", "deps": "npm 依赖", "dist": "前端构建", "electron": "Electron"}
         for key, label_text in labels.items():
             row = QHBoxLayout()
+            row.setSpacing(4)
             name_lbl = QLabel(f"  {label_text}")
-            name_lbl.setStyleSheet("color: #ccc; font-size: 13px; border: none;")
+            name_lbl.setStyleSheet("color: #ccc; font-size: 12px; border: none;")
             row.addWidget(name_lbl)
             row.addStretch()
-            status_lbl = QLabel("✓ 已安装" if checks.get(key) else "✗ 未安装")
-            status_lbl.setStyleSheet(f"color: {'#4CAF50' if checks.get(key) else '#F44336'}; font-size: 13px; font-weight: bold; border: none;")
+            status_lbl = QLabel("✓" if checks.get(key) else "✗")
+            status_lbl.setStyleSheet(f"color: {'#4CAF50' if checks.get(key) else '#F44336'}; font-size: 12px; font-weight: bold; border: none;")
             row.addWidget(status_lbl)
             self.deploy_env_labels[key] = status_lbl
             env_layout.addLayout(row)
@@ -870,11 +858,11 @@ class MainWindow(QMainWindow):
 
         # 操作按钮区域
         btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(15)
+        btn_layout.setSpacing(8)
 
         self.btn_install_all = QPushButton("🔄 一键部署全部")
         self.btn_install_all.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 8px; padding: 12px 24px; font-size: 14px; }
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; }
             QPushButton:hover { background-color: #388E3C; }
         """)
         self.btn_install_all.clicked.connect(self._on_deploy)
@@ -882,7 +870,7 @@ class MainWindow(QMainWindow):
 
         self.btn_install_node = QPushButton("📥 安装 Node.js")
         self.btn_install_node.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
             QPushButton:hover { background-color: #1976D2; }
         """)
         self.btn_install_node.clicked.connect(lambda: self._on_install_single("node"))
@@ -890,7 +878,7 @@ class MainWindow(QMainWindow):
 
         self.btn_install_bun = QPushButton("📥 安装 Bun")
         self.btn_install_bun.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
             QPushButton:hover { background-color: #1976D2; }
         """)
         self.btn_install_bun.clicked.connect(lambda: self._on_install_single("bun"))
@@ -898,7 +886,7 @@ class MainWindow(QMainWindow):
 
         self.btn_install_deps = QPushButton("📥 安装依赖")
         self.btn_install_deps.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
             QPushButton:hover { background-color: #1976D2; }
         """)
         self.btn_install_deps.clicked.connect(lambda: self._on_install_single("deps"))
@@ -906,7 +894,7 @@ class MainWindow(QMainWindow):
 
         self.btn_build_frontend = QPushButton("🔨 构建前端")
         self.btn_build_frontend.setStyleSheet("""
-            QPushButton { background-color: #6A1B9A; border: 2px solid #7B1FA2; border-radius: 8px; padding: 10px 18px; font-size: 12px; }
+            QPushButton { background-color: #6A1B9A; border: 2px solid #7B1FA2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
             QPushButton:hover { background-color: #7B1FA2; }
         """)
         self.btn_build_frontend.clicked.connect(lambda: self._on_install_single("dist"))
@@ -940,22 +928,22 @@ class MainWindow(QMainWindow):
         """创建软件更新页面"""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setSpacing(12)
-        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 10, 12, 10)
 
         # 标题
         title = QLabel("🔄 软件更新")
-        title.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
         title.setStyleSheet("color: #1565C0; border: none;")
         layout.addWidget(title)
 
         # 版本信息区域
         info_group = QFrame()
-        info_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; }")
+        info_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 8px; }")
         info_layout = QVBoxLayout(info_group)
 
         self.update_info_label = QLabel("点击「检查更新」查看最新版本")
-        self.update_info_label.setStyleSheet("color: #ccc; font-size: 13px; border: none;")
+        self.update_info_label.setStyleSheet("color: #ccc; font-size: 12px; border: none;")
         self.update_info_label.setWordWrap(True)
         info_layout.addWidget(self.update_info_label)
 
@@ -966,7 +954,7 @@ class MainWindow(QMainWindow):
 
         self.btn_check_update = QPushButton("🔍 检查更新")
         self.btn_check_update.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 8px; padding: 12px 24px; font-size: 14px; }
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 8px 16px; font-size: 12px; }
             QPushButton:hover { background-color: #1976D2; }
         """)
         self.btn_check_update.clicked.connect(self._on_update)
@@ -974,7 +962,7 @@ class MainWindow(QMainWindow):
 
         self.btn_pull_update = QPushButton("📥 更新资源包")
         self.btn_pull_update.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 8px; padding: 12px 24px; font-size: 14px; }
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; }
             QPushButton:hover { background-color: #388E3C; }
         """)
         self.btn_pull_update.clicked.connect(self._do_pull_update)
@@ -1134,7 +1122,7 @@ class MainWindow(QMainWindow):
         pass  # 可扩展
 
     def _update_status(self, text: str):
-        self.status_label.setText(text)
+        self.env_status.setText(text)
 
     def _on_result_ready(self, result_json: str):
         """CLI 执行完成"""
