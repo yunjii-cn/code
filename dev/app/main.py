@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
     QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QUrl
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
@@ -227,9 +227,10 @@ class SoftwareUpdater:
 class BackendBridge(QObject):
     """暴露给前端 JS 的 Python 对象，替代 Electron 的 desktopApi"""
 
-    # 信号：前端通过 onDelta/onStatus 连接
+    # 信号：前端通过 onDelta/onStatus/onModelsLoaded 连接
     deltaReceived = pyqtSignal(str)   # JSON string: {"text": "..."}
     statusReceived = pyqtSignal(str)  # JSON string: {"busy": true, ...}
+    modelsLoaded = pyqtSignal(str)    # JSON string: {"ok": true, "models": [...]}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -238,8 +239,9 @@ class BackendBridge(QObject):
     def _get_main(self):
         return self._app_ref
 
-    # ── 前端可调用方法 (自动暴露为 JS 方法) ──
+    # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
+    @pyqtSlot(result=str)
     def getState(self):
         """获取应用状态"""
         main = self._get_main()
@@ -255,6 +257,7 @@ class BackendBridge(QObject):
             "workspacePath": main.current_workspace,
         })
 
+    @pyqtSlot(result=str)
     def newSession(self):
         main = self._get_main()
         if not main:
@@ -262,6 +265,7 @@ class BackendBridge(QObject):
         main.active_session_id = _uuid()
         return json.dumps({"sessionId": main.active_session_id})
 
+    @pyqtSlot(str, result=str)
     def sendMessage(self, payload_json: str):
         """发送消息给 AI"""
         main = self._get_main()
@@ -296,6 +300,7 @@ class BackendBridge(QObject):
 
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
 
+    @pyqtSlot(result=str)
     def stopMessage(self):
         main = self._get_main()
         if not main or not main.is_busy:
@@ -312,11 +317,13 @@ class BackendBridge(QObject):
         self.statusReceived.emit(json.dumps({"busy": False}))
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
 
+    @pyqtSlot(result=str)
     def getWorkspace(self):
         main = self._get_main()
         path = main.current_workspace if main else ""
         return json.dumps({"path": path})
 
+    @pyqtSlot(result=str)
     def chooseWorkspace(self):
         """由 Python 端弹出文件夹选择对话框"""
         main = self._get_main()
@@ -326,12 +333,14 @@ class BackendBridge(QObject):
         main.workspace_choose_requested.emit()
         return json.dumps({"ok": True, "path": main.current_workspace})
 
+    @pyqtSlot(result=str)
     def getSettings(self):
         main = self._get_main()
         if not main:
             return json.dumps({})
         return json.dumps(main.env_manager.read_settings())
 
+    @pyqtSlot(str, result=str)
     def saveSettings(self, payload_json: str):
         main = self._get_main()
         if not main:
@@ -343,6 +352,7 @@ class BackendBridge(QObject):
         result = main.env_manager.write_settings(payload)
         return json.dumps(result)
 
+    @pyqtSlot(result=str)
     def clearModelSettings(self):
         main = self._get_main()
         if not main:
@@ -350,8 +360,9 @@ class BackendBridge(QObject):
         result = main.env_manager.clear_model_settings()
         return json.dumps(result)
 
+    @pyqtSlot(str, result=str)
     def listModels(self, payload_json: str):
-        """获取模型列表"""
+        """获取模型列表（在后台线程中执行，通过信号返回结果）"""
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
         except:
@@ -362,18 +373,25 @@ class BackendBridge(QObject):
         settings = main.env_manager.read_settings() if main else {}
         timeout = int(settings.get("API_TIMEOUT_MS", "15000") or "15000")
 
-        if source == "openrouter":
-            result = list_openrouter_models(timeout)
-        elif source == "anthropic":
-            api_key = payload.get("apiKey", "") or settings.get("ANTHROPIC_API_KEY", "")
-            result = list_anthropic_models(api_key, timeout)
-        elif source == "ollama":
-            base_url = payload.get("baseUrl", "") or settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434"
-            result = list_ollama_models(base_url, timeout)
-        else:
-            result = {"ok": False, "error": "Unsupported source."}
+        # 在后台线程中执行，避免阻塞主线程
+        def _do_load():
+            if source == "openrouter":
+                result = list_openrouter_models(timeout)
+            elif source == "anthropic":
+                api_key = payload.get("apiKey", "") or settings.get("ANTHROPIC_API_KEY", "")
+                result = list_anthropic_models(api_key, timeout)
+            elif source == "ollama":
+                base_url = payload.get("baseUrl", "") or settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434"
+                result = list_ollama_models(base_url, timeout)
+            else:
+                result = {"ok": False, "error": "Unsupported source."}
+            # 通过信号通知前端
+            self.modelsLoaded.emit(json.dumps(result))
 
-        return json.dumps(result)
+        t = threading.Thread(target=_do_load, daemon=True)
+        t.start()
+        # 立即返回，前端通过 modelsLoaded 信号获取结果
+        return json.dumps({"ok": True, "loading": True})
 
     # ── 内部方法 ──
 
