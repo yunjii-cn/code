@@ -376,13 +376,6 @@ onMounted(async () => {
 
 <template>
   <div class="page">
-    <header class="hero">
-      <div class="badge">YUNJII-CODE</div>
-      <h1>云集智能编程工作站</h1>
-      <p>高效智能的编程助手，让代码创作更简单。</p>
-      <div class="path-chip">当前项目：{{ workspacePath || "未选择" }}</div>
-    </header>
-
     <section class="flowbar">
       <span>1. 选择模式（云端 / Ollama）</span>
       <span>2. 配置模型</span>
@@ -490,69 +483,23 @@ onMounted(async () => {
 <style scoped>
 .page {
   height: 100%;
-  padding: 24px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
   background: #0d0d0d;
 }
 
-.hero {
-  border-radius: 8px;
+.flowbar {
+  border-radius: 6px;
   border: 1px solid #2a2a2a;
   background: #1a1a1a;
-  padding: 24px;
-}
-
-.badge {
-  display: inline-block;
-  padding: 4px 12px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.5px;
-  color: #ffffff;
-  background: #3b82f6;
-}
-
-.hero h1 {
-  margin: 16px 0 8px;
-  font-size: 28px;
-  line-height: 1.2;
-  color: #ffffff;
-  font-weight: 700;
-}
-
-.hero p {
-  margin: 0;
   color: #888888;
-  line-height: 1.5;
-  font-size: 14px;
-}
-
-.path-chip {
-  margin-top: 16px;
-  border-radius: 4px;
-  border: 1px solid #2a2a2a;
-  background: #262626;
-  color: #a3a3a3;
   font-size: 12px;
   padding: 8px 12px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.flowbar {
-  border-radius: 8px;
-  border: 1px solid #2a2a2a;
-  background: #1a1a1a;
-  color: #888888;
-  font-size: 13px;
-  padding: 12px 16px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .workbench {
@@ -560,7 +507,7 @@ onMounted(async () => {
   min-height: 0;
   display: grid;
   grid-template-columns: 1fr 360px;
-  gap: 16px;
+  gap: 10px;
 }
 
 .workbench.single {
@@ -577,16 +524,16 @@ onMounted(async () => {
 .chat {
   display: flex;
   flex-direction: column;
-  padding: 16px;
-  gap: 16px;
+  padding: 10px;
+  gap: 10px;
 }
 
 .toolbar {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   align-items: center;
-  padding-bottom: 12px;
+  padding-bottom: 8px;
   border-bottom: 1px solid #2a2a2a;
 }
 
@@ -607,7 +554,7 @@ onMounted(async () => {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   padding: 4px;
 }
 
@@ -661,8 +608,8 @@ onMounted(async () => {
 .composer {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding-top: 12px;
+  gap: 8px;
+  padding-top: 8px;
   border-top: 1px solid #2a2a2a;
 }
 
@@ -699,10 +646,10 @@ onMounted(async () => {
 }
 
 .settings {
-  padding: 16px;
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 10px;
   overflow: auto;
 }
 
