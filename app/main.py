@@ -614,22 +614,20 @@ class MainWindow(QMainWindow):
             pass
 
         # 基础目录
-        # --onedir 打包后: EXE 在 dev/版本名/ 下，_internal/ 和 desktop/ 同级
-        # 开发模式: 脚本在 dev/app/ 下
+        # 架构（对齐参考项目）:
+        #   dev/app/  = 资源整合包（EXE + _internal/ + desktop/ + nodejs/ + ...）
+        #              也是 Git 管理的核心开发目录
+        #   dev/ver/  = 稳定版 EXE（手动从 app/ 复制）
+        #   dev/      = Git 仓库根目录
+        #
+        # --onedir 打包后: EXE 直接在 dev/app/ 下，_internal/ 也在 dev/app/ 下
+        # 开发模式: main.py 在 dev/app/ 下
         if hasattr(sys, 'frozen'):
-            # PyInstaller 打包模式：EXE 所在目录就是 base_dir
-            self.base_dir = os.path.abspath(os.path.dirname(sys.executable))
-            # dev/ 根目录 = EXE 所在目录的上级（EXE 在 dev/版本名/ 下）
-            exe_dir = os.path.dirname(sys.executable)
-            parent_dir = os.path.dirname(exe_dir)
-            # 判断是否在 ver/ 子目录下
-            if os.path.basename(exe_dir) == "ver":
-                self.dev_dir = os.path.dirname(exe_dir)
-            elif os.path.basename(parent_dir) == "dev" or os.path.basename(parent_dir) in os.path.basename(exe_dir):
-                # EXE 在 dev/版本名/ 下
-                self.dev_dir = parent_dir
-            else:
-                self.dev_dir = exe_dir
+            # PyInstaller 打包模式：EXE 在 dev/app/ 下
+            exe_dir = os.path.abspath(os.path.dirname(sys.executable))
+            self.base_dir = exe_dir
+            # dev/ 根目录 = app/ 的上级
+            self.dev_dir = os.path.dirname(exe_dir)
         else:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
             # 开发模式: main.py 在 dev/app/ 下，dev/ 是上级目录

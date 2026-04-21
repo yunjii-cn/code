@@ -13,9 +13,11 @@
   - QWebChannel 替代 Electron IPC
   - backend.py 提供 Ollama 代理 / CLI 管理 / 配置管理
   - --onedir 模式打包（QtWebEngine 不支持 --onefile）
-  - PyInstaller 工作目录: build/ (仅构建用)
-  - 开发测试目录: dev/云集智能编程工作站vX.X/ (EXE + _internal/)
-  - 用户拿到整合包后，EXE 直接在 dev/ 下运行
+  - PyInstaller 工作目录: build/ (仅构建用，不推送)
+  - 开发/运行目录: dev/app/ (EXE + _internal/ + desktop/ + nodejs/ + ...)
+    EXE 直接放在 dev/app/ 下，所有资源也在 dev/app/ 中
+    dev/app/ 通过 Git 管理版本，方便回滚切换
+  - 稳定版目录: dev/ver/ (手动从 app/ 复制 EXE，git 跟踪)
   - 部署维护功能自动安装 nodejs/bun/node_modules 等运行时
 """
 import os
@@ -197,9 +199,12 @@ def build_exe():
     return release_dir
 
 
-# ── 打包后处理：将运行时文件复制到发布目录 ──
+# ── 打包后处理：将运行时文件复制到发布目录（build/ 下的整合包）──
 def post_build(release_dir: Path):
-    """将 desktop/dist/ 和其他运行时资源复制到发布目录"""
+    """将 desktop/dist/ 等资源复制到 build/ 下的发布目录（用于打包分发）
+    
+    注意：dev/app/ 下已有这些资源，这里是为 build/ 里的完整整合包准备的。
+    """
     print("  打包后处理...")
 
     # 1. 复制 desktop/dist/ (Vue 前端)
@@ -218,51 +223,34 @@ def post_build(release_dir: Path):
     if icon_src.exists():
         shutil.copy2(str(icon_src), str(release_dir / "icon.ico"))
 
-    # 3. 复制 .env (配置文件，如果存在)
-    env_src = DEV_APP_DIR / ".env"
-    if env_src.exists():
-        shutil.copy2(str(env_src), str(release_dir / ".env"))
-
-    # 4. 复制 bin/ (CLI 工具)
+    # 3. 复制 bin/ (CLI 工具)
     bin_src = DEV_APP_DIR / "bin"
     bin_dst = release_dir / "bin"
     if bin_src.exists() and not bin_dst.exists():
         shutil.copytree(str(bin_src), str(bin_dst))
         print("  ✓ 复制 bin/ (CLI)")
 
-    # 5. 复制 stubs/ (类型定义)
+    # 4. 复制 stubs/ (类型定义)
     stubs_src = DEV_APP_DIR / "stubs"
     stubs_dst = release_dir / "stubs"
     if stubs_src.exists() and not stubs_dst.exists():
         shutil.copytree(str(stubs_src), str(stubs_dst))
         print("  ✓ 复制 stubs/")
 
-    # 6. nodejs/ 和 bun/ 不复制 (发布版由用户点击部署维护自动下载)
-    #    如果 dev/app/ 下有，也复制过去以方便使用
-    for runtime_dir in ["nodejs", "bun"]:
-        src = DEV_APP_DIR / runtime_dir
-        dst = release_dir / runtime_dir
-        if src.exists() and not dst.exists():
-            try:
-                shutil.copytree(str(src), str(dst_dst) if False else str(dst))
-                print(f"  ✓ 复制 {runtime_dir}/")
-            except Exception as e:
-                print(f"  ⚠ 复制 {runtime_dir}/ 失败: {e}")
-
-    # 7. node_modules/ (如果存在，CLI 依赖)
-    nm_src = DEV_APP_DIR / "node_modules"
-    nm_dst = release_dir / "node_modules"
-    if nm_src.exists() and not nm_dst.exists():
-        try:
-            shutil.copytree(str(nm_src), str(nm_dst))
-            print("  ✓ 复制 node_modules/")
-        except Exception as e:
-            print(f"  ⚠ 复制 node_modules/ 失败: {e}")
-
-    # 8. package.json
+    # 5. 复制 package.json
     pkg_src = DEV_APP_DIR / "package.json"
     if pkg_src.exists():
         shutil.copy2(str(pkg_src), str(release_dir / "package.json"))
+
+    # 6. 复制 scripts/ (安装/启动脚本)
+    scripts_src = DEV_APP_DIR / "scripts"
+    scripts_dst = release_dir / "scripts"
+    if scripts_src.exists() and not scripts_dst.exists():
+        shutil.copytree(str(scripts_src), str(scripts_dst))
+        print("  ✓ 复制 scripts/")
+
+    # nodejs/, bun/, node_modules/ 不复制到 build/ 发布包
+    # 用户拿到整合包后，通过部署维护功能自动下载安装
 
     # 计算发布目录大小
     total_size = sum(f.stat().st_size for f in release_dir.rglob("*") if f.is_file())
@@ -280,6 +268,43 @@ def cleanup():
             print("  清理 PyInstaller 临时文件")
         except:
             pass
+
+
+# ── 部署到 dev/app/ ──
+def _deploy_to_app(release_dir: Path):
+    """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/app/ 下
+    
+    dev/app/ 是资源整合包，EXE 直接运行在这里，与 desktop/、nodejs/ 等同级。
+    """
+    release_name = release_dir.name
+    
+    # 1. 复制 EXE 文件（删除旧 EXE）
+    new_exe = release_dir / f"{release_name}.exe"
+    if new_exe.exists():
+        # 删除 dev/app/ 下旧的 EXE
+        for old_exe in DEV_APP_DIR.glob("云集智能编程工作站v*.exe"):
+            print(f"  删除旧 EXE: {old_exe.name}")
+            old_exe.unlink()
+        shutil.copy2(str(new_exe), str(DEV_APP_DIR / new_exe.name))
+        print(f"  ✓ 复制 EXE: {new_exe.name}")
+    
+    # 2. 替换 _internal/ 目录（PyInstaller 运行时）
+    new_internal = release_dir / "_internal"
+    old_internal = DEV_APP_DIR / "_internal"
+    if new_internal.exists():
+        if old_internal.exists():
+            print(f"  替换旧 _internal/")
+            shutil.rmtree(str(old_internal), ignore_errors=True)
+        shutil.copytree(str(new_internal), str(old_internal))
+        print(f"  ✓ 复制 _internal/")
+    
+    # 3. 复制 icon.ico（如果 release_dir 有且 dev/app/ 没有）
+    icon_src = release_dir / "icon.ico"
+    icon_dst = DEV_APP_DIR / "icon.ico"
+    if icon_src.exists() and not icon_dst.exists():
+        shutil.copy2(str(icon_src), str(icon_dst))
+    
+    print(f"  ✓ 部署完成，EXE 在 {DEV_APP_DIR}")
 
 
 # ── 记录版本 ──
@@ -355,27 +380,26 @@ def main():
         release_name = release_dir.name
         record_version(release_name, changes)
 
-        # Step 6: 复制到 dev/ 目录（开发测试用）
-        dev_release_dir = DEV_DIR / release_name
-        print("── Step 6: 复制到 dev/ 目录 ──")
-        if dev_release_dir.exists():
-            print(f"  清理旧目录: {dev_release_dir}")
-            shutil.rmtree(str(dev_release_dir), ignore_errors=True)
-        shutil.copytree(str(release_dir), str(dev_release_dir))
-        print(f"  ✓ 已复制到 {dev_release_dir}")
+        # Step 6: 将 EXE + _internal/ 复制到 dev/app/ 下
+        print("── Step 6: 部署到 dev/app/ ──")
+        _deploy_to_app(release_dir)
 
         # 完成
-        exe_path = dev_release_dir / f"{release_name}.exe"
+        exe_path = DEV_APP_DIR / f"{release_name}.exe"
         print("=" * 60)
         print("  构建完成！")
         print(f"  发布目录: {release_dir}")
-        print(f"  开发目录: {dev_release_dir}")
+        print(f"  运行目录: {DEV_APP_DIR}")
         if exe_path.exists():
             print(f"  EXE 文件: {exe_path}")
             size_mb = exe_path.stat().st_size / (1024 * 1024)
-            total_size = sum(f.stat().st_size for f in dev_release_dir.rglob("*") if f.is_file())
+            print(f"  EXE 大小: {size_mb:.1f} MB")
+        # 计算 _internal/ 大小
+        internal_dir = DEV_APP_DIR / "_internal"
+        if internal_dir.exists():
+            total_size = sum(f.stat().st_size for f in internal_dir.rglob("*") if f.is_file())
             total_mb = total_size / (1024 * 1024)
-            print(f"  EXE 大小: {size_mb:.1f} MB | 整合包大小: {total_mb:.1f} MB")
+            print(f"  _internal/ 大小: {total_mb:.1f} MB")
         print(f"  版本历史: {VERSION_HISTORY_FILE}")
         print("=" * 60)
 
