@@ -71,6 +71,157 @@ NODE_DIR_NAME = f"node-{NODE_VERSION}-win-x64"
 BUN_VERSION = "1.1.42"
 BUN_DIR_NAME = "bun-windows-x64"
 
+# ── Git 仓库配置 ──
+GIT_REMOTE = "git@gitee.com:yunjii/code.git"
+GIT_BRANCH = "main"
+
+
+# ── 软件更新器 ──
+class SoftwareUpdater:
+    """基于 Git 的软件更新和 EXE 版本切换"""
+
+    def __init__(self, dev_dir: str, log_func=None, progress_func=None):
+        self.dev_dir = dev_dir          # dev/ 根目录（Git 仓库）
+        self.app_dir = os.path.join(dev_dir, "app")  # 资源包
+        self.ver_dir = os.path.join(dev_dir, "ver")   # 稳定版 EXE
+        self.log = log_func or (lambda *a: None)
+        self.progress = progress_func
+
+    def _si(self):
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        return si
+
+    def _run_git(self, *args, cwd=None, timeout=60):
+        """执行 git 命令"""
+        cmd = ["git"] + list(args)
+        try:
+            r = subprocess.run(
+                cmd, cwd=cwd or self.dev_dir,
+                capture_output=True, text=True, timeout=timeout,
+                startupinfo=self._si(),
+                encoding="utf-8", errors="replace",
+            )
+            return {"ok": r.returncode == 0, "stdout": r.stdout.strip(), "stderr": r.stderr.strip(), "code": r.returncode}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "stdout": "", "stderr": "命令超时", "code": -1}
+        except Exception as e:
+            return {"ok": False, "stdout": "", "stderr": str(e), "code": -1}
+
+    def is_git_repo(self):
+        """检查 dev_dir 是否是 Git 仓库"""
+        r = self._run_git("rev-parse", "--is-inside-work-tree")
+        return r["ok"] and r["stdout"] == "true"
+
+    def get_current_commit(self):
+        """获取当前 commit hash"""
+        r = self._run_git("rev-parse", "--short", "HEAD")
+        return r["stdout"] if r["ok"] else "unknown"
+
+    def get_remote_commit(self):
+        """获取远程最新 commit hash（不合并）"""
+        r = self._run_git("fetch", "origin", GIT_BRANCH, timeout=30)
+        if not r["ok"]:
+            return None
+        r2 = self._run_git("rev-parse", "--short", f"origin/{GIT_BRANCH}")
+        return r2["stdout"] if r2["ok"] else None
+
+    def check_update(self):
+        """检查是否有资源包更新，返回 {has_update, local, remote}"""
+        if not self.is_git_repo():
+            return {"has_update": False, "error": "不是 Git 仓库，无法检查更新"}
+
+        local = self.get_current_commit()
+        self.log(f"本地版本: {local}")
+
+        remote = self.get_remote_commit()
+        if remote is None:
+            return {"has_update": False, "local": local, "remote": "无法获取", "error": "无法连接远程仓库"}
+
+        self.log(f"远程版本: {remote}")
+        has_update = local != remote
+        if has_update:
+            self.log(f"发现资源包更新: {local} → {remote}", "#4CAF50")
+        else:
+            self.log("资源包已是最新版本")
+        return {"has_update": has_update, "local": local, "remote": remote}
+
+    def pull_update(self):
+        """拉取资源包更新（git pull）"""
+        if not self.is_git_repo():
+            self.log("[错误] 不是 Git 仓库，无法更新", "#F44336")
+            return False
+
+        self.log("正在更新资源包...")
+        self.progress(10, "正在拉取远程更新...")
+
+        # git stash 保存本地修改（如 .env）
+        r = self._run_git("stash")
+        stashed = r["ok"] and "Saved" in r["stdout"]
+
+        # git pull
+        r = self._run_git("pull", "origin", GIT_BRANCH, timeout=120)
+        if not r["ok"]:
+            self.log(f"[错误] 更新失败: {r['stderr'][:200]}", "#F44336")
+            if stashed:
+                self._run_git("stash", "pop")
+            return False
+
+        self.progress(70, "正在恢复本地配置...")
+
+        # 恢复 stash
+        if stashed:
+            self._run_git("stash", "pop")
+
+        new_commit = self.get_current_commit()
+        self.log(f"✓ 资源包已更新到 {new_commit}", "#4CAF50")
+        self.progress(100, "更新完成")
+        return True
+
+    def list_stable_exes(self):
+        """列出 ver/ 目录中的稳定版 EXE"""
+        if not os.path.isdir(self.ver_dir):
+            return []
+
+        exes = []
+        for f in os.listdir(self.ver_dir):
+            if f.endswith(".exe"):
+                path = os.path.join(self.ver_dir, f)
+                # 从文件名提取版本号
+                import re
+                m = re.search(r'v(\d+\.\d+\.\d+\.\d+)', f)
+                ver = m.group(1) if m else "unknown"
+                size_mb = os.path.getsize(path) / (1024 * 1024)
+                exes.append({
+                    "filename": f,
+                    "path": path,
+                    "version": ver,
+                    "size_mb": round(size_mb, 1),
+                })
+
+        # 按版本号降序排列
+        exes.sort(key=lambda x: x["version"], reverse=True)
+        return exes
+
+    def switch_to_exe(self, exe_path: str):
+        """切换到指定 EXE 并重启（当前 EXE 退出后启动新 EXE）"""
+        if not os.path.exists(exe_path):
+            self.log(f"[错误] EXE 不存在: {exe_path}", "#F44336")
+            return False
+
+        # 构造重启命令：等待当前进程退出后启动新 EXE
+        current_pid = os.getpid()
+        new_exe = exe_path
+        # 用 ping 延迟等待当前进程退出
+        cmd = f'ping -n 3 127.0.0.1 >nul & start "" "{new_exe}"'
+        subprocess.Popen(cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+
+        self.log(f"正在切换到 {os.path.basename(exe_path)}...", "#4CAF50")
+
+        # 退出当前程序
+        QApplication.quit()
+        return True
+
 
 # ── QWebChannel 桥接对象 (替代 Electron preload.cjs) ──
 class BackendBridge(QObject):
@@ -444,6 +595,7 @@ class MainWindow(QMainWindow):
     status_signal = pyqtSignal(str)
     result_ready_signal = pyqtSignal(str)  # JSON result from CLI
     workspace_choose_requested = pyqtSignal()
+    update_info_signal = pyqtSignal(str)   # JSON: 更新信息
 
     def __init__(self):
         super().__init__()
@@ -467,8 +619,17 @@ class MainWindow(QMainWindow):
         if hasattr(sys, 'frozen'):
             # PyInstaller 打包模式：EXE 所在目录就是 base_dir
             self.base_dir = os.path.abspath(os.path.dirname(sys.executable))
+            # dev/ 根目录 = EXE 所在目录（EXE 直接放在 dev/ 下）
+            # 或 EXE 在 ver/ 子目录下
+            exe_dir = os.path.dirname(sys.executable)
+            if os.path.basename(exe_dir) == "ver":
+                self.dev_dir = os.path.dirname(exe_dir)
+            else:
+                self.dev_dir = exe_dir
         else:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
+            # 开发模式: main.py 在 dev/app/ 下，dev/ 是上级目录
+            self.dev_dir = os.path.dirname(self.base_dir)
 
         # 初始化后端
         self.env_manager = EnvFileManager(os.path.join(self.base_dir, ".env"))
@@ -479,6 +640,7 @@ class MainWindow(QMainWindow):
             os.path.join(self.base_dir, "bun", BUN_DIR_NAME),
         )
         self.installer = EnvInstaller(self.base_dir)
+        self.updater = SoftwareUpdater(self.dev_dir)
 
         # 状态
         self.active_session_id = _uuid()
@@ -538,6 +700,14 @@ class MainWindow(QMainWindow):
         """)
         self.btn_deploy.clicked.connect(self._on_deploy)
         tb_layout.addWidget(self.btn_deploy)
+
+        self.btn_update = QPushButton("🔄 软件更新")
+        self.btn_update.setStyleSheet("""
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 14px; font-size: 12px; }
+            QPushButton:hover { background-color: #1976D2; }
+        """)
+        self.btn_update.clicked.connect(self._on_update)
+        tb_layout.addWidget(self.btn_update)
 
         layout.addWidget(toolbar)
 
@@ -714,6 +884,143 @@ class MainWindow(QMainWindow):
 
         t = threading.Thread(target=_deploy, daemon=True)
         t.start()
+
+    # ── 软件更新 ──
+    def _on_update(self):
+        """打开软件更新对话框"""
+        self.log_panel.setVisible(True)
+        self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
+
+        # 检查更新
+        self.log_signal.emit("━━━ 软件更新 ━━━", "#1565C0")
+
+        if not self.updater.is_git_repo():
+            self.log_signal.emit("当前不是 Git 仓库，无法检查更新", "#FF9800")
+            return
+
+        def _check_and_show():
+            result = self.updater.check_update()
+            self.update_info_signal.emit(json.dumps(result))
+
+        t = threading.Thread(target=_check_and_show, daemon=True)
+        t.start()
+
+        # 连接信号，收到结果后弹出对话框
+        try:
+            self.update_info_signal.disconnect(self._show_update_dialog)
+        except:
+            pass
+        self.update_info_signal.connect(self._show_update_dialog)
+
+    def _show_update_dialog(self, info_json: str):
+        """显示更新信息对话框"""
+        try:
+            info = json.loads(info_json)
+        except:
+            return
+
+        local = info.get("local", "unknown")
+        remote = info.get("remote", "unknown")
+        has_update = info.get("has_update", False)
+        error = info.get("error", "")
+
+        # 构建信息文本
+        lines = [
+            f"<b>当前资源包版本:</b> {local}",
+            f"<b>远程最新版本:</b> {remote}",
+        ]
+
+        if error:
+            lines.append(f"<br><span style='color:#FF9800'>{error}</span>")
+
+        # 列出稳定版 EXE
+        stable_exes = self.updater.list_stable_exes()
+        if stable_exes:
+            lines.append("<br><b>稳定版 EXE:</b>")
+            for exe in stable_exes:
+                current_marker = ""
+                if hasattr(sys, 'frozen'):
+                    current_exe = os.path.basename(sys.executable)
+                    if exe["filename"] == current_exe:
+                        current_marker = " <span style='color:#4CAF50'>(当前)</span>"
+                lines.append(f"  {exe['filename']} ({exe['size_mb']}MB){current_marker}")
+
+        if not stable_exes:
+            lines.append("<br><span style='color:#888'>暂无稳定版 EXE（ver/ 目录为空）</span>")
+
+        msg_text = "<br>".join(lines)
+
+        # 弹出对话框
+        dlg = QMessageBox(self)
+        dlg.setWindowTitle("软件更新")
+        dlg.setTextFormat(Qt.TextFormat.RichText)
+        dlg.setText(msg_text)
+        dlg.setStyleSheet("""
+            QMessageBox { background-color: #1a1a1a; color: #f0f0f0; }
+            QLabel { color: #f0f0f0; }
+            QPushButton { background-color: #333; border: 1px solid #555; border-radius: 4px; padding: 6px 16px; color: white; min-width: 80px; }
+            QPushButton:hover { background-color: #444; }
+        """)
+
+        # 按钮
+        if has_update:
+            btn_update = dlg.addButton("📥 更新资源包", QMessageBox.ButtonRole.AcceptRole)
+            btn_update.setStyleSheet("background-color: #1565C0; border: 1px solid #1976D2;")
+        dlg.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
+
+        # 如果有稳定版 EXE 且有多个，添加切换按钮
+        if stable_exes and hasattr(sys, 'frozen'):
+            current_exe = os.path.basename(sys.executable)
+            other_exes = [e for e in stable_exes if e["filename"] != current_exe]
+            if other_exes:
+                btn_switch = dlg.addButton("🔄 切换到最新稳定版", QMessageBox.ButtonRole.ResetRole)
+                btn_switch.setStyleSheet("background-color: #6A1B9A; border: 1px solid #7B1FA2;")
+
+        dlg.exec()
+
+        clicked = dlg.clickedButton()
+        if has_update and hasattr(self, '_update_btn_ref') is False:
+            pass  # 不会走到这里
+
+        # 判断点击了哪个按钮
+        if has_update:
+            try:
+                if clicked == btn_update:
+                    self._do_pull_update()
+            except:
+                pass
+
+        try:
+            if clicked == btn_switch and other_exes:
+                self._do_switch_exe(other_exes[0]["path"])
+        except:
+            pass
+
+    def _do_pull_update(self):
+        """执行资源包更新"""
+        self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
+        self.updater.progress = lambda p, l: self.progress_signal.emit(p, l)
+
+        def _pull():
+            if self.updater.pull_update():
+                self.log_signal.emit("✓ 资源包更新完成，部分功能可能需要重启生效", "#4CAF50")
+            else:
+                self.log_signal.emit("✗ 资源包更新失败", "#F44336")
+
+        t = threading.Thread(target=_pull, daemon=True)
+        t.start()
+
+    def _do_switch_exe(self, exe_path: str):
+        """切换到指定稳定版 EXE"""
+        exe_name = os.path.basename(exe_path)
+        reply = QMessageBox.question(
+            self, "切换 EXE 版本",
+            f"确定要切换到 {exe_name} 吗？\n当前程序将退出并启动新版本。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.updater.switch_to_exe(exe_path)
 
     # ── 关闭 ──
     def closeEvent(self, event):
