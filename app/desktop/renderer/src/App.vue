@@ -21,17 +21,33 @@ type DesktopSettings = {
   OLLAMA_BASE_URL?: string;
   OLLAMA_MODEL?: string;
   API_TIMEOUT_MS?: string;
+  AI_LANGUAGE?: string;
+  AI_TEMPERATURE?: string;
+  AI_MAX_TOKENS?: string;
+  SYSTEM_PROMPT?: string;
 };
 
-// ── QWebChannel 桥接层 ──
-// 替代 Electron 的 window.desktopApi
-// 所有方法返回 JSON 字符串，需要 JSON.parse
+type ModelInfo = {
+  id: string;
+  name: string;
+  provider: string;
+  toolSupport?: boolean;
+  size?: string;
+  family?: string;
+  paramCount?: string;
+};
+
+type ModelConfig = {
+  language: string;
+  temperature: string;
+  maxTokens: string;
+  systemPrompt: string;
+};
 
 let _backend: any = null;
 
 async function getBackend(): Promise<any> {
   if (_backend) return _backend;
-  // QWebChannel 初始化
   return new Promise((resolve) => {
     if (typeof (window as any).QWebChannel === "undefined") {
       console.warn("QWebChannel not available, running in browser mode");
@@ -54,10 +70,8 @@ async function callBackend(method: string, ...args: any[]): Promise<any> {
     console.warn("[callBackend] backend not available, method:", method);
     return null;
   }
-  console.log("[callBackend]", method, args);
   try {
     const result = await backend[method](...args);
-    console.log("[callBackend]", method, "result type:", typeof result, "preview:", typeof result === "string" ? result.substring(0, 200) : result);
     if (typeof result === "string") {
       try { return JSON.parse(result); } catch { return result; }
     }
@@ -68,39 +82,26 @@ async function callBackend(method: string, ...args: any[]): Promise<any> {
   }
 }
 
-// ── 响应式状态 ──
-
 const isBusy = ref(false);
 const sessionId = ref("");
 const workspacePath = ref("");
 const inputText = ref("");
-const showSettings = ref(true);
+const showPanel = ref(true);
 const noticeText = ref("");
 const noticeType = ref<"ok" | "warn">("ok");
 const messages = ref<ChatMessage[]>([]);
 const currentAssistantId = ref("");
 
-const runMode = ref<"cloud" | "ollama">("cloud");
+const runMode = ref<"cloud" | "ollama">("ollama");
 const apiKey = ref("");
-const selectedModelId = ref("");
-const selectedModelProvider = ref<"openrouter" | "anthropic" | "">("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
-const cloudModels = ref<Array<{ id: string; name: string; provider: string; toolSupport?: boolean }>>([]);
+const cloudModels = ref<ModelInfo[]>([]);
 const loadingModels = ref(false);
+const expandedModelId = ref("");
+const hardwareInfo = ref<any>(null);
 
-const selectedOllamaModelToolSupport = computed<boolean | undefined>(() => {
-  if (!ollamaModel.value) return undefined;
-  const found = cloudModels.value.find((m) => m.id === ollamaModel.value);
-  return found?.toolSupport;
-});
-
-watch(runMode, (newMode) => {
-  if (newMode === "ollama") {
-    cloudModels.value = [];
-    loadCloudModels("ollama");
-  }
-});
+const modelConfigs = reactive<Record<string, ModelConfig>>({});
 
 const settings = reactive<Required<DesktopSettings>>({
   MODEL_PROVIDER: "anthropic",
@@ -114,6 +115,40 @@ const settings = reactive<Required<DesktopSettings>>({
   OLLAMA_BASE_URL: "",
   OLLAMA_MODEL: "",
   API_TIMEOUT_MS: "3000000",
+  AI_LANGUAGE: "zh",
+  AI_TEMPERATURE: "",
+  AI_MAX_TOKENS: "",
+  SYSTEM_PROMPT: "",
+});
+
+function getModelConfig(modelId: string): ModelConfig {
+  if (!modelConfigs[modelId]) {
+    modelConfigs[modelId] = {
+      language: settings.AI_LANGUAGE || "zh",
+      temperature: settings.AI_TEMPERATURE || "",
+      maxTokens: settings.AI_MAX_TOKENS || "",
+      systemPrompt: settings.SYSTEM_PROMPT || "",
+    };
+  }
+  return modelConfigs[modelId];
+}
+
+function getActiveModelConfig(): ModelConfig {
+  const activeModel = runMode.value === "ollama" ? ollamaModel.value : settings.ANTHROPIC_MODEL;
+  return getModelConfig(activeModel || "__default__");
+}
+
+const selectedOllamaModelToolSupport = computed<boolean | undefined>(() => {
+  if (!ollamaModel.value) return undefined;
+  const found = cloudModels.value.find((m) => m.id === ollamaModel.value);
+  return found?.toolSupport;
+});
+
+watch(runMode, (newMode) => {
+  if (newMode === "ollama") {
+    cloudModels.value = [];
+    loadCloudModels("ollama");
+  }
 });
 
 function makeId() {
@@ -137,24 +172,6 @@ function showNotice(text: string, type: "ok" | "warn" = "ok") {
   noticeType.value = type;
 }
 
-function inferProviderByModel(model: string) {
-  if ((model || "").startsWith("openrouter/")) return "openrouter";
-  return "anthropic";
-}
-
-function inferProviderByKey(key: string) {
-  const k = (key || "").trim();
-  if (k.startsWith("sk-or-")) return "openrouter";
-  return "";
-}
-
-function resolveCloudProvider(model: string, key: string, selected: "openrouter" | "anthropic" | "") {
-  const byKey = inferProviderByKey(key);
-  if (byKey) return byKey as "openrouter" | "anthropic";
-  if (selected) return selected;
-  return inferProviderByModel(model) as "openrouter" | "anthropic";
-}
-
 function cloudBaseUrlByProvider(provider: "openrouter" | "anthropic") {
   return provider === "openrouter" ? "https://openrouter.ai/api" : "https://api.anthropic.com";
 }
@@ -172,20 +189,138 @@ function applySettings(data?: DesktopSettings) {
   settings.OLLAMA_BASE_URL = data.OLLAMA_BASE_URL ?? "";
   settings.OLLAMA_MODEL = data.OLLAMA_MODEL ?? "";
   settings.API_TIMEOUT_MS = data.API_TIMEOUT_MS ?? "3000000";
+  settings.AI_LANGUAGE = data.AI_LANGUAGE ?? "zh";
+  settings.AI_TEMPERATURE = data.AI_TEMPERATURE ?? "";
+  settings.AI_MAX_TOKENS = data.AI_MAX_TOKENS ?? "";
+  settings.SYSTEM_PROMPT = data.SYSTEM_PROMPT ?? "";
 
   runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : "cloud";
   const cloudKey = settings.ANTHROPIC_API_KEY || settings.ANTHROPIC_AUTH_TOKEN || "";
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
-  selectedModelId.value = settings.ANTHROPIC_MODEL || "openrouter/auto";
-  selectedModelProvider.value = "openrouter";
   ollamaBaseUrl.value = settings.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   ollamaModel.value = settings.OLLAMA_MODEL || "";
+
+  if (settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL) {
+    const modelId = settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL;
+    if (!modelConfigs[modelId]) {
+      modelConfigs[modelId] = {
+        language: settings.AI_LANGUAGE || "zh",
+        temperature: settings.AI_TEMPERATURE || "",
+        maxTokens: settings.AI_MAX_TOKENS || "",
+        systemPrompt: settings.SYSTEM_PROMPT || "",
+      };
+    }
+  }
 }
 
-function onModelPicked(value: string) {
-  selectedModelId.value = value;
-  const found = cloudModels.value.find((m) => m.id === value);
-  selectedModelProvider.value = (found?.provider as "openrouter" | "anthropic") || inferProviderByModel(value);
+function toggleModelSettings(modelId: string) {
+  expandedModelId.value = expandedModelId.value === modelId ? "" : modelId;
+}
+
+function selectModel(modelId: string) {
+  ollamaModel.value = modelId;
+}
+
+function parseModelSize(model: ModelInfo): number {
+  const sizeStr = model.size || "";
+  const match = sizeStr.match(/([\d.]+)\s*(GB|MB|TB)/i);
+  if (!match) return 0;
+  const val = parseFloat(match[1]);
+  const unit = match[2].toUpperCase();
+  if (unit === "TB") return val * 1024;
+  if (unit === "GB") return val;
+  if (unit === "MB") return val / 1024;
+  return 0;
+}
+
+function autoConfigure(modelId: string) {
+  const model = cloudModels.value.find((m) => m.id === modelId);
+  const config = getModelConfig(modelId);
+  const hw = hardwareInfo.value;
+
+  let paramB = 0;
+  const pcStr = model?.paramCount || "";
+  const pcMatch = pcStr.match(/([\d.]+)\s*[Bb]/);
+  if (pcMatch) paramB = parseFloat(pcMatch[1]);
+
+  const modelSizeGB = model ? parseModelSize(model) : 0;
+  const hasToolSupport = model?.toolSupport === true;
+
+  if (hasToolSupport) {
+    config.temperature = "0.3";
+  } else {
+    config.temperature = "0.7";
+  }
+
+  if (paramB > 0) {
+    if (paramB <= 4) config.maxTokens = "4096";
+    else if (paramB <= 8) config.maxTokens = "4096";
+    else if (paramB <= 14) config.maxTokens = "8192";
+    else if (paramB <= 33) config.maxTokens = "8192";
+    else config.maxTokens = "16384";
+  } else if (modelSizeGB > 0) {
+    if (modelSizeGB <= 5) config.maxTokens = "4096";
+    else if (modelSizeGB <= 12) config.maxTokens = "8192";
+    else config.maxTokens = "16384";
+  } else {
+    config.maxTokens = "4096";
+  }
+
+  if (hw) {
+    const totalRamGB = (hw.total_ram || 0) / (1024 * 1024 * 1024);
+    if (totalRamGB > 0 && totalRamGB < 16) {
+      if (parseInt(config.maxTokens) > 4096) config.maxTokens = "4096";
+    }
+    if (hw.gpu_vram_gb && hw.gpu_vram_gb > 0) {
+      if (hw.gpu_vram_gb < 8 && parseInt(config.maxTokens) > 4096) {
+        config.maxTokens = "2048";
+      }
+    }
+  }
+
+  config.language = "zh";
+  config.systemPrompt = "";
+
+  showNotice(`已为 ${modelId} 自动配置参数`, "ok");
+}
+
+function getAutoConfigHint(modelId: string): string {
+  const model = cloudModels.value.find((m) => m.id === modelId);
+  const modelSizeGB = model ? parseModelSize(model) : 0;
+  const hasToolSupport = model?.toolSupport === true;
+  const hints: string[] = [];
+
+  if (hasToolSupport) {
+    hints.push("✅ 支持工具调用，推荐 Temperature 0.2~0.4（精确编程）");
+  } else {
+    hints.push("⚠ 不支持工具调用，推荐 Temperature 0.6~0.8（对话辅助）");
+  }
+
+  const pcStr = model?.paramCount || "";
+  if (pcStr) {
+    hints.push(`参数量: ${pcStr}`);
+  }
+
+  if (modelSizeGB > 0 && modelSizeGB <= 5) {
+    hints.push("小模型，建议 MaxTokens 2048~4096");
+  } else if (modelSizeGB > 5 && modelSizeGB <= 12) {
+    hints.push("中等模型，建议 MaxTokens 4096~8192");
+  } else if (modelSizeGB > 12) {
+    hints.push("大模型，建议 MaxTokens 8192~16384");
+  }
+
+  const hw = hardwareInfo.value;
+  if (hw) {
+    const totalRamGB = (hw.total_ram || 0) / (1024 * 1024 * 1024);
+    if (totalRamGB > 0 && totalRamGB < 8) {
+      hints.push("⚠ 内存 <8GB，建议降低 MaxTokens 至 2048");
+    }
+    if (hw.gpu_name) {
+      hints.push(`GPU: ${hw.gpu_name}${hw.gpu_vram_gb ? ` (${hw.gpu_vram_gb}GB)` : ""}`);
+    }
+  }
+
+  return hints.join(" | ");
 }
 
 async function sendMessage() {
@@ -198,10 +333,16 @@ async function sendMessage() {
   currentAssistantId.value = addMessage("assistant", "");
   isBusy.value = true;
 
+  const activeConfig = getActiveModelConfig();
+
   const result = await callBackend("sendMessage", JSON.stringify({
     prompt: text,
     provider: runMode.value === "ollama" ? "ollama" : "anthropic",
     model: runMode.value === "ollama" ? ollamaModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim(),
+    ai_language: activeConfig.language,
+    ai_temperature: activeConfig.temperature,
+    ai_max_tokens: activeConfig.maxTokens,
+    system_prompt: activeConfig.systemPrompt,
   }));
 
   if (!result?.ok) {
@@ -217,9 +358,6 @@ async function sendMessage() {
   }
 
   if (result?.sessionId) sessionId.value = result.sessionId;
-  // 不在这里检查文本是否为空，因为 CLI 在后台异步运行
-  // 文本通过 deltaReceived 信号实时接收
-  // 空文本检查在 statusReceived 信号中处理（busy=false 时）
 }
 
 async function stopMessage() {
@@ -229,13 +367,11 @@ async function stopMessage() {
 }
 
 async function chooseWorkspace() {
-  // Python 端弹出文件夹选择对话框
   const result = await callBackend("chooseWorkspace");
   if (!result?.ok) {
     if (result?.error) showNotice(result.error, "warn");
     return;
   }
-  // 等待 Python 端完成选择后刷新路径
   const state = await callBackend("getState");
   if (state?.workspacePath) {
     workspacePath.value = state.workspacePath;
@@ -256,9 +392,12 @@ function clearMessages() {
 
 async function saveSettings() {
   if (isBusy.value) return;
+
+  const activeConfig = getActiveModelConfig();
+
   if (runMode.value === "ollama") {
     if (!ollamaModel.value.trim()) {
-      showNotice("请先填写 Ollama 模型", "warn");
+      showNotice("请先选择一个模型", "warn");
       return;
     }
 
@@ -270,6 +409,10 @@ async function saveSettings() {
       API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
       DISABLE_TELEMETRY: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      AI_LANGUAGE: activeConfig.language || "zh",
+      AI_TEMPERATURE: activeConfig.temperature || "",
+      AI_MAX_TOKENS: activeConfig.maxTokens || "",
+      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
     };
 
     const saved = await callBackend("saveSettings", JSON.stringify(payload));
@@ -277,9 +420,9 @@ async function saveSettings() {
 
     const selectedModel = cloudModels.value.find((m) => m.id === ollamaModel.value.trim());
     if (selectedModel && selectedModel.toolSupport === false) {
-      showNotice("Ollama 配置已保存。⚠ 该模型不支持工具调用，编程功能将受限。建议选择带 ★ 标记的模型。", "warn");
+      showNotice("配置已保存。⚠ 该模型不支持工具调用，编程功能将受限。建议选择带 ★ 标记的模型。", "warn");
     } else {
-      showNotice("Ollama 配置已保存。", "ok");
+      showNotice("配置已保存。", "ok");
     }
     return;
   }
@@ -289,10 +432,7 @@ async function saveSettings() {
     return;
   }
   const cloudModel = "openrouter/auto";
-  const provider: "openrouter" = "openrouter";
-  const cloudBaseUrl = cloudBaseUrlByProvider(provider);
-  selectedModelId.value = cloudModel;
-  selectedModelProvider.value = "openrouter";
+  const cloudBaseUrl = cloudBaseUrlByProvider("openrouter");
 
   const payload: Record<string, string> = {
     MODEL_PROVIDER: "anthropic",
@@ -306,6 +446,10 @@ async function saveSettings() {
     API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
     DISABLE_TELEMETRY: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    AI_LANGUAGE: activeConfig.language || "zh",
+    AI_TEMPERATURE: activeConfig.temperature || "",
+    AI_MAX_TOKENS: activeConfig.maxTokens || "",
+    SYSTEM_PROMPT: activeConfig.systemPrompt || "",
   };
 
   const saved = await callBackend("saveSettings", JSON.stringify(payload));
@@ -317,8 +461,6 @@ async function clearModelFields() {
   if (isBusy.value) return;
   const saved = await callBackend("clearModelSettings");
   applySettings(saved);
-  selectedModelId.value = "";
-  selectedModelProvider.value = "";
   showNotice("模型字段已清空。", "warn");
 }
 
@@ -331,27 +473,28 @@ async function loadCloudModels(source: "openrouter" | "anthropic" | "ollama") {
     } else {
       payload = { source, apiKey: apiKey.value };
     }
-    console.log("[loadCloudModels] calling listModels with:", JSON.stringify(payload));
     const result = await callBackend("listModels", JSON.stringify(payload));
-    console.log("[loadCloudModels] result:", JSON.stringify(result));
-    // 后台加载模式：listModels 立即返回 {ok:true, loading:true}，
-    // 实际结果通过 modelsLoaded 信号异步返回，由 onMounted 中连接的信号处理器处理
     if (result && result.loading) {
-      // 等待信号返回，不做额外处理
       return;
     }
-    // 兼容：如果同步返回了结果（旧逻辑），直接处理
     if (!result || !result.ok) {
       showNotice(result?.error || "模型列表加载失败", "warn");
       return;
     }
     cloudModels.value = result.models || [];
-    showNotice(`已加载 ${cloudModels.value.length} 个${source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : " Ollama"}模型`, "ok");
+    showNotice(`已加载 ${cloudModels.value.length} 个模型`, "ok");
   } catch (e) {
     console.error("[loadCloudModels] error:", e);
     showNotice("模型列表加载异常", "warn");
   } finally {
     loadingModels.value = false;
+  }
+}
+
+async function detectHardware() {
+  const result = await callBackend("detectHardware");
+  if (result) {
+    hardwareInfo.value = result;
   }
 }
 
@@ -364,13 +507,14 @@ onMounted(async () => {
     applySettings(appState.settings || {});
   }
 
+  detectHardware();
+
   if (runMode.value === "ollama") {
     loadCloudModels("ollama");
   }
 
-  addMessage("assistant", "先完成模型配置，再打开项目目录，直接下达编码任务。");
+  addMessage("assistant", "选择模型并配置参数，打开项目目录后即可下达编码任务。");
 
-  // 监听 QWebChannel 信号
   const backend = await getBackend();
   if (backend) {
     backend.deltaReceived.connect((jsonStr: string) => {
@@ -403,7 +547,6 @@ onMounted(async () => {
     backend.modelsLoaded.connect((jsonStr: string) => {
       try {
         const payload = JSON.parse(jsonStr);
-        console.log("[modelsLoaded] signal received:", jsonStr?.substring(0, 200));
         loadingModels.value = false;
         if (!payload || !payload.ok) {
           showNotice(payload?.error || "模型列表加载失败", "warn");
@@ -425,12 +568,12 @@ onMounted(async () => {
 <template>
   <div class="page">
     <section class="flowbar">
-      <span>1. 选择模式（云端 / Ollama）</span>
-      <span>2. 配置模型</span>
+      <span>1. 选择模型</span>
+      <span>2. 配置参数</span>
       <span>3. 打开项目并执行编码任务</span>
     </section>
 
-    <main class="workbench" :class="{ single: !showSettings }">
+    <main class="workbench" :class="{ single: !showPanel }">
       <section class="chat card">
         <div class="toolbar">
           <div class="session">会话：{{ sessionId || "未创建" }}</div>
@@ -438,7 +581,7 @@ onMounted(async () => {
             <button class="btn-blue" @click="chooseWorkspace">打开项目</button>
             <button class="btn-blue" @click="createSession" :disabled="isBusy">新会话</button>
             <button class="btn-red" @click="stopMessage" :disabled="!isBusy">停止</button>
-            <button class="btn-blue" @click="showSettings = !showSettings">{{ showSettings ? "隐藏设置" : "显示设置" }}</button>
+            <button class="btn-blue" @click="showPanel = !showPanel">{{ showPanel ? "隐藏面板" : "显示面板" }}</button>
           </div>
         </div>
 
@@ -466,58 +609,74 @@ onMounted(async () => {
         </div>
       </section>
 
-      <aside v-if="showSettings" class="settings card">
-        <h2>快速配置</h2>
-
-        <label class="field">
-          <span>运行模式</span>
+      <aside v-if="showPanel" class="panel card">
+        <div class="panel-header">
+          <h2>模型与配置</h2>
           <div class="mode-switch">
             <button :class="['mode-btn', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">☁️ 云端</button>
             <button :class="['mode-btn', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">🦙 Ollama</button>
           </div>
-        </label>
+        </div>
 
         <template v-if="runMode === 'cloud'">
           <label class="field">
             <span>API Key</span>
             <input v-model="apiKey" type="password" placeholder="输入你的 API Key" />
           </label>
-
           <label class="field">
             <span>云端模型（固定）</span>
             <input value="openrouter/auto" readonly />
           </label>
+
+          <div class="cloud-model-item model-row selected">
+            <div class="model-row-info">
+              <span class="model-name">openrouter/auto</span>
+              <span class="tool-badge ok">★ 工具</span>
+            </div>
+            <button class="btn-icon" :class="{ active: expandedModelId === 'openrouter/auto' }" @click="toggleModelSettings('openrouter/auto')">⚙</button>
+          </div>
+
+          <div v-if="expandedModelId === 'openrouter/auto'" class="model-settings">
+            <ModelSettingsPanel :config="getModelConfig('openrouter/auto')" :hint="getAutoConfigHint('openrouter/auto')" @auto-configure="autoConfigure('openrouter/auto')" />
+          </div>
         </template>
 
         <template v-else>
           <label class="field">
             <span>Ollama 地址</span>
-            <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" />
-          </label>
-          <label class="field">
-            <span>Ollama 模型</span>
             <div class="model-loader">
-              <input v-model="ollamaModel" placeholder="例如 qwen3:4b" />
-              <button class="btn-blue" @click="loadCloudModels('ollama')" :disabled="loadingModels">
-                {{ loadingModels ? "加载中..." : "刷新模型" }}
+              <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" />
+              <button class="btn-blue btn-sm" @click="loadCloudModels('ollama')" :disabled="loadingModels">
+                {{ loadingModels ? "加载中..." : "刷新" }}
               </button>
             </div>
           </label>
-          <!-- 模型列表（自动加载后显示） -->
+
           <div v-if="cloudModels.length > 0" class="model-list">
-            <button
-              v-for="m in cloudModels"
-              :key="m.id"
-              :class="['model-item', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false }]"
-              @click="ollamaModel = m.id"
-            >
-              <span class="model-name">{{ m.name }}</span>
-              <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
-              <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
-            </button>
+            <div v-for="m in cloudModels" :key="m.id" class="model-row-wrapper">
+              <div
+                :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false }]"
+                @click="selectModel(m.id)"
+              >
+                <div class="model-row-info">
+                  <span class="model-name">{{ m.name }}</span>
+                  <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
+                  <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
+                  <span v-if="m.size" class="model-size">{{ m.size }}</span>
+                </div>
+                <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
+              </div>
+              <div v-if="expandedModelId === m.id" class="model-settings">
+                <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
+              </div>
+            </div>
           </div>
+          <div v-else-if="!loadingModels" class="empty-hint">
+            <p>点击"刷新"加载可用模型</p>
+          </div>
+
           <p v-if="ollamaModel && selectedOllamaModelToolSupport === false" class="hint warn">
-            ⚠ 该模型不支持工具调用（Tool Calling），编程功能将受限。建议选择带 ★ 标记的模型。
+            ⚠ 该模型不支持工具调用，编程功能将受限。建议选择带 ★ 标记的模型。
           </p>
           <p v-else-if="ollamaModel && selectedOllamaModelToolSupport === true" class="hint ok">
             ★ 该模型支持工具调用，可使用全功能编程。
@@ -534,6 +693,79 @@ onMounted(async () => {
     </main>
   </div>
 </template>
+
+<script lang="ts">
+import { defineComponent, h } from "vue";
+
+const ModelSettingsPanel = defineComponent({
+  name: "ModelSettingsPanel",
+  props: {
+    config: { type: Object, required: true },
+    hint: { type: String, default: "" },
+  },
+  emits: ["auto-configure"],
+  setup(props, { emit }) {
+    return () => h("div", { class: "model-settings-inner" }, [
+      h("div", { class: "settings-header" }, [
+        h("span", { class: "settings-title" }, "模型参数"),
+        h("button", {
+          class: "btn-auto",
+          onClick: () => emit("auto-configure"),
+        }, "🪄 自动配置"),
+      ]),
+      props.hint ? h("p", { class: "auto-hint" }, props.hint) : null,
+      h("label", { class: "field" }, [
+        h("span", "AI 语言"),
+        h("select", {
+          class: "select-input",
+          value: props.config.language,
+          onChange: (e: Event) => { props.config.language = (e.target as HTMLSelectElement).value; },
+        }, [
+          h("option", { value: "zh" }, "🇨🇳 中文"),
+          h("option", { value: "en" }, "🇺🇸 English"),
+          h("option", { value: "ja" }, "🇯🇵 日本語"),
+          h("option", { value: "ko" }, "🇰🇷 한국어"),
+        ]),
+      ]),
+      h("label", { class: "field" }, [
+        h("span", "Temperature（创造性）"),
+        h("div", { class: "range-row" }, [
+          h("input", {
+            type: "number", min: "0", max: "2", step: "0.1",
+            placeholder: "0.3", class: "short-input",
+            value: props.config.temperature,
+            onInput: (e: Event) => { props.config.temperature = (e.target as HTMLInputElement).value; },
+          }),
+          h("span", { class: "range-hint" }, "0=精确 2=创造"),
+        ]),
+      ]),
+      h("label", { class: "field" }, [
+        h("span", "Max Tokens（最大输出长度）"),
+        h("div", { class: "range-row" }, [
+          h("input", {
+            type: "number", min: "256", max: "65536", step: "256",
+            placeholder: "4096", class: "short-input",
+            value: props.config.maxTokens,
+            onInput: (e: Event) => { props.config.maxTokens = (e.target as HTMLInputElement).value; },
+          }),
+          h("span", { class: "range-hint" }, "留空=默认"),
+        ]),
+      ]),
+      h("label", { class: "field" }, [
+        h("span", "自定义系统提示词"),
+        h("textarea", {
+          rows: 2, class: "textarea-input",
+          placeholder: "留空则根据语言自动生成",
+          value: props.config.systemPrompt,
+          onInput: (e: Event) => { props.config.systemPrompt = (e.target as HTMLTextAreaElement).value; },
+        }),
+      ]),
+    ]);
+  },
+});
+
+export default { name: "App" };
+</script>
 
 <style scoped>
 .page {
@@ -561,7 +793,7 @@ onMounted(async () => {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: 1fr 380px;
   gap: 10px;
 }
 
@@ -700,7 +932,7 @@ onMounted(async () => {
   gap: 8px;
 }
 
-.settings {
+.panel {
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -708,23 +940,17 @@ onMounted(async () => {
   overflow: auto;
 }
 
-.settings h2 {
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.panel-header h2 {
   margin: 0;
   font-size: 16px;
   font-weight: 700;
   color: #ffffff;
-}
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.field span {
-  font-size: 12px;
-  font-weight: 500;
-  color: #888888;
 }
 
 .mode-switch {
@@ -733,8 +959,7 @@ onMounted(async () => {
 }
 
 .mode-btn {
-  flex: 1;
-  padding: 6px 10px;
+  padding: 5px 10px;
   font-size: 12px;
   border: 1px solid #333;
   border-radius: 4px;
@@ -756,20 +981,37 @@ onMounted(async () => {
   color: #fff;
 }
 
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field span {
+  font-size: 12px;
+  font-weight: 500;
+  color: #888888;
+}
+
 .model-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  max-height: 200px;
+  gap: 2px;
+  max-height: 400px;
   overflow-y: auto;
   padding: 2px;
 }
 
-.model-item {
+.model-row-wrapper {
+  display: flex;
+  flex-direction: column;
+}
+
+.model-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 6px 10px;
+  padding: 8px 10px;
   border: 1px solid #333;
   border-radius: 4px;
   background: #1a1a1a;
@@ -777,29 +1019,42 @@ onMounted(async () => {
   cursor: pointer;
   font-size: 12px;
   transition: all 0.15s;
-  text-align: left;
 }
 
-.model-item:hover {
+.model-row:hover {
   background: #252525;
   border-color: #444;
 }
 
-.model-item.selected {
+.model-row.selected {
   background: #1e3a8a;
   border-color: #3b82f6;
   color: #fff;
 }
 
-.model-item.no-tool {
-  opacity: 0.6;
+.model-row.no-tool {
+  opacity: 0.7;
+}
+
+.model-row-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
 }
 
 .model-name {
-  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+}
+
+.model-size {
+  font-size: 10px;
+  color: #888;
+  flex-shrink: 0;
 }
 
 .tool-badge {
@@ -808,7 +1063,6 @@ onMounted(async () => {
   border-radius: 3px;
   font-weight: 600;
   flex-shrink: 0;
-  margin-left: 8px;
 }
 
 .tool-badge.ok {
@@ -821,11 +1075,117 @@ onMounted(async () => {
   color: #fca5a5;
 }
 
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: #222;
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.btn-icon:hover {
+  background: #333;
+  color: #fff;
+  border-color: #666;
+}
+
+.btn-icon.active {
+  background: #1565C0;
+  border-color: #1976D2;
+  color: #fff;
+}
+
+.model-settings {
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.model-settings-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.settings-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #aaa;
+}
+
+.btn-auto {
+  padding: 4px 10px;
+  font-size: 11px;
+  border: 1px solid #4a90d9;
+  border-radius: 4px;
+  background: transparent;
+  color: #4a90d9;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-auto:hover {
+  background: #4a90d9;
+  color: #fff;
+}
+
+.auto-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #888;
+  padding: 6px 8px;
+  background: #0d0d0d;
+  border-radius: 4px;
+  border: 1px solid #222;
+}
+
+.cloud-model-item {
+  padding: 8px 10px;
+  border: 1px solid #3b82f6;
+  border-radius: 4px;
+  background: #1e3a8a;
+  color: #fff;
+  font-size: 12px;
+}
+
 .setting-actions,
 .model-loader {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.btn-sm {
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.empty-hint {
+  text-align: center;
+  color: #555;
+  font-size: 12px;
+  padding: 20px 0;
 }
 
 .notice {
@@ -911,6 +1271,64 @@ button {
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.select-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #f0f0f0;
+  font-size: 13px;
+  outline: none;
+}
+
+.select-input:focus {
+  border-color: #4a90d9;
+}
+
+.range-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.short-input {
+  width: 100px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #f0f0f0;
+  font-size: 13px;
+  outline: none;
+}
+
+.short-input:focus {
+  border-color: #4a90d9;
+}
+
+.range-hint {
+  color: #666;
+  font-size: 12px;
+}
+
+.textarea-input {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #f0f0f0;
+  font-size: 13px;
+  outline: none;
+  resize: vertical;
+  font-family: inherit;
+}
+
+.textarea-input:focus {
+  border-color: #4a90d9;
 }
 
 @media (max-width: 1024px) {
