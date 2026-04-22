@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
     QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
+    QTabWidget,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl
 from PyQt6.QtGui import QFont, QIcon
@@ -295,7 +296,15 @@ class BackendBridge(QObject):
         if not model:
             model = settings.get("OLLAMA_MODEL", "") if provider == "ollama" else settings.get("ANTHROPIC_MODEL", "")
 
-        # 启动异步处理
+        if payload.get("ai_language"):
+            settings["AI_LANGUAGE"] = payload["ai_language"]
+        if payload.get("ai_temperature"):
+            settings["AI_TEMPERATURE"] = payload["ai_temperature"]
+        if payload.get("ai_max_tokens"):
+            settings["AI_MAX_TOKENS"] = payload["ai_max_tokens"]
+        if payload.get("system_prompt"):
+            settings["SYSTEM_PROMPT"] = payload["system_prompt"]
+
         main.is_busy = True
         self.statusReceived.emit(json.dumps({"busy": True}))
 
@@ -377,7 +386,6 @@ class BackendBridge(QObject):
         settings = main.env_manager.read_settings() if main else {}
         timeout = int(settings.get("API_TIMEOUT_MS", "15000") or "15000")
 
-        # 在后台线程中执行，避免阻塞主线程
         def _do_load():
             if source == "openrouter":
                 result = list_openrouter_models(timeout)
@@ -389,13 +397,49 @@ class BackendBridge(QObject):
                 result = list_ollama_models(base_url, timeout)
             else:
                 result = {"ok": False, "error": "Unsupported source."}
-            # 通过信号通知前端
             self.modelsLoaded.emit(json.dumps(result))
 
         t = threading.Thread(target=_do_load, daemon=True)
         t.start()
-        # 立即返回，前端通过 modelsLoaded 信号获取结果
         return json.dumps({"ok": True, "loading": True})
+
+    @pyqtSlot(result=str)
+    def detectHardware(self):
+        """检测硬件信息，用于自动配置推荐"""
+        info = {"total_ram": 0, "gpu_name": "", "gpu_vram_gb": 0, "cpu_name": "", "cpu_cores": 0}
+
+        try:
+            import psutil as _ps
+            info["total_ram"] = _ps.virtual_memory().total
+            info["cpu_cores"] = _ps.cpu_count(logical=False) or _ps.cpu_count(logical=True) or 0
+        except:
+            pass
+
+        try:
+            import platform
+            info["cpu_name"] = platform.processor() or ""
+        except:
+            pass
+
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if result.returncode == 0:
+                line = result.stdout.strip().split("\n")[0].strip()
+                if "," in line:
+                    name_part, vram_part = line.split(",", 1)
+                    info["gpu_name"] = name_part.strip()
+                    try:
+                        info["gpu_vram_gb"] = round(float(vram_part.strip()) / 1024, 1)
+                    except:
+                        pass
+        except:
+            pass
+
+        return json.dumps(info)
 
     # ── 内部方法 ──
 
@@ -418,9 +462,21 @@ class BackendBridge(QObject):
                     "ANTHROPIC_MODEL": ollama_model,
                     "MODEL_PROVIDER": "anthropic",
                 }
+                if settings.get("AI_TEMPERATURE"):
+                    env_overrides["AI_TEMPERATURE"] = settings["AI_TEMPERATURE"]
+                    os.environ["AI_TEMPERATURE"] = settings["AI_TEMPERATURE"]
+                else:
+                    os.environ.pop("AI_TEMPERATURE", None)
+                if settings.get("AI_MAX_TOKENS"):
+                    env_overrides["AI_MAX_TOKENS"] = settings["AI_MAX_TOKENS"]
+                    os.environ["AI_MAX_TOKENS"] = settings["AI_MAX_TOKENS"]
+                else:
+                    os.environ.pop("AI_MAX_TOKENS", None)
                 main.log_signal.emit(f"[代理] Ollama代理已启动 端口={proxy_port} 模型={ollama_model}", "#2196F3")
 
             is_resuming = main.active_session_id in main.started_sessions
+
+            system_prompt = self._build_system_prompt(settings)
 
             def _on_delta(text):
                 self.deltaReceived.emit(json.dumps({"text": text}))
@@ -433,8 +489,12 @@ class BackendBridge(QObject):
                 workspace_path=main.current_workspace,
                 env_overrides=env_overrides,
                 on_delta=_on_delta,
-                on_log=lambda msg, color="#888": main.log_signal.emit(msg, color),
+                on_log=lambda msg, color="#888": (
+                    main.log_signal.emit(msg, color),
+                    main.debug_log_signal.emit(msg, color),
+                ),
                 on_proc=lambda p: setattr(main, 'active_proc', p),
+                system_prompt=system_prompt,
             )
 
             if result.get("ok"):
@@ -456,6 +516,34 @@ class BackendBridge(QObject):
             main.is_busy = False
             main.active_proc = None
             self.statusReceived.emit(json.dumps({"busy": False}))
+
+
+    @staticmethod
+    def _build_system_prompt(settings: dict) -> str:
+        custom_prompt = (settings.get("SYSTEM_PROMPT") or "").strip()
+        if custom_prompt:
+            return custom_prompt
+
+        language = (settings.get("AI_LANGUAGE") or "zh").strip().lower()
+        parts = []
+
+        if language == "zh":
+            parts.append("你是一个专业的AI编程助手。请始终使用中文回答。")
+            parts.append("你可以读取文件、编辑代码、执行命令来完成编程任务。")
+            parts.append("回答要详细、专业，包含代码示例和解释。")
+        elif language == "en":
+            parts.append("You are a professional AI coding assistant.")
+            parts.append("You can read files, edit code, and execute commands to complete programming tasks.")
+            parts.append("Provide detailed, professional answers with code examples and explanations.")
+        elif language == "ja":
+            parts.append("あなたはプロのAIプログラミングアシスタントです。日本語で回答してください。")
+            parts.append("ファイルの読み取り、コードの編集、コマンドの実行ができます。")
+        elif language == "ko":
+            parts.append("당신은 전문 AI 프로그래밍 어시스턴트입니다. 한국어로 답변해 주세요.")
+        else:
+            parts.append(f"You are a professional AI coding assistant. Please respond in {language}.")
+
+        return "\n".join(parts)
 
 
 def _uuid() -> str:
@@ -633,11 +721,12 @@ class EnvInstaller:
 # ── 主窗口 ──
 class MainWindow(QMainWindow):
     log_signal = pyqtSignal(str, str)
+    debug_log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(int, str)
     status_signal = pyqtSignal(str)
-    result_ready_signal = pyqtSignal(str)  # JSON result from CLI
+    result_ready_signal = pyqtSignal(str)
     workspace_choose_requested = pyqtSignal()
-    update_info_signal = pyqtSignal(str)   # JSON: 更新信息
+    update_info_signal = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -700,6 +789,7 @@ class MainWindow(QMainWindow):
 
         # 连接信号
         self.log_signal.connect(self._append_log)
+        self.debug_log_signal.connect(self._append_debug_log)
         self.progress_signal.connect(self._update_progress)
         self.status_signal.connect(self._update_status)
         self.result_ready_signal.connect(self._on_result_ready)
@@ -958,23 +1048,72 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(btn_layout)
 
-        # 日志区域
+        # 日志区域（标签页切换）
         log_group = QFrame()
         log_group.setStyleSheet("QFrame { background-color: #0a0a0a; border: 1px solid #222; border-radius: 8px; }")
         log_l = QVBoxLayout(log_group)
-        log_l.setContentsMargins(8, 4, 8, 4)
+        log_l.setContentsMargins(4, 4, 4, 4)
+        log_l.setSpacing(0)
 
-        log_header = QHBoxLayout()
-        log_header_lbl = QLabel("📋 部署日志")
-        log_header_lbl.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; border: none;")
-        log_header.addWidget(log_header_lbl)
-        log_header.addStretch()
-        log_l.addLayout(log_header)
+        self.deploy_log_tabs = QTabWidget()
+        self.deploy_log_tabs.setStyleSheet("""
+            QTabWidget::pane { border: none; background: #0a0a0a; }
+            QTabBar::tab { background: #1a1a1a; color: #888; padding: 6px 14px; border: 1px solid #333; border-bottom: none; border-radius: 4px 4px 0 0; font-size: 11px; }
+            QTabBar::tab:selected { background: #0a0a0a; color: #4CAF50; font-weight: bold; }
+            QTabBar::tab:hover { color: #ccc; }
+        """)
 
+        # Tab 1: 部署日志
+        deploy_log_tab = QWidget()
+        deploy_log_layout = QVBoxLayout(deploy_log_tab)
+        deploy_log_layout.setContentsMargins(0, 4, 0, 0)
         self.deploy_log_text = QTextEdit()
         self.deploy_log_text.setReadOnly(True)
         self.deploy_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
-        log_l.addWidget(self.deploy_log_text)
+        deploy_log_layout.addWidget(self.deploy_log_text)
+        self.deploy_log_tabs.addTab(deploy_log_tab, "📋 部署日志")
+
+        # Tab 2: 运行日志
+        runtime_log_tab = QWidget()
+        runtime_log_layout = QVBoxLayout(runtime_log_tab)
+        runtime_log_layout.setContentsMargins(0, 4, 0, 0)
+        runtime_log_layout.setSpacing(4)
+
+        runtime_toolbar = QHBoxLayout()
+        self.btn_clear_runtime_log = QPushButton("清空")
+        self.btn_clear_runtime_log.setStyleSheet("QPushButton { background: #333; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 10px; color: #aaa; }")
+        self.btn_clear_runtime_log.clicked.connect(lambda: self.runtime_log_text.clear())
+        runtime_toolbar.addStretch()
+        runtime_toolbar.addWidget(self.btn_clear_runtime_log)
+        runtime_log_layout.addLayout(runtime_toolbar)
+
+        self.runtime_log_text = QTextEdit()
+        self.runtime_log_text.setReadOnly(True)
+        self.runtime_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
+        runtime_log_layout.addWidget(self.runtime_log_text)
+        self.deploy_log_tabs.addTab(runtime_log_tab, "🔄 运行日志")
+
+        # Tab 3: 调试日志
+        debug_log_tab = QWidget()
+        debug_log_layout = QVBoxLayout(debug_log_tab)
+        debug_log_layout.setContentsMargins(0, 4, 0, 0)
+        debug_log_layout.setSpacing(4)
+
+        debug_toolbar = QHBoxLayout()
+        self.btn_clear_debug_log = QPushButton("清空")
+        self.btn_clear_debug_log.setStyleSheet("QPushButton { background: #333; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 10px; color: #aaa; }")
+        self.btn_clear_debug_log.clicked.connect(lambda: self.debug_log_text.clear())
+        debug_toolbar.addStretch()
+        debug_toolbar.addWidget(self.btn_clear_debug_log)
+        debug_log_layout.addLayout(debug_toolbar)
+
+        self.debug_log_text = QTextEdit()
+        self.debug_log_text.setReadOnly(True)
+        self.debug_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
+        debug_log_layout.addWidget(self.debug_log_text)
+        self.deploy_log_tabs.addTab(debug_log_tab, "🐛 调试日志")
+
+        log_l.addWidget(self.deploy_log_tabs)
 
         layout.addWidget(log_group, 1)
 
@@ -1173,12 +1312,25 @@ class MainWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f'<span style="color:#666">[{ts}]</span> <span style="color:{color}">{message}</span>'
 
-        # 输出到所有可见的日志区域
         for log_widget in [self.log_text, self.deploy_log_text, self.update_log_text]:
-            if log_widget and log_widget.isVisible():
+            if log_widget:
                 log_widget.append(line)
                 sb = log_widget.verticalScrollBar()
                 sb.setValue(sb.maximum())
+
+        if hasattr(self, 'runtime_log_text') and self.runtime_log_text:
+            self.runtime_log_text.append(line)
+            sb = self.runtime_log_text.verticalScrollBar()
+            sb.setValue(sb.maximum())
+
+    def _append_debug_log(self, message: str, color: str):
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f'<span style="color:#666">[{ts}]</span> <span style="color:{color}">{message}</span>'
+
+        if hasattr(self, 'debug_log_text') and self.debug_log_text:
+            self.debug_log_text.append(line)
+            sb = self.debug_log_text.verticalScrollBar()
+            sb.setValue(sb.maximum())
 
     def _update_progress(self, percent: int, label: str):
         pass  # 可扩展

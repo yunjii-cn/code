@@ -50,6 +50,10 @@ SETTINGS_KEYS = [
     "API_TIMEOUT_MS",
     "DISABLE_TELEMETRY",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "AI_LANGUAGE",
+    "AI_TEMPERATURE",
+    "AI_MAX_TOKENS",
+    "SYSTEM_PROMPT",
 ]
 
 OLLAMA_AGENT_MAX_STEPS = 10
@@ -279,11 +283,23 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000) -> dict:
                 cap_resolved = True
             if not cap_resolved and len(cap) > 0:
                 tool_support = False
+        size_bytes = m.get("size", 0) or 0
+        size_str = ""
+        if size_bytes > 0:
+            size_gb = size_bytes / (1024 * 1024 * 1024)
+            if size_gb >= 1:
+                size_str = f"{size_gb:.1f}GB"
+            else:
+                size_mb = size_bytes / (1024 * 1024)
+                size_str = f"{size_mb:.0f}MB"
         models.append({
             "id": m.get("name", ""),
             "name": m.get("name", ""),
             "provider": "ollama",
             "toolSupport": tool_support,
+            "size": size_str,
+            "family": m.get("details", {}).get("family", "") if isinstance(m.get("details"), dict) else "",
+            "paramCount": m.get("details", {}).get("parameter_size", "") if isinstance(m.get("details"), dict) else "",
         })
     return {"ok": True, "models": models}
 
@@ -328,6 +344,19 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
             "stream": stream,
             "options": {"num_ctx": 32768},
         }
+
+        env_temp = os.environ.get("AI_TEMPERATURE", "").strip()
+        env_max_tokens = os.environ.get("AI_MAX_TOKENS", "").strip()
+        if env_temp:
+            try:
+                ollama_body["options"]["temperature"] = float(env_temp)
+            except ValueError:
+                pass
+        if env_max_tokens:
+            try:
+                ollama_body["options"]["num_predict"] = int(env_max_tokens)
+            except ValueError:
+                pass
         if system_prompt:
             ollama_body["system"] = system_prompt
         if ollama_tools:
@@ -807,7 +836,8 @@ class ClaudeCliRunner:
             return local
         return "node"
 
-    def _build_args(self, session_id: str, model: str, is_resuming: bool) -> list:
+    def _build_args(self, session_id: str, model: str, is_resuming: bool,
+                    system_prompt: str = None) -> list:
         args = [
             "--env-file=.env",
             self.cli_entry,
@@ -822,15 +852,18 @@ class ClaudeCliRunner:
             args.extend(["--session-id", session_id])
         if model and model.strip():
             args.extend(["--model", model.strip()])
+        if system_prompt and system_prompt.strip():
+            args.extend(["--system-prompt", system_prompt.strip()])
         return args
 
     def run(self, prompt: str, session_id: str, model: str, is_resuming: bool,
             workspace_path: str, env_overrides: dict = None,
             on_delta: Callable = None, on_status: Callable = None,
-            on_log: Callable = None, on_proc: Callable = None) -> dict:
+            on_log: Callable = None, on_proc: Callable = None,
+            system_prompt: str = None) -> dict:
         """运行 CLI，返回结果"""
         node_path = self._find_node()
-        args = self._build_args(session_id, model, is_resuming)
+        args = self._build_args(session_id, model, is_resuming, system_prompt)
 
         env = dict(os.environ)
         if os.path.exists(self.node_dir):
@@ -1023,7 +1056,7 @@ class ClaudeCliRunner:
 BRIDGE_METHODS = [
     "getState", "newSession", "sendMessage", "stopMessage",
     "getWorkspace", "chooseWorkspace", "getSettings", "saveSettings",
-    "clearModelSettings", "listModels",
+    "clearModelSettings", "listModels", "detectHardware",
 ]
 
 BRIDGE_SIGNALS = [

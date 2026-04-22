@@ -30,6 +30,7 @@ import re
 import json
 from pathlib import Path
 from datetime import datetime
+import time
 
 if sys.platform == "win32":
     import io
@@ -273,6 +274,30 @@ def cleanup():
 
 
 # ── 部署到 dev/ ──
+def _kill_running_exe():
+    """尝试终止正在运行的旧版 EXE 进程，避免文件锁定"""
+    import signal as sig_module
+    current_pid = os.getpid()
+    killed = []
+    try:
+        import psutil as _ps
+        for proc in _ps.process_iter(['pid', 'name', 'exe']):
+            try:
+                pname = (proc.info.get('name') or '').lower()
+                pexe = proc.info.get('exe') or ''
+                if pname.startswith('云集智能编程工作站') and proc.info['pid'] != current_pid:
+                    proc.terminate()
+                    killed.append(pname)
+            except (_ps.NoSuchProcess, _ps.AccessDenied):
+                pass
+    except ImportError:
+        pass
+    if killed:
+        print(f"  已终止旧版进程: {', '.join(killed)}")
+        time.sleep(1)
+    return len(killed)
+
+
 def _deploy_to_dev(release_dir: Path):
     """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/ 下
     
@@ -283,14 +308,32 @@ def _deploy_to_dev(release_dir: Path):
     """
     release_name = release_dir.name
     
+    # 先尝试终止正在运行的旧版 EXE
+    _kill_running_exe()
+    
     # 1. 复制 EXE 文件到 dev/ 根目录（保留旧版 EXE，方便 git 回滚切换）
     new_exe = release_dir / f"{release_name}.exe"
     if new_exe.exists():
-        # 仅当同名 EXE 已存在时才替换
         existing = DEV_DIR / new_exe.name
         if existing.exists():
-            existing.unlink()
-            print(f"  替换同名 EXE: {new_exe.name}")
+            try:
+                existing.unlink()
+            except PermissionError:
+                print(f"  ⚠ EXE 被占用，尝试重命名旧文件...")
+                backup_name = existing.stem + "_old" + existing.suffix
+                backup_path = DEV_DIR / backup_name
+                if backup_path.exists():
+                    try:
+                        backup_path.unlink()
+                    except PermissionError:
+                        pass
+                try:
+                    existing.rename(str(backup_path))
+                    print(f"  旧 EXE 重命名为: {backup_name}")
+                except PermissionError:
+                    print(f"  ✗ 无法重命名旧 EXE，请手动关闭正在运行的应用后重试")
+                    return
+            print(f"  复制 EXE: {new_exe.name}")
         shutil.copy2(str(new_exe), str(DEV_DIR / new_exe.name))
         print(f"  ✓ 复制 EXE: {new_exe.name}")
     
@@ -300,7 +343,11 @@ def _deploy_to_dev(release_dir: Path):
     if new_internal.exists():
         if old_internal.exists():
             print(f"  替换旧 _internal/")
-            shutil.rmtree(str(old_internal), ignore_errors=True)
+            try:
+                shutil.rmtree(str(old_internal))
+            except PermissionError:
+                print(f"  ⚠ 部分 _internal/ 文件被占用，尝试强制替换...")
+                shutil.rmtree(str(old_internal), ignore_errors=True)
         shutil.copytree(str(new_internal), str(old_internal), dirs_exist_ok=True)
         print(f"  ✓ 复制 _internal/")
     
