@@ -216,12 +216,10 @@ async function sendMessage() {
     return;
   }
 
-  const target = messages.value.find((m) => m.id === currentAssistantId.value);
   if (result?.sessionId) sessionId.value = result.sessionId;
-  if (target && !target.text.trim()) {
-    target.text = result.text || "[模型未返回文本]";
-  }
-  isBusy.value = false;
+  // 不在这里检查文本是否为空，因为 CLI 在后台异步运行
+  // 文本通过 deltaReceived 信号实时接收
+  // 空文本检查在 statusReceived 信号中处理（busy=false 时）
 }
 
 async function stopMessage() {
@@ -389,6 +387,15 @@ onMounted(async () => {
         const payload = JSON.parse(jsonStr);
         if (payload && typeof payload.busy === "boolean") {
           isBusy.value = payload.busy;
+          if (!payload.busy && currentAssistantId.value) {
+            const checkId = currentAssistantId.value;
+            setTimeout(() => {
+              const target = messages.value.find((m) => m.id === checkId);
+              if (target && !target.text.trim()) {
+                target.text = "[模型未返回文本]";
+              }
+            }, 500);
+          }
         }
       } catch {}
     });

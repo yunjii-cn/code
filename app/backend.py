@@ -297,7 +297,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
     proxy_model = "qwen3:8b"
 
     def log_message(self, format, *args):
-        pass  # 静默日志
+        pass
 
     def do_POST(self):
         if self.path.startswith("/v1/messages"):
@@ -567,17 +567,21 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         sent_start = False
+        sent_text_block_start = False
         block_idx = 0
         tool_idx = 0
         has_tool_calls = False
         full_content = ""
         buffer = ""
+        chunk_count = 0
+        ollama_event_count = 0
 
         while True:
             try:
                 chunk = resp.read(4096)
                 if not chunk:
                     break
+                chunk_count += 1
                 buffer += chunk.decode("utf-8", errors="ignore")
                 lines = buffer.split("\n")
                 buffer = lines.pop() or ""
@@ -590,6 +594,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                         oc = json.loads(trimmed)
                     except:
                         continue
+                    ollama_event_count += 1
 
                     if oc.get("prompt_eval_count"):
                         input_tokens = oc["prompt_eval_count"]
@@ -608,12 +613,13 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                     msg = oc.get("message", {})
                     if msg.get("content") and not has_tool_calls:
                         full_content += msg["content"]
-                        if block_idx == 0 and not msg.get("tool_calls"):
+                        if not sent_text_block_start:
                             self._write_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+                            sent_text_block_start = True
                         self._write_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": msg["content"]}})
 
                     if msg.get("tool_calls"):
-                        if block_idx == 0 and full_content and not has_tool_calls:
+                        if sent_text_block_start and not has_tool_calls:
                             self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
                             block_idx = 1
                         has_tool_calls = True
@@ -627,7 +633,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                             tool_idx += 1
 
                     if oc.get("done"):
-                        if not has_tool_calls and block_idx == 0:
+                        if not has_tool_calls and sent_text_block_start:
                             self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
                         stop_reason = "tool_use" if has_tool_calls else ("max_tokens" if oc.get("done_reason") == "length" else "end_turn")
                         self._write_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": output_tokens or len(full_content)}})
@@ -820,7 +826,8 @@ class ClaudeCliRunner:
 
     def run(self, prompt: str, session_id: str, model: str, is_resuming: bool,
             workspace_path: str, env_overrides: dict = None,
-            on_delta: Callable = None, on_status: Callable = None) -> dict:
+            on_delta: Callable = None, on_status: Callable = None,
+            on_log: Callable = None, on_proc: Callable = None) -> dict:
         """运行 CLI，返回结果"""
         node_path = self._find_node()
         args = self._build_args(session_id, model, is_resuming)
@@ -836,6 +843,27 @@ class ClaudeCliRunner:
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
+        def _log(msg, color="#888"):
+            if on_log:
+                on_log(msg, color)
+
+        _log(f"[CLI] 启动: node_path={node_path} entry_exists={os.path.exists(self.cli_entry)}")
+        _log(f"[CLI] MODEL_PROVIDER={env.get('MODEL_PROVIDER')} BASE_URL={env.get('ANTHROPIC_BASE_URL')} MODEL={env.get('ANTHROPIC_MODEL')}")
+
+        _log_path = os.path.join(self.project_root, "cli_debug.log")
+        _log_file = open(_log_path, "a", encoding="utf-8")
+        _log_file.write(f"=== CLI Debug Log {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        _log_file.write(f"node_path={node_path}\n")
+        _log_file.write(f"args={[node_path] + args}\n")
+        _log_file.write(f"cwd={workspace_path or self.project_root}\n")
+        _log_file.write(f"env_overrides={env_overrides}\n")
+        _log_file.write(f"MODEL_PROVIDER={env.get('MODEL_PROVIDER')}\n")
+        _log_file.write(f"ANTHROPIC_BASE_URL={env.get('ANTHROPIC_BASE_URL')}\n")
+        _log_file.write(f"ANTHROPIC_MODEL={env.get('ANTHROPIC_MODEL')}\n")
+        _log_file.write(f"node_exists={os.path.exists(node_path)}\n")
+        _log_file.write(f"cli_entry_exists={os.path.exists(self.cli_entry)}\n")
+        _log_file.flush()
+
         try:
             proc = subprocess.Popen(
                 [node_path] + args,
@@ -849,22 +877,78 @@ class ClaudeCliRunner:
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
 
+            _log_file.write(f"proc_pid={proc.pid}\n")
+            _log_file.flush()
+            _log(f"[CLI] 进程已启动 pid={proc.pid}")
+
+            if on_proc:
+                on_proc(proc)
+
             proc.stdin.write(prompt)
             proc.stdin.close()
+
+            stderr_lines = []
+            def _read_stderr():
+                try:
+                    for line in proc.stderr:
+                        stderr_lines.append(line)
+                except:
+                    pass
+
+            stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+            stderr_thread.start()
 
             last_text = ""
             last_result = ""
             stdout_log = ""
+            has_stream_delta = False
+            line_count = 0
+            event_types = []
+            idle_count = 0
+            max_idle_after_exit = 50
 
-            for line in proc.stdout:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        idle_count += 1
+                        if idle_count > max_idle_after_exit:
+                            _log_file.write(f"  [TIMEOUT] stdout pipe still open after process exit (pid={proc.pid} rc={proc.returncode}), breaking\n")
+                            _log_file.flush()
+                            try:
+                                proc.kill()
+                            except:
+                                pass
+                            break
+                        time.sleep(0.1)
+                        continue
+                    time.sleep(0.05)
+                    continue
+                idle_count = 0
                 trimmed = line.strip()
                 if not trimmed:
                     continue
+                line_count += 1
                 stdout_log += trimmed + "\n"
                 try:
                     parsed = json.loads(trimmed)
                 except:
                     continue
+
+                evt_type = parsed.get("type", "?")
+                if evt_type not in event_types:
+                    event_types.append(evt_type)
+                    _log_file.write(f"  [NEW-TYPE] {evt_type}: {trimmed[:200]}\n")
+                    _log_file.flush()
+                    _log(f"[CLI] 事件类型: {evt_type}")
+
+                if evt_type == "stream_event":
+                    sub_type = parsed.get("event", {}).get("type", "?")
+                    delta_type = parsed.get("event", {}).get("delta", {}).get("type", "?")
+                    if f"stream_event.{sub_type}.{delta_type}" not in event_types:
+                        event_types.append(f"stream_event.{sub_type}.{delta_type}")
+                        _log_file.write(f"  [STREAM-EVT] {sub_type}.{delta_type}\n")
+                        _log_file.flush()
 
                 # 流式文本 delta
                 if (parsed.get("type") == "stream_event" and
@@ -873,6 +957,7 @@ class ClaudeCliRunner:
                     text = parsed["event"]["delta"].get("text", "")
                     if text and on_delta:
                         on_delta(text)
+                        has_stream_delta = True
 
                 # assistant 消息
                 if parsed.get("type") == "assistant":
@@ -881,13 +966,42 @@ class ClaudeCliRunner:
                         parts = [b.get("text", "") for b in msg["content"] if b.get("type") == "text" and isinstance(b.get("text"), str)]
                         if parts:
                             last_text = "\n".join(parts)
+                            if not has_stream_delta and on_delta:
+                                on_delta(last_text)
+                                _log(f"[CLI] 从assistant消息补充文本 len={len(last_text)}", "#FF9800")
 
                 # result
                 if parsed.get("type") == "result" and isinstance(parsed.get("result"), str):
                     last_result = parsed["result"]
+                    if not has_stream_delta and not last_text and on_delta:
+                        on_delta(last_result)
+                        has_stream_delta = True
+                        _log(f"[CLI] 从result补充文本 len={len(last_result)}", "#FF9800")
 
-            proc.wait()
-            stderr_out = proc.stderr.read()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except:
+                    pass
+                proc.wait(timeout=5)
+            stderr_thread.join(timeout=5)
+            stderr_out = "".join(stderr_lines)
+
+            _log_file.write(f"\n=== RESULT ===\n")
+            _log_file.write(f"lines={line_count} types={event_types} has_delta={has_stream_delta} last_text_len={len(last_text)} rc={proc.returncode}\n")
+            if stderr_out:
+                _log_file.write(f"stderr={stderr_out[:2000]}\n")
+            if not has_stream_delta and not last_text and stdout_log:
+                _log_file.write(f"stdout_sample={stdout_log[:3000]}\n")
+            _log_file.flush()
+            _log_file.close()
+
+            _log(f"[CLI] 完成: lines={line_count} types={event_types} has_delta={has_stream_delta} rc={proc.returncode}",
+                 "#4CAF50" if proc.returncode == 0 else "#F44336")
+            if stderr_out and proc.returncode != 0:
+                _log(f"[CLI] stderr: {stderr_out[:300]}", "#F44336")
 
             if proc.returncode == 0:
                 return {"ok": True, "text": last_text.strip(), "sessionId": session_id}
