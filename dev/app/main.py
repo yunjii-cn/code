@@ -278,7 +278,11 @@ class BackendBridge(QObject):
             return json.dumps({"ok": False, "error": "Invalid payload"})
 
         if main.is_busy:
-            return json.dumps({"ok": False, "error": "A request is already running."})
+            if main.active_proc and main.active_proc.poll() is None:
+                return json.dumps({"ok": False, "error": "A request is already running."})
+            else:
+                main.is_busy = False
+                self.statusReceived.emit(json.dumps({"busy": False}))
 
         prompt = (payload.get("prompt") or "").strip()
         if not prompt:
@@ -401,37 +405,57 @@ class BackendBridge(QObject):
         if not main:
             return
 
-        env_overrides = None
-        if provider == "ollama":
-            ollama_target = (settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").strip()
-            ollama_model = (settings.get("OLLAMA_MODEL", "") or "qwen3:8b").strip()
-            proxy_port = main.ollama_proxy.start(ollama_target, ollama_model)
-            env_overrides = {
-                "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{proxy_port}",
-                "ANTHROPIC_API_KEY": "ollama-local",
-                "ANTHROPIC_AUTH_TOKEN": "ollama-local",
-                "ANTHROPIC_MODEL": ollama_model,
-            }
+        try:
+            env_overrides = None
+            if provider == "ollama":
+                ollama_target = (settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").strip()
+                ollama_model = (settings.get("OLLAMA_MODEL", "") or "qwen3:8b").strip()
+                proxy_port = main.ollama_proxy.start(ollama_target, ollama_model)
+                env_overrides = {
+                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{proxy_port}",
+                    "ANTHROPIC_API_KEY": "ollama-local",
+                    "ANTHROPIC_AUTH_TOKEN": "ollama-local",
+                    "ANTHROPIC_MODEL": ollama_model,
+                    "MODEL_PROVIDER": "anthropic",
+                }
+                main.log_signal.emit(f"[代理] Ollama代理已启动 端口={proxy_port} 模型={ollama_model}", "#2196F3")
 
-        is_resuming = main.active_session_id in main.started_sessions
-        result = main.cli_runner.run(
-            prompt=prompt,
-            session_id=main.active_session_id,
-            model=model,
-            is_resuming=is_resuming,
-            workspace_path=main.current_workspace,
-            env_overrides=env_overrides,
-            on_delta=lambda text: self.deltaReceived.emit(json.dumps({"text": text})),
-        )
+            is_resuming = main.active_session_id in main.started_sessions
 
-        if result.get("ok"):
-            main.started_sessions.add(main.active_session_id)
+            def _on_delta(text):
+                self.deltaReceived.emit(json.dumps({"text": text}))
 
-        main.is_busy = False
-        self.statusReceived.emit(json.dumps({"busy": False}))
+            result = main.cli_runner.run(
+                prompt=prompt,
+                session_id=main.active_session_id,
+                model=model,
+                is_resuming=is_resuming,
+                workspace_path=main.current_workspace,
+                env_overrides=env_overrides,
+                on_delta=_on_delta,
+                on_log=lambda msg, color="#888": main.log_signal.emit(msg, color),
+                on_proc=lambda p: setattr(main, 'active_proc', p),
+            )
 
-        # 通知前端最终结果
-        main.result_ready_signal.emit(json.dumps(result))
+            if result.get("ok"):
+                main.started_sessions.add(main.active_session_id)
+            else:
+                err = result.get("error", "")[:200]
+                main.log_signal.emit(f"[CLI错误] {err}", "#F44336")
+                if err and not result.get("text"):
+                    self.deltaReceived.emit(json.dumps({"text": f"❌ {err}"}))
+
+            main.result_ready_signal.emit(json.dumps(result))
+        except Exception as e:
+            main.log_signal.emit(f"[线程异常] {e}", "#F44336")
+            self.deltaReceived.emit(json.dumps({"text": f"❌ 线程异常: {str(e)[:200]}"}))
+            main.result_ready_signal.emit(json.dumps({"ok": False, "error": str(e)}))
+        finally:
+            import time as _time
+            _time.sleep(0.3)
+            main.is_busy = False
+            main.active_proc = None
+            self.statusReceived.emit(json.dumps({"busy": False}))
 
 
 def _uuid() -> str:
