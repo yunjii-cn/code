@@ -19,6 +19,7 @@ import uuid
 import time
 import subprocess
 import threading
+import queue
 import http.server
 import socketserver
 import urllib.request
@@ -246,7 +247,48 @@ def list_anthropic_models(api_key: str, timeout_ms: int = 15000) -> dict:
     return {"ok": True, "models": models}
 
 
-def list_ollama_models(base_url: str, timeout_ms: int = 15000) -> dict:
+def check_ollama_model_health(base_url: str, model_name: str, timeout_ms: int = 30000) -> dict:
+    """检测模型是否能正常加载和响应，返回健康状态"""
+    result = {"loadable": True, "tool_support": None, "error": ""}
+    try:
+        url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        body = json.dumps({
+            "model": model_name,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "max_tokens": 5,
+        }).encode("utf-8")
+        resp = fetch_json_with_timeout(
+            url,
+            headers={"Content-Type": "application/json"},
+            timeout_ms=timeout_ms,
+            method="POST",
+            body=body,
+        )
+        if resp.get("ok"):
+            result["loadable"] = True
+        else:
+            status = resp.get("status", 0)
+            err_text = (resp.get("text", "") or "")[:300]
+            if status == 500 and "unable to load" in err_text.lower():
+                result["loadable"] = False
+                result["error"] = "模型文件损坏或无法加载"
+            elif status == 400 and "does not support tools" in err_text:
+                result["loadable"] = True
+                result["tool_support"] = False
+            elif status >= 400:
+                result["loadable"] = False
+                result["error"] = f"API错误({status})"
+            else:
+                result["loadable"] = False
+                result["error"] = err_text[:100] or "未知错误"
+    except Exception as e:
+        result["loadable"] = False
+        result["error"] = str(e)[:100]
+    return result
+
+
+def list_ollama_models(base_url: str, timeout_ms: int = 15000, check_health: bool = False) -> dict:
     base = (base_url or "").strip() or "http://127.0.0.1:11434"
     url = f"{base.rstrip('/')}/api/tags"
     result = fetch_json_with_timeout(url, timeout_ms=timeout_ms)
@@ -257,17 +299,25 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000) -> dict:
 
     # 并行查询 capabilities
     cap_results = [None] * len(raw_models)
+    health_results = [None] * len(raw_models) if check_health else []
 
     def _fetch_cap(idx, m):
         cap_results[idx] = fetch_ollama_capabilities(base, m.get("name", ""), timeout_ms)
+
+    def _fetch_health(idx, m):
+        health_results[idx] = check_ollama_model_health(base, m.get("name", ""), min(timeout_ms, 60000))
 
     threads = []
     for i, m in enumerate(raw_models):
         t = threading.Thread(target=_fetch_cap, args=(i, m), daemon=True)
         t.start()
         threads.append(t)
+        if check_health:
+            ht = threading.Thread(target=_fetch_health, args=(i, m), daemon=True)
+            ht.start()
+            threads.append(ht)
     for t in threads:
-        t.join(timeout=10)
+        t.join(timeout=120 if check_health else 10)
 
     models = []
     for i, m in enumerate(raw_models):
@@ -283,6 +333,15 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000) -> dict:
                 cap_resolved = True
             if not cap_resolved and len(cap) > 0:
                 tool_support = False
+        loadable = True
+        health_error = ""
+        if check_health and health_results:
+            hr = health_results[i]
+            if hr:
+                loadable = hr.get("loadable", True)
+                health_error = hr.get("error", "")
+                if hr.get("tool_support") is False:
+                    tool_support = False
         size_bytes = m.get("size", 0) or 0
         size_str = ""
         if size_bytes > 0:
@@ -300,15 +359,16 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000) -> dict:
             "size": size_str,
             "family": m.get("details", {}).get("family", "") if isinstance(m.get("details"), dict) else "",
             "paramCount": m.get("details", {}).get("parameter_size", "") if isinstance(m.get("details"), dict) else "",
+            "loadable": loadable,
+            "healthError": health_error,
         })
     return {"ok": True, "models": models}
 
 
 # ── Ollama 代理服务器 ──
 class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
-    """将 Anthropic Messages API 转换为 Ollama Chat API"""
+    """将 Anthropic Messages API 转换为 OpenAI Chat Completions API（通过 Ollama /v1/chat/completions）"""
 
-    # 类级变量，由 start_ollama_proxy 设置
     target_url = None
     proxy_model = "qwen3:8b"
 
@@ -333,46 +393,62 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
             return
 
-        # 转换消息
-        ollama_messages, system_prompt = self._convert_messages(anthropic_body)
-        ollama_tools = self._convert_tools(anthropic_body)
+        openai_messages = self._convert_messages(anthropic_body)
+        openai_tools = self._convert_tools(anthropic_body)
+
+        tool_result_count = sum(
+            1 for msg in anthropic_body.get("messages", [])
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list)
+            and any(b.get("type") == "tool_result" for b in msg.get("content", []))
+        )
+        if tool_result_count >= 3:
+            openai_tools = None
 
         stream = anthropic_body.get("stream") is True
-        ollama_body = {
+        openai_body = {
             "model": self.proxy_model,
-            "messages": ollama_messages,
+            "messages": openai_messages,
             "stream": stream,
-            "options": {"num_ctx": 32768},
         }
 
         env_temp = os.environ.get("AI_TEMPERATURE", "").strip()
         env_max_tokens = os.environ.get("AI_MAX_TOKENS", "").strip()
         if env_temp:
             try:
-                ollama_body["options"]["temperature"] = float(env_temp)
+                openai_body["temperature"] = float(env_temp)
             except ValueError:
                 pass
         if env_max_tokens:
             try:
-                ollama_body["options"]["num_predict"] = int(env_max_tokens)
+                openai_body["max_tokens"] = int(env_max_tokens)
             except ValueError:
                 pass
-        if system_prompt:
-            ollama_body["system"] = system_prompt
-        if ollama_tools:
-            ollama_body["tools"] = ollama_tools
+        if openai_tools:
+            openai_body["tools"] = openai_tools
 
-        self._send_to_ollama(ollama_body, ollama_tools, stream, is_retry=False)
+        self._send_to_ollama(openai_body, stream)
 
-    def _convert_messages(self, body: dict):
-        ollama_msgs = []
-        system_prompt = ""
-        if isinstance(body.get("system"), str):
-            system_prompt = body["system"]
+    def _convert_messages(self, body: dict) -> list:
+        openai_msgs = []
+
+        if isinstance(body.get("system"), str) and body["system"].strip():
+            openai_msgs.append({"role": "system", "content": body["system"]})
         elif isinstance(body.get("system"), list):
-            system_prompt = "\n".join(
+            sys_text = "\n".join(
                 b.get("text", "") for b in body["system"] if b.get("type") == "text"
             )
+            if sys_text.strip():
+                openai_msgs.append({"role": "system", "content": sys_text})
+        else:
+            lang = os.environ.get("AI_LANGUAGE", "zh").strip().lower()
+            if lang == "zh":
+                openai_msgs.append({"role": "system", "content": "你是一个专业的AI编程助手。请始终使用中文回答。只有在用户明确要求执行编程任务时才使用工具。普通对话请直接回答。"})
+            elif lang == "ja":
+                openai_msgs.append({"role": "system", "content": "あなたはプロのAIプログラミングアシスタントです。日本語で回答してください。"})
+            elif lang == "ko":
+                openai_msgs.append({"role": "system", "content": "당신은 전문 AI 프로그래밍 어시스턴트입니다. 한국어로 답변해 주세요."})
+            elif lang and lang != "en":
+                openai_msgs.append({"role": "system", "content": f"You are a professional AI coding assistant. Please respond in {lang}."})
 
         for msg in body.get("messages", []):
             if msg["role"] == "user":
@@ -393,14 +469,14 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                         c = "\n".join(b.get("text", "") for b in c if b.get("type") == "text")
                     elif not isinstance(c, str):
                         c = ""
-                    ollama_msgs.append({
+                    openai_msgs.append({
                         "role": "tool",
-                        "name": tr.get("tool_use_id", "unknown"),
+                        "tool_call_id": tr.get("tool_use_id", "unknown"),
                         "content": c or "(no output)",
                     })
                 text = "\n".join(p for p in text_parts if p)
                 if text:
-                    ollama_msgs.append({"role": "user", "content": text})
+                    openai_msgs.append({"role": "user", "content": text})
 
             elif msg["role"] == "assistant":
                 tool_calls, text_parts = [], []
@@ -414,31 +490,35 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                 elif isinstance(content, str):
                     text_parts.append(content)
 
-                assistant_msg = {"role": "assistant", "content": ""}
                 text = "\n".join(p for p in text_parts if p)
-                if text:
-                    assistant_msg["content"] = text
-                ollama_tc = []
-                for tc in tool_calls:
-                    args = tc.get("input", {})
-                    if isinstance(args, str):
-                        try:
-                            args = json.loads(args)
-                        except:
-                            args = {}
-                    ollama_tc.append({"function": {"name": tc.get("name", ""), "arguments": args}})
-                if ollama_tc:
-                    assistant_msg["tool_calls"] = ollama_tc
-                ollama_msgs.append(assistant_msg)
+                assistant_msg = {"role": "assistant", "content": text or None}
+                if tool_calls:
+                    openai_tc = []
+                    for tc in tool_calls:
+                        args = tc.get("input", {})
+                        if isinstance(args, dict):
+                            args = json.dumps(args)
+                        elif not isinstance(args, str):
+                            args = json.dumps({})
+                        openai_tc.append({
+                            "id": tc.get("id", f"call_{len(openai_tc)}"),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name", ""),
+                                "arguments": args,
+                            }
+                        })
+                    assistant_msg["tool_calls"] = openai_tc
+                openai_msgs.append(assistant_msg)
 
-        return ollama_msgs, system_prompt
+        return openai_msgs
 
     def _convert_tools(self, body: dict) -> list:
-        ollama_tools = []
+        openai_tools = []
         for tool in body.get("tools", []):
             if tool.get("type") == "custom":
                 continue
-            ollama_tools.append({
+            openai_tools.append({
                 "type": "function",
                 "function": {
                     "name": tool.get("name", ""),
@@ -446,15 +526,14 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                     "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
                 },
             })
-        return ollama_tools
+        return openai_tools if openai_tools else None
 
-    def _send_to_ollama(self, body_obj: dict, ollama_tools: list, stream: bool, is_retry: bool):
-        """发送请求到 Ollama，支持自动降级重试"""
+    def _send_to_ollama(self, body_obj: dict, stream: bool):
         body_str = json.dumps(body_obj).encode("utf-8")
         target = self.target_url
 
         req = urllib.request.Request(
-            f"http://{target.hostname}:{target.port or 11434}/api/chat",
+            f"http://{target.hostname}:{target.port or 11434}/v1/chat/completions",
             data=body_str,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -468,37 +547,49 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                 err_body = e.read().decode("utf-8")
             except:
                 pass
-
-            # 检测 "does not support tools" → 自动去掉 tools 重试
-            if not is_retry and "does not support tools" in err_body:
-                retry_body = {**body_obj}
-                retry_body.pop("tools", None)
-                if ollama_tools:
-                    tool_descs = "\n".join(
-                        f"- {t['function']['name']}: {t['function'].get('description', '')} Params: {json.dumps(t['function'].get('parameters', {}))}"
-                        for t in ollama_tools
-                    )
-                    BT = "`" * 3
-                    tool_prompt = (
-                        f"\n\nYou have access to the following tools. To call a tool, output a JSON block enclosed in {BT} tags like this:\n"
-                        f"{BT}\n"
-                        f'{{"name": "tool_name", "arguments": {{"param": "value"}}}}\n'
-                        f"{BT}\n"
-                        f"You can call multiple tools. After each tool call, wait for the result in the next user message enclosed in <tool_result> tags.\n"
-                        f"Available tools:\n{tool_descs}"
-                    )
-                    retry_body["system"] = (retry_body.get("system") or "") + tool_prompt
-                self._send_to_ollama(retry_body, ollama_tools, stream, is_retry=True)
+            if e.code == 400 and "does not support tools" in err_body and "tools" in body_obj:
+                fallback_body = {k: v for k, v in body_obj.items() if k != "tools"}
+                fallback_body_str = json.dumps(fallback_body).encode("utf-8")
+                fallback_req = urllib.request.Request(
+                    f"http://{target.hostname}:{target.port or 11434}/v1/chat/completions",
+                    data=fallback_body_str,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    resp = urllib.request.urlopen(fallback_req, timeout=300)
+                except urllib.error.HTTPError as e2:
+                    err_body2 = ""
+                    try:
+                        err_body2 = e2.read().decode("utf-8")
+                    except:
+                        pass
+                    self.send_response(e2.code)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "type": "error",
+                        "error": {"type": "invalid_request_error", "message": f"Ollama error ({e2.code}): {err_body2}"},
+                    }).encode())
+                    return
+                except Exception:
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": "Proxy error on retry without tools"},
+                    }).encode())
+                    return
+            else:
+                self.send_response(e.code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "type": "error",
+                    "error": {"type": "invalid_request_error", "message": f"Ollama error ({e.code}): {err_body}"},
+                }).encode())
                 return
-
-            self.send_response(e.code)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "type": "error",
-                "error": {"type": "invalid_request_error", "message": f"Ollama error ({e.code}): {err_body}"},
-            }).encode())
-            return
         except Exception as e:
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
@@ -510,271 +601,201 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
         if stream:
-            self._handle_stream_response(resp, is_retry)
+            self._handle_stream_response(resp)
         else:
-            self._handle_non_stream_response(resp, is_retry)
+            self._handle_non_stream_response(resp)
 
-    def _handle_stream_response(self, resp, is_retry: bool):
-        """处理流式响应"""
+    def _handle_stream_response(self, resp):
         msg_id = f"msg_{int(time.time())}"
-        input_tokens = 0
-        output_tokens = 0
-
-        if is_retry:
-            # 降级重试：先收集完整响应再解析
-            chunks = []
-            while True:
-                try:
-                    chunk = resp.read(4096)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                except:
-                    break
-
-            full_content = ""
-            for chunk in chunks:
-                for line in chunk.decode("utf-8", errors="ignore").split("\n"):
-                    trimmed = line.strip()
-                    if not trimmed:
-                        continue
-                    try:
-                        parsed = json.loads(trimmed)
-                        if parsed.get("prompt_eval_count"):
-                            input_tokens = parsed["prompt_eval_count"]
-                        if parsed.get("eval_count"):
-                            output_tokens = parsed["eval_count"]
-                        if parsed.get("message", {}).get("content"):
-                            full_content += parsed["message"]["content"]
-                    except:
-                        pass
-
-            tool_calls = _parse_tool_calls_from_text(full_content)
-            clean_content = _remove_tool_call_blocks_from_text(full_content)
-
-            # 发送转换后的 SSE
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-
-            self._write_sse("message_start", {
-                "type": "message_start",
-                "message": {"id": msg_id, "type": "message", "role": "assistant", "content": [],
-                            "model": self.proxy_model, "stop_reason": None, "stop_sequence": None,
-                            "usage": {"input_tokens": input_tokens, "output_tokens": 0}},
-            })
-
-            idx = 0
-            if clean_content.strip():
-                self._write_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-                self._write_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": clean_content}})
-                self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-                idx = 1
-
-            for i, tc in enumerate(tool_calls):
-                tool_id = f"toolu_{int(time.time())}_{i}"
-                self._write_sse("content_block_start", {"type": "content_block_start", "index": idx, "content_block": {"type": "tool_use", "id": tool_id, "name": tc["name"], "input": {}}})
-                self._write_sse("content_block_delta", {"type": "content_block_delta", "index": idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps(tc.get("arguments", {}))}})
-                self._write_sse("content_block_stop", {"type": "content_block_stop", "index": idx})
-                idx += 1
-
-            if idx == 0:
-                self._write_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-                self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-
-            stop_reason = "tool_use" if tool_calls else "end_turn"
-            self._write_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": output_tokens or len(full_content)}})
-            self._write_sse("message_stop", {"type": "message_stop"})
-            self.wfile.flush()
-            return
-
-        # ── 正常流式模式 ──
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-
         sent_start = False
-        sent_text_block_start = False
-        block_idx = 0
-        tool_idx = 0
-        has_tool_calls = False
-        full_content = ""
+        text_block_started = False
+        text_block_closed = False
+        tool_block_indices = {}
+        next_content_index = 0
+        prompt_tokens = 0
+        completion_tokens = 0
         buffer = ""
-        chunk_count = 0
-        ollama_event_count = 0
+        has_tool_calls = False
+        text_content = ""
 
         while True:
             try:
                 chunk = resp.read(4096)
                 if not chunk:
                     break
-                chunk_count += 1
                 buffer += chunk.decode("utf-8", errors="ignore")
-                lines = buffer.split("\n")
-                buffer = lines.pop() or ""
 
-                for line in lines:
-                    trimmed = line.strip()
-                    if not trimmed:
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line:
                         continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        if not sent_start:
+                            self._send_empty_message(msg_id)
+                        else:
+                            if text_block_started and not text_block_closed:
+                                self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+                            for oi, ai in tool_block_indices.items():
+                                self._write_sse("content_block_stop", {"type": "content_block_stop", "index": ai})
+                            self._write_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": completion_tokens}})
+                            self._write_sse("message_stop", {"type": "message_stop"})
+                        self.wfile.flush()
+                        return
+
                     try:
-                        oc = json.loads(trimmed)
+                        parsed = json.loads(data)
                     except:
                         continue
-                    ollama_event_count += 1
 
-                    if oc.get("prompt_eval_count"):
-                        input_tokens = oc["prompt_eval_count"]
-                    if oc.get("eval_count"):
-                        output_tokens = oc["eval_count"]
+                    if not parsed or not isinstance(parsed, dict):
+                        continue
+
+                    if parsed.get("usage"):
+                        prompt_tokens = parsed["usage"].get("prompt_tokens", prompt_tokens)
+                        completion_tokens = parsed["usage"].get("completion_tokens", completion_tokens)
+
+                    choices = parsed.get("choices", [])
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+                    finish_reason = choice.get("finish_reason")
 
                     if not sent_start:
+                        sent_start = True
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.end_headers()
                         self._write_sse("message_start", {
                             "type": "message_start",
                             "message": {"id": msg_id, "type": "message", "role": "assistant", "content": [],
                                         "model": self.proxy_model, "stop_reason": None, "stop_sequence": None,
-                                        "usage": {"input_tokens": input_tokens, "output_tokens": 0}},
+                                        "usage": {"input_tokens": prompt_tokens, "output_tokens": 0}},
                         })
-                        sent_start = True
 
-                    msg = oc.get("message", {})
-                    if msg.get("content") and not has_tool_calls:
-                        full_content += msg["content"]
-                        if not sent_text_block_start:
-                            self._write_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-                            sent_text_block_start = True
-                        self._write_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": msg["content"]}})
-
-                    if msg.get("tool_calls"):
-                        if sent_text_block_start and not has_tool_calls:
-                            self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-                            block_idx = 1
+                    if delta.get("tool_calls"):
                         has_tool_calls = True
-                        for tc in msg["tool_calls"]:
-                            tool_id = f"toolu_{int(time.time())}_{tool_idx}"
-                            func = tc.get("function", {})
-                            self._write_sse("content_block_start", {"type": "content_block_start", "index": block_idx, "content_block": {"type": "tool_use", "id": tool_id, "name": func.get("name", "unknown"), "input": {}}})
-                            self._write_sse("content_block_delta", {"type": "content_block_delta", "index": block_idx, "delta": {"type": "input_json_delta", "partial_json": json.dumps(func.get("arguments", {}))}})
-                            self._write_sse("content_block_stop", {"type": "content_block_stop", "index": block_idx})
-                            block_idx += 1
-                            tool_idx += 1
-
-                    if oc.get("done"):
-                        if not has_tool_calls and sent_text_block_start:
+                        if text_block_started and not text_block_closed:
                             self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
-                        stop_reason = "tool_use" if has_tool_calls else ("max_tokens" if oc.get("done_reason") == "length" else "end_turn")
-                        self._write_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": output_tokens or len(full_content)}})
+                            text_block_closed = True
+
+                    if delta.get("content") and not has_tool_calls:
+                        text_content += delta["content"]
+                        if not text_block_started:
+                            text_block_started = True
+                            text_idx = next_content_index
+                            next_content_index += 1
+                            self._write_sse("content_block_start", {"type": "content_block_start", "index": text_idx, "content_block": {"type": "text", "text": ""}})
+                        self._write_sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta["content"]}})
+
+                    for tc in delta.get("tool_calls", []):
+                        oi = tc.get("index", 0)
+                        if oi not in tool_block_indices:
+                            ai = next_content_index
+                            next_content_index += 1
+                            tool_block_indices[oi] = ai
+                            tc_id = tc.get("id", f"call_{oi}")
+                            tc_name = (tc.get("function", {}) or {}).get("name", "")
+                            self._write_sse("content_block_start", {"type": "content_block_start", "index": ai, "content_block": {"type": "tool_use", "id": tc_id, "name": tc_name, "input": ""}})
+                        tc_args = (tc.get("function", {}) or {}).get("arguments", "")
+                        if tc_args:
+                            self._write_sse("content_block_delta", {"type": "content_block_delta", "index": tool_block_indices[oi], "delta": {"type": "input_json_delta", "partial_json": tc_args}})
+
+                    if finish_reason:
+                        if text_block_started and not text_block_closed:
+                            self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+                        for oi, ai in tool_block_indices.items():
+                            self._write_sse("content_block_stop", {"type": "content_block_stop", "index": ai})
+
+                        stop_reason = "tool_use" if finish_reason == "tool_calls" else ("max_tokens" if finish_reason == "length" else "end_turn")
+                        self._write_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": completion_tokens}})
                         self._write_sse("message_stop", {"type": "message_stop"})
+                        self.wfile.flush()
+                        return
 
             except:
                 break
 
         if not sent_start:
-            self._write_sse("message_start", {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant", "content": [{"type": "text", "text": ""}], "model": self.proxy_model, "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0}}})
+            self._send_empty_message(msg_id)
         self.wfile.flush()
 
-    def _handle_non_stream_response(self, resp, is_retry: bool):
-        """处理非流式响应"""
+    def _handle_non_stream_response(self, resp):
         data = resp.read().decode("utf-8")
-        full_content = ""
-        input_tokens = 0
-        output_tokens = 0
-        tool_calls_raw = []
+        try:
+            result = json.loads(data)
+        except:
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"type": "error", "error": {"type": "api_error", "message": "Invalid response from Ollama"}}).encode())
+            return
 
-        for line in data.split("\n"):
-            trimmed = line.strip()
-            if not trimmed:
-                continue
-            try:
-                chunk = json.loads(trimmed)
-                if chunk.get("message", {}).get("content"):
-                    full_content += chunk["message"]["content"]
-                if chunk.get("message", {}).get("tool_calls"):
-                    tool_calls_raw.extend(chunk["message"]["tool_calls"])
-                if chunk.get("prompt_eval_count"):
-                    input_tokens = chunk["prompt_eval_count"]
-                if chunk.get("eval_count"):
-                    output_tokens = chunk["eval_count"]
-            except:
-                pass
+        choice = (result.get("choices") or [{}])[0]
+        message = choice.get("message", {})
+        finish_reason = choice.get("finish_reason", "stop")
+        content_text = message.get("content") or ""
+        tool_calls = message.get("tool_calls", [])
+        prompt_tokens = (result.get("usage") or {}).get("prompt_tokens", 0)
+        completion_tokens = (result.get("usage") or {}).get("completion_tokens", 0)
 
-        if is_retry and not tool_calls_raw and full_content:
-            parsed = _parse_tool_calls_from_text(full_content)
-            for pc in parsed:
-                tool_calls_raw.append({"function": {"name": pc["name"], "arguments": pc.get("arguments", {})}})
-            if tool_calls_raw:
-                full_content = _remove_tool_call_blocks_from_text(full_content)
-
+        msg_id = f"msg_{int(time.time())}"
         content = []
-        if full_content:
-            content.append({"type": "text", "text": full_content})
-        for i, tc in enumerate(tool_calls_raw):
+        if content_text:
+            content.append({"type": "text", "text": content_text})
+        for tc in tool_calls:
             func = tc.get("function", {})
-            content.append({"type": "tool_use", "id": f"toolu_{int(time.time())}_{i}", "name": func.get("name", "unknown"), "input": func.get("arguments", {})})
+            args = func.get("arguments", "{}")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except:
+                    args = {}
+            content.append({"type": "tool_use", "id": tc.get("id", f"toolu_{int(time.time())}"), "name": func.get("name", "unknown"), "input": args})
         if not content:
             content.append({"type": "text", "text": ""})
+
+        stop_reason = "tool_use" if finish_reason == "tool_calls" else ("max_tokens" if finish_reason == "length" else "end_turn")
+
+        response = {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "content": content,
+            "model": self.proxy_model,
+            "stop_reason": stop_reason,
+            "stop_sequence": None,
+            "usage": {"input_tokens": prompt_tokens, "output_tokens": completion_tokens},
+        }
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({
-            "id": f"msg_{int(time.time())}", "type": "message", "role": "assistant", "content": content,
-            "model": self.proxy_model, "stop_reason": "tool_use" if tool_calls_raw else "end_turn",
-            "stop_sequence": None, "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
-        }).encode())
+        self.wfile.write(json.dumps(response).encode())
+
+    def _send_empty_message(self, msg_id):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self._write_sse("message_start", {
+            "type": "message_start",
+            "message": {"id": msg_id, "type": "message", "role": "assistant", "content": [],
+                        "model": self.proxy_model, "stop_reason": None, "stop_sequence": None,
+                        "usage": {"input_tokens": 0, "output_tokens": 0}},
+        })
+        self._write_sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        self._write_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+        self._write_sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 0}})
+        self._write_sse("message_stop", {"type": "message_stop"})
 
     def _write_sse(self, event: str, data: dict):
         self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
-
-
-# ── 工具调用解析（降级重试模式） ──
-def _parse_tool_calls_from_text(text: str) -> list:
-    calls = []
-    seen = set()
-    # 代码块中的 JSON
-    for match in re.finditer(r"```(?:json)?\s*\n?([\s\S]*?)\n?```", text):
-        try:
-            parsed = json.loads(match.group(1))
-            if parsed.get("name") and isinstance(parsed["name"], str):
-                key = f"{parsed['name']}:{json.dumps(parsed.get('arguments', {}))}"
-                if key not in seen:
-                    seen.add(key)
-                    calls.append({"name": parsed["name"], "arguments": parsed.get("arguments", {})})
-        except:
-            pass
-    # 独立的 JSON 对象
-    for match in re.finditer(r'\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^}]*\})\s*\}', text):
-        name = match.group(1)
-        try:
-            args = json.loads(match.group(2))
-            key = f"{name}:{json.dumps(args)}"
-            if key not in seen:
-                seen.add(key)
-                calls.append({"name": name, "arguments": args})
-        except:
-            pass
-    return calls
-
-
-def _remove_tool_call_blocks_from_text(text: str) -> str:
-    result = re.sub(r"```(?:json)?\s*\n?[\s\S]*?\n?```", lambda m: _try_remove_tool_block(m), text)
-    result = re.sub(r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\}', "", result)
-    result = re.sub(r"\n{3,}", "\n\n", result).strip()
-    return result
-
-
-def _try_remove_tool_block(match) -> str:
-    inner = re.sub(r"^```(?:json)?\s*\n?", "", match.group(0))
-    inner = re.sub(r"\n?```$", "", inner)
-    try:
-        parsed = json.loads(inner)
-        if parsed.get("name") and parsed.get("arguments"):
-            return ""
-    except:
-        pass
-    return match.group(0)
 
 
 # ── Ollama 代理服务器管理 ──
@@ -845,6 +866,7 @@ class ClaudeCliRunner:
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
+            "--max-turns", "3",
         ]
         if is_resuming:
             args.extend(["--resume", session_id])
@@ -920,6 +942,22 @@ class ClaudeCliRunner:
             proc.stdin.write(prompt)
             proc.stdin.close()
 
+            cli_timeout = 300
+            timed_out = False
+
+            def _timeout_watcher():
+                nonlocal timed_out
+                time.sleep(cli_timeout)
+                if proc.poll() is None:
+                    timed_out = True
+                    try:
+                        proc.kill()
+                    except:
+                        pass
+
+            timeout_thread = threading.Thread(target=_timeout_watcher, daemon=True)
+            timeout_thread.start()
+
             stderr_lines = []
             def _read_stderr():
                 try:
@@ -938,12 +976,46 @@ class ClaudeCliRunner:
             line_count = 0
             event_types = []
             idle_count = 0
-            max_idle_after_exit = 50
+            max_idle_after_exit = 30
+            proc_exited = False
+
+            stdout_queue = queue.Queue()
+
+            def _read_stdout():
+                try:
+                    for line in proc.stdout:
+                        stdout_queue.put(line)
+                except:
+                    pass
+                finally:
+                    stdout_queue.put(None)
+
+            stdout_reader = threading.Thread(target=_read_stdout, daemon=True)
+            stdout_reader.start()
 
             while True:
-                line = proc.stdout.readline()
+                try:
+                    line = stdout_queue.get(timeout=0.5)
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        proc_exited = True
+                        idle_count += 1
+                        if idle_count > max_idle_after_exit:
+                            _log_file.write(f"  [TIMEOUT] stdout pipe timeout after process exit (pid={proc.pid} rc={proc.returncode}), breaking\n")
+                            _log_file.flush()
+                            try:
+                                proc.kill()
+                            except:
+                                pass
+                            break
+                    continue
+
+                if line is None:
+                    break
+
                 if not line:
                     if proc.poll() is not None:
+                        proc_exited = True
                         idle_count += 1
                         if idle_count > max_idle_after_exit:
                             _log_file.write(f"  [TIMEOUT] stdout pipe still open after process exit (pid={proc.pid} rc={proc.returncode}), breaking\n")
@@ -1039,6 +1111,8 @@ class ClaudeCliRunner:
             if proc.returncode == 0:
                 return {"ok": True, "text": last_text.strip(), "sessionId": session_id}
             else:
+                if timed_out:
+                    return {"ok": False, "error": f"CLI执行超时({cli_timeout}秒)，已自动终止", "sessionId": session_id}
                 error = stderr_out.strip() or "Unknown CLI error."
                 fallback = ""
                 if error == "Unknown CLI error.":
@@ -1057,6 +1131,7 @@ BRIDGE_METHODS = [
     "getState", "newSession", "sendMessage", "stopMessage",
     "getWorkspace", "chooseWorkspace", "getSettings", "saveSettings",
     "clearModelSettings", "listModels", "detectHardware",
+    "deleteModel", "recommendModels",
 ]
 
 BRIDGE_SIGNALS = [

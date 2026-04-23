@@ -263,7 +263,10 @@ class BackendBridge(QObject):
         main = self._get_main()
         if not main:
             return json.dumps({"sessionId": ""})
+        if main.is_busy:
+            return json.dumps({"sessionId": main.active_session_id or ""})
         main.active_session_id = _uuid()
+        main.started_sessions.discard(main.active_session_id)
         return json.dumps({"sessionId": main.active_session_id})
 
     @pyqtSlot(str, result=str)
@@ -282,7 +285,9 @@ class BackendBridge(QObject):
             if main.active_proc and main.active_proc.poll() is None:
                 return json.dumps({"ok": False, "error": "A request is already running."})
             else:
+                main.log_signal.emit("[恢复] 检测到僵尸busy状态，自动恢复", "#FF9800")
                 main.is_busy = False
+                main.active_proc = None
                 self.statusReceived.emit(json.dumps({"busy": False}))
 
         prompt = (payload.get("prompt") or "").strip()
@@ -394,7 +399,8 @@ class BackendBridge(QObject):
                 result = list_anthropic_models(api_key, timeout)
             elif source == "ollama":
                 base_url = payload.get("baseUrl", "") or settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434"
-                result = list_ollama_models(base_url, timeout)
+                check_health = payload.get("checkHealth", False)
+                result = list_ollama_models(base_url, timeout, check_health=check_health)
             else:
                 result = {"ok": False, "error": "Unsupported source."}
             self.modelsLoaded.emit(json.dumps(result))
@@ -440,6 +446,60 @@ class BackendBridge(QObject):
             pass
 
         return json.dumps(info)
+
+    @pyqtSlot(str, result=str)
+    def deleteModel(self, payload_json: str):
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+        except:
+            return json.dumps({"ok": False, "error": "Invalid payload"})
+        model_name = (payload.get("name") or "").strip()
+        if not model_name:
+            return json.dumps({"ok": False, "error": "模型名称不能为空"})
+        main = self._get_main()
+        settings = main.env_manager.read_settings() if main else {}
+        base_url = (settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").strip()
+        try:
+            url = f"{base_url.rstrip('/')}/api/delete"
+            body = json.dumps({"name": model_name}).encode("utf-8")
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="DELETE")
+            resp = urllib.request.urlopen(req, timeout=15)
+            return json.dumps({"ok": True})
+        except urllib.error.HTTPError as e:
+            err = ""
+            try:
+                err = e.read().decode("utf-8")[:200]
+            except:
+                pass
+            return json.dumps({"ok": False, "error": f"删除失败({e.code}): {err}"})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)[:200]})
+
+    @pyqtSlot(result=str)
+    def recommendModels(self):
+        hw = json.loads(self.detectHardware())
+        total_ram_gb = (hw.get("total_ram", 0) or 0) / (1024 ** 3)
+        gpu_vram_gb = hw.get("gpu_vram_gb", 0) or 0
+        recommendations = []
+        if gpu_vram_gb >= 20:
+            recommendations.append({"name": "qwen3:32b", "size": "~20GB", "reason": "GPU显存充足，推荐32B参数量模型，工具调用支持完善", "toolSupport": True})
+            recommendations.append({"name": "huihui_ai/qwen3-abliterated:14b", "size": "~9GB", "reason": "14B去审查版，工具调用支持完善，响应更快", "toolSupport": True})
+        if gpu_vram_gb >= 12:
+            recommendations.append({"name": "huihui_ai/qwen3-abliterated:14b", "size": "~9GB", "reason": "14B去审查版，工具调用支持完善", "toolSupport": True})
+            recommendations.append({"name": "qwen3:14b", "size": "~9GB", "reason": "官方14B模型，工具调用支持完善", "toolSupport": True})
+        if gpu_vram_gb >= 8 or total_ram_gb >= 16:
+            recommendations.append({"name": "qwen3:8b", "size": "~5GB", "reason": "8B轻量模型，工具调用支持完善，适合8GB显存", "toolSupport": True})
+        if gpu_vram_gb >= 6 or total_ram_gb >= 12:
+            recommendations.append({"name": "huihui_ai/qwen3-vl-abliterated:8b", "size": "~6GB", "reason": "8B视觉模型，支持图片理解", "toolSupport": False})
+        if total_ram_gb >= 8:
+            recommendations.append({"name": "llama3:8b", "size": "~5GB", "reason": "Meta Llama3 8B，通用对话模型", "toolSupport": False})
+        seen = set()
+        unique = []
+        for r in recommendations:
+            if r["name"] not in seen:
+                seen.add(r["name"])
+                unique.append(r)
+        return json.dumps({"ok": True, "models": unique, "hardware": hw})
 
     # ── 内部方法 ──
 
@@ -528,20 +588,24 @@ class BackendBridge(QObject):
         parts = []
 
         if language == "zh":
-            parts.append("你是一个专业的AI编程助手。请始终使用中文回答。")
-            parts.append("你可以读取文件、编辑代码、执行命令来完成编程任务。")
-            parts.append("回答要详细、专业，包含代码示例和解释。")
+            parts.append("你是一个专业的AI编程助手，请始终使用中文回答。")
+            parts.append("对于简短的问候或问题，请简洁友好地回应。对于编程任务，你可以读取文件、编辑代码、执行命令来完成。")
+            parts.append("重要：只有在用户明确要求执行编程任务时才使用工具。普通对话和问题请直接回答，不要调用任何工具。")
         elif language == "en":
             parts.append("You are a professional AI coding assistant.")
-            parts.append("You can read files, edit code, and execute commands to complete programming tasks.")
-            parts.append("Provide detailed, professional answers with code examples and explanations.")
+            parts.append("For brief greetings or questions, respond concisely and friendly. For coding tasks, you can read files, edit code, and execute commands.")
+            parts.append("Important: Only use tools when the user explicitly requests a coding task. For normal conversation and questions, respond directly without calling any tools.")
         elif language == "ja":
             parts.append("あなたはプロのAIプログラミングアシスタントです。日本語で回答してください。")
-            parts.append("ファイルの読み取り、コードの編集、コマンドの実行ができます。")
+            parts.append("簡単な挨拶や質問には簡潔に友好的に答えてください。プログラミングタスクでは、ファイルの読み取り、コードの編集、コマンドの実行ができます。")
+            parts.append("重要：プログラミングタスクが明示的に要求された場合のみツールを使用してください。通常の会話や質問には直接回答し、ツールを呼び出さないでください。")
         elif language == "ko":
             parts.append("당신은 전문 AI 프로그래밍 어시스턴트입니다. 한국어로 답변해 주세요.")
+            parts.append("간단한 인사나 질문에는 간결하고 친절하게 답변하세요. 프로그래밍 작업에서는 파일 읽기, 코드 편집, 명령 실행이 가능합니다.")
+            parts.append("중요: 프로그래밍 작업이 명시적으로 요청된 경우에만 도구를 사용하세요. 일반 대화와 질문에는 도구를 호출하지 말고 직접 답변하세요.")
         else:
             parts.append(f"You are a professional AI coding assistant. Please respond in {language}.")
+            parts.append("Important: Only use tools when the user explicitly requests a coding task. For normal conversation, respond directly.")
 
         return "\n".join(parts)
 

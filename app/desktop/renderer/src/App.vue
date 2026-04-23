@@ -7,6 +7,8 @@ type ChatMessage = {
   id: string;
   role: MessageRole;
   text: string;
+  time: string;
+  model?: string;
 };
 
 type DesktopSettings = {
@@ -35,6 +37,8 @@ type ModelInfo = {
   size?: string;
   family?: string;
   paramCount?: string;
+  loadable?: boolean;
+  healthError?: string;
 };
 
 type ModelConfig = {
@@ -83,6 +87,7 @@ async function callBackend(method: string, ...args: any[]): Promise<any> {
 }
 
 const isBusy = ref(false);
+let busyTimeoutId: ReturnType<typeof setTimeout> | null = null;
 const sessionId = ref("");
 const workspacePath = ref("");
 const inputText = ref("");
@@ -155,14 +160,24 @@ function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+const userName = ref("你");
+const assistantName = ref("助手");
+const pendingQueue = ref<string[]>([]);
+
 function roleLabel(role: MessageRole) {
-  if (role === "user") return "你";
-  if (role === "assistant") return "助手";
+  if (role === "user") return userName.value;
+  if (role === "assistant") return assistantName.value;
   return "错误";
 }
 
-function addMessage(role: MessageRole, text: string) {
-  const item: ChatMessage = { id: makeId(), role, text };
+function nowStr() {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function addMessage(role: MessageRole, text: string, model?: string) {
+  const item: ChatMessage = { id: makeId(), role, text, time: nowStr(), model };
   messages.value.push(item);
   return item.id;
 }
@@ -211,6 +226,11 @@ function applySettings(data?: DesktopSettings) {
       };
     }
   }
+}
+
+function displayName(name: string): string {
+  const idx = name.indexOf("/");
+  return idx >= 0 ? name.slice(idx + 1) : name;
 }
 
 function toggleModelSettings(modelId: string) {
@@ -324,21 +344,41 @@ function getAutoConfigHint(modelId: string): string {
 }
 
 async function sendMessage() {
-  if (isBusy.value) return;
   const text = inputText.value.trim();
   if (!text) return;
-
-  addMessage("user", text);
   inputText.value = "";
-  currentAssistantId.value = addMessage("assistant", "");
+
+  if (isBusy.value) {
+    pendingQueue.value.push(text);
+    addMessage("user", text);
+    showNotice(`已加入排队（第${pendingQueue.value.length}条）`, "warn");
+    return;
+  }
+
+  await doSend(text);
+}
+
+async function doSend(text: string) {
+  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
+  addMessage("user", text);
+  currentAssistantId.value = addMessage("assistant", "", displayName(currentModel));
   isBusy.value = true;
+
+  if (busyTimeoutId) clearTimeout(busyTimeoutId);
+  busyTimeoutId = setTimeout(() => {
+    if (isBusy.value) {
+      isBusy.value = false;
+      showNotice("任务超时，已自动恢复输入", "warn");
+      processQueue();
+    }
+  }, 120000);
 
   const activeConfig = getActiveModelConfig();
 
   const result = await callBackend("sendMessage", JSON.stringify({
     prompt: text,
     provider: runMode.value === "ollama" ? "ollama" : "anthropic",
-    model: runMode.value === "ollama" ? ollamaModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim(),
+    model: currentModel,
     ai_language: activeConfig.language,
     ai_temperature: activeConfig.temperature,
     ai_max_tokens: activeConfig.maxTokens,
@@ -348,22 +388,40 @@ async function sendMessage() {
   if (!result?.ok) {
     if (result?.sessionId) sessionId.value = result.sessionId;
     messages.value = messages.value.filter((m) => m.id !== currentAssistantId.value);
-    if (result?.stopped) {
-      addMessage("assistant", "任务已停止。");
+    if (result?.error === "A request is already running.") {
+      await callBackend("stopMessage");
+      isBusy.value = false;
+      if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+      showNotice("已自动恢复，请重新发送", "warn");
+    } else if (result?.stopped) {
+      addMessage("assistant", "任务已停止。", displayName(currentModel));
     } else {
       addMessage("error", result?.error || "请求失败");
     }
     isBusy.value = false;
+    if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+    processQueue();
     return;
   }
 
   if (result?.sessionId) sessionId.value = result.sessionId;
 }
 
+function processQueue() {
+  if (pendingQueue.value.length > 0 && !isBusy.value) {
+    const next = pendingQueue.value.shift()!;
+    doSend(next);
+  }
+}
+
 async function stopMessage() {
   const result = await callBackend("stopMessage");
   if (result?.sessionId) sessionId.value = result.sessionId;
   if (!result.ok && result.error) showNotice(result.error, "warn");
+  if (result?.ok) {
+    isBusy.value = false;
+    if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+  }
 }
 
 async function chooseWorkspace() {
@@ -382,12 +440,14 @@ async function chooseWorkspace() {
 async function createSession() {
   if (isBusy.value) return;
   const result = await callBackend("newSession");
-  sessionId.value = result.sessionId;
-  addMessage("assistant", `新会话已创建：${result.sessionId}`);
+  if (result?.sessionId) {
+    sessionId.value = result.sessionId;
+  }
 }
 
-function clearMessages() {
+async function clearMessages() {
   messages.value = [];
+  await createSession();
 }
 
 async function saveSettings() {
@@ -491,6 +551,58 @@ async function loadCloudModels(source: "openrouter" | "anthropic" | "ollama") {
   }
 }
 
+async function detectModels() {
+  loadingModels.value = true;
+  try {
+    const payload = { source: "ollama", baseUrl: ollamaBaseUrl.value, checkHealth: true };
+    const result = await callBackend("listModels", JSON.stringify(payload));
+    if (result && result.loading) {
+      return;
+    }
+    if (!result || !result.ok) {
+      showNotice(result?.error || "模型检测失败", "warn");
+      return;
+    }
+    cloudModels.value = result.models || [];
+    const broken = cloudModels.value.filter((m) => m.loadable === false);
+    const noTool = cloudModels.value.filter((m) => m.toolSupport === false);
+    const okCount = cloudModels.value.filter((m) => m.loadable !== false && m.toolSupport === true).length;
+    let msg = `检测完成: ${okCount}个可用`;
+    if (broken.length > 0) msg += `，${broken.length}个损坏`;
+    if (noTool.length > 0) msg += `，${noTool.length}个无工具`;
+    showNotice(msg, broken.length > 0 ? "warn" : "ok");
+  } catch (e) {
+    console.error("[detectModels] error:", e);
+    showNotice("模型检测异常", "warn");
+  } finally {
+    loadingModels.value = false;
+  }
+}
+
+async function deleteModel(modelName: string) {
+  const display = displayName(modelName);
+  if (!confirm(`确定要卸载模型「${display}」吗？\n此操作不可撤销，模型文件将被删除。`)) return;
+  const result = await callBackend("deleteModel", JSON.stringify({ name: modelName }));
+  if (result?.ok) {
+    cloudModels.value = cloudModels.value.filter((m) => m.id !== modelName);
+    if (ollamaModel.value === modelName) ollamaModel.value = "";
+    showNotice(`已卸载 ${display}`, "ok");
+  } else {
+    showNotice(result?.error || "卸载失败", "warn");
+  }
+}
+
+const recommendedModels = ref<any[]>([]);
+const showRecommendations = ref(false);
+
+async function loadRecommendations() {
+  const result = await callBackend("recommendModels");
+  if (result?.ok) {
+    recommendedModels.value = result.models || [];
+    showRecommendations.value = true;
+  }
+}
+
 async function detectHardware() {
   const result = await callBackend("detectHardware");
   if (result) {
@@ -531,14 +643,18 @@ onMounted(async () => {
         const payload = JSON.parse(jsonStr);
         if (payload && typeof payload.busy === "boolean") {
           isBusy.value = payload.busy;
-          if (!payload.busy && currentAssistantId.value) {
-            const checkId = currentAssistantId.value;
-            setTimeout(() => {
-              const target = messages.value.find((m) => m.id === checkId);
-              if (target && !target.text.trim()) {
-                target.text = "[模型未返回文本]";
-              }
-            }, 500);
+          if (!payload.busy) {
+            if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+            if (currentAssistantId.value) {
+              const checkId = currentAssistantId.value;
+              setTimeout(() => {
+                const target = messages.value.find((m) => m.id === checkId);
+                if (target && !target.text.trim()) {
+                  target.text = "[模型未返回文本]";
+                }
+              }, 500);
+            }
+            processQueue();
           }
         }
       } catch {}
@@ -553,9 +669,12 @@ onMounted(async () => {
           return;
         }
         cloudModels.value = payload.models || [];
+        const broken = cloudModels.value.filter((m: ModelInfo) => m.loadable === false);
         const source = (payload.models?.[0]?.provider) || "ollama";
         const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : " Ollama";
-        showNotice(`已加载 ${cloudModels.value.length} 个${label}模型`, "ok");
+        let msg = `已加载 ${cloudModels.value.length} 个${label}模型`;
+        if (broken.length > 0) msg += `，${broken.length}个损坏`;
+        showNotice(msg, broken.length > 0 ? "warn" : "ok");
       } catch (e) {
         console.error("[modelsLoaded] parse error:", e);
         loadingModels.value = false;
@@ -587,7 +706,11 @@ onMounted(async () => {
 
         <div class="messages">
           <article v-for="m in messages" :key="m.id" class="msg" :class="m.role">
-            <label>{{ roleLabel(m.role) }}</label>
+            <div class="msg-header">
+              <label>{{ roleLabel(m.role) }}</label>
+              <span class="msg-time">{{ m.time }}</span>
+              <span v-if="m.model" class="msg-model">{{ m.model }}</span>
+            </div>
             <pre>{{ m.text }}</pre>
           </article>
         </div>
@@ -595,15 +718,14 @@ onMounted(async () => {
         <div class="composer">
           <textarea
             v-model="inputText"
-            :disabled="isBusy"
             placeholder="输入编码任务（Enter 发送，Shift+Enter 换行）"
             @keydown.enter.exact.prevent="sendMessage"
           />
           <div class="composer-foot">
-            <span>{{ isBusy ? "执行中..." : "就绪" }}</span>
+            <span>{{ isBusy ? (pendingQueue.length > 0 ? `执行中... 排队${pendingQueue.length}条` : "执行中...") : "就绪" }}</span>
             <div>
-              <button class="btn-blue" @click="clearMessages" :disabled="isBusy">清空</button>
-              <button class="btn-red" @click="sendMessage" :disabled="isBusy">发送任务</button>
+              <button class="btn-blue" @click="clearMessages" :disabled="isBusy">新会话</button>
+              <button class="btn-red" @click="sendMessage">发送任务</button>
             </div>
           </div>
         </div>
@@ -646,25 +768,51 @@ onMounted(async () => {
             <span>Ollama 地址</span>
             <div class="model-loader">
               <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" />
-              <button class="btn-blue btn-sm" @click="loadCloudModels('ollama')" :disabled="loadingModels">
-                {{ loadingModels ? "加载中..." : "刷新" }}
+              <button class="btn-blue btn-sm" @click="detectModels" :disabled="loadingModels">
+                {{ loadingModels ? "检测中..." : "🔍 检测" }}
+              </button>
+              <button class="btn-auto btn-sm" @click="loadRecommendations" :disabled="loadingModels">
+                💡 推荐
               </button>
             </div>
           </label>
 
+          <div v-if="showRecommendations && recommendedModels.length > 0" class="recommend-section">
+            <div class="recommend-header">
+              <span>推荐安装</span>
+              <button class="btn-icon-sm" @click="showRecommendations = false">✕</button>
+            </div>
+            <div v-for="r in recommendedModels" :key="r.name" class="recommend-item">
+              <div class="recommend-info">
+                <span class="recommend-name">{{ displayName(r.name) }}</span>
+                <span v-if="r.toolSupport" class="tool-badge ok">★ 工具</span>
+                <span v-else class="tool-badge no">无工具</span>
+                <span class="model-size">{{ r.size }}</span>
+              </div>
+              <div class="recommend-reason">{{ r.reason }}</div>
+            </div>
+          </div>
+
           <div v-if="cloudModels.length > 0" class="model-list">
             <div v-for="m in cloudModels" :key="m.id" class="model-row-wrapper">
               <div
-                :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false }]"
-                @click="selectModel(m.id)"
+                :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false, 'broken': m.loadable === false }]"
+                @click="m.loadable !== false && selectModel(m.id)"
               >
                 <div class="model-row-info">
-                  <span class="model-name">{{ m.name }}</span>
-                  <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
+                  <span class="model-name">{{ displayName(m.name) }}</span>
+                  <span v-if="m.loadable === false" class="tool-badge broken">⚠ 损坏</span>
+                  <span v-else-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
                   <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
                   <span v-if="m.size" class="model-size">{{ m.size }}</span>
                 </div>
-                <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
+                <div class="model-row-actions">
+                  <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
+                  <button class="btn-icon btn-delete" @click.stop="deleteModel(m.id)" title="卸载模型">🗑</button>
+                </div>
+              </div>
+              <div v-if="m.loadable === false && m.healthError" class="model-error-hint">
+                ⚠ {{ m.healthError }}
               </div>
               <div v-if="expandedModelId === m.id" class="model-settings">
                 <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
@@ -672,7 +820,7 @@ onMounted(async () => {
             </div>
           </div>
           <div v-else-if="!loadingModels" class="empty-hint">
-            <p>点击"刷新"加载可用模型</p>
+            <p>点击"检测"加载并检测可用模型</p>
           </div>
 
           <p v-if="ollamaModel && selectedOllamaModelToolSupport === false" class="hint warn">
@@ -1034,6 +1182,117 @@ export default { name: "App" };
 
 .model-row.no-tool {
   opacity: 0.7;
+}
+
+.model-row.broken {
+  border-color: #7f1d1d;
+  background: #1a0a0a;
+  opacity: 0.6;
+}
+
+.model-row.broken.selected {
+  background: #7f1d1d;
+  border-color: #ef4444;
+  opacity: 0.8;
+}
+
+.model-row-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.model-error-hint {
+  font-size: 11px;
+  color: #f87171;
+  padding: 4px 10px 6px;
+  background: #1a0a0a;
+  border-left: 2px solid #7f1d1d;
+  margin: 0 0 2px;
+}
+
+.btn-delete {
+  color: #666;
+  border-color: #333;
+}
+
+.btn-delete:hover {
+  color: #ef4444;
+  border-color: #ef4444;
+  background: #2a0a0a;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.recommend-section {
+  background: #0d1a0d;
+  border: 1px solid #1e3a1e;
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.recommend-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #60a5fa;
+}
+
+.btn-icon-sm {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: #666;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-icon-sm:hover {
+  color: #fff;
+}
+
+.recommend-item {
+  padding: 6px 8px;
+  background: #111;
+  border-radius: 4px;
+  border: 1px solid #222;
+}
+
+.recommend-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.recommend-name {
+  font-size: 12px;
+  color: #e5e5e5;
+  font-weight: 500;
+}
+
+.recommend-reason {
+  font-size: 11px;
+  color: #888;
+  line-height: 1.4;
+}
+
+.tool-badge.broken {
+  background: #7f1d1d;
+  color: #fca5a5;
 }
 
 .model-row-info {
