@@ -983,7 +983,10 @@ class ClaudeCliRunner:
 
             def _read_stdout():
                 try:
-                    for line in proc.stdout:
+                    while True:
+                        line = proc.stdout.readline()
+                        if not line:
+                            break
                         stdout_queue.put(line)
                 except:
                     pass

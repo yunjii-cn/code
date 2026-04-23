@@ -634,7 +634,11 @@ onMounted(async () => {
         const payload = JSON.parse(jsonStr);
         if (!payload?.text) return;
         const target = messages.value.find((m) => m.id === currentAssistantId.value);
-        if (target) target.text += payload.text;
+        if (target) {
+          const newText = payload.text;
+          if (target.text === "" && newText.trim() === "") return;
+          target.text += newText;
+        }
       } catch {}
     });
 
@@ -831,6 +835,16 @@ onMounted(async () => {
           </p>
         </template>
 
+        <div class="field-group-title">对话设置</div>
+        <label class="field">
+          <span>你的称谓</span>
+          <input v-model="userName" placeholder="你" class="short-input" />
+        </label>
+        <label class="field">
+          <span>AI 称谓</span>
+          <input v-model="assistantName" placeholder="助手" class="short-input" />
+        </label>
+
         <div class="setting-actions">
           <button class="btn-blue" @click="clearModelFields" :disabled="isBusy">清空模型</button>
           <button class="btn-red" @click="saveSettings" :disabled="isBusy">保存并启用</button>
@@ -1013,14 +1027,32 @@ export default { name: "App" };
   border-color: #ef4444;
 }
 
-.msg label {
-  display: block;
+.msg .msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 6px;
+}
+
+.msg label {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: #888888;
+}
+
+.msg .msg-time {
+  font-size: 10px;
+  color: #555;
+}
+
+.msg .msg-model {
+  font-size: 10px;
+  color: #666;
+  background: #1a1a2e;
+  padding: 1px 6px;
+  border-radius: 3px;
 }
 
 .msg.user label {
@@ -1127,6 +1159,16 @@ export default { name: "App" };
   background: #1565C0;
   border-color: #1976D2;
   color: #fff;
+}
+
+.field-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  margin-top: 12px;
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #222;
 }
 
 .field {
