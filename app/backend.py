@@ -371,6 +371,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
 
     target_url = None
     proxy_model = "qwen3:8b"
+    close_connection = True
 
     def log_message(self, format, *args):
         pass
@@ -670,6 +671,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                         self.send_response(200)
                         self.send_header("Content-Type", "text/event-stream")
                         self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "close")
                         self.end_headers()
                         self._write_sse("message_start", {
                             "type": "message_start",
@@ -718,12 +720,14 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
                         self.wfile.flush()
                         return
 
-            except:
-                break
-
-        if not sent_start:
-            self._send_empty_message(msg_id)
-        self.wfile.flush()
+            except Exception:
+                try:
+                    if not sent_start:
+                        self._send_empty_message(msg_id)
+                    self.wfile.flush()
+                except:
+                    pass
+                return
 
     def _handle_non_stream_response(self, resp):
         data = resp.read().decode("utf-8")
@@ -775,6 +779,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(json.dumps(response).encode())
 
@@ -782,6 +787,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
         self.end_headers()
         self._write_sse("message_start", {
             "type": "message_start",
@@ -806,16 +812,29 @@ class OllamaProxyServer:
         self.server = None
         self.port = 0
         self.thread = None
+        self._target_base_url = ""
+        self._model = ""
 
     def start(self, target_base_url: str, model: str) -> int:
-        if self.server:
+        self._target_base_url = target_base_url
+        self._model = model or "qwen3:8b"
+
+        if self.server and self.thread and self.thread.is_alive():
+            OllamaProxyHandler.target_url = urllib.parse.urlparse(target_base_url)
+            OllamaProxyHandler.proxy_model = self._model
             return self.port
+
+        if self.server:
+            try:
+                self.server.server_close()
+            except:
+                pass
+            self.server = None
 
         target_url = urllib.parse.urlparse(target_base_url)
         OllamaProxyHandler.target_url = target_url
-        OllamaProxyHandler.proxy_model = model or "qwen3:8b"
+        OllamaProxyHandler.proxy_model = self._model
 
-        # 找可用端口
         self.server = socketserver.TCPServer(("127.0.0.1", 0), OllamaProxyHandler)
         self.port = self.server.server_address[1]
         self.server.timeout = 1
@@ -829,7 +848,8 @@ class OllamaProxyServer:
             try:
                 self.server.handle_request()
             except:
-                break
+                if not self.server:
+                    break
 
     def stop(self):
         if self.server:
