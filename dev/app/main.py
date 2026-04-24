@@ -283,12 +283,18 @@ class BackendBridge(QObject):
 
         if main.is_busy:
             if main.active_proc and main.active_proc.poll() is None:
-                return json.dumps({"ok": False, "error": "A request is already running."})
-            else:
-                main.log_signal.emit("[恢复] 检测到僵尸busy状态，自动恢复", "#FF9800")
-                main.is_busy = False
-                main.active_proc = None
-                self.statusReceived.emit(json.dumps({"busy": False}))
+                try:
+                    main.active_proc.kill()
+                    main.log_signal.emit("[恢复] 终止了残留的CLI进程", "#FF9800")
+                except:
+                    pass
+                try:
+                    main.active_proc.wait(timeout=3)
+                except:
+                    pass
+            main.is_busy = False
+            main.active_proc = None
+            self.statusReceived.emit(json.dumps({"busy": False}))
 
         prompt = (payload.get("prompt") or "").strip()
         if not prompt:
@@ -515,6 +521,8 @@ class BackendBridge(QObject):
                 ollama_target = (settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").strip()
                 ollama_model = (settings.get("OLLAMA_MODEL", "") or "qwen3:8b").strip()
                 proxy_port = main.ollama_proxy.start(ollama_target, ollama_model)
+                proxy_alive = main.ollama_proxy.thread and main.ollama_proxy.thread.is_alive()
+                main.log_signal.emit(f"[代理] Ollama代理 端口={proxy_port} 存活={proxy_alive} 模型={ollama_model}", "#2196F3")
                 env_overrides = {
                     "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{proxy_port}",
                     "ANTHROPIC_API_KEY": "ollama-local",

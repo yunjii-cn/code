@@ -173,7 +173,7 @@ function roleLabel(role: MessageRole) {
 function nowStr() {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 function addMessage(role: MessageRole, text: string, model?: string) {
@@ -355,19 +355,22 @@ async function sendMessage() {
     return;
   }
 
-  await doSend(text);
+  await doSend(text, true);
 }
 
-async function doSend(text: string) {
+async function doSend(text: string, addUserMsg: boolean = false) {
   const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
-  addMessage("user", text);
+  if (addUserMsg) {
+    addMessage("user", text);
+  }
   currentAssistantId.value = addMessage("assistant", "", displayName(currentModel));
   isBusy.value = true;
 
   if (busyTimeoutId) clearTimeout(busyTimeoutId);
-  busyTimeoutId = setTimeout(() => {
+  busyTimeoutId = setTimeout(async () => {
     if (isBusy.value) {
       isBusy.value = false;
+      await callBackend("stopMessage");
       showNotice("任务超时，已自动恢复输入", "warn");
       processQueue();
     }
@@ -410,7 +413,7 @@ async function doSend(text: string) {
 function processQueue() {
   if (pendingQueue.value.length > 0 && !isBusy.value) {
     const next = pendingQueue.value.shift()!;
-    doSend(next);
+    doSend(next, false);
   }
 }
 
@@ -715,7 +718,8 @@ onMounted(async () => {
               <span class="msg-time">{{ m.time }}</span>
               <span v-if="m.model" class="msg-model">{{ m.model }}</span>
             </div>
-            <pre>{{ m.text }}</pre>
+            <pre v-if="m.text">{{ m.text }}</pre>
+            <pre v-else class="thinking">思考中<span class="dots">...</span></pre>
           </article>
         </div>
 
@@ -1053,6 +1057,21 @@ export default { name: "App" };
   background: #1a1a2e;
   padding: 1px 6px;
   border-radius: 3px;
+}
+
+.msg .thinking {
+  color: #666;
+  font-style: italic;
+}
+
+.msg .thinking .dots {
+  animation: blink 1.2s infinite;
+}
+
+@keyframes blink {
+  0%, 20% { opacity: 0; }
+  50% { opacity: 1; }
+  80%, 100% { opacity: 0; }
 }
 
 .msg.user label {
