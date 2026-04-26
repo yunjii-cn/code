@@ -298,13 +298,25 @@ def _kill_running_exe():
     return len(killed)
 
 
+def _set_hidden_attribute(path: str):
+    """设置 Windows 文件/文件夹为隐藏属性"""
+    if os.name == 'nt':
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(path, 0x02)  # FILE_ATTRIBUTE_HIDDEN
+            return True
+        except:
+            pass
+    return False
+
+
 def _deploy_to_dev(release_dir: Path):
     """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/ 下
     
-    架构（对齐参考项目）:
+    优化后的架构:
     - EXE 直接放在 dev/ 下（dev/云集智能编程工作站vX.X.exe）
-    - _internal/ 也在 dev/ 下（dev/_internal/）
-    - 资源文件在 dev/app/ 下（desktop/、nodejs/ 等，已存在）
+    - _internal/ 在 dev/ 下（隐藏文件夹，包含 PyInstaller 运行时）
+    - app/ 在 dev/ 下（用户可见的资源文件夹）
     """
     release_name = release_dir.name
     
@@ -337,7 +349,7 @@ def _deploy_to_dev(release_dir: Path):
         shutil.copy2(str(new_exe), str(DEV_DIR / new_exe.name))
         print(f"  ✓ 复制 EXE: {new_exe.name}")
     
-    # 2. 替换 _internal/ 目录到 dev/ 下（PyInstaller 运行时）
+    # 2. 复制 _internal/ 并设置为隐藏属性
     new_internal = release_dir / "_internal"
     old_internal = DEV_DIR / "_internal"
     if new_internal.exists():
@@ -349,7 +361,11 @@ def _deploy_to_dev(release_dir: Path):
                 print(f"  ⚠ 部分 _internal/ 文件被占用，尝试强制替换...")
                 shutil.rmtree(str(old_internal), ignore_errors=True)
         shutil.copytree(str(new_internal), str(old_internal), dirs_exist_ok=True)
-        print(f"  ✓ 复制 _internal/")
+        # 设置为隐藏文件夹
+        if _set_hidden_attribute(str(old_internal)):
+            print(f"  ✓ 复制 _internal/ (已隐藏)")
+        else:
+            print(f"  ✓ 复制 _internal/")
     
     print(f"  ✓ 部署完成，EXE 在 {DEV_DIR}")
 
