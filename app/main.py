@@ -44,7 +44,7 @@ from PyQt6.QtCore import QObject
 
 # 导入后端模块
 from backend import (
-    EnvFileManager, OllamaProxyServer, ClaudeCliRunner,
+    EnvFileManager, ClaudeCliRunner,
     list_openrouter_models, list_anthropic_models, list_ollama_models,
     SETTINGS_KEYS,
 )
@@ -102,6 +102,7 @@ class SoftwareUpdater:
                 capture_output=True, text=True, timeout=timeout,
                 startupinfo=self._si(),
                 encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             return {"ok": r.returncode == 0, "stdout": r.stdout.strip(), "stderr": r.stderr.strip(), "code": r.returncode}
         except subprocess.TimeoutExpired:
@@ -516,31 +517,35 @@ class BackendBridge(QObject):
             return
 
         try:
-            env_overrides = None
+            env_overrides = {}
             if provider == "ollama":
                 ollama_target = (settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").strip()
                 ollama_model = (settings.get("OLLAMA_MODEL", "") or "qwen3:8b").strip()
-                proxy_port = main.ollama_proxy.start(ollama_target, ollama_model)
-                proxy_alive = main.ollama_proxy.thread and main.ollama_proxy.thread.is_alive()
-                main.log_signal.emit(f"[代理] Ollama代理 端口={proxy_port} 存活={proxy_alive} 模型={ollama_model}", "#2196F3")
-                env_overrides = {
-                    "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{proxy_port}",
-                    "ANTHROPIC_API_KEY": "ollama-local",
-                    "ANTHROPIC_AUTH_TOKEN": "ollama-local",
-                    "ANTHROPIC_MODEL": ollama_model,
-                    "MODEL_PROVIDER": "anthropic",
-                }
-                if settings.get("AI_TEMPERATURE"):
-                    env_overrides["AI_TEMPERATURE"] = settings["AI_TEMPERATURE"]
-                    os.environ["AI_TEMPERATURE"] = settings["AI_TEMPERATURE"]
-                else:
-                    os.environ.pop("AI_TEMPERATURE", None)
-                if settings.get("AI_MAX_TOKENS"):
-                    env_overrides["AI_MAX_TOKENS"] = settings["AI_MAX_TOKENS"]
-                    os.environ["AI_MAX_TOKENS"] = settings["AI_MAX_TOKENS"]
-                else:
-                    os.environ.pop("AI_MAX_TOKENS", None)
-                main.log_signal.emit(f"[代理] Ollama代理已启动 端口={proxy_port} 模型={ollama_model}", "#2196F3")
+                main.log_signal.emit(f"[代理] 使用Node.js代理 模型={ollama_model} 目标={ollama_target}", "#2196F3")
+                env_overrides["MODEL_PROVIDER"] = "ollama"
+                env_overrides["OLLAMA_BASE_URL"] = ollama_target
+                env_overrides["OLLAMA_MODEL"] = ollama_model
+                main.log_signal.emit(f"[代理] Node.js代理模式 模型={ollama_model}", "#2196F3")
+            else:
+                env_overrides["MODEL_PROVIDER"] = "anthropic"
+                env_overrides.pop("OLLAMA_BASE_URL", None)
+                env_overrides.pop("OLLAMA_MODEL", None)
+
+            if settings.get("AI_TEMPERATURE"):
+                env_overrides["AI_TEMPERATURE"] = settings["AI_TEMPERATURE"]
+                os.environ["AI_TEMPERATURE"] = settings["AI_TEMPERATURE"]
+            else:
+                os.environ.pop("AI_TEMPERATURE", None)
+            if settings.get("AI_MAX_TOKENS"):
+                env_overrides["AI_MAX_TOKENS"] = settings["AI_MAX_TOKENS"]
+                os.environ["AI_MAX_TOKENS"] = settings["AI_MAX_TOKENS"]
+            else:
+                os.environ.pop("AI_MAX_TOKENS", None)
+            if settings.get("AI_LANGUAGE"):
+                env_overrides["AI_LANGUAGE"] = settings["AI_LANGUAGE"]
+                os.environ["AI_LANGUAGE"] = settings["AI_LANGUAGE"]
+            else:
+                os.environ.pop("AI_LANGUAGE", None)
 
             is_resuming = main.active_session_id in main.started_sessions
 
@@ -566,10 +571,18 @@ class BackendBridge(QObject):
             )
 
             if result.get("ok"):
+                cli_sid = result.get("cliSessionId", "")
+                if cli_sid and cli_sid != main.active_session_id:
+                    main.log_signal.emit(f"[CLI] 更新session_id: {main.active_session_id} -> {cli_sid}", "#2196F3")
+                    main.active_session_id = cli_sid
                 main.started_sessions.add(main.active_session_id)
             else:
+                cli_sid = result.get("cliSessionId", "")
+                if cli_sid and cli_sid != main.active_session_id:
+                    main.active_session_id = cli_sid
+                main.started_sessions.add(main.active_session_id)
                 err = result.get("error", "")[:200]
-                main.log_signal.emit(f"[CLI错误] {err}", "#F44336")
+                main.log_signal.emit(f"[CLI 错误] {err}", "#F44336")
                 if err and not result.get("text"):
                     self.deltaReceived.emit(json.dumps({"text": f"❌ {err}"}))
 
@@ -744,9 +757,11 @@ class EnvInstaller:
             if os.path.exists(self.bun_extract):
                 env["PATH"] = self.bun_extract + ";" + env.get("PATH", "")
             subprocess.run([self.bun_exe, "config", "set", "registry", "https://registry.npmmirror.com"],
-                           cwd=self.base_dir, env=env, startupinfo=self._si(), capture_output=True, timeout=30)
+                           cwd=self.base_dir, env=env, startupinfo=self._si(), capture_output=True, timeout=30,
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             r = subprocess.run([self.bun_exe, "install"], cwd=self.base_dir, env=env,
-                               startupinfo=self._si(), capture_output=True, text=True, timeout=300)
+                               startupinfo=self._si(), capture_output=True, text=True, timeout=300,
+                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if r.returncode == 0:
                 self.log("✓ 依赖安装完成")
                 return True
@@ -771,7 +786,8 @@ class EnvInstaller:
             if os.path.exists(self.bun_extract):
                 env["PATH"] = self.bun_extract + ";" + env.get("PATH", "")
             r = subprocess.run([self.bun_exe, "run", "desktop:build"], cwd=self.base_dir, env=env,
-                               startupinfo=self._si(), capture_output=True, text=True, timeout=120)
+                               startupinfo=self._si(), capture_output=True, text=True, timeout=120,
+                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if r.returncode == 0:
                 self.log("✓ 前端构建完成")
                 return True
@@ -840,7 +856,6 @@ class MainWindow(QMainWindow):
 
         # 初始化后端（desktop/、nodejs/ 等资源在 app_dir 下）
         self.env_manager = EnvFileManager(os.path.join(self.app_dir, ".env"))
-        self.ollama_proxy = OllamaProxyServer()
         self.cli_runner = ClaudeCliRunner(
             self.app_dir,
             os.path.join(self.app_dir, "nodejs", NODE_DIR_NAME),
@@ -1548,7 +1563,6 @@ class MainWindow(QMainWindow):
 
     # ── 关闭 ──
     def closeEvent(self, event):
-        self.ollama_proxy.stop()
         event.accept()
 
 
