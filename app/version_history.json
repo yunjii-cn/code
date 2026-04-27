@@ -1,135 +1,516 @@
-{
-  "云集智能编程工作站v2026.04.21.2000": {
-    "version": "云集智能编程工作站v2026.04.21.2000",
+[
+  {
+    "version": "2026.04.27.1803",
+    "name": "云集智能编程工作站v2026.04.27.1803",
     "changes": [
-      "前端集成到EXE，QWebEngineView替代Electron，统一终端架构"
+      "版本管理：HTTP API获取远程版本，EXE关联git commit，切换时同步回滚代码"
     ],
-    "build_time": "2026-04-21T20:03:06.254578",
-    "version_number": "2026.04.21.2000"
+    "build_time": "2026-04-27T18:05:22.851718",
+    "git_commit": "496ef8e"
   },
-  "云集智能编程工作站v2026.04.21.2019": {
-    "version": "云集智能编程工作站v2026.04.21.2019",
+  {
+    "version": "云集智能编程工作站v2026.04.27.0543",
     "changes": [
-      "前端集成到EXE，QWebEngineView替代Electron，统一终端架构，onedir打包"
+      "版本管理：从远程仓库获取版本信息，对比本地与远程版本差异，显示远程新版本"
     ],
-    "build_time": "2026-04-21T20:21:15.298944",
-    "version_number": "2026.04.21.2019"
+    "build_time": "2026-04-27T05:45:20.231341",
+    "version_number": "2026.04.27.0543",
+    "name": "云集智能编程工作站v2026.04.27.0543"
   },
-  "云集智能编程工作站v2026.04.21.2023": {
-    "version": "云集智能编程工作站v2026.04.21.2023",
+  {
+    "version": "云集智能编程工作站v2026.04.27.0527",
     "changes": [
-      "修复QtWebEngine DLL路径，PyInstaller打包后正确加载WebEngine"
+      "版本管理页面：卡片式版本历史替代运行日志，显示变更记录和版本切换"
     ],
-    "build_time": "2026-04-21T20:25:45.189187",
-    "version_number": "2026.04.21.2023"
+    "build_time": "2026-04-27T05:29:02.171175",
+    "version_number": "2026.04.27.0527",
+    "name": "云集智能编程工作站v2026.04.27.0527"
   },
-  "云集智能编程工作站v2026.04.21.2043": {
-    "version": "云集智能编程工作站v2026.04.21.2043",
+  {
+    "version": "云集智能编程工作站v2026.04.27.0507",
     "changes": [
-      "修复PyQt6版本不匹配导致QtWebEngine DLL加载失败"
+      "修复AI语言设置不生效问题，强制注入中文指令到system prompt"
     ],
-    "build_time": "2026-04-21T20:45:22.641548",
-    "version_number": "2026.04.21.2043"
+    "build_time": "2026-04-27T05:09:16.762709",
+    "version_number": "2026.04.27.0507",
+    "name": "云集智能编程工作站v2026.04.27.0507"
   },
-  "云集智能编程工作站v2026.04.21.2048": {
-    "version": "云集智能编程工作站v2026.04.21.2048",
+  {
+    "version": "云集智能编程工作站v2026.04.27.0455",
     "changes": [
-      "修复PyQt6版本不匹配",
-      "更新目录结构对齐参考项目",
-      "更新开发指南"
+      "Node.js代理替代Python代理，修复SSE流式事件缓冲问题"
     ],
-    "build_time": "2026-04-21T20:50:01.815535",
-    "version_number": "2026.04.21.2048"
+    "build_time": "2026-04-27T04:57:11.986287",
+    "version_number": "2026.04.27.0455",
+    "name": "云集智能编程工作站v2026.04.27.0455"
   },
-  "云集智能编程工作站v2026.04.22.0057": {
-    "version": "云集智能编程工作站v2026.04.22.0057",
+  {
+    "version": "云集智能编程工作站v2026.04.26.1633",
     "changes": [
-      "feat:添加软件更新功能",
-      "docs:更新开发指南对齐新仓库结构",
-      "fix:PyQt6版本匹配"
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
     ],
-    "build_time": "2026-04-22T00:59:22.672062",
-    "version_number": "2026.04.22.0057"
+    "build_time": "2026-04-26T16:34:52.586181",
+    "version_number": "2026.04.26.1633",
+    "name": "云集智能编程工作站v2026.04.26.1633"
   },
-  "云集智能编程工作站v2026.04.22.0122": {
-    "version": "云集智能编程工作站v2026.04.22.0122",
+  {
+    "version": "云集智能编程工作站v2026.04.26.0508",
     "changes": [
-      "feat:QStackedWidget页面切换架构",
-      "feat:部署维护独立栏目页面",
-      "feat:软件更新独立栏目页面",
-      "refactor:EXE输出到dev/目录"
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
     ],
-    "build_time": "2026-04-22T01:24:42.836834",
-    "version_number": "2026.04.22.0122"
+    "build_time": "2026-04-26T05:10:45.631141",
+    "version_number": "2026.04.26.0508",
+    "name": "云集智能编程工作站v2026.04.26.0508"
   },
-  "云集智能编程工作站v2026.04.22.0141": {
-    "version": "云集智能编程工作站v2026.04.22.0141",
+  {
+    "version": "云集智能编程工作站v2026.04.26.0443",
     "changes": [
-      "refactor:EXE直接放在dev/app/下",
-      "refactor:目录架构对齐参考项目",
-      "app/作为资源整合包+开发目录",
-      "ver/作为稳定版EXE"
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
     ],
-    "build_time": "2026-04-22T01:43:46.973835",
-    "version_number": "2026.04.22.0141"
+    "build_time": "2026-04-26T04:45:06.116603",
+    "version_number": "2026.04.26.0443",
+    "name": "云集智能编程工作站v2026.04.26.0443"
   },
-  "云集智能编程工作站v2026.04.22.0158": {
-    "version": "云集智能编程工作站v2026.04.22.0158",
+  {
+    "version": "云集智能编程工作站v2026.04.26.0133",
     "changes": [
-      "refactor:EXE放在dev/根目录",
-      "app/纯资源目录对齐参考项目",
-      "_internal/在dev/下",
-      "新增app_dir路径变量"
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
     ],
-    "build_time": "2026-04-22T01:59:55.216691",
-    "version_number": "2026.04.22.0158"
+    "build_time": "2026-04-26T01:35:30.702079",
+    "version_number": "2026.04.26.0133",
+    "name": "云集智能编程工作站v2026.04.26.0133"
   },
-  "云集智能编程工作站v2026.04.22.0223": {
-    "version": "云集智能编程工作站v2026.04.22.0223",
+  {
+    "version": "云集智能编程工作站v2026.04.26.0029",
     "changes": [
-      "UI优化",
-      "去除标题栏标题和就绪灯三个按钮占满",
-      "去除Vue顶栏hero区域节省高度",
-      "部署维护环境状态紧凑化",
-      "图标路径修正app/icon.ico"
+      "隐藏_internal文件夹",
+      "优化目录结构",
+      "app文件夹为用户可见资源"
     ],
-    "build_time": "2026-04-22T02:25:11.841226",
-    "version_number": "2026.04.22.0223"
+    "build_time": "2026-04-26T00:30:55.636424",
+    "version_number": "2026.04.26.0029",
+    "name": "云集智能编程工作站v2026.04.26.0029"
   },
-  "云集智能编程工作站v2026.04.22.0326": {
-    "version": "云集智能编程工作站v2026.04.22.0326",
+  {
+    "version": "云集智能编程工作站v2026.04.25.1653",
     "changes": [
-      "修复闪屏",
-      "模式按钮替代select",
-      "Ollama模型列表按钮化+工具能力标记",
-      "保留旧版EXE"
+      "修复 AI 回答内容被截断问题",
+      "优化流式响应 buffer 处理",
+      "确保完整发送 message_stop 事件"
     ],
-    "build_time": "2026-04-22T03:27:22.944089",
-    "version_number": "2026.04.22.0326"
+    "build_time": "2026-04-25T16:54:49.299021",
+    "version_number": "2026.04.25.1653",
+    "name": "云集智能编程工作站v2026.04.25.1653"
   },
-  "云集智能编程工作站v2026.04.22.0408": {
-    "version": "云集智能编程工作站v2026.04.22.0408",
+  {
+    "version": "云集智能编程工作站v2026.04.25.1628",
     "changes": [
-      "导航栏Tab式设计",
-      "底部蓝色指示条",
-      "左右留边8px",
-      "整体性导航菜单"
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
     ],
-    "build_time": "2026-04-22T04:09:29.218623",
-    "version_number": "2026.04.22.0408"
+    "build_time": "2026-04-25T16:29:59.456113",
+    "version_number": "2026.04.25.1628",
+    "name": "云集智能编程工作站v2026.04.25.1628"
   },
-  "云集智能编程工作站v2026.04.22.0426": {
-    "version": "云集智能编程工作站v2026.04.22.0426",
+  {
+    "version": "云集智能编程工作站v2026.04.25.0737",
     "changes": [
-      "修复Ollama模型列表加载:添加pyqtSlot装饰器",
-      "listModels改为异步线程执行",
-      "添加modelsLoaded信号",
-      "前端调试日志"
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
     ],
-    "build_time": "2026-04-22T04:27:54.110998",
-    "version_number": "2026.04.22.0426"
+    "build_time": "2026-04-25T07:38:57.096339",
+    "version_number": "2026.04.25.0737",
+    "name": "云集智能编程工作站v2026.04.25.0737"
   },
-  "云集智能编程工作站v2026.04.22.0645": {
+  {
+    "version": "云集智能编程工作站v2026.04.25.0459",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-25T05:01:02.786306",
+    "version_number": "2026.04.25.0459",
+    "name": "云集智能编程工作站v2026.04.25.0459"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.25.0415",
+    "changes": [
+      "修复CLI会话恢复问题",
+      "修复代理流式响应中断",
+      "修复Session ID already in use错误",
+      "改进错误显示和日志"
+    ],
+    "build_time": "2026-04-25T04:16:38.640925",
+    "version_number": "2026.04.25.0415",
+    "name": "云集智能编程工作站v2026.04.25.0415"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.25.0345",
+    "changes": [
+      "修复第二次对话报错：捕获CLI session ID、改进错误显示、添加代理日志"
+    ],
+    "build_time": "2026-04-25T03:47:41.363136",
+    "version_number": "2026.04.25.0345",
+    "name": "云集智能编程工作站v2026.04.25.0345"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.1523",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T15:24:47.790348",
+    "version_number": "2026.04.24.1523",
+    "name": "云集智能编程工作站v2026.04.24.1523"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0719",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T07:21:06.402161",
+    "version_number": "2026.04.24.0719",
+    "name": "云集智能编程工作站v2026.04.24.0719"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0653",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T06:56:00.019134",
+    "version_number": "2026.04.24.0653",
+    "name": "云集智能编程工作站v2026.04.24.0653"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0626",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T06:28:20.837234",
+    "version_number": "2026.04.24.0626",
+    "name": "云集智能编程工作站v2026.04.24.0626"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0615",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T06:17:10.950043",
+    "version_number": "2026.04.24.0615",
+    "name": "云集智能编程工作站v2026.04.24.0615"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0605",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T06:06:54.915043",
+    "version_number": "2026.04.24.0605",
+    "name": "云集智能编程工作站v2026.04.24.0605"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0548",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T05:49:56.984102",
+    "version_number": "2026.04.24.0548",
+    "name": "云集智能编程工作站v2026.04.24.0548"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0531",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T05:33:42.758838",
+    "version_number": "2026.04.24.0531",
+    "name": "云集智能编程工作站v2026.04.24.0531"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0311",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T03:13:15.314947",
+    "version_number": "2026.04.24.0311",
+    "name": "云集智能编程工作站v2026.04.24.0311"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.24.0259",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-24T03:00:38.209343",
+    "version_number": "2026.04.24.0259",
+    "name": "云集智能编程工作站v2026.04.24.0259"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0823",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-23T08:24:59.898712",
+    "version_number": "2026.04.23.0823",
+    "name": "云集智能编程工作站v2026.04.23.0823"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0802",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-23T08:04:29.555598",
+    "version_number": "2026.04.23.0802",
+    "name": "云集智能编程工作站v2026.04.23.0802"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0712",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-23T07:13:50.850338",
+    "version_number": "2026.04.23.0712",
+    "name": "云集智能编程工作站v2026.04.23.0712"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0707",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-04-23T07:09:17.934334",
+    "version_number": "2026.04.23.0707",
+    "name": "云集智能编程工作站v2026.04.23.0707"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0608",
+    "changes": [
+      "修复AI语言设置不生效",
+      "Ollama代理强制注入语言指令到system prompt末尾"
+    ],
+    "build_time": "2026-04-23T06:10:28.614248",
+    "version_number": "2026.04.23.0608",
+    "name": "云集智能编程工作站v2026.04.23.0608"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0600",
+    "changes": [
+      "修复默认模型为可用模型",
+      "清理Ollama损坏blob",
+      "恢复会话上下文连续性"
+    ],
+    "build_time": "2026-04-23T06:02:07.256100",
+    "version_number": "2026.04.23.0600",
+    "name": "云集智能编程工作站v2026.04.23.0600"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0521",
+    "changes": [
+      "恢复会话上下文连续性",
+      "新会话按钮",
+      "修复Session ID already in use"
+    ],
+    "build_time": "2026-04-23T05:23:01.004856",
+    "version_number": "2026.04.23.0521",
+    "name": "云集智能编程工作站v2026.04.23.0521"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0515",
+    "changes": [
+      "修复Session ID already in use错误",
+      "每次对话使用新session"
+    ],
+    "build_time": "2026-04-23T05:16:29.193218",
+    "version_number": "2026.04.23.0515",
+    "name": "云集智能编程工作站v2026.04.23.0515"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0340",
+    "changes": [
+      "部署维护增加运行日志和调试日志标签页",
+      "日志实时显示",
+      "修复Ollama代理参数传递"
+    ],
+    "build_time": "2026-04-23T03:41:36.516335",
+    "version_number": "2026.04.23.0340",
+    "name": "云集智能编程工作站v2026.04.23.0340"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0307",
+    "changes": [
+      "修复Ollama代理参数传递",
+      "自动终止旧版EXE进程",
+      "构建脚本文件锁处理"
+    ],
+    "build_time": "2026-04-23T03:08:52.595550",
+    "version_number": "2026.04.23.0307",
+    "name": "云集智能编程工作站v2026.04.23.0307"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.23.0245",
+    "changes": [
+      "UI重构:模型列表默认显示",
+      "per-model参数配置",
+      "行内设置面板",
+      "自动配置按钮",
+      "硬件检测API",
+      "模型size/family/paramCount信息"
+    ],
+    "build_time": "2026-04-23T02:46:52.553653",
+    "version_number": "2026.04.23.0245",
+    "name": "云集智能编程工作站v2026.04.23.0245"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.2305",
+    "changes": [
+      "UI重构:模型列表默认显示",
+      "per-model参数配置",
+      "行内设置面板",
+      "自动配置按钮",
+      "硬件检测API",
+      "模型size/family/paramCount信息"
+    ],
+    "build_time": "2026-04-22T23:07:07.640322",
+    "version_number": "2026.04.22.2305",
+    "name": "云集智能编程工作站v2026.04.22.2305"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.1611",
+    "changes": [
+      "添加AI语言选择(默认中文)",
+      "添加Temperature参数",
+      "添加MaxTokens参数",
+      "添加自定义系统提示词",
+      "CLI传递system-prompt",
+      "Ollama代理支持temperature和num_predict"
+    ],
+    "build_time": "2026-04-22T16:12:46.994753",
+    "version_number": "2026.04.22.1611",
+    "name": "云集智能编程工作站v2026.04.22.1611"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.0847",
+    "changes": [
+      "添加AI语言选择(默认中文)",
+      "添加Temperature参数",
+      "添加MaxTokens参数",
+      "添加自定义系统提示词",
+      "CLI传递system-prompt",
+      "Ollama代理支持temperature和num_predict"
+    ],
+    "build_time": "2026-04-22T08:48:50.742669",
+    "version_number": "2026.04.22.0847",
+    "name": "云集智能编程工作站v2026.04.22.0847"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.0758",
+    "changes": [
+      "修复deltaReceived/statusReceived竞态条件",
+      "前端500ms延迟检查空文本",
+      "CLI错误通过delta显示",
+      "后端300ms延迟发statusReceived",
+      "前端重新构建"
+    ],
+    "build_time": "2026-04-22T07:59:56.257596",
+    "version_number": "2026.04.22.0758",
+    "name": "云集智能编程工作站v2026.04.22.0758"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.0754",
+    "changes": [
+      "修复deltaReceived/statusReceived竞态条件",
+      "前端500ms延迟检查空文本",
+      "CLI错误通过delta显示",
+      "后端300ms延迟发statusReceived",
+      "前端重新构建"
+    ],
+    "build_time": "2026-04-22T07:56:30.461471",
+    "version_number": "2026.04.22.0754",
+    "name": "云集智能编程工作站v2026.04.22.0754"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.0739",
+    "changes": [
+      "修复stdout读取循环卡死导致is_busy永久为True",
+      "改用readline+进程状态检查",
+      "添加stderr异步读取线程",
+      "日志改为追加模式",
+      "进程退出后5秒超时退出循环"
+    ],
+    "build_time": "2026-04-22T07:41:29.535707",
+    "version_number": "2026.04.22.0739",
+    "name": "云集智能编程工作站v2026.04.22.0739"
+  },
+  {
+    "version": "云集智能编程工作站v2026.04.22.0719",
+    "changes": [
+      "修复A request is already running错误",
+      "添加try/finally保证is_busy重置",
+      "添加on_proc回调支持停止CLI进程",
+      "添加is_busy僵尸状态自动恢复"
+    ],
+    "build_time": "2026-04-22T07:21:23.461837",
+    "version_number": "2026.04.22.0719",
+    "name": "云集智能编程工作站v2026.04.22.0719"
+  },
+  {
     "version": "云集智能编程工作站v2026.04.22.0645",
     "changes": [
       "修复AI对话模型未返回文本问题",
@@ -141,465 +522,150 @@
       "修复parent-proxy.js兼容性"
     ],
     "build_time": "2026-04-22T06:47:26.735031",
-    "version_number": "2026.04.22.0645"
+    "version_number": "2026.04.22.0645",
+    "name": "云集智能编程工作站v2026.04.22.0645"
   },
-  "云集智能编程工作站v2026.04.22.0719": {
-    "version": "云集智能编程工作站v2026.04.22.0719",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0426",
     "changes": [
-      "修复A request is already running错误",
-      "添加try/finally保证is_busy重置",
-      "添加on_proc回调支持停止CLI进程",
-      "添加is_busy僵尸状态自动恢复"
+      "修复Ollama模型列表加载:添加pyqtSlot装饰器",
+      "listModels改为异步线程执行",
+      "添加modelsLoaded信号",
+      "前端调试日志"
     ],
-    "build_time": "2026-04-22T07:21:23.461837",
-    "version_number": "2026.04.22.0719"
+    "build_time": "2026-04-22T04:27:54.110998",
+    "version_number": "2026.04.22.0426",
+    "name": "云集智能编程工作站v2026.04.22.0426"
   },
-  "云集智能编程工作站v2026.04.22.0739": {
-    "version": "云集智能编程工作站v2026.04.22.0739",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0408",
     "changes": [
-      "修复stdout读取循环卡死导致is_busy永久为True",
-      "改用readline+进程状态检查",
-      "添加stderr异步读取线程",
-      "日志改为追加模式",
-      "进程退出后5秒超时退出循环"
+      "导航栏Tab式设计",
+      "底部蓝色指示条",
+      "左右留边8px",
+      "整体性导航菜单"
     ],
-    "build_time": "2026-04-22T07:41:29.535707",
-    "version_number": "2026.04.22.0739"
+    "build_time": "2026-04-22T04:09:29.218623",
+    "version_number": "2026.04.22.0408",
+    "name": "云集智能编程工作站v2026.04.22.0408"
   },
-  "云集智能编程工作站v2026.04.22.0754": {
-    "version": "云集智能编程工作站v2026.04.22.0754",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0326",
     "changes": [
-      "修复deltaReceived/statusReceived竞态条件",
-      "前端500ms延迟检查空文本",
-      "CLI错误通过delta显示",
-      "后端300ms延迟发statusReceived",
-      "前端重新构建"
+      "修复闪屏",
+      "模式按钮替代select",
+      "Ollama模型列表按钮化+工具能力标记",
+      "保留旧版EXE"
     ],
-    "build_time": "2026-04-22T07:56:30.461471",
-    "version_number": "2026.04.22.0754"
+    "build_time": "2026-04-22T03:27:22.944089",
+    "version_number": "2026.04.22.0326",
+    "name": "云集智能编程工作站v2026.04.22.0326"
   },
-  "云集智能编程工作站v2026.04.22.0758": {
-    "version": "云集智能编程工作站v2026.04.22.0758",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0223",
     "changes": [
-      "修复deltaReceived/statusReceived竞态条件",
-      "前端500ms延迟检查空文本",
-      "CLI错误通过delta显示",
-      "后端300ms延迟发statusReceived",
-      "前端重新构建"
+      "UI优化",
+      "去除标题栏标题和就绪灯三个按钮占满",
+      "去除Vue顶栏hero区域节省高度",
+      "部署维护环境状态紧凑化",
+      "图标路径修正app/icon.ico"
     ],
-    "build_time": "2026-04-22T07:59:56.257596",
-    "version_number": "2026.04.22.0758"
+    "build_time": "2026-04-22T02:25:11.841226",
+    "version_number": "2026.04.22.0223",
+    "name": "云集智能编程工作站v2026.04.22.0223"
   },
-  "云集智能编程工作站v2026.04.22.0847": {
-    "version": "云集智能编程工作站v2026.04.22.0847",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0158",
     "changes": [
-      "添加AI语言选择(默认中文)",
-      "添加Temperature参数",
-      "添加MaxTokens参数",
-      "添加自定义系统提示词",
-      "CLI传递system-prompt",
-      "Ollama代理支持temperature和num_predict"
+      "refactor:EXE放在dev/根目录",
+      "app/纯资源目录对齐参考项目",
+      "_internal/在dev/下",
+      "新增app_dir路径变量"
     ],
-    "build_time": "2026-04-22T08:48:50.742669",
-    "version_number": "2026.04.22.0847"
+    "build_time": "2026-04-22T01:59:55.216691",
+    "version_number": "2026.04.22.0158",
+    "name": "云集智能编程工作站v2026.04.22.0158"
   },
-  "云集智能编程工作站v2026.04.22.1611": {
-    "version": "云集智能编程工作站v2026.04.22.1611",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0141",
     "changes": [
-      "添加AI语言选择(默认中文)",
-      "添加Temperature参数",
-      "添加MaxTokens参数",
-      "添加自定义系统提示词",
-      "CLI传递system-prompt",
-      "Ollama代理支持temperature和num_predict"
+      "refactor:EXE直接放在dev/app/下",
+      "refactor:目录架构对齐参考项目",
+      "app/作为资源整合包+开发目录",
+      "ver/作为稳定版EXE"
     ],
-    "build_time": "2026-04-22T16:12:46.994753",
-    "version_number": "2026.04.22.1611"
+    "build_time": "2026-04-22T01:43:46.973835",
+    "version_number": "2026.04.22.0141",
+    "name": "云集智能编程工作站v2026.04.22.0141"
   },
-  "云集智能编程工作站v2026.04.22.2305": {
-    "version": "云集智能编程工作站v2026.04.22.2305",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0122",
     "changes": [
-      "UI重构:模型列表默认显示",
-      "per-model参数配置",
-      "行内设置面板",
-      "自动配置按钮",
-      "硬件检测API",
-      "模型size/family/paramCount信息"
+      "feat:QStackedWidget页面切换架构",
+      "feat:部署维护独立栏目页面",
+      "feat:软件更新独立栏目页面",
+      "refactor:EXE输出到dev/目录"
     ],
-    "build_time": "2026-04-22T23:07:07.640322",
-    "version_number": "2026.04.22.2305"
+    "build_time": "2026-04-22T01:24:42.836834",
+    "version_number": "2026.04.22.0122",
+    "name": "云集智能编程工作站v2026.04.22.0122"
   },
-  "云集智能编程工作站v2026.04.23.0245": {
-    "version": "云集智能编程工作站v2026.04.23.0245",
+  {
+    "version": "云集智能编程工作站v2026.04.22.0057",
     "changes": [
-      "UI重构:模型列表默认显示",
-      "per-model参数配置",
-      "行内设置面板",
-      "自动配置按钮",
-      "硬件检测API",
-      "模型size/family/paramCount信息"
+      "feat:添加软件更新功能",
+      "docs:更新开发指南对齐新仓库结构",
+      "fix:PyQt6版本匹配"
     ],
-    "build_time": "2026-04-23T02:46:52.553653",
-    "version_number": "2026.04.23.0245"
+    "build_time": "2026-04-22T00:59:22.672062",
+    "version_number": "2026.04.22.0057",
+    "name": "云集智能编程工作站v2026.04.22.0057"
   },
-  "云集智能编程工作站v2026.04.23.0307": {
-    "version": "云集智能编程工作站v2026.04.23.0307",
+  {
+    "version": "云集智能编程工作站v2026.04.21.2048",
     "changes": [
-      "修复Ollama代理参数传递",
-      "自动终止旧版EXE进程",
-      "构建脚本文件锁处理"
+      "修复PyQt6版本不匹配",
+      "更新目录结构对齐参考项目",
+      "更新开发指南"
     ],
-    "build_time": "2026-04-23T03:08:52.595550",
-    "version_number": "2026.04.23.0307"
+    "build_time": "2026-04-21T20:50:01.815535",
+    "version_number": "2026.04.21.2048",
+    "name": "云集智能编程工作站v2026.04.21.2048"
   },
-  "云集智能编程工作站v2026.04.23.0340": {
-    "version": "云集智能编程工作站v2026.04.23.0340",
+  {
+    "version": "云集智能编程工作站v2026.04.21.2043",
     "changes": [
-      "部署维护增加运行日志和调试日志标签页",
-      "日志实时显示",
-      "修复Ollama代理参数传递"
+      "修复PyQt6版本不匹配导致QtWebEngine DLL加载失败"
     ],
-    "build_time": "2026-04-23T03:41:36.516335",
-    "version_number": "2026.04.23.0340"
+    "build_time": "2026-04-21T20:45:22.641548",
+    "version_number": "2026.04.21.2043",
+    "name": "云集智能编程工作站v2026.04.21.2043"
   },
-  "云集智能编程工作站v2026.04.23.0515": {
-    "version": "云集智能编程工作站v2026.04.23.0515",
+  {
+    "version": "云集智能编程工作站v2026.04.21.2023",
     "changes": [
-      "修复Session ID already in use错误",
-      "每次对话使用新session"
+      "修复QtWebEngine DLL路径，PyInstaller打包后正确加载WebEngine"
     ],
-    "build_time": "2026-04-23T05:16:29.193218",
-    "version_number": "2026.04.23.0515"
+    "build_time": "2026-04-21T20:25:45.189187",
+    "version_number": "2026.04.21.2023",
+    "name": "云集智能编程工作站v2026.04.21.2023"
   },
-  "云集智能编程工作站v2026.04.23.0521": {
-    "version": "云集智能编程工作站v2026.04.23.0521",
+  {
+    "version": "云集智能编程工作站v2026.04.21.2019",
     "changes": [
-      "恢复会话上下文连续性",
-      "新会话按钮",
-      "修复Session ID already in use"
+      "前端集成到EXE，QWebEngineView替代Electron，统一终端架构，onedir打包"
     ],
-    "build_time": "2026-04-23T05:23:01.004856",
-    "version_number": "2026.04.23.0521"
+    "build_time": "2026-04-21T20:21:15.298944",
+    "version_number": "2026.04.21.2019",
+    "name": "云集智能编程工作站v2026.04.21.2019"
   },
-  "云集智能编程工作站v2026.04.23.0600": {
-    "version": "云集智能编程工作站v2026.04.23.0600",
+  {
+    "version": "云集智能编程工作站v2026.04.21.2000",
     "changes": [
-      "修复默认模型为可用模型",
-      "清理Ollama损坏blob",
-      "恢复会话上下文连续性"
+      "前端集成到EXE，QWebEngineView替代Electron，统一终端架构"
     ],
-    "build_time": "2026-04-23T06:02:07.256100",
-    "version_number": "2026.04.23.0600"
-  },
-  "云集智能编程工作站v2026.04.23.0608": {
-    "version": "云集智能编程工作站v2026.04.23.0608",
-    "changes": [
-      "修复AI语言设置不生效",
-      "Ollama代理强制注入语言指令到system prompt末尾"
-    ],
-    "build_time": "2026-04-23T06:10:28.614248",
-    "version_number": "2026.04.23.0608"
-  },
-  "云集智能编程工作站v2026.04.23.0707": {
-    "version": "云集智能编程工作站v2026.04.23.0707",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-23T07:09:17.934334",
-    "version_number": "2026.04.23.0707"
-  },
-  "云集智能编程工作站v2026.04.23.0712": {
-    "version": "云集智能编程工作站v2026.04.23.0712",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-23T07:13:50.850338",
-    "version_number": "2026.04.23.0712"
-  },
-  "云集智能编程工作站v2026.04.23.0802": {
-    "version": "云集智能编程工作站v2026.04.23.0802",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-23T08:04:29.555598",
-    "version_number": "2026.04.23.0802"
-  },
-  "云集智能编程工作站v2026.04.23.0823": {
-    "version": "云集智能编程工作站v2026.04.23.0823",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-23T08:24:59.898712",
-    "version_number": "2026.04.23.0823"
-  },
-  "云集智能编程工作站v2026.04.24.0259": {
-    "version": "云集智能编程工作站v2026.04.24.0259",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T03:00:38.209343",
-    "version_number": "2026.04.24.0259"
-  },
-  "云集智能编程工作站v2026.04.24.0311": {
-    "version": "云集智能编程工作站v2026.04.24.0311",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T03:13:15.314947",
-    "version_number": "2026.04.24.0311"
-  },
-  "云集智能编程工作站v2026.04.24.0531": {
-    "version": "云集智能编程工作站v2026.04.24.0531",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T05:33:42.758838",
-    "version_number": "2026.04.24.0531"
-  },
-  "云集智能编程工作站v2026.04.24.0548": {
-    "version": "云集智能编程工作站v2026.04.24.0548",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T05:49:56.984102",
-    "version_number": "2026.04.24.0548"
-  },
-  "云集智能编程工作站v2026.04.24.0605": {
-    "version": "云集智能编程工作站v2026.04.24.0605",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T06:06:54.915043",
-    "version_number": "2026.04.24.0605"
-  },
-  "云集智能编程工作站v2026.04.24.0615": {
-    "version": "云集智能编程工作站v2026.04.24.0615",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T06:17:10.950043",
-    "version_number": "2026.04.24.0615"
-  },
-  "云集智能编程工作站v2026.04.24.0626": {
-    "version": "云集智能编程工作站v2026.04.24.0626",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T06:28:20.837234",
-    "version_number": "2026.04.24.0626"
-  },
-  "云集智能编程工作站v2026.04.24.0653": {
-    "version": "云集智能编程工作站v2026.04.24.0653",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T06:56:00.019134",
-    "version_number": "2026.04.24.0653"
-  },
-  "云集智能编程工作站v2026.04.24.0719": {
-    "version": "云集智能编程工作站v2026.04.24.0719",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T07:21:06.402161",
-    "version_number": "2026.04.24.0719"
-  },
-  "云集智能编程工作站v2026.04.24.1523": {
-    "version": "云集智能编程工作站v2026.04.24.1523",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-24T15:24:47.790348",
-    "version_number": "2026.04.24.1523"
-  },
-  "云集智能编程工作站v2026.04.25.0345": {
-    "version": "云集智能编程工作站v2026.04.25.0345",
-    "changes": [
-      "修复第二次对话报错：捕获CLI session ID、改进错误显示、添加代理日志"
-    ],
-    "build_time": "2026-04-25T03:47:41.363136",
-    "version_number": "2026.04.25.0345"
-  },
-  "云集智能编程工作站v2026.04.25.0415": {
-    "version": "云集智能编程工作站v2026.04.25.0415",
-    "changes": [
-      "修复CLI会话恢复问题",
-      "修复代理流式响应中断",
-      "修复Session ID already in use错误",
-      "改进错误显示和日志"
-    ],
-    "build_time": "2026-04-25T04:16:38.640925",
-    "version_number": "2026.04.25.0415"
-  },
-  "云集智能编程工作站v2026.04.25.0459": {
-    "version": "云集智能编程工作站v2026.04.25.0459",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-25T05:01:02.786306",
-    "version_number": "2026.04.25.0459"
-  },
-  "云集智能编程工作站v2026.04.25.0737": {
-    "version": "云集智能编程工作站v2026.04.25.0737",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-25T07:38:57.096339",
-    "version_number": "2026.04.25.0737"
-  },
-  "云集智能编程工作站v2026.04.25.1628": {
-    "version": "云集智能编程工作站v2026.04.25.1628",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-25T16:29:59.456113",
-    "version_number": "2026.04.25.1628"
-  },
-  "云集智能编程工作站v2026.04.25.1653": {
-    "version": "云集智能编程工作站v2026.04.25.1653",
-    "changes": [
-      "修复 AI 回答内容被截断问题",
-      "优化流式响应 buffer 处理",
-      "确保完整发送 message_stop 事件"
-    ],
-    "build_time": "2026-04-25T16:54:49.299021",
-    "version_number": "2026.04.25.1653"
-  },
-  "云集智能编程工作站v2026.04.26.0029": {
-    "version": "云集智能编程工作站v2026.04.26.0029",
-    "changes": [
-      "隐藏_internal文件夹",
-      "优化目录结构",
-      "app文件夹为用户可见资源"
-    ],
-    "build_time": "2026-04-26T00:30:55.636424",
-    "version_number": "2026.04.26.0029"
-  },
-  "云集智能编程工作站v2026.04.26.0133": {
-    "version": "云集智能编程工作站v2026.04.26.0133",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-26T01:35:30.702079",
-    "version_number": "2026.04.26.0133"
-  },
-  "云集智能编程工作站v2026.04.26.0443": {
-    "version": "云集智能编程工作站v2026.04.26.0443",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-26T04:45:06.116603",
-    "version_number": "2026.04.26.0443"
-  },
-  "云集智能编程工作站v2026.04.26.0508": {
-    "version": "云集智能编程工作站v2026.04.26.0508",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-26T05:10:45.631141",
-    "version_number": "2026.04.26.0508"
-  },
-  "云集智能编程工作站v2026.04.26.1633": {
-    "version": "云集智能编程工作站v2026.04.26.1633",
-    "changes": [
-      "前端集成到EXE (QWebEngineView替代Electron)",
-      "统一终端架构，部署维护成为EXE内置功能",
-      "QWebChannel替代Electron IPC",
-      "backend.py替代main.cjs后端逻辑"
-    ],
-    "build_time": "2026-04-26T16:34:52.586181",
-    "version_number": "2026.04.26.1633"
-  },
-  "云集智能编程工作站v2026.04.27.0455": {
-    "version": "云集智能编程工作站v2026.04.27.0455",
-    "changes": [
-      "Node.js代理替代Python代理，修复SSE流式事件缓冲问题"
-    ],
-    "build_time": "2026-04-27T04:57:11.986287",
-    "version_number": "2026.04.27.0455"
-  },
-  "云集智能编程工作站v2026.04.27.0507": {
-    "version": "云集智能编程工作站v2026.04.27.0507",
-    "changes": [
-      "修复AI语言设置不生效问题，强制注入中文指令到system prompt"
-    ],
-    "build_time": "2026-04-27T05:09:16.762709",
-    "version_number": "2026.04.27.0507"
-  },
-  "云集智能编程工作站v2026.04.27.0527": {
-    "version": "云集智能编程工作站v2026.04.27.0527",
-    "changes": [
-      "版本管理页面：卡片式版本历史替代运行日志，显示变更记录和版本切换"
-    ],
-    "build_time": "2026-04-27T05:29:02.171175",
-    "version_number": "2026.04.27.0527"
-  },
-  "云集智能编程工作站v2026.04.27.0543": {
-    "version": "云集智能编程工作站v2026.04.27.0543",
-    "changes": [
-      "版本管理：从远程仓库获取版本信息，对比本地与远程版本差异，显示远程新版本"
-    ],
-    "build_time": "2026-04-27T05:45:20.231341",
-    "version_number": "2026.04.27.0543"
+    "build_time": "2026-04-21T20:03:06.254578",
+    "version_number": "2026.04.21.2000",
+    "name": "云集智能编程工作站v2026.04.21.2000"
   }
-}
+]

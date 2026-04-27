@@ -49,10 +49,23 @@ def load_version_history():
     if VERSION_HISTORY_FILE.exists():
         try:
             with open(VERSION_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                result = []
+                for vname, vinfo in data.items():
+                    entry = dict(vinfo)
+                    entry["name"] = vname
+                    if "version_number" in entry and "version" not in entry:
+                        entry["version"] = entry["version_number"]
+                    result.append(entry)
+                result.sort(key=lambda x: x.get("version", ""), reverse=True)
+                return result
+            return []
         except Exception:
             pass
-    return {}
+    return []
 
 
 def save_version_history(history):
@@ -374,14 +387,33 @@ def _deploy_to_dev(release_dir: Path):
 def record_version(release_name, changes):
     history = load_version_history()
 
+    git_commit = ""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(DEV_DIR),
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if r.returncode == 0:
+            git_commit = r.stdout.strip()
+    except Exception:
+        pass
+
     version_info = {
-        "version": release_name,
+        "version": VERSION,
+        "name": release_name,
         "changes": changes,
         "build_time": datetime.now().isoformat(),
-        "version_number": VERSION,
+        "git_commit": git_commit,
     }
 
-    history[release_name] = version_info
+    existing = [v for v in history if v.get("version") == VERSION]
+    if existing:
+        existing[0].update(version_info)
+    else:
+        history.insert(0, version_info)
+
     save_version_history(history)
     return version_info
 

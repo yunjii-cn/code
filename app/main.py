@@ -75,6 +75,7 @@ BUN_DIR_NAME = "bun-windows-x64"
 # ── Git 仓库配置 ──
 GIT_REMOTE = "git@gitee.com:yunjii/code.git"
 GIT_BRANCH = "main"
+REMOTE_VERSIONS_URL = f"https://gitee.com/yunjii/code/raw/{GIT_BRANCH}/app/version_history.json"
 
 
 # ── 软件更新器 ──
@@ -205,70 +206,110 @@ class SoftwareUpdater:
         exes.sort(key=lambda x: x["version"], reverse=True)
         return exes
 
-    def switch_to_exe(self, exe_path: str):
-        """切换到指定 EXE 并重启（当前 EXE 退出后启动新 EXE）"""
+    def switch_to_exe(self, exe_path: str, git_commit: str = ""):
+        """切换到指定 EXE 并重启，同时回滚代码到对应 git commit"""
         if not os.path.exists(exe_path):
             self.log(f"[错误] EXE 不存在: {exe_path}", "#F44336")
             return False
 
-        # 构造重启命令：等待当前进程退出后启动新 EXE
+        if git_commit and self.is_git_repo():
+            self.log(f"正在回滚代码到 commit {git_commit}...", "#FF9800")
+            r = self._run_git("stash")
+            stashed = r["ok"] and "Saved" in r["stdout"]
+            r = self._run_git("checkout", git_commit, timeout=30)
+            if not r["ok"]:
+                self.log(f"[警告] 代码回滚失败: {r['stderr'][:200]}", "#FF9800")
+                if stashed:
+                    self._run_git("stash", "pop")
+            else:
+                self.log(f"✓ 代码已回滚到 {git_commit}", "#4CAF50")
+                if stashed:
+                    self._run_git("stash", "pop")
+
         current_pid = os.getpid()
         new_exe = exe_path
-        # 用 ping 延迟等待当前进程退出
         cmd = f'ping -n 3 127.0.0.1 >nul & start "" "{new_exe}"'
         subprocess.Popen(cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
         self.log(f"正在切换到 {os.path.basename(exe_path)}...", "#4CAF50")
 
-        # 退出当前程序
         QApplication.quit()
         return True
 
     def fetch_remote_version_history(self):
-        """从远程仓库获取版本历史（通过 git fetch + git show）"""
-        if not self.is_git_repo():
-            return None
-
-        r = self._run_git("fetch", "origin", GIT_BRANCH, timeout=30)
-        if not r["ok"]:
-            return None
-
-        r2 = self._run_git("show", f"origin/{GIT_BRANCH}:app/version_history.json", timeout=15)
-        if not r2["ok"]:
-            return None
-
+        """通过 HTTP API 获取远程版本历史（零 subprocess，零弹窗）"""
         try:
-            return json.loads(r2["stdout"])
-        except:
+            from urllib.request import urlopen, Request
+            from urllib.error import URLError, HTTPError
+            req = Request(REMOTE_VERSIONS_URL)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            resp = urlopen(req, timeout=10)
+            content = resp.read().decode('utf-8')
+            data = json.loads(content)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                result = []
+                for vname, vinfo in data.items():
+                    entry = dict(vinfo)
+                    entry["name"] = vname
+                    if "version_number" in entry and "version" not in entry:
+                        entry["version"] = entry["version_number"]
+                    result.append(entry)
+                result.sort(key=lambda x: x.get("version", ""), reverse=True)
+                return result
+            return []
+        except HTTPError as e:
+            print(f"远程版本获取失败 (HTTP {e.code}): {e.reason}")
+            return None
+        except URLError as e:
+            print(f"远程版本获取失败 (网络错误): {e.reason}")
+            return None
+        except Exception as e:
+            print(f"远程版本获取失败: {e}")
             return None
 
     def get_local_version_history(self):
-        """获取本地版本历史"""
+        """获取本地版本历史（返回 list 格式）"""
         path = os.path.join(self.app_dir, "version_history.json")
         if not os.path.exists(path):
-            return {}
+            return []
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict):
+                result = []
+                for vname, vinfo in data.items():
+                    entry = dict(vinfo)
+                    entry["name"] = vname
+                    if "version_number" in entry and "version" not in entry:
+                        entry["version"] = entry["version_number"]
+                    result.append(entry)
+                result.sort(key=lambda x: x.get("version", ""), reverse=True)
+                return result
+            return []
         except:
-            return {}
-
-    def compare_versions(self, local_history, remote_history):
-        """对比本地和远程版本，返回新版本列表"""
-        if not remote_history:
             return []
 
-        new_versions = []
-        for vname, vinfo in remote_history.items():
-            if vname not in local_history:
-                new_versions.append({
-                    "name": vname,
-                    "version": vinfo.get("version_number", ""),
-                    "changes": vinfo.get("changes", []),
-                    "build_time": vinfo.get("build_time", ""),
-                })
+    def compare_versions(self, local_versions, remote_versions):
+        """对比本地和远程版本，返回远程新增版本列表"""
+        if not remote_versions:
+            return []
 
-        new_versions.sort(key=lambda x: x.get("version", ""), reverse=True)
+        local_ver_set = set()
+        for v in (local_versions or []):
+            ver = v.get("version", v.get("version_number", ""))
+            if ver:
+                local_ver_set.add(ver)
+
+        new_versions = []
+        for v in remote_versions:
+            ver = v.get("version", v.get("version_number", ""))
+            if ver and ver not in local_ver_set:
+                new_versions.append(v)
+
         return new_versions
 
 
@@ -1429,7 +1470,7 @@ class MainWindow(QMainWindow):
             lbl.setText("✓ 已安装" if installed else "✗ 未安装")
             lbl.setStyleSheet(f"color: {'#4CAF50' if installed else '#F44336'}; font-size: 13px; font-weight: bold; border: none;")
 
-    def _refresh_ver_list(self, remote_history=None):
+    def _refresh_ver_list(self, remote_versions=None):
         """刷新软件更新页面的版本历史列表"""
         if not hasattr(self, 'ver_list_layout'):
             return
@@ -1439,7 +1480,7 @@ class MainWindow(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
 
-        local_history = self.updater.get_local_version_history()
+        local_versions = self.updater.get_local_version_history()
 
         stable_exes = self.updater.list_stable_exes()
         exe_versions = {}
@@ -1453,65 +1494,72 @@ class MainWindow(QMainWindow):
             if m:
                 current_version = m.group(1)
 
-        all_versions = {}
-        for vname, vinfo in local_history.items():
-            import re as _re
-            m = _re.search(r'v(\d+\.\d+\.\d+\.\d+)', vname)
-            ver = m.group(1) if m else ""
-            if not ver:
-                continue
-            all_versions[ver] = {
-                "version": ver,
-                "name": vname,
-                "changes": vinfo.get("changes", []),
-                "build_time": vinfo.get("build_time", ""),
-                "available": ver in exe_versions,
-                "exe_info": exe_versions.get(ver),
-                "is_remote_new": False,
-            }
+        local_ver_set = set()
+        all_versions = []
 
-        if remote_history:
-            for vname, vinfo in remote_history.items():
+        for v in local_versions:
+            ver = v.get("version", v.get("version_number", ""))
+            import re as _re
+            m = _re.search(r'v?(\d+\.\d+\.\d+\.\d+)', ver)
+            ver_num = m.group(1) if m else ver
+            if not ver_num:
+                continue
+            local_ver_set.add(ver_num)
+            all_versions.append({
+                "version": ver_num,
+                "name": v.get("name", f"v{ver_num}"),
+                "changes": v.get("changes", []),
+                "build_time": v.get("build_time", ""),
+                "git_commit": v.get("git_commit", ""),
+                "available": ver_num in exe_versions,
+                "exe_info": exe_versions.get(ver_num),
+                "is_remote_new": False,
+            })
+
+        if remote_versions:
+            for v in remote_versions:
+                ver = v.get("version", v.get("version_number", ""))
                 import re as _re2
-                m = _re2.search(r'v(\d+\.\d+\.\d+\.\d+)', vname)
-                ver = m.group(1) if m else ""
-                if not ver:
+                m = _re2.search(r'v?(\d+\.\d+\.\d+\.\d+)', ver)
+                ver_num = m.group(1) if m else ver
+                if not ver_num:
                     continue
-                if ver in all_versions:
-                    all_versions[ver]["is_remote_new"] = False
-                else:
-                    all_versions[ver] = {
-                        "version": ver,
-                        "name": vname,
-                        "changes": vinfo.get("changes", []),
-                        "build_time": vinfo.get("build_time", ""),
-                        "available": ver in exe_versions,
-                        "exe_info": exe_versions.get(ver),
-                        "is_remote_new": True,
-                    }
+                if ver_num in local_ver_set:
+                    continue
+                all_versions.append({
+                    "version": ver_num,
+                    "name": v.get("name", f"v{ver_num}"),
+                    "changes": v.get("changes", []),
+                    "build_time": v.get("build_time", ""),
+                    "git_commit": v.get("git_commit", ""),
+                    "available": ver_num in exe_versions,
+                    "exe_info": exe_versions.get(ver_num),
+                    "is_remote_new": True,
+                })
 
         for ver, exe in exe_versions.items():
-            if ver not in all_versions:
-                all_versions[ver] = {
+            if ver not in local_ver_set:
+                all_versions.append({
                     "version": ver,
                     "name": exe["filename"],
                     "changes": [],
                     "build_time": "",
+                    "git_commit": "",
                     "available": True,
                     "exe_info": exe,
                     "is_remote_new": False,
-                }
+                })
 
-        sorted_versions = sorted(all_versions.values(), key=lambda x: x["version"], reverse=True)
+        all_versions.sort(key=lambda x: x["version"], reverse=True)
 
-        if not sorted_versions:
+        if not all_versions:
             no_ver = QLabel("暂无版本历史记录")
             no_ver.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
             no_ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.ver_list_layout.addWidget(no_ver)
             return
 
-        for v in sorted_versions:
+        for v in all_versions:
             self._create_version_card(v, v["version"] == current_version)
 
     def _fetch_and_refresh_ver_list(self):
@@ -1530,20 +1578,20 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=_do_fetch, daemon=True)
         t.start()
 
-    def _on_remote_ver_fetched(self, remote_history):
+    def _on_remote_ver_fetched(self, remote_versions):
         """远程版本信息获取完成"""
-        if remote_history is None:
-            self.update_info_label.setText("⚠️ 无法获取远程版本信息（非Git仓库或网络不可达）")
-            self._refresh_ver_list(remote_history=None)
+        if remote_versions is None:
+            self.update_info_label.setText("⚠️ 无法获取远程版本信息（网络不可达）")
+            self._refresh_ver_list(remote_versions=None)
         else:
-            local_history = self.updater.get_local_version_history()
-            new_versions = self.updater.compare_versions(local_history, remote_history)
+            local_versions = self.updater.get_local_version_history()
+            new_versions = self.updater.compare_versions(local_versions, remote_versions)
             if new_versions:
-                names = ", ".join(v["name"] for v in new_versions[:3])
+                names = ", ".join(f"v{v.get('version', v.get('version_number', '?'))}" for v in new_versions[:3])
                 self.update_info_label.setText(f"🆕 发现 {len(new_versions)} 个远程新版本: {names}")
             else:
                 self.update_info_label.setText("✅ 已是最新版本")
-            self._refresh_ver_list(remote_history=remote_history)
+            self._refresh_ver_list(remote_versions=remote_versions)
 
     def _create_version_card(self, version_info, is_current):
         """创建版本卡片"""
@@ -1650,7 +1698,8 @@ class MainWindow(QMainWindow):
                 QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; padding: 3px 10px; font-size: 11px; color: #AAA; }
                 QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #FFF; }
             """)
-            switch_btn.clicked.connect(lambda checked, p=exe_info["path"]: self.updater.switch_to_exe(p))
+            gc = version_info.get("git_commit", "")
+            switch_btn.clicked.connect(lambda checked, p=exe_info["path"], c=gc: self.updater.switch_to_exe(p, c))
             header.addWidget(switch_btn)
 
         cl.addLayout(header)
@@ -1660,6 +1709,13 @@ class MainWindow(QMainWindow):
         dl = QVBoxLayout(detail)
         dl.setSpacing(2)
         dl.setContentsMargins(0, 4, 0, 0)
+
+        git_commit = version_info.get("git_commit", "")
+        if git_commit:
+            commit_label = QLabel(f"🔗 commit: {git_commit}")
+            commit_label.setFont(QFont("Consolas", 8))
+            commit_label.setStyleSheet("color: #555;")
+            dl.addWidget(commit_label)
 
         if changes:
             for ch in changes:
