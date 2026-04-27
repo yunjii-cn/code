@@ -42,7 +42,7 @@ ROOT_DIR = Path(__file__).resolve().parent  # build-version.py 在 dev/app/ 下
 DEV_APP_DIR = ROOT_DIR
 DEV_DIR = ROOT_DIR.parent                   # dev/ 根目录
 BUILD_DIR = ROOT_DIR.parent.parent / "build"  # 项目根/build/ (PyInstaller 工作目录)
-VERSION_HISTORY_FILE = ROOT_DIR.parent.parent / "version_history.json"
+VERSION_HISTORY_FILE = ROOT_DIR / "version_history.json"
 
 
 def load_version_history():

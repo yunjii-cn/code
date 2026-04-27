@@ -99,5 +99,5 @@ app/fix_bundle_imports.cjs
 app/fix_bundle_imports_v2.cjs
 app/fix_bundle_imports_v3.cjs
 
-# ── 版本历史（不提交到 Git）──
-app/version_history.json
+# ── 版本历史（提交到 Git 以支持远程版本对比）──
+# app/version_history.json

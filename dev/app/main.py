@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
     QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
-    QTabWidget,
+    QTabWidget, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl
 from PyQt6.QtGui import QFont, QIcon
@@ -223,6 +223,53 @@ class SoftwareUpdater:
         # 退出当前程序
         QApplication.quit()
         return True
+
+    def fetch_remote_version_history(self):
+        """从远程仓库获取版本历史（通过 git fetch + git show）"""
+        if not self.is_git_repo():
+            return None
+
+        r = self._run_git("fetch", "origin", GIT_BRANCH, timeout=30)
+        if not r["ok"]:
+            return None
+
+        r2 = self._run_git("show", f"origin/{GIT_BRANCH}:app/version_history.json", timeout=15)
+        if not r2["ok"]:
+            return None
+
+        try:
+            return json.loads(r2["stdout"])
+        except:
+            return None
+
+    def get_local_version_history(self):
+        """获取本地版本历史"""
+        path = os.path.join(self.app_dir, "version_history.json")
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+
+    def compare_versions(self, local_history, remote_history):
+        """对比本地和远程版本，返回新版本列表"""
+        if not remote_history:
+            return []
+
+        new_versions = []
+        for vname, vinfo in remote_history.items():
+            if vname not in local_history:
+                new_versions.append({
+                    "name": vname,
+                    "version": vinfo.get("version_number", ""),
+                    "changes": vinfo.get("changes", []),
+                    "build_time": vinfo.get("build_time", ""),
+                })
+
+        new_versions.sort(key=lambda x: x.get("version", ""), reverse=True)
+        return new_versions
 
 
 # ── QWebChannel 桥接对象 (替代 Electron preload.cjs) ──
@@ -815,6 +862,7 @@ class MainWindow(QMainWindow):
     result_ready_signal = pyqtSignal(str)
     workspace_choose_requested = pyqtSignal()
     update_info_signal = pyqtSignal(str)
+    _remote_ver_signal = pyqtSignal(object)
 
     def __init__(self):
         super().__init__()
@@ -881,6 +929,7 @@ class MainWindow(QMainWindow):
         self.status_signal.connect(self._update_status)
         self.result_ready_signal.connect(self._on_result_ready)
         self.workspace_choose_requested.connect(self._choose_workspace_dialog)
+        self._remote_ver_signal.connect(self._on_remote_ver_fetched)
 
         # 启动时检查环境
         QTimer.singleShot(800, self._auto_check_and_load)
@@ -936,7 +985,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.btn_deploy_nav)
 
         # 软件更新按钮
-        self.btn_update_nav = QPushButton("🔄 软件更新")
+        self.btn_update_nav = QPushButton("📋 版本管理")
         self.btn_update_nav.setCheckable(True)
         self.btn_update_nav.setStyleSheet(menu_button_style)
         self.btn_update_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -1207,85 +1256,88 @@ class MainWindow(QMainWindow):
         return page
 
     def _create_update_page(self):
-        """创建软件更新页面"""
+        """创建软件更新页面 - 版本历史管理"""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setSpacing(8)
         layout.setContentsMargins(12, 10, 12, 10)
 
-        # 标题
-        title = QLabel("🔄 软件更新")
+        top_bar = QHBoxLayout()
+        title = QLabel("🔄 版本管理")
         title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
         title.setStyleSheet("color: #1565C0; border: none;")
-        layout.addWidget(title)
-
-        # 版本信息区域
-        info_group = QFrame()
-        info_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 8px; }")
-        info_layout = QVBoxLayout(info_group)
-
-        self.update_info_label = QLabel("点击「检查更新」查看最新版本")
-        self.update_info_label.setStyleSheet("color: #ccc; font-size: 12px; border: none;")
-        self.update_info_label.setWordWrap(True)
-        info_layout.addWidget(self.update_info_label)
-
-        layout.addWidget(info_group)
-
-        # 操作按钮
-        btn_layout = QHBoxLayout()
+        top_bar.addWidget(title)
+        top_bar.addStretch()
 
         self.btn_check_update = QPushButton("🔍 检查更新")
         self.btn_check_update.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 8px 16px; font-size: 12px; }
+            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 8px 16px; font-size: 12px; color: white; }
             QPushButton:hover { background-color: #1976D2; }
         """)
         self.btn_check_update.clicked.connect(self._on_update)
-        btn_layout.addWidget(self.btn_check_update)
+        top_bar.addWidget(self.btn_check_update)
 
         self.btn_pull_update = QPushButton("📥 更新资源包")
         self.btn_pull_update.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; }
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; color: white; }
             QPushButton:hover { background-color: #388E3C; }
+            QPushButton:disabled { background-color: #1a1a1a; border-color: #333; color: #555; }
         """)
         self.btn_pull_update.clicked.connect(self._do_pull_update)
         self.btn_pull_update.setEnabled(False)
-        btn_layout.addWidget(self.btn_pull_update)
+        top_bar.addWidget(self.btn_pull_update)
 
-        layout.addLayout(btn_layout)
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.setStyleSheet("""
+            QPushButton { background-color: #2D2D2D; border: 1px solid #424242; border-radius: 4px; padding: 8px 12px; font-size: 12px; color: #F0F0F0; }
+            QPushButton:hover { background-color: #424242; border-color: #555; }
+        """)
+        refresh_btn.clicked.connect(lambda: self._fetch_and_refresh_ver_list())
+        top_bar.addWidget(refresh_btn)
 
-        # 稳定版 EXE 列表区域
-        ver_group = QFrame()
-        ver_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; }")
-        ver_layout = QVBoxLayout(ver_group)
+        layout.addLayout(top_bar)
 
-        ver_title = QLabel("📦 稳定版 EXE")
-        ver_title.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
-        ver_title.setStyleSheet("color: #fff; border: none;")
-        ver_layout.addWidget(ver_title)
+        current_frame = QFrame()
+        current_frame.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px; } QLabel { border: none; background: transparent; }")
+        current_layout = QVBoxLayout(current_frame)
+        current_layout.setSpacing(4)
 
-        self.ver_list_label = QLabel("暂无稳定版 EXE")
-        self.ver_list_label.setStyleSheet("color: #888; font-size: 12px; border: none;")
-        self.ver_list_label.setWordWrap(True)
-        ver_layout.addWidget(self.ver_list_label)
+        self.update_info_label = QLabel("点击「检查更新」查看最新版本")
+        self.update_info_label.setStyleSheet("color: #ccc; font-size: 12px;")
+        self.update_info_label.setWordWrap(True)
+        current_layout.addWidget(self.update_info_label)
 
-        layout.addWidget(ver_group)
+        layout.addWidget(current_frame)
 
-        # 日志区域
-        log_group = QFrame()
-        log_group.setStyleSheet("QFrame { background-color: #0a0a0a; border: 1px solid #222; border-radius: 8px; }")
-        log_l = QVBoxLayout(log_group)
-        log_l.setContentsMargins(8, 4, 8, 4)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background-color: #333;")
+        sep.setMaximumHeight(1)
+        layout.addWidget(sep)
 
-        log_header_lbl = QLabel("📋 更新日志")
-        log_header_lbl.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; border: none;")
-        log_l.addWidget(log_header_lbl)
+        list_label = QLabel("版本历史")
+        list_label.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        list_label.setStyleSheet("color: #888; border: none;")
+        layout.addWidget(list_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+
+        self.ver_list_container = QWidget()
+        self.ver_list_container.setStyleSheet("background-color: transparent; border: none;")
+        self.ver_list_layout = QVBoxLayout(self.ver_list_container)
+        self.ver_list_layout.setSpacing(6)
+        self.ver_list_layout.setContentsMargins(4, 4, 4, 4)
+
+        scroll.setWidget(self.ver_list_container)
+        layout.addWidget(scroll, 1)
 
         self.update_log_text = QTextEdit()
         self.update_log_text.setReadOnly(True)
         self.update_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
-        log_l.addWidget(self.update_log_text)
-
-        layout.addWidget(log_group, 1)
+        self.update_log_text.hide()
 
         return page
 
@@ -1303,7 +1355,7 @@ class MainWindow(QMainWindow):
             self._refresh_deploy_env_status()
         # 切换到软件更新页面时刷新稳定版列表
         if index == 2:
-            self._refresh_ver_list()
+            self._fetch_and_refresh_ver_list()
 
     # ── 环境检查与自动加载 ──
     def _auto_check_and_load(self):
@@ -1377,22 +1429,253 @@ class MainWindow(QMainWindow):
             lbl.setText("✓ 已安装" if installed else "✗ 未安装")
             lbl.setStyleSheet(f"color: {'#4CAF50' if installed else '#F44336'}; font-size: 13px; font-weight: bold; border: none;")
 
-    def _refresh_ver_list(self):
-        """刷新软件更新页面的稳定版列表"""
-        if not hasattr(self, 'ver_list_label'):
+    def _refresh_ver_list(self, remote_history=None):
+        """刷新软件更新页面的版本历史列表"""
+        if not hasattr(self, 'ver_list_layout'):
             return
+
+        while self.ver_list_layout.count():
+            item = self.ver_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        local_history = self.updater.get_local_version_history()
+
         stable_exes = self.updater.list_stable_exes()
-        if not stable_exes:
-            self.ver_list_label.setText("暂无稳定版 EXE（ver/ 目录为空）")
-            return
-        lines = []
+        exe_versions = {}
         for exe in stable_exes:
-            current_marker = ""
-            if hasattr(sys, 'frozen'):
-                if exe["filename"] == os.path.basename(sys.executable):
-                    current_marker = " ← 当前"
-            lines.append(f"  {exe['filename']} ({exe['size_mb']}MB){current_marker}")
-        self.ver_list_label.setText("\n".join(lines))
+            exe_versions[exe["version"]] = exe
+
+        current_version = ""
+        if hasattr(sys, 'frozen'):
+            import re
+            m = re.search(r'v(\d+\.\d+\.\d+\.\d+)', os.path.basename(sys.executable))
+            if m:
+                current_version = m.group(1)
+
+        all_versions = {}
+        for vname, vinfo in local_history.items():
+            import re as _re
+            m = _re.search(r'v(\d+\.\d+\.\d+\.\d+)', vname)
+            ver = m.group(1) if m else ""
+            if not ver:
+                continue
+            all_versions[ver] = {
+                "version": ver,
+                "name": vname,
+                "changes": vinfo.get("changes", []),
+                "build_time": vinfo.get("build_time", ""),
+                "available": ver in exe_versions,
+                "exe_info": exe_versions.get(ver),
+                "is_remote_new": False,
+            }
+
+        if remote_history:
+            for vname, vinfo in remote_history.items():
+                import re as _re2
+                m = _re2.search(r'v(\d+\.\d+\.\d+\.\d+)', vname)
+                ver = m.group(1) if m else ""
+                if not ver:
+                    continue
+                if ver in all_versions:
+                    all_versions[ver]["is_remote_new"] = False
+                else:
+                    all_versions[ver] = {
+                        "version": ver,
+                        "name": vname,
+                        "changes": vinfo.get("changes", []),
+                        "build_time": vinfo.get("build_time", ""),
+                        "available": ver in exe_versions,
+                        "exe_info": exe_versions.get(ver),
+                        "is_remote_new": True,
+                    }
+
+        for ver, exe in exe_versions.items():
+            if ver not in all_versions:
+                all_versions[ver] = {
+                    "version": ver,
+                    "name": exe["filename"],
+                    "changes": [],
+                    "build_time": "",
+                    "available": True,
+                    "exe_info": exe,
+                    "is_remote_new": False,
+                }
+
+        sorted_versions = sorted(all_versions.values(), key=lambda x: x["version"], reverse=True)
+
+        if not sorted_versions:
+            no_ver = QLabel("暂无版本历史记录")
+            no_ver.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
+            no_ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.ver_list_layout.addWidget(no_ver)
+            return
+
+        for v in sorted_versions:
+            self._create_version_card(v, v["version"] == current_version)
+
+    def _fetch_and_refresh_ver_list(self):
+        """后台获取远程版本信息并刷新列表"""
+        if hasattr(self, '_fetching_remote') and self._fetching_remote:
+            return
+        self._fetching_remote = True
+
+        self.update_info_label.setText("⏳ 正在获取远程版本信息...")
+
+        def _do_fetch():
+            remote = self.updater.fetch_remote_version_history()
+            self._fetching_remote = False
+            self._remote_ver_signal.emit(remote)
+
+        t = threading.Thread(target=_do_fetch, daemon=True)
+        t.start()
+
+    def _on_remote_ver_fetched(self, remote_history):
+        """远程版本信息获取完成"""
+        if remote_history is None:
+            self.update_info_label.setText("⚠️ 无法获取远程版本信息（非Git仓库或网络不可达）")
+            self._refresh_ver_list(remote_history=None)
+        else:
+            local_history = self.updater.get_local_version_history()
+            new_versions = self.updater.compare_versions(local_history, remote_history)
+            if new_versions:
+                names = ", ".join(v["name"] for v in new_versions[:3])
+                self.update_info_label.setText(f"🆕 发现 {len(new_versions)} 个远程新版本: {names}")
+            else:
+                self.update_info_label.setText("✅ 已是最新版本")
+            self._refresh_ver_list(remote_history=remote_history)
+
+    def _create_version_card(self, version_info, is_current):
+        """创建版本卡片"""
+        ver = version_info["version"]
+        is_available = version_info.get("available", False)
+        is_remote_new = version_info.get("is_remote_new", False)
+        changes = version_info.get("changes", [])
+        build_time = version_info.get("build_time", "")
+        exe_info = version_info.get("exe_info")
+
+        card = QFrame()
+        card.setObjectName("verCard")
+        if is_current:
+            card.setStyleSheet("""
+                #verCard { background-color: #162016; border: 1px solid #1f3a1f; border-radius: 8px; }
+                #verCard:hover { background-color: #1a2a1a; border-color: #2a4a2a; }
+                QLabel { border: none; background: transparent; }
+                QWidget { border: none; background: transparent; }
+                QPushButton { border: none; }
+            """)
+        elif is_remote_new:
+            card.setStyleSheet("""
+                #verCard { background-color: #161620; border: 1px solid #1f3a4f; border-radius: 8px; }
+                #verCard:hover { background-color: #1a1a2a; border-color: #2a4a6a; }
+                QLabel { border: none; background: transparent; }
+                QWidget { border: none; background: transparent; }
+                QPushButton { border: none; }
+            """)
+        elif is_available:
+            card.setStyleSheet("""
+                #verCard { background-color: #161616; border: 1px solid #222; border-radius: 8px; }
+                #verCard:hover { background-color: #1c1c1c; border-color: #333; }
+                QLabel { border: none; background: transparent; }
+                QWidget { border: none; background: transparent; }
+                QPushButton { border: none; }
+            """)
+        else:
+            card.setStyleSheet("""
+                #verCard { background-color: #111; border: 1px solid #1a1a1a; border-radius: 8px; }
+                #verCard:hover { background-color: #161616; border-color: #222; }
+                QLabel { border: none; background: transparent; }
+                QWidget { border: none; background: transparent; }
+                QPushButton { border: none; }
+            """)
+
+        cl = QVBoxLayout(card)
+        cl.setSpacing(4)
+        cl.setContentsMargins(14, 10, 14, 10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+
+        ver_label = QLabel(f"v{ver}")
+        ver_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        if is_current:
+            ver_label.setStyleSheet("color: #4CAF50;")
+        elif is_remote_new:
+            ver_label.setStyleSheet("color: #42A5F5;")
+        elif not is_available:
+            ver_label.setStyleSheet("color: #555;")
+        else:
+            ver_label.setStyleSheet("color: #E0E0E0;")
+        header.addWidget(ver_label)
+
+        if build_time:
+            try:
+                from datetime import datetime as _dt
+                dt = _dt.fromisoformat(build_time)
+                date_str = dt.strftime("%Y-%m-%d %H:%M")
+            except:
+                date_str = build_time[:16]
+            date_label = QLabel(date_str)
+            date_label.setFont(QFont("Consolas", 9))
+            date_label.setStyleSheet("color: #555;")
+            header.addWidget(date_label)
+
+        header.addStretch()
+
+        if is_remote_new:
+            remote_tag = QLabel("🆕 远程新版本")
+            remote_tag.setFont(QFont("Microsoft YaHei", 9))
+            remote_tag.setStyleSheet("color: #42A5F5;")
+            header.addWidget(remote_tag)
+        elif is_available and exe_info and exe_info.get("size_mb"):
+            size_label = QLabel(f"{exe_info['size_mb']}MB")
+            size_label.setFont(QFont("Consolas", 9))
+            size_label.setStyleSheet("color: #555;")
+            header.addWidget(size_label)
+        elif not is_available:
+            status_label = QLabel("未提供")
+            status_label.setFont(QFont("Microsoft YaHei", 9))
+            status_label.setStyleSheet("color: #444;")
+            header.addWidget(status_label)
+
+        if is_current:
+            current_tag = QLabel("● 当前版本")
+            current_tag.setFont(QFont("Microsoft YaHei", 9))
+            current_tag.setStyleSheet("color: #4CAF50;")
+            header.addWidget(current_tag)
+        elif is_available and exe_info:
+            switch_btn = QPushButton("切换")
+            switch_btn.setFixedWidth(55)
+            switch_btn.setStyleSheet("""
+                QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; padding: 3px 10px; font-size: 11px; color: #AAA; }
+                QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #FFF; }
+            """)
+            switch_btn.clicked.connect(lambda checked, p=exe_info["path"]: self.updater.switch_to_exe(p))
+            header.addWidget(switch_btn)
+
+        cl.addLayout(header)
+
+        detail = QWidget()
+        detail.setStyleSheet("border: none; background: transparent;")
+        dl = QVBoxLayout(detail)
+        dl.setSpacing(2)
+        dl.setContentsMargins(0, 4, 0, 0)
+
+        if changes:
+            for ch in changes:
+                ch_label = QLabel(f"· {ch}")
+                ch_label.setFont(QFont("Microsoft YaHei", 9))
+                ch_label.setStyleSheet("color: #777;")
+                ch_label.setWordWrap(True)
+                dl.addWidget(ch_label)
+        else:
+            no_ch = QLabel("暂无修改记录")
+            no_ch.setFont(QFont("Microsoft YaHei", 9))
+            no_ch.setStyleSheet("color: #3a3a3a;")
+            dl.addWidget(no_ch)
+
+        cl.addWidget(detail)
+        self.ver_list_layout.addWidget(card)
 
     # ── 日志 ──
     def _append_log(self, message: str, color: str):
