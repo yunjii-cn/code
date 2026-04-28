@@ -36,13 +36,14 @@ from PyQt6.QtWidgets import (
     QTabWidget, QScrollArea, QComboBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QColor
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
 
 from PyQt6.QtCore import QObject
 
 # 导入后端模块
+import backend
 from backend import (
     EnvFileManager, ClaudeCliRunner,
     list_openrouter_models, list_anthropic_models, list_ollama_models, list_api_models,
@@ -621,26 +622,38 @@ class BackendBridge(QObject):
                 unique.append(r)
         return json.dumps({"ok": True, "models": unique, "hardware": hw})
 
+    @pyqtSlot(str, result=str)
     def fetchApiKey(self, payload_json: str = "{}"):
-        payload = json.loads(payload_json) if payload_json else {}
-        base_url = payload.get("baseUrl", "").strip()
-        admin_key = payload.get("adminKey", "").strip()
-        result = backend.fetch_api_key(base_url, admin_key)
-        return json.dumps(result)
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.fetch_api_key(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"fetchApiKey异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def startQwen2Api(self, payload_json: str = "{}"):
-        payload = json.loads(payload_json) if payload_json else {}
-        project_dir = payload.get("projectDir", "").strip()
-        port = int(payload.get("port", 7860) or 7860)
-        admin_key = payload.get("adminKey", "admin").strip() or "admin"
-        result = backend.start_qwen2api(project_dir, port, admin_key)
-        return json.dumps(result)
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            project_dir = payload.get("projectDir", "").strip()
+            port = int(payload.get("port", 7860) or 7860)
+            admin_key = payload.get("adminKey", "admin").strip() or "admin"
+            result = backend.start_qwen2api(project_dir, port, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"startQwen2Api异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def checkApiService(self, payload_json: str = "{}"):
-        payload = json.loads(payload_json) if payload_json else {}
-        base_url = payload.get("baseUrl", "").strip()
-        result = backend.check_api_service(base_url)
-        return json.dumps(result)
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            result = backend.check_api_service(base_url)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"checkApiService异常: {e}"})
 
     # ── 内部方法 ──
 
@@ -2312,12 +2325,21 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    # 设置高 DPI
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     app = QApplication(sys.argv)
+
+    palette = app.palette()
+    palette.setColor(palette.ColorRole.Window, QColor("#0d0d0d"))
+    palette.setColor(palette.ColorRole.WindowText, QColor("#f0f0f0"))
+    palette.setColor(palette.ColorRole.Base, QColor("#0d0d0d"))
+    palette.setColor(palette.ColorRole.Text, QColor("#f0f0f0"))
+    palette.setColor(palette.ColorRole.Button, QColor("#1a1a1a"))
+    palette.setColor(palette.ColorRole.ButtonText, QColor("#f0f0f0"))
+    app.setPalette(palette)
+
     window = MainWindow()
     window.resize(1260, 860)
     window.show()

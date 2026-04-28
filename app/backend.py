@@ -481,6 +481,9 @@ MIRROR_SOURCES = {
 }
 
 def _app_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.abspath(os.path.dirname(sys.executable))
+        return os.path.join(exe_dir, "app")
     return str(Path(__file__).resolve().parent)
 
 def _uv_exe() -> str:
@@ -544,6 +547,19 @@ _qwen2api_proc = None
 def start_qwen2api(project_dir: str = "", port: int = 7860, admin_key: str = "admin") -> dict:
     global _qwen2api_proc
 
+    _debug_log = []
+    _debug_log.append(f"_app_dir={_app_dir()}")
+    _debug_log.append(f"frozen={getattr(sys, 'frozen', False)}")
+    _debug_log.append(f"exe={getattr(sys, 'executable', '')}")
+    _debug_log.append(f"__file__={__file__}")
+
+    try:
+        _debug_path = os.path.join(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)), "start_qwen2api_debug.log")
+        with open(_debug_path, "w", encoding="utf-8") as _df:
+            _df.write("\n".join(_debug_log) + "\n")
+    except Exception:
+        pass
+
     base = f"http://127.0.0.1:{port}"
     status = check_api_service(base)
     if status.get("running"):
@@ -554,18 +570,25 @@ def start_qwen2api(project_dir: str = "", port: int = 7860, admin_key: str = "ad
 
     qwen_dir = project_dir.strip()
     if not qwen_dir:
-        app_qwen_dir = Path(__file__).resolve().parent / "qwen2api"
+        app_qwen_dir = Path(_app_dir()) / "qwen2api"
+        _debug_log.append(f"app_qwen_dir={app_qwen_dir}")
+        _debug_log.append(f"app_qwen_dir.exists={app_qwen_dir.exists()}")
         if app_qwen_dir.exists():
             qwen_dir = str(app_qwen_dir)
         else:
-            return {"ok": False, "error": f"未找到 qwen2api 目录: {app_qwen_dir}"}
+            debug_info = " | ".join(_debug_log)
+            return {"ok": False, "error": f"未找到 qwen2api 目录: {app_qwen_dir} [{debug_info}]"}
 
     if not Path(qwen_dir).exists():
         return {"ok": False, "error": f"qwen2api 目录不存在: {qwen_dir}"}
 
     venv_python = _qwen2api_venv_python()
+    _debug_log.append(f"venv_python={venv_python}")
+    _debug_log.append(f"venv_python.exists={os.path.isfile(venv_python)}")
     venv_dir = os.path.join(_app_dir(), "scripts", ".venv")
     uv = _uv_exe()
+    _debug_log.append(f"uv={uv}")
+    _debug_log.append(f"uv.exists={os.path.isfile(uv)}")
     env = _uv_env()
 
     if not _check_qwen2api_deps():
@@ -632,7 +655,7 @@ def start_qwen2api(project_dir: str = "", port: int = 7860, admin_key: str = "ad
         if log_file != subprocess.PIPE:
             try: log_file.close()
             except: pass
-        return {"ok": False, "error": f"启动 API 服务失败: {e}"}
+        return {"ok": False, "error": f"启动 API 服务失败: {e} [{chr(124).join(_debug_log)}]"}
 
     import time as _time
     _time.sleep(2)
@@ -647,8 +670,18 @@ def start_qwen2api(project_dir: str = "", port: int = 7860, admin_key: str = "ad
                     err_msg = tail.strip().split("\n")[-1][:200]
             except:
                 pass
-        return {"ok": False, "error": f"API 服务启动失败: {err_msg}", "logPath": str(log_path)}
+        _debug_log.append(f"RESULT=进程意外退出 err_msg={err_msg}")
+        try:
+            with open(_debug_path, "a", encoding="utf-8") as _df:
+                _df.write("\n".join(_debug_log) + "\n")
+        except: pass
+        return {"ok": False, "error": f"API 服务启动失败: {err_msg}", "logPath": str(log_path), "debug": " | ".join(_debug_log)}
 
+    _debug_log.append("RESULT=ok")
+    try:
+        with open(_debug_path, "a", encoding="utf-8") as _df:
+            _df.write("\n".join(_debug_log) + "\n")
+    except: pass
     return {"ok": True, "message": "API 服务正在启动，请稍候检查状态", "baseUrl": base, "pid": proc.pid, "logPath": str(log_path)}
 
 
@@ -676,7 +709,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
     def _log_proxy(cls, msg):
         try:
             if cls._proxy_log_file is None:
-                log_dir = cls._proxy_log_dir or os.path.dirname(os.path.abspath(__file__))
+                log_dir = cls._proxy_log_dir or _app_dir()
                 os.makedirs(log_dir, exist_ok=True)
                 cls._proxy_log_file = open(os.path.join(log_dir, "proxy_debug.log"), "a", encoding="utf-8")
             ts = time.strftime("%H:%M:%S")

@@ -121,7 +121,7 @@ const apiSteps = [
 ];
 const apiStepProgress = ref(0);
 const apiStepBusy = ref(false);
-const apiStepMessage = ref("点击「一键就绪」自动配置 API 服务");
+const apiStepMessage = ref("点击「一键启动」自动配置 API 服务");
 
 const apiProgressPercent = computed(() => {
   if (apiStepProgress.value >= apiSteps.length) return 100;
@@ -1062,7 +1062,7 @@ onMounted(async () => {
               @click="apiStepAutoRun"
               :disabled="apiStepBusy || apiStepProgress >= apiSteps.length"
             >
-              {{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键就绪') }}
+              {{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键启动') }}
             </button>
           </div>
 
