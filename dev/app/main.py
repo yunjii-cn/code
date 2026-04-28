@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
     QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
-    QTabWidget, QScrollArea,
+    QTabWidget, QScrollArea, QComboBox,
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl
 from PyQt6.QtGui import QFont, QIcon
@@ -45,7 +45,7 @@ from PyQt6.QtCore import QObject
 # 导入后端模块
 from backend import (
     EnvFileManager, ClaudeCliRunner,
-    list_openrouter_models, list_anthropic_models, list_ollama_models,
+    list_openrouter_models, list_anthropic_models, list_ollama_models, list_api_models,
     SETTINGS_KEYS,
 )
 
@@ -71,6 +71,27 @@ NODE_VERSION = "v24.11.1"
 NODE_DIR_NAME = f"node-{NODE_VERSION}-win-x64"
 BUN_VERSION = "1.1.42"
 BUN_DIR_NAME = "bun-windows-x64"
+UV_VERSION = "0.11.7"
+UV_PYTHON_VERSION = "3.12"
+
+# ── 下载源配置 ──
+MIRROR_SOURCES = {
+    "official": {
+        "label": "🌐 官方源",
+        "node": "https://nodejs.org/dist/",
+        "github_proxy": "",
+        "uv_python_mirror": "",
+        "pypi_index": "https://pypi.org/simple/",
+    },
+    "china": {
+        "label": "🇨🇳 国内镜像",
+        "node": "https://npmmirror.com/mirrors/node/",
+        "github_proxy": "https://gh-proxy.com/",
+        "uv_python_mirror": "https://registry.npmmirror.com/-/binary/python-build-standalone/",
+        "pypi_index": "https://pypi.tuna.tsinghua.edu.cn/simple/",
+    },
+}
+MIRROR_SETTINGS_FILE = "mirror_source.json"
 
 # ── Git 仓库配置 ──
 GIT_REMOTE = "git@gitee.com:yunjii/code.git"
@@ -496,6 +517,10 @@ class BackendBridge(QObject):
                 base_url = payload.get("baseUrl", "") or settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434"
                 check_health = payload.get("checkHealth", False)
                 result = list_ollama_models(base_url, timeout, check_health=check_health)
+            elif source == "api":
+                api_base = payload.get("baseUrl", "") or settings.get("API_BASE_URL", "") or "http://127.0.0.1:7860"
+                api_key = payload.get("apiKey", "") or settings.get("API_KEY", "")
+                result = list_api_models(api_base, api_key, timeout)
             else:
                 result = {"ok": False, "error": "Unsupported source."}
             self.modelsLoaded.emit(json.dumps(result))
@@ -596,6 +621,27 @@ class BackendBridge(QObject):
                 unique.append(r)
         return json.dumps({"ok": True, "models": unique, "hardware": hw})
 
+    def fetchApiKey(self, payload_json: str = "{}"):
+        payload = json.loads(payload_json) if payload_json else {}
+        base_url = payload.get("baseUrl", "").strip()
+        admin_key = payload.get("adminKey", "").strip()
+        result = backend.fetch_api_key(base_url, admin_key)
+        return json.dumps(result)
+
+    def startQwen2Api(self, payload_json: str = "{}"):
+        payload = json.loads(payload_json) if payload_json else {}
+        project_dir = payload.get("projectDir", "").strip()
+        port = int(payload.get("port", 7860) or 7860)
+        admin_key = payload.get("adminKey", "admin").strip() or "admin"
+        result = backend.start_qwen2api(project_dir, port, admin_key)
+        return json.dumps(result)
+
+    def checkApiService(self, payload_json: str = "{}"):
+        payload = json.loads(payload_json) if payload_json else {}
+        base_url = payload.get("baseUrl", "").strip()
+        result = backend.check_api_service(base_url)
+        return json.dumps(result)
+
     # ── 内部方法 ──
 
     def _run_cli(self, prompt: str, model: str, provider: str, settings: dict):
@@ -614,6 +660,16 @@ class BackendBridge(QObject):
                 env_overrides["OLLAMA_BASE_URL"] = ollama_target
                 env_overrides["OLLAMA_MODEL"] = ollama_model
                 main.log_signal.emit(f"[代理] Node.js代理模式 模型={ollama_model}", "#2196F3")
+            elif provider == "api":
+                api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7860").strip()
+                api_model = (settings.get("API_MODEL", "") or "qwen3.6-plus").strip()
+                api_key = (settings.get("API_KEY", "") or "").strip()
+                main.log_signal.emit(f"[代理] API模式 模型={api_model} 目标={api_base}", "#2196F3")
+                env_overrides["MODEL_PROVIDER"] = "api"
+                env_overrides["API_BASE_URL"] = api_base
+                env_overrides["API_MODEL"] = api_model
+                if api_key:
+                    env_overrides["API_KEY"] = api_key
             else:
                 env_overrides["MODEL_PROVIDER"] = "anthropic"
                 env_overrides.pop("OLLAMA_BASE_URL", None)
@@ -732,6 +788,37 @@ class EnvInstaller:
         self.base_dir = base_dir
         self.log = log_func or (lambda *a: None)
         self.progress = progress_func
+        self._mirror_key = "china"
+
+    def _load_mirror(self):
+        try:
+            fp = os.path.join(self.base_dir, MIRROR_SETTINGS_FILE)
+            if os.path.isfile(fp):
+                with open(fp, "r", encoding="utf-8") as f:
+                    key = f.read().strip()
+                if key in MIRROR_SOURCES:
+                    self._mirror_key = key
+        except Exception:
+            pass
+
+    def _save_mirror(self, key: str):
+        self._mirror_key = key
+        try:
+            fp = os.path.join(self.base_dir, MIRROR_SETTINGS_FILE)
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(key)
+        except Exception:
+            pass
+
+    @property
+    def mirror(self) -> dict:
+        return MIRROR_SOURCES.get(self._mirror_key, MIRROR_SOURCES["china"])
+
+    def _github_url(self, original_url: str) -> str:
+        proxy = self.mirror.get("github_proxy", "")
+        if proxy and "github.com" in original_url:
+            return proxy + original_url
+        return original_url
 
     @property
     def nodejs_dir(self): return os.path.join(self.base_dir, "nodejs")
@@ -745,6 +832,19 @@ class EnvInstaller:
     def bun_extract(self): return os.path.join(self.bun_dir, BUN_DIR_NAME)
     @property
     def bun_exe(self): return os.path.join(self.bun_extract, "bun.exe")
+    @property
+    def uv_dir(self): return os.path.join(self.base_dir, "uv")
+    @property
+    def uv_exe(self): return os.path.join(self.uv_dir, "uv.exe")
+    @property
+    def uv_python_dir(self): return os.path.join(self.base_dir, "python")
+    @property
+    def scripts_dir(self): return os.path.join(self.base_dir, "scripts")
+    @property
+    def venv_dir(self): return os.path.join(self.scripts_dir, ".venv")
+    @property
+    def venv_python(self):
+        return os.path.join(self.venv_dir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(self.venv_dir, "bin", "python")
 
     def check_node(self): return os.path.exists(self.node_exe)
     def check_bun(self): return os.path.exists(self.bun_exe)
@@ -755,15 +855,33 @@ class EnvInstaller:
     def check_electron(self):
         return os.path.exists(os.path.join(self.base_dir, "node_modules", ".bin", "electron.cmd"))
 
+    def check_uv(self): return os.path.exists(self.uv_exe)
+
+    def check_qwen2api(self):
+        if not os.path.isfile(self.venv_python):
+            return False
+        try:
+            r = subprocess.run(
+                [self.venv_python, "-c",
+                 "import fastapi, uvicorn, httpx, pydantic_settings, tiktoken, curl_cffi; print('ok')"],
+                capture_output=True, text=True, timeout=15,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            return r.returncode == 0 and "ok" in (r.stdout or "")
+        except Exception:
+            return False
+
     def check_all(self):
         return {
             "node": self.check_node(), "bun": self.check_bun(),
             "deps": self.check_deps(), "dist": self.check_dist(),
             "electron": self.check_electron(),
+            "uv": self.check_uv(), "qwen2api": self.check_qwen2api(),
         }
 
     def _download(self, url: str, dest: str, label: str):
-        self.log(f"正在下载 {label}...")
+        mirror_label = self.mirror.get("label", "")
+        self.log(f"正在下载 {label}... [{mirror_label}]")
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -810,7 +928,8 @@ class EnvInstaller:
             self.log("✓ Node.js 已安装")
             return True
         zip_path = os.path.join(self.nodejs_dir, f"{NODE_DIR_NAME}.zip")
-        url = f"https://nodejs.org/dist/{NODE_VERSION}/node-{NODE_VERSION}-win-x64.zip"
+        node_base = self.mirror.get("node", "https://nodejs.org/dist/")
+        url = f"{node_base}{NODE_VERSION}/node-{NODE_VERSION}-win-x64.zip"
         if not os.path.exists(zip_path):
             if not self._download(url, zip_path, f"Node.js {NODE_VERSION}"):
                 return False
@@ -823,7 +942,7 @@ class EnvInstaller:
             self.log("✓ Bun 已安装")
             return True
         zip_path = os.path.join(self.bun_dir, f"{BUN_DIR_NAME}.zip")
-        url = f"https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/bun-windows-x64.zip"
+        url = self._github_url(f"https://github.com/oven-sh/bun/releases/download/bun-v{BUN_VERSION}/bun-windows-x64.zip")
         if not os.path.exists(zip_path):
             if not self._download(url, zip_path, f"Bun {BUN_VERSION}"):
                 return False
@@ -891,7 +1010,149 @@ class EnvInstaller:
             self.install_bun(),
             self.install_deps(),
             self.build_frontend(),
+            self.install_uv(),
+            self.install_qwen2api_deps(),
         ])
+
+    def install_uv(self):
+        if self.check_uv():
+            self.log("✓ uv 已安装")
+            return True
+        os.makedirs(self.uv_dir, exist_ok=True)
+        try:
+            env = os.environ.copy()
+            env["UV_INSTALL_DIR"] = self.uv_dir
+            mirror = self.mirror
+            install_url = "https://astral.sh/uv/install.ps1"
+            github_proxy = mirror.get("github_proxy", "")
+            proxy_urls = []
+            if github_proxy:
+                proxy_urls.append(github_proxy + "https://astral.sh/uv/install.ps1")
+            proxy_urls.append("https://astral.sh/uv/install.ps1")
+            si = self._si()
+            success = False
+            for url in proxy_urls:
+                source_label = "代理" if url != proxy_urls[-1] else "直连"
+                self.log(f"正在下载 uv 安装脚本 ({source_label})... [{mirror.get('label', '')}]")
+                ps_script = f"""
+$ProgressPreference = 'SilentlyContinue'
+$env:UV_INSTALL_DIR = '{self.uv_dir}'
+try {{
+    Invoke-WebRequest -Uri '{url}' -OutFile '$env:TEMP\\uv-install.ps1' -TimeoutSec 30
+    powershell -ExecutionPolicy Bypass -File '$env:TEMP\\uv-install.ps1'
+    Remove-Item '$env:TEMP\\uv-install.ps1' -ErrorAction SilentlyContinue
+}} catch {{
+    Write-Output "DOWNLOAD_FAILED"
+    Exit 1
+}}
+"""
+                proc = subprocess.Popen(
+                    ["powershell.exe", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    env=env, startupinfo=si, creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                output_lines = []
+                while proc.poll() is None:
+                    line = proc.stdout.readline()
+                    if line and line.strip():
+                        self.log(f"  {line.strip()}")
+                        output_lines.append(line.strip())
+                if "DOWNLOAD_FAILED" in output_lines:
+                    self.log(f"  {source_label}下载失败，尝试下一个源...", "#FF9800")
+                    continue
+                if proc.returncode == 0:
+                    success = True
+                    break
+                self.log(f"  {source_label}安装失败 (返回码: {proc.returncode})", "#FF9800")
+            if not success and os.path.exists(os.path.expanduser("~/.local/bin/uv.exe")):
+                src = os.path.expanduser("~/.local/bin/uv.exe")
+                import shutil
+                shutil.copy2(src, self.uv_exe)
+                self.log("✓ uv 安装完成（从默认路径复制）")
+                return True
+            if success and os.path.exists(self.uv_exe):
+                self.log("✓ uv 安装完成")
+                return True
+            if not success:
+                self.log("[错误] uv 安装失败，所有源均不可用", "#F44336")
+                return False
+            self.log("✓ uv 安装完成")
+            return True
+        except Exception as e:
+            self.log(f"[错误] uv 安装异常: {e}", "#F44336")
+            return False
+
+    def _uv_env(self):
+        env = os.environ.copy()
+        env["UV_PYTHON_INSTALL_DIR"] = self.uv_python_dir
+        env["UV_PYTHON_DOWNLOADS"] = "auto"
+        python_mirror = self.mirror.get("uv_python_mirror", "")
+        if python_mirror:
+            env["UV_PYTHON_INSTALL_MIRROR"] = python_mirror
+        pypi_index = self.mirror.get("pypi_index", "")
+        if pypi_index:
+            env["UV_INDEX_URL"] = pypi_index
+            env["UV_DEFAULT_INDEX"] = pypi_index
+        return env
+
+    def install_qwen2api_deps(self):
+        if self.check_qwen2api():
+            self.log("✓ API 服务依赖已安装")
+            return True
+        qwen_dir = os.path.join(self.base_dir, "qwen2api")
+        if not os.path.isdir(qwen_dir):
+            self.log("⚠ 未找到 qwen2api 目录，跳过 API 服务依赖安装", "#FF9800")
+            return True
+        req_file = os.path.join(qwen_dir, "backend", "requirements.txt")
+        if not os.path.exists(req_file):
+            self.log("⚠ qwen2api/requirements.txt 不存在，跳过", "#FF9800")
+            return True
+        if not self.install_uv():
+            self.log("[错误] uv 安装失败，无法继续", "#F44336")
+            return False
+        try:
+            env = self._uv_env()
+
+            if not os.path.isfile(self.venv_python):
+                self.log("正在创建虚拟环境 (uv + Python 3.12)...")
+                r = subprocess.run(
+                    [self.uv_exe, "venv", self.venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                    env=env, capture_output=True, text=True, timeout=300,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                if r.returncode != 0:
+                    mirror = self.mirror
+                    python_mirror = mirror.get("uv_python_mirror", "")
+                    if python_mirror and "UV_PYTHON_INSTALL_MIRROR" in env:
+                        self.log("镜像下载 Python 失败，尝试直连下载...", "#FF9800")
+                        env_fallback = env.copy()
+                        del env_fallback["UV_PYTHON_INSTALL_MIRROR"]
+                        r = subprocess.run(
+                            [self.uv_exe, "venv", self.venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                            env=env_fallback, capture_output=True, text=True, timeout=300,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                        )
+                if r.returncode != 0:
+                    self.log(f"[错误] 创建虚拟环境失败: {r.stderr[:500]}", "#F44336")
+                    return False
+                self.log("✓ 虚拟环境已创建")
+
+            self.log("正在安装 API 服务依赖 (uv pip)...")
+            r = subprocess.run(
+                [self.uv_exe, "pip", "install", "-r", req_file, "--python", self.venv_python],
+                env=env, capture_output=True, text=True, timeout=600,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if r.returncode == 0:
+                self.log("✓ API 服务依赖安装完成")
+                return True
+            self.log(f"[警告] API 服务依赖安装返回码: {r.returncode}", "#FF9800")
+            if r.stderr:
+                self.log(f"  stderr: {r.stderr[:500]}", "#FF9800")
+            return False
+        except Exception as e:
+            self.log(f"[错误] API 服务依赖安装失败: {e}", "#F44336")
+            return False
 
 
 # ── 主窗口 ──
@@ -904,6 +1165,7 @@ class MainWindow(QMainWindow):
     workspace_choose_requested = pyqtSignal()
     update_info_signal = pyqtSignal(str)
     _remote_ver_signal = pyqtSignal(object)
+    deploy_step_signal = pyqtSignal(str, str, int)
 
     def __init__(self):
         super().__init__()
@@ -967,6 +1229,7 @@ class MainWindow(QMainWindow):
         self.log_signal.connect(self._append_log)
         self.debug_log_signal.connect(self._append_debug_log)
         self.progress_signal.connect(self._update_progress)
+        self.deploy_step_signal.connect(self._update_deploy_step)
         self.status_signal.connect(self._update_status)
         self.result_ready_signal.connect(self._on_result_ready)
         self.workspace_choose_requested.connect(self._choose_workspace_dialog)
@@ -1149,81 +1412,110 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("color: #4CAF50; border: none;")
         layout.addWidget(title)
 
-        # 环境状态区域（紧凑：单行网格）
-        env_group = QFrame()
-        env_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 6px; }")
-        env_layout = QVBoxLayout(env_group)
-        env_layout.setSpacing(2)
-        env_layout.setContentsMargins(8, 6, 8, 6)
+        # 环境状态 + 安装流程（合二为一）
+        deploy_group = QFrame()
+        deploy_group.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; }")
+        deploy_layout = QVBoxLayout(deploy_group)
+        deploy_layout.setSpacing(4)
+        deploy_layout.setContentsMargins(8, 8, 8, 8)
 
-        env_title = QLabel("📦 环境状态")
-        env_title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        env_title.setStyleSheet("color: #fff; border: none;")
-        env_layout.addWidget(env_title)
+        # 顶部：标题 + 下载源
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+        deploy_title = QLabel("📦 部署维护")
+        deploy_title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        deploy_title.setStyleSheet("color: #fff; border: none;")
+        top_row.addWidget(deploy_title)
 
-        self.deploy_env_labels = {}
-        checks = self.installer.check_all()
-        labels = {"node": "Node.js", "bun": "Bun", "deps": "npm 依赖", "dist": "前端构建", "electron": "Electron"}
-        for key, label_text in labels.items():
-            row = QHBoxLayout()
-            row.setSpacing(4)
-            name_lbl = QLabel(f"  {label_text}")
-            name_lbl.setStyleSheet("color: #ccc; font-size: 12px; border: none;")
-            row.addWidget(name_lbl)
-            row.addStretch()
-            status_lbl = QLabel("✓" if checks.get(key) else "✗")
-            status_lbl.setStyleSheet(f"color: {'#4CAF50' if checks.get(key) else '#F44336'}; font-size: 12px; font-weight: bold; border: none;")
-            row.addWidget(status_lbl)
-            self.deploy_env_labels[key] = status_lbl
-            env_layout.addLayout(row)
+        top_row.addStretch()
 
-        layout.addWidget(env_group)
+        mirror_label = QLabel("📡 下载源")
+        mirror_label.setStyleSheet("color: #aaa; font-size: 10px; border: none;")
+        top_row.addWidget(mirror_label)
 
-        # 操作按钮区域
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
+        self.mirror_combo = QComboBox()
+        self.mirror_combo.setStyleSheet("""
+            QComboBox { background: #2a2a2a; border: 1px solid #444; border-radius: 4px; padding: 3px 8px; color: #fff; font-size: 11px; min-width: 120px; }
+            QComboBox::drop-down { border: none; }
+            QComboBox QAbstractItemView { background: #2a2a2a; color: #fff; selection-background-color: #1565C0; }
+        """)
+        for key, cfg in MIRROR_SOURCES.items():
+            self.mirror_combo.addItem(cfg["label"], key)
+        self.installer._load_mirror()
+        idx = list(MIRROR_SOURCES.keys()).index(self.installer._mirror_key) if self.installer._mirror_key in MIRROR_SOURCES else 0
+        self.mirror_combo.setCurrentIndex(idx)
+        self.mirror_combo.currentIndexChanged.connect(self._on_mirror_changed)
+        top_row.addWidget(self.mirror_combo)
+        deploy_layout.addLayout(top_row)
 
+        # 一键部署按钮
         self.btn_install_all = QPushButton("🔄 一键部署全部")
         self.btn_install_all.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; }
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; font-weight: bold; }
             QPushButton:hover { background-color: #388E3C; }
+            QPushButton:disabled { background-color: #333; color: #666; border-color: #444; }
         """)
         self.btn_install_all.clicked.connect(self._on_deploy)
-        btn_layout.addWidget(self.btn_install_all)
+        deploy_layout.addWidget(self.btn_install_all)
 
-        self.btn_install_node = QPushButton("📥 安装 Node.js")
-        self.btn_install_node.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
-        self.btn_install_node.clicked.connect(lambda: self._on_install_single("node"))
-        btn_layout.addWidget(self.btn_install_node)
+        # 步骤进度条按钮
+        self.deploy_env_labels = {}
+        self.deploy_steps = {}
+        checks = self.installer.check_all()
+        steps_info = [
+            ("node", "Node.js", "#1565C0"),
+            ("bun", "Bun", "#1565C0"),
+            ("deps", "npm 依赖", "#1565C0"),
+            ("dist", "前端构建", "#6A1B9A"),
+            ("uv", "uv", "#00695C"),
+            ("qwen2api", "API 依赖", "#E65100"),
+        ]
 
-        self.btn_install_bun = QPushButton("📥 安装 Bun")
-        self.btn_install_bun.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
-        self.btn_install_bun.clicked.connect(lambda: self._on_install_single("bun"))
-        btn_layout.addWidget(self.btn_install_bun)
+        for idx_s, (key, label, color) in enumerate(steps_info):
+            step_btn = QPushButton()
+            step_btn.setFixedHeight(28)
+            installed = checks.get(key, False)
 
-        self.btn_install_deps = QPushButton("📥 安装依赖")
-        self.btn_install_deps.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
-        self.btn_install_deps.clicked.connect(lambda: self._on_install_single("deps"))
-        btn_layout.addWidget(self.btn_install_deps)
+            bar_val = 100 if installed else 0
+            icon_text = "✓" if installed else "○"
+            status_text = "已安装" if installed else "待安装"
+            status_color = "#4CAF50" if installed else "#666"
 
-        self.btn_build_frontend = QPushButton("🔨 构建前端")
-        self.btn_build_frontend.setStyleSheet("""
-            QPushButton { background-color: #6A1B9A; border: 2px solid #7B1FA2; border-radius: 6px; padding: 6px 12px; font-size: 11px; }
-            QPushButton:hover { background-color: #7B1FA2; }
-        """)
-        self.btn_build_frontend.clicked.connect(lambda: self._on_install_single("dist"))
-        btn_layout.addWidget(self.btn_build_frontend)
+            step_btn.setText(f"  {icon_text}  {label}  {status_text}  ")
+            step_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #222; border: 1px solid #333; border-radius: 4px;
+                    color: {status_color}; font-size: 11px; text-align: left;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: #2a2a2a; border-color: {color};
+                }}
+                QPushButton:disabled {{
+                    background-color: #1a1a1a; color: #555; border-color: #222;
+                }}
+            """)
+            step_btn.clicked.connect(lambda checked, k=key: self._on_install_single(k))
+            deploy_layout.addWidget(step_btn)
 
-        layout.addLayout(btn_layout)
+            self.deploy_env_labels[key] = step_btn
+            self.deploy_steps[key] = {
+                "btn": step_btn, "color": color, "label": label,
+            }
+
+        # Electron 状态（只显示，不可安装）
+        electron_row = QHBoxLayout()
+        electron_row.setSpacing(4)
+        electron_lbl = QLabel("  ○  Electron")
+        electron_lbl.setStyleSheet("color: #888; font-size: 11px; border: none;")
+        electron_row.addWidget(electron_lbl)
+        electron_row.addStretch()
+        self.electron_status_lbl = QLabel("✓ 已安装" if checks.get("electron") else "✗ 未安装")
+        self.electron_status_lbl.setStyleSheet(f"color: {'#4CAF50' if checks.get('electron') else '#F44336'}; font-size: 11px; border: none;")
+        electron_row.addWidget(self.electron_status_lbl)
+        deploy_layout.addLayout(electron_row)
+
+        layout.addWidget(deploy_group)
 
         # 日志区域（标签页切换）
         log_group = QFrame()
@@ -1400,30 +1692,15 @@ class MainWindow(QMainWindow):
 
     # ── 环境检查与自动加载 ──
     def _auto_check_and_load(self):
-        """启动时自动检查环境，如需安装则先安装，然后加载前端"""
         def _check():
             checks = self.installer.check_all()
-            all_ok = all(checks.values())
 
-            # 更新环境状态
             parts = []
             for k, v in checks.items():
                 parts.append(f"{k}:{'✓' if v else '✗'}")
             self.log_signal.emit("环境检查: " + " ".join(parts), "#666")
 
-            if not all_ok:
-                self.log_signal.emit("环境未完全就绪，开始自动安装...", "#FF9800")
-                self.installer.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
-                self.installer.progress = lambda p, l: self.progress_signal.emit(p, l)
-
-                if self.installer.install_all():
-                    self.log_signal.emit("✓ 环境安装完成", "#4CAF50")
-                else:
-                    self.log_signal.emit("⚠ 部分环境安装失败，请使用部署维护", "#FF9800")
-
-            # 加载前端
             QTimer.singleShot(100, self._load_frontend)
-            # 刷新部署页面状态
             QTimer.singleShot(200, self._refresh_deploy_env_status)
 
         t = threading.Thread(target=_check, daemon=True)
@@ -1455,20 +1732,26 @@ class MainWindow(QMainWindow):
     def _update_env_status(self):
         checks = self.installer.check_all()
         parts = []
-        labels = {"node": "Node", "bun": "Bun", "deps": "依赖", "dist": "前端", "electron": "Electron"}
+        labels = {"node": "Node", "bun": "Bun", "deps": "依赖", "dist": "前端", "electron": "Electron", "qwen2api": "API"}
         for k, v in checks.items():
             parts.append(f"{labels.get(k, k)}:{'✓' if v else '✗'}")
         self.env_status.setText("环境: " + " | ".join(parts))
 
     def _refresh_deploy_env_status(self):
         """刷新部署维护页面的环境状态"""
-        if not hasattr(self, 'deploy_env_labels'):
+        if not hasattr(self, 'deploy_steps'):
             return
         checks = self.installer.check_all()
-        for key, lbl in self.deploy_env_labels.items():
-            installed = checks.get(key, False)
-            lbl.setText("✓ 已安装" if installed else "✗ 未安装")
-            lbl.setStyleSheet(f"color: {'#4CAF50' if installed else '#F44336'}; font-size: 13px; font-weight: bold; border: none;")
+        if not self.is_busy:
+            for key in self.deploy_steps:
+                if checks.get(key, False):
+                    self._update_deploy_step(key, "skip", 100)
+                else:
+                    self._update_deploy_step(key, "reset", 0)
+        if hasattr(self, 'electron_status_lbl'):
+            installed = checks.get("electron", False)
+            self.electron_status_lbl.setText("✓ 已安装" if installed else "✗ 未安装")
+            self.electron_status_lbl.setStyleSheet(f"color: {'#4CAF50' if installed else '#F44336'}; font-size: 11px; border: none;")
 
     def _refresh_ver_list(self, remote_versions=None):
         """刷新软件更新页面的版本历史列表"""
@@ -1761,6 +2044,79 @@ class MainWindow(QMainWindow):
     def _update_progress(self, percent: int, label: str):
         pass  # 可扩展
 
+    def _update_deploy_step(self, key: str, state: str, value: int):
+        step = self.deploy_steps.get(key)
+        if not step:
+            return
+        btn = step["btn"]
+        color = step["color"]
+        label = step["label"]
+        if state == "running":
+            btn.setText(f"  ◐  {label}  安装中...  ")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #1a2a1a; border: 2px solid {color}; border-radius: 4px;
+                    color: #FFC107; font-size: 11px; text-align: left;
+                    padding: 2px 8px;
+                }}
+                QPushButton:disabled {{
+                    background-color: #1a2a1a; color: #FFC107; border-color: {color};
+                }}
+            """)
+            btn.setEnabled(False)
+        elif state == "done":
+            btn.setText(f"  ✓  {label}  已完成  ")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #1a2a1a; border: 1px solid #333; border-radius: 4px;
+                    color: #4CAF50; font-size: 11px; text-align: left;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: #2a2a2a; border-color: {color};
+                }}
+            """)
+            btn.setEnabled(True)
+        elif state == "fail":
+            btn.setText(f"  ✗  {label}  安装失败  ")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #2a1a1a; border: 1px solid #F44336; border-radius: 4px;
+                    color: #F44336; font-size: 11px; text-align: left;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: #3a1a1a; border-color: #F44336;
+                }}
+            """)
+            btn.setEnabled(True)
+        elif state == "skip":
+            btn.setText(f"  ✓  {label}  已安装  ")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #222; border: 1px solid #333; border-radius: 4px;
+                    color: #4CAF50; font-size: 11px; text-align: left;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: #2a2a2a; border-color: {color};
+                }}
+            """)
+            btn.setEnabled(True)
+        elif state == "reset":
+            btn.setText(f"  ○  {label}  待安装  ")
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #222; border: 1px solid #333; border-radius: 4px;
+                    color: #666; font-size: 11px; text-align: left;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover {{
+                    background-color: #2a2a2a; border-color: {color};
+                }}
+            """)
+            btn.setEnabled(True)
+
     def _update_status(self, text: str):
         self.env_status.setText(text)
 
@@ -1781,31 +2137,72 @@ class MainWindow(QMainWindow):
             self.current_workspace = path
 
     # ── 部署维护 ──
+    def _on_mirror_changed(self, index):
+        key = self.mirror_combo.currentData()
+        if key:
+            self.installer._save_mirror(key)
+            self.log_signal.emit(f"下载源已切换为: {MIRROR_SOURCES[key]['label']}", "#4CAF50")
+
     def _on_deploy(self):
         if self.is_busy:
+            self.log_signal.emit("⚠ 安装任务进行中，请稍候...", "#FF9800")
             return
+        self.is_busy = True
         self.installer.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
         self.installer.progress = lambda p, l: self.progress_signal.emit(p, l)
+        for k in self.deploy_steps:
+            self.deploy_step_signal.emit(k, "reset", 0)
+
+        deploy_order = ["node", "bun", "deps", "dist", "uv", "qwen2api"]
+        install_funcs = {
+            "node": self.installer.install_node,
+            "bun": self.installer.install_bun,
+            "deps": self.installer.install_deps,
+            "dist": self.installer.build_frontend,
+            "uv": self.installer.install_uv,
+            "qwen2api": self.installer.install_qwen2api_deps,
+        }
+        check_funcs = {
+            "node": self.installer.check_node,
+            "bun": self.installer.check_bun,
+            "deps": self.installer.check_deps,
+            "dist": self.installer.check_dist,
+            "uv": self.installer.check_uv,
+            "qwen2api": self.installer.check_qwen2api,
+        }
 
         def _deploy():
-            self.log_signal.emit("━━━ 部署维护 ━━━", "#2E7D32")
-            if self.installer.install_all():
+            try:
+                self.log_signal.emit("━━━ 部署维护 ━━━", "#2E7D32")
+                total = len(deploy_order)
+                for i, key in enumerate(deploy_order):
+                    if check_funcs[key]():
+                        self.deploy_step_signal.emit(key, "skip", 100)
+                        continue
+                    self.deploy_step_signal.emit(key, "running", int(i / total * 100))
+                    func = install_funcs[key]
+                    ok = func()
+                    if ok:
+                        self.deploy_step_signal.emit(key, "done", 100)
+                    else:
+                        self.deploy_step_signal.emit(key, "fail", int(i / total * 100))
                 self.log_signal.emit("✓ 部署维护完成", "#4CAF50")
-            else:
-                self.log_signal.emit("⚠ 部署维护部分失败", "#FF9800")
+            except Exception as e:
+                self.log_signal.emit(f"⚠ 部署维护异常: {e}", "#FF9800")
+            finally:
+                self.is_busy = False
             self._update_env_status()
-            # 刷新部署页面状态
             QTimer.singleShot(100, self._refresh_deploy_env_status)
-            # 重新加载前端
             QTimer.singleShot(500, self._load_frontend)
 
         t = threading.Thread(target=_deploy, daemon=True)
         t.start()
 
     def _on_install_single(self, component: str):
-        """安装单个组件"""
         if self.is_busy:
+            self.log_signal.emit("⚠ 安装任务进行中，请稍候...", "#FF9800")
             return
+        self.is_busy = True
         self.installer.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
         self.installer.progress = lambda p, l: self.progress_signal.emit(p, l)
 
@@ -1814,19 +2211,28 @@ class MainWindow(QMainWindow):
             "bun": self.installer.install_bun,
             "deps": self.installer.install_deps,
             "dist": self.installer.build_frontend,
+            "uv": self.installer.install_uv,
+            "qwen2api": self.installer.install_qwen2api_deps,
         }
 
         func = install_funcs.get(component)
         if not func:
+            self.is_busy = False
             return
 
         def _install():
-            labels = {"node": "Node.js", "bun": "Bun", "deps": "npm 依赖", "dist": "前端构建"}
-            self.log_signal.emit(f"━━━ 安装 {labels.get(component, component)} ━━━", "#1976D2")
-            if func():
-                self.log_signal.emit(f"✓ {labels.get(component, component)} 安装完成", "#4CAF50")
-            else:
-                self.log_signal.emit(f"✗ {labels.get(component, component)} 安装失败", "#F44336")
+            try:
+                labels = {"node": "Node.js", "bun": "Bun", "deps": "npm 依赖", "dist": "前端构建", "uv": "uv", "qwen2api": "API 服务依赖"}
+                self.deploy_step_signal.emit(component, "running", 30)
+                self.log_signal.emit(f"━━━ 安装 {labels.get(component, component)} ━━━", "#1976D2")
+                if func():
+                    self.deploy_step_signal.emit(component, "done", 100)
+                    self.log_signal.emit(f"✓ {labels.get(component, component)} 安装完成", "#4CAF50")
+                else:
+                    self.deploy_step_signal.emit(component, "fail", 30)
+                    self.log_signal.emit(f"✗ {labels.get(component, component)} 安装失败", "#F44336")
+            finally:
+                self.is_busy = False
             self._update_env_status()
             QTimer.singleShot(100, self._refresh_deploy_env_status)
 

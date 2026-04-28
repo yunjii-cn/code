@@ -102,11 +102,24 @@ def get_version_description():
 def build_frontend():
     """在 dev/app/ 中构建 Vue 前端到 desktop/dist/"""
     dist_path = DEV_APP_DIR / "desktop" / "dist" / "index.html"
-    if dist_path.exists():
-        print("  ✓ 前端已构建 (desktop/dist/)")
+    src_dir = DEV_APP_DIR / "desktop" / "renderer" / "src"
+
+    need_rebuild = not dist_path.exists()
+    if not need_rebuild and src_dir.exists():
+        dist_mtime = dist_path.stat().st_mtime
+        for src_file in src_dir.rglob("*"):
+            if src_file.is_file() and src_file.stat().st_mtime > dist_mtime:
+                need_rebuild = True
+                break
+
+    if not need_rebuild:
+        print("  ✓ 前端已构建且为最新 (desktop/dist/)")
         return True
 
-    print("  构建前端 (vite build)...")
+    if dist_path.exists():
+        print("  检测到前端源码变更，重新构建...")
+    else:
+        print("  构建前端 (vite build)...")
 
     bun_dir = DEV_APP_DIR / "bun" / "bun-windows-x64"
     node_dir = DEV_APP_DIR / "nodejs"
@@ -126,7 +139,16 @@ def build_frontend():
     si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
     try:
-        if bun_exe and bun_exe.exists():
+        vite_js = str(DEV_APP_DIR / "node_modules" / "vite" / "bin" / "vite.js")
+        node_exe = str(node_exe_dir / "node.exe") if node_exe_dir and node_exe_dir.exists() else "node"
+
+        if node_exe_dir and node_exe_dir.exists() and os.path.isfile(vite_js):
+            r = subprocess.run(
+                [node_exe, vite_js, "build", "--config", "desktop/vite.config.ts"],
+                cwd=str(DEV_APP_DIR), env=env,
+                startupinfo=si, capture_output=True, text=True, timeout=120,
+            )
+        elif bun_exe and bun_exe.exists():
             r = subprocess.run(
                 [str(bun_exe), "run", "desktop:build"],
                 cwd=str(DEV_APP_DIR), env=env,
@@ -264,6 +286,15 @@ def post_build(release_dir: Path):
     if scripts_src.exists() and not scripts_dst.exists():
         shutil.copytree(str(scripts_src), str(scripts_dst))
         print("  ✓ 复制 scripts/")
+
+    # 7. 复制 qwen2api/ (API 服务后端)
+    qwen_src = DEV_APP_DIR / "qwen2api"
+    qwen_dst = release_dir / "qwen2api"
+    if qwen_src.exists():
+        if qwen_dst.exists():
+            shutil.rmtree(str(qwen_dst))
+        shutil.copytree(str(qwen_src), str(qwen_dst))
+        print("  ✓ 复制 qwen2api/ (API 服务)")
 
     # nodejs/, bun/, node_modules/ 不复制到 build/ 发布包
     # 用户拿到整合包后，通过部署维护功能自动下载安装
