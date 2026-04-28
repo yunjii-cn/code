@@ -1,5 +1,52 @@
 [
   {
+    "version": "2026.04.29.0612",
+    "name": "云集智能编程工作站v2026.04.29.0612",
+    "changes": [
+      "修复backend模块未导入导致NameError",
+      "设置应用级深色调色板消除白色闪屏"
+    ],
+    "build_time": "2026-04-29T06:16:10.619226",
+    "git_commit": "6c591cb"
+  },
+  {
+    "version": "2026.04.29.0604",
+    "name": "云集智能编程工作站v2026.04.29.0604",
+    "changes": [
+      "为API相关方法添加异常保护防止闪退"
+    ],
+    "build_time": "2026-04-29T06:07:33.370513",
+    "git_commit": "6c591cb"
+  },
+  {
+    "version": "2026.04.29.0546",
+    "name": "云集智能编程工作站v2026.04.29.0546",
+    "changes": [
+      "修复关键BUG:fetchApiKey/startQwen2Api/checkApiService缺少@pyqtSlot装饰器导致QWebChannel无法调用"
+    ],
+    "build_time": "2026-04-29T05:49:32.479441",
+    "git_commit": "6c591cb"
+  },
+  {
+    "version": "2026.04.29.0522",
+    "name": "云集智能编程工作站v2026.04.29.0522",
+    "changes": [
+      "添加start_qwen2api调试日志定位EXE运行时路径问题",
+      "一键就绪改为一键启动"
+    ],
+    "build_time": "2026-04-29T05:26:18.702528",
+    "git_commit": "6c591cb"
+  },
+  {
+    "version": "2026.04.29.0448",
+    "name": "云集智能编程工作站v2026.04.29.0448",
+    "changes": [
+      "修复PyInstaller打包后backend.py路径错误导致API服务启动失败"
+    ],
+    "build_time": "2026-04-29T04:51:08.136661",
+    "git_commit": "6c591cb"
+  },
+  {
     "version": "2026.04.29.0334",
     "name": "云集智能编程工作站v2026.04.29.0334",
     "changes": [
