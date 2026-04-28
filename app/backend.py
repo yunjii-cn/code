@@ -17,6 +17,7 @@ import json
 import re
 import uuid
 import time
+import shutil
 import subprocess
 import threading
 import queue
@@ -50,6 +51,9 @@ SETTINGS_KEYS = [
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "OLLAMA_BASE_URL",
     "OLLAMA_MODEL",
+    "API_BASE_URL",
+    "API_MODEL",
+    "API_KEY",
     "API_TIMEOUT_MS",
     "DISABLE_TELEMETRY",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
@@ -365,6 +369,287 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000, check_health: boo
             "healthError": health_error,
         })
     return {"ok": True, "models": models}
+
+
+def list_api_models(base_url: str, api_key: str = "", timeout_ms: int = 15000) -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    url = f"{base.rstrip('/')}/v1/models"
+    headers = {"Content-Type": "application/json"}
+    if api_key and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+    result = fetch_json_with_timeout(url, headers=headers, timeout_ms=timeout_ms)
+    if not result["ok"]:
+        err = (result.get("text", "") or "")[:200]
+        return {"ok": False, "error": f"API 服务连接失败 ({result['status']}) {err}".strip()}
+    raw_models = ((result.get("data") or {}).get("data", []))[:120]
+    models = []
+    for m in raw_models:
+        model_id = m.get("id", m.get("name", ""))
+        models.append({
+            "id": model_id,
+            "name": m.get("name", model_id),
+            "provider": "api",
+            "toolSupport": True,
+            "size": "",
+            "family": m.get("owned_by", ""),
+            "paramCount": "",
+            "loadable": True,
+            "healthError": "",
+        })
+    if not models:
+        models.append({
+            "id": "qwen3.6-plus",
+            "name": "qwen3.6-plus",
+            "provider": "api",
+            "toolSupport": True,
+            "size": "",
+            "family": "qwen",
+            "paramCount": "",
+            "loadable": True,
+            "healthError": "",
+        })
+    return {"ok": True, "models": models}
+
+
+def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    try:
+        result = fetch_json_with_timeout(f"{base.rstrip('/')}/healthz", timeout_ms=timeout_ms)
+        if result["ok"]:
+            return {"ok": True, "running": True}
+    except:
+        pass
+    return {"ok": True, "running": False}
+
+
+def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    ak = (admin_key or "").strip() or "admin"
+
+    try:
+        result = fetch_json_with_timeout(
+            f"{base.rstrip('/')}/api/admin/keys",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {ak}"},
+            timeout_ms=timeout_ms,
+        )
+        if result["ok"]:
+            data = result.get("data") or {}
+            keys = data.get("keys", [])
+            if keys:
+                return {"ok": True, "key": keys[0]}
+    except:
+        pass
+
+    try:
+        body = json.dumps({}).encode("utf-8")
+        result = fetch_json_with_timeout(
+            f"{base.rstrip('/')}/api/admin/keys",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {ak}"},
+            timeout_ms=timeout_ms,
+            method="POST",
+            body=body,
+        )
+        if result["ok"]:
+            data = result.get("data") or {}
+            key = data.get("key", "")
+            if key:
+                return {"ok": True, "key": key}
+    except:
+        pass
+
+    admin_url = base.rstrip("/")
+    return {"ok": False, "error": "未能自动获取 API Key，请确认 API 服务已启动且 ADMIN_KEY 正确。", "adminUrl": admin_url}
+
+
+UV_PYTHON_VERSION = "3.12"
+
+MIRROR_SOURCES = {
+    "official": {
+        "label": "🌐 官方源",
+        "node": "https://nodejs.org/dist/",
+        "github_proxy": "",
+        "uv_python_mirror": "",
+        "pypi_index": "https://pypi.org/simple/",
+    },
+    "china": {
+        "label": "🇨🇳 国内镜像",
+        "node": "https://npmmirror.com/mirrors/node/",
+        "github_proxy": "https://gh-proxy.com/",
+        "uv_python_mirror": "https://registry.npmmirror.com/-/binary/python-build-standalone/",
+        "pypi_index": "https://pypi.tuna.tsinghua.edu.cn/simple/",
+    },
+}
+
+def _app_dir() -> str:
+    return str(Path(__file__).resolve().parent)
+
+def _uv_exe() -> str:
+    return os.path.join(_app_dir(), "uv", "uv.exe")
+
+def _uv_python_dir() -> str:
+    return os.path.join(_app_dir(), "python")
+
+def _qwen2api_venv_python() -> str:
+    venv_dir = os.path.join(_app_dir(), "scripts", ".venv")
+    if os.name == "nt":
+        return os.path.join(venv_dir, "Scripts", "python.exe")
+    return os.path.join(venv_dir, "bin", "python")
+
+def _qwen2api_venv_exists() -> bool:
+    return os.path.isfile(_qwen2api_venv_python())
+
+def _load_mirror_key() -> str:
+    try:
+        fp = os.path.join(_app_dir(), "mirror_source.json")
+        if os.path.isfile(fp):
+            with open(fp, "r", encoding="utf-8") as f:
+                key = f.read().strip()
+            if key in MIRROR_SOURCES:
+                return key
+    except Exception:
+        pass
+    return "china"
+
+def _uv_env() -> dict:
+    env = os.environ.copy()
+    env["UV_PYTHON_INSTALL_DIR"] = _uv_python_dir()
+    env["UV_PYTHON_DOWNLOADS"] = "auto"
+    mirror = MIRROR_SOURCES.get(_load_mirror_key(), MIRROR_SOURCES["china"])
+    python_mirror = mirror.get("uv_python_mirror", "")
+    if python_mirror:
+        env["UV_PYTHON_INSTALL_MIRROR"] = python_mirror
+    pypi_index = mirror.get("pypi_index", "")
+    if pypi_index:
+        env["UV_INDEX_URL"] = pypi_index
+        env["UV_DEFAULT_INDEX"] = pypi_index
+    return env
+
+def _check_qwen2api_deps() -> bool:
+    if not _qwen2api_venv_exists():
+        return False
+    venv_python = _qwen2api_venv_python()
+    try:
+        r = subprocess.run(
+            [venv_python, "-c",
+             "import fastapi, uvicorn, httpx, pydantic_settings, tiktoken, curl_cffi; print('ok')"],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        return r.returncode == 0 and "ok" in (r.stdout or "")
+    except Exception:
+        return False
+
+_qwen2api_proc = None
+
+def start_qwen2api(project_dir: str = "", port: int = 7860, admin_key: str = "admin") -> dict:
+    global _qwen2api_proc
+
+    base = f"http://127.0.0.1:{port}"
+    status = check_api_service(base)
+    if status.get("running"):
+        return {"ok": True, "message": "API 服务已在运行", "baseUrl": base}
+
+    if _qwen2api_proc and _qwen2api_proc.poll() is None:
+        return {"ok": True, "message": "API 服务正在启动中", "baseUrl": base}
+
+    qwen_dir = project_dir.strip()
+    if not qwen_dir:
+        app_qwen_dir = Path(__file__).resolve().parent / "qwen2api"
+        if app_qwen_dir.exists():
+            qwen_dir = str(app_qwen_dir)
+        else:
+            return {"ok": False, "error": f"未找到 qwen2api 目录: {app_qwen_dir}"}
+
+    if not Path(qwen_dir).exists():
+        return {"ok": False, "error": f"qwen2api 目录不存在: {qwen_dir}"}
+
+    venv_python = _qwen2api_venv_python()
+    venv_dir = os.path.join(_app_dir(), "scripts", ".venv")
+    uv = _uv_exe()
+    env = _uv_env()
+
+    if not _check_qwen2api_deps():
+        if not os.path.isfile(venv_python):
+            if not os.path.isfile(uv):
+                return {"ok": False, "error": "uv 未安装，请先在部署维护中安装 uv"}
+            try:
+                subprocess.check_call(
+                    [uv, "venv", venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                    env=env,
+                    timeout=300,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
+
+        req_file = Path(qwen_dir) / "backend" / "requirements.txt"
+        if req_file.exists():
+            try:
+                subprocess.check_call(
+                    [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
+                    env=env,
+                    timeout=300,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"安装 API 服务依赖失败: {e}"}
+
+    env.update({
+        "PYTHONPATH": str(qwen_dir),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PORT": str(port),
+        "ADMIN_KEY": admin_key,
+        "WORKERS": "1",
+        "ENGINE_MODE": "httpx",
+        "LOG_LEVEL": "WARNING",
+        "ACCOUNTS_FILE": str(Path(qwen_dir) / "data" / "accounts.json"),
+        "USERS_FILE": str(Path(qwen_dir) / "data" / "users.json"),
+        "VIRTUAL_ENV": venv_dir,
+    })
+
+    data_dir = Path(qwen_dir) / "data"
+    data_dir.mkdir(exist_ok=True)
+
+    log_path = Path(qwen_dir) / "data" / "qwen2api.log"
+    try:
+        log_file = open(log_path, "a", encoding="utf-8")
+    except Exception:
+        log_file = subprocess.PIPE
+
+    try:
+        proc = subprocess.Popen(
+            [venv_python, "-m", "uvicorn", "backend.main:app",
+             "--host", "0.0.0.0", "--port", str(port), "--workers", "1"],
+            cwd=qwen_dir,
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        _qwen2api_proc = proc
+    except Exception as e:
+        if log_file != subprocess.PIPE:
+            try: log_file.close()
+            except: pass
+        return {"ok": False, "error": f"启动 API 服务失败: {e}"}
+
+    import time as _time
+    _time.sleep(2)
+    if proc.poll() is not None:
+        err_msg = "进程意外退出"
+        if log_file != subprocess.PIPE:
+            try:
+                log_file.close()
+                with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
+                    tail = lf.read()[-2000:]
+                if tail.strip():
+                    err_msg = tail.strip().split("\n")[-1][:200]
+            except:
+                pass
+        return {"ok": False, "error": f"API 服务启动失败: {err_msg}", "logPath": str(log_path)}
+
+    return {"ok": True, "message": "API 服务正在启动，请稍候检查状态", "baseUrl": base, "pid": proc.pid, "logPath": str(log_path)}
 
 
 # ── Ollama 代理服务器 ──
@@ -1482,7 +1767,8 @@ BRIDGE_METHODS = [
     "getState", "newSession", "sendMessage", "stopMessage",
     "getWorkspace", "chooseWorkspace", "getSettings", "saveSettings",
     "clearModelSettings", "listModels", "detectHardware",
-    "deleteModel", "recommendModels",
+    "deleteModel", "recommendModels", "fetchApiKey",
+    "startQwen2Api", "checkApiService",
 ]
 
 BRIDGE_SIGNALS = [

@@ -22,6 +22,9 @@ type DesktopSettings = {
   ANTHROPIC_DEFAULT_OPUS_MODEL?: string;
   OLLAMA_BASE_URL?: string;
   OLLAMA_MODEL?: string;
+  API_BASE_URL?: string;
+  API_MODEL?: string;
+  API_KEY?: string;
   API_TIMEOUT_MS?: string;
   AI_LANGUAGE?: string;
   AI_TEMPERATURE?: string;
@@ -97,14 +100,33 @@ const noticeType = ref<"ok" | "warn">("ok");
 const messages = ref<ChatMessage[]>([]);
 const currentAssistantId = ref("");
 
-const runMode = ref<"cloud" | "ollama">("ollama");
+const runMode = ref<"cloud" | "ollama" | "api">("ollama");
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
+const apiBaseUrl = ref("http://127.0.0.1:7860");
+const apiModel = ref("qwen3.6-plus");
+const apiModels = ref<ModelInfo[]>([]);
 const cloudModels = ref<ModelInfo[]>([]);
 const loadingModels = ref(false);
 const expandedModelId = ref("");
 const hardwareInfo = ref<any>(null);
+const apiServiceRunning = ref(false);
+
+const apiSteps = [
+  { label: "检测服务", action: "check" },
+  { label: "启动服务", action: "start" },
+  { label: "获取 Key", action: "key" },
+  { label: "加载模型", action: "models" },
+];
+const apiStepProgress = ref(0);
+const apiStepBusy = ref(false);
+const apiStepMessage = ref("点击「一键就绪」自动配置 API 服务");
+
+const apiProgressPercent = computed(() => {
+  if (apiStepProgress.value >= apiSteps.length) return 100;
+  return Math.round((apiStepProgress.value / apiSteps.length) * 100);
+});
 
 const modelConfigs = reactive<Record<string, ModelConfig>>({});
 
@@ -119,6 +141,9 @@ const settings = reactive<Required<DesktopSettings>>({
   ANTHROPIC_DEFAULT_OPUS_MODEL: "",
   OLLAMA_BASE_URL: "",
   OLLAMA_MODEL: "",
+  API_BASE_URL: "",
+  API_MODEL: "",
+  API_KEY: "",
   API_TIMEOUT_MS: "3000000",
   AI_LANGUAGE: "zh",
   AI_TEMPERATURE: "",
@@ -139,7 +164,7 @@ function getModelConfig(modelId: string): ModelConfig {
 }
 
 function getActiveModelConfig(): ModelConfig {
-  const activeModel = runMode.value === "ollama" ? ollamaModel.value : settings.ANTHROPIC_MODEL;
+  const activeModel = runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : settings.ANTHROPIC_MODEL;
   return getModelConfig(activeModel || "__default__");
 }
 
@@ -153,8 +178,33 @@ watch(runMode, (newMode) => {
   if (newMode === "ollama") {
     cloudModels.value = [];
     loadCloudModels("ollama");
+  } else if (newMode === "api") {
+    checkApiServiceStatus();
   }
 });
+
+async function checkApiServiceStatus() {
+  if (!apiBaseUrl.value.trim()) {
+    apiServiceRunning.value = false;
+    apiStepMessage.value = "请输入 API 服务地址";
+    return;
+  }
+  try {
+    const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
+    if (result && result.running) {
+      apiServiceRunning.value = true;
+      apiStepProgress.value = 2;
+      apiStepMessage.value = "服务已运行，点击「一键就绪」继续配置";
+    } else {
+      apiServiceRunning.value = false;
+      apiStepProgress.value = 0;
+      apiStepMessage.value = "点击「一键就绪」自动配置 API 服务";
+    }
+  } catch {
+    apiServiceRunning.value = false;
+    apiStepMessage.value = "点击「一键就绪」自动配置 API 服务";
+  }
+}
 
 function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -203,17 +253,28 @@ function applySettings(data?: DesktopSettings) {
   settings.ANTHROPIC_DEFAULT_OPUS_MODEL = data.ANTHROPIC_DEFAULT_OPUS_MODEL ?? "";
   settings.OLLAMA_BASE_URL = data.OLLAMA_BASE_URL ?? "";
   settings.OLLAMA_MODEL = data.OLLAMA_MODEL ?? "";
+  settings.API_BASE_URL = data.API_BASE_URL ?? "";
+  settings.API_MODEL = data.API_MODEL ?? "";
+  settings.API_KEY = data.API_KEY ?? "";
   settings.API_TIMEOUT_MS = data.API_TIMEOUT_MS ?? "3000000";
   settings.AI_LANGUAGE = data.AI_LANGUAGE ?? "zh";
   settings.AI_TEMPERATURE = data.AI_TEMPERATURE ?? "";
   settings.AI_MAX_TOKENS = data.AI_MAX_TOKENS ?? "";
   settings.SYSTEM_PROMPT = data.SYSTEM_PROMPT ?? "";
 
-  runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : "cloud";
+  runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : settings.MODEL_PROVIDER === "api" ? "api" : "cloud";
   const cloudKey = settings.ANTHROPIC_API_KEY || settings.ANTHROPIC_AUTH_TOKEN || "";
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
   ollamaBaseUrl.value = settings.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   ollamaModel.value = settings.OLLAMA_MODEL || "";
+  apiBaseUrl.value = settings.API_BASE_URL || "http://127.0.0.1:7860";
+  apiModel.value = settings.API_MODEL || "qwen3.6-plus";
+  if (settings.API_KEY) {
+    const ak = settings.API_KEY;
+    if (ak !== "ollama-local" && ak !== cloudKey) {
+      apiKey.value = ak;
+    }
+  }
 
   if (settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL) {
     const modelId = settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL;
@@ -359,7 +420,7 @@ async function sendMessage() {
 }
 
 async function doSend(text: string, addUserMsg: boolean = false) {
-  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
+  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : runMode.value === "api" ? apiModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
   if (addUserMsg) {
     addMessage("user", text);
   }
@@ -380,7 +441,7 @@ async function doSend(text: string, addUserMsg: boolean = false) {
 
   const result = await callBackend("sendMessage", JSON.stringify({
     prompt: text,
-    provider: runMode.value === "ollama" ? "ollama" : "anthropic",
+    provider: runMode.value === "ollama" ? "ollama" : runMode.value === "api" ? "api" : "anthropic",
     model: currentModel,
     ai_language: activeConfig.language,
     ai_temperature: activeConfig.temperature,
@@ -490,6 +551,36 @@ async function saveSettings() {
     return;
   }
 
+  if (runMode.value === "api") {
+    if (!apiBaseUrl.value.trim()) {
+      showNotice("请填写 API 服务地址", "warn");
+      return;
+    }
+    if (!apiModel.value.trim()) {
+      showNotice("请填写或选择模型名称", "warn");
+      return;
+    }
+
+    const payload: Record<string, string> = {
+      MODEL_PROVIDER: "api",
+      API_BASE_URL: apiBaseUrl.value.trim(),
+      API_MODEL: apiModel.value.trim(),
+      API_KEY: apiKey.value.trim(),
+      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+      DISABLE_TELEMETRY: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      AI_LANGUAGE: activeConfig.language || "zh",
+      AI_TEMPERATURE: activeConfig.temperature || "",
+      AI_MAX_TOKENS: activeConfig.maxTokens || "",
+      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+    };
+
+    const saved = await callBackend("saveSettings", JSON.stringify(payload));
+    applySettings(saved);
+    showNotice("配置已保存。API 模式已启用。", "ok");
+    return;
+  }
+
   if (!apiKey.value.trim()) {
     showNotice("请先填写 API Key", "warn");
     return;
@@ -525,6 +616,169 @@ async function clearModelFields() {
   const saved = await callBackend("clearModelSettings");
   applySettings(saved);
   showNotice("模型字段已清空。", "warn");
+}
+
+async function loadApiModels() {
+  loadingModels.value = true;
+  try {
+    const payload = { source: "api", baseUrl: apiBaseUrl.value, apiKey: apiKey.value };
+    const result = await callBackend("listModels", JSON.stringify(payload));
+    if (result && result.loading) {
+      return;
+    }
+    if (!result || !result.ok) {
+      showNotice(result?.error || "API 模型列表加载失败", "warn");
+      loadingModels.value = false;
+      return;
+    }
+    apiModels.value = result.models || [];
+    cloudModels.value = result.models || [];
+    loadingModels.value = false;
+    showNotice(`已加载 ${apiModels.value.length} 个 API 模型`, "ok");
+  } catch (e) {
+    console.error("[loadApiModels] error:", e);
+    showNotice("API 模型列表加载异常", "warn");
+    loadingModels.value = false;
+  }
+}
+
+async function fetchApiKey() {
+  if (!apiBaseUrl.value.trim()) {
+    showNotice("请先填写 API 服务地址", "warn");
+    return;
+  }
+  try {
+    const result = await callBackend("fetchApiKey", JSON.stringify({ baseUrl: apiBaseUrl.value.trim(), adminKey: "admin" }));
+    if (result && result.ok && result.key) {
+      apiKey.value = result.key;
+      showNotice("API Key 已自动获取", "ok");
+    } else {
+      if (result?.adminUrl) {
+        window.open(result.adminUrl, "_blank");
+        showNotice("已打开 API 服务管理界面，请手动创建 API Key", "warn");
+      } else {
+        showNotice(result?.error || "未能自动获取 API Key", "warn");
+      }
+    }
+  } catch (e) {
+    console.error("[fetchApiKey] error:", e);
+    showNotice("获取 API Key 异常", "warn");
+  }
+}
+
+async function apiStepAutoRun() {
+  if (apiStepBusy.value) return;
+  apiStepBusy.value = true;
+
+  try {
+    while (apiStepProgress.value < apiSteps.length) {
+      const step = apiSteps[apiStepProgress.value];
+      apiStepMessage.value = `${step.label}中...`;
+
+      if (step.action === "check") {
+        const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
+        if (result && result.running) {
+          apiServiceRunning.value = true;
+          apiStepMessage.value = "服务已运行";
+          apiStepProgress.value++;
+          continue;
+        }
+        apiStepMessage.value = "服务未启动，准备启动...";
+        apiStepProgress.value++;
+      }
+
+      else if (step.action === "start") {
+        const portMatch = apiBaseUrl.value.match(/:(\d+)/);
+        const port = portMatch ? parseInt(portMatch[1]) : 7860;
+        const result = await callBackend("startQwen2Api", JSON.stringify({ port }));
+        if (result && result.ok) {
+          apiBaseUrl.value = result.baseUrl || `http://127.0.0.1:${port}`;
+          if (result.message && result.message.includes("已在运行")) {
+            apiServiceRunning.value = true;
+            apiStepMessage.value = "服务已运行";
+            apiStepProgress.value++;
+            continue;
+          }
+          apiStepMessage.value = "等待服务就绪...";
+          const ready = await waitForApiService();
+          if (ready) {
+            apiServiceRunning.value = true;
+            apiStepMessage.value = "服务已启动";
+            apiStepProgress.value++;
+          } else {
+            apiStepMessage.value = "服务启动超时";
+            break;
+          }
+        } else {
+          apiStepMessage.value = result?.error || "启动失败";
+          showNotice(result?.error || "API 服务启动失败", "warn");
+          break;
+        }
+      }
+
+      else if (step.action === "key") {
+        const result = await callBackend("fetchApiKey", JSON.stringify({ baseUrl: apiBaseUrl.value.trim(), adminKey: "admin" }));
+        if (result && result.ok && result.key) {
+          apiKey.value = result.key;
+          apiStepMessage.value = "Key 已获取";
+          apiStepProgress.value++;
+        } else {
+          apiStepMessage.value = "Key 获取失败，可手动输入";
+          apiStepProgress.value++;
+        }
+      }
+
+      else if (step.action === "models") {
+        loadingModels.value = true;
+        const payload = { source: "api", baseUrl: apiBaseUrl.value, apiKey: apiKey.value };
+        const result = await callBackend("listModels", JSON.stringify(payload));
+        loadingModels.value = false;
+        if (result && result.ok) {
+          apiModels.value = result.models || [];
+          cloudModels.value = result.models || [];
+          if (apiModels.value.length > 0 && !apiModel.value) {
+            apiModel.value = apiModels.value[0].id;
+          }
+          apiStepMessage.value = `已加载 ${apiModels.value.length} 个模型`;
+          apiStepProgress.value++;
+        } else {
+          apiStepMessage.value = result?.error || "模型加载失败";
+          apiStepProgress.value++;
+        }
+      }
+    }
+
+    if (apiStepProgress.value >= apiSteps.length) {
+      apiStepMessage.value = "✓ API 服务已就绪，可以开始编程";
+      showNotice("API 服务已就绪", "ok");
+    }
+  } catch (e) {
+    console.error("[apiStepAutoRun] error:", e);
+    apiStepMessage.value = "配置异常: " + (e as Error).message;
+  } finally {
+    apiStepBusy.value = false;
+  }
+}
+
+function waitForApiService(maxRetries = 30): Promise<boolean> {
+  return new Promise((resolve) => {
+    let count = 0;
+    const timer = setInterval(async () => {
+      count++;
+      try {
+        const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
+        if (result && result.running) {
+          clearInterval(timer);
+          resolve(true);
+          return;
+        }
+      } catch { /* ignore */ }
+      if (count >= maxRetries) {
+        clearInterval(timer);
+        resolve(false);
+      }
+    }, 2000);
+  });
 }
 
 async function loadCloudModels(source: "openrouter" | "anthropic" | "ollama") {
@@ -626,6 +880,8 @@ onMounted(async () => {
 
   if (runMode.value === "ollama") {
     loadCloudModels("ollama");
+  } else if (runMode.value === "api") {
+    checkApiServiceStatus();
   }
 
   addMessage("assistant", "选择模型并配置参数，打开项目目录后即可下达编码任务。");
@@ -678,7 +934,10 @@ onMounted(async () => {
         cloudModels.value = payload.models || [];
         const broken = cloudModels.value.filter((m: ModelInfo) => m.loadable === false);
         const source = (payload.models?.[0]?.provider) || "ollama";
-        const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : " Ollama";
+        if (source === "api") {
+          apiModels.value = payload.models || [];
+        }
+        const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : source === "api" ? " API" : " Ollama";
         let msg = `已加载 ${cloudModels.value.length} 个${label}模型`;
         if (broken.length > 0) msg += `，${broken.length}个损坏`;
         showNotice(msg, broken.length > 0 ? "warn" : "ok");
@@ -744,6 +1003,7 @@ onMounted(async () => {
           <h2>模型与配置</h2>
           <div class="mode-switch">
             <button :class="['mode-btn', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">☁️ 云端</button>
+            <button :class="['mode-btn', { active: runMode === 'api' }]" @click="runMode = 'api'">🔗 API</button>
             <button :class="['mode-btn', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">🦙 Ollama</button>
           </div>
         </div>
@@ -769,6 +1029,75 @@ onMounted(async () => {
           <div v-if="expandedModelId === 'openrouter/auto'" class="model-settings">
             <ModelSettingsPanel :config="getModelConfig('openrouter/auto')" :hint="getAutoConfigHint('openrouter/auto')" @auto-configure="autoConfigure('openrouter/auto')" />
           </div>
+        </template>
+
+        <template v-else-if="runMode === 'api'">
+          <label class="field">
+            <span>API 服务地址</span>
+            <input v-model="apiBaseUrl" placeholder="http://127.0.0.1:7860" />
+          </label>
+
+          <div class="api-progress-section">
+            <div class="api-progress-bar">
+              <div
+                v-for="(step, idx) in apiSteps"
+                :key="idx"
+                :class="['api-step', { done: apiStepProgress > idx, active: apiStepProgress === idx, pending: apiStepProgress < idx }]"
+              >
+                <div class="step-dot">
+                  <span v-if="apiStepProgress > idx">✓</span>
+                  <span v-else-if="apiStepProgress === idx && apiStepBusy">{{ idx + 1 }}</span>
+                  <span v-else>{{ idx + 1 }}</span>
+                </div>
+                <div class="step-label">{{ step.label }}</div>
+              </div>
+            </div>
+            <div class="api-progress-track">
+              <div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div>
+            </div>
+            <p class="api-progress-msg">{{ apiStepMessage }}</p>
+            <button
+              class="btn-blue"
+              style="width: 100%; margin-top: 6px;"
+              @click="apiStepAutoRun"
+              :disabled="apiStepBusy || apiStepProgress >= apiSteps.length"
+            >
+              {{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键就绪') }}
+            </button>
+          </div>
+
+          <label class="field">
+            <span>API Key</span>
+            <input v-model="apiKey" type="password" placeholder="自动获取或手动输入" />
+          </label>
+
+          <div v-if="apiModels.length > 0" class="model-list">
+            <div v-for="m in apiModels" :key="m.id" class="model-row-wrapper">
+              <div
+                :class="['model-row', { selected: apiModel === m.id }]"
+                @click="apiModel = m.id"
+              >
+                <div class="model-row-info">
+                  <span class="model-name">{{ displayName(m.name || m.id) }}</span>
+                  <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
+                  <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
+                </div>
+                <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
+              </div>
+              <div v-if="expandedModelId === m.id" class="model-settings">
+                <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
+              </div>
+            </div>
+          </div>
+
+          <label v-if="apiModels.length > 0" class="field" style="margin-top: 8px;">
+            <span>模型名称（可手动修改）</span>
+            <input v-model="apiModel" placeholder="qwen3.6-plus" />
+          </label>
+
+          <p v-if="apiModel" class="hint ok">
+            ★ API 模式支持工具调用，可使用全功能编程。
+          </p>
         </template>
 
         <template v-else>
@@ -1085,6 +1414,8 @@ export default { name: "App" };
 .msg pre {
   margin: 0;
   white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: break-word;
   line-height: 1.6;
   color: #e5e5e5;
   font-family: inherit;
@@ -1178,6 +1509,99 @@ export default { name: "App" };
   background: #1565C0;
   border-color: #1976D2;
   color: #fff;
+}
+
+.api-progress-section {
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 12px;
+  margin: 4px 0;
+}
+
+.api-progress-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+
+.api-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1;
+  gap: 4px;
+}
+
+.api-step .step-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: bold;
+  border: 2px solid #333;
+  background: #1a1a1a;
+  color: #666;
+  transition: all 0.3s;
+}
+
+.api-step.done .step-dot {
+  background: #2E7D32;
+  border-color: #4CAF50;
+  color: #fff;
+}
+
+.api-step.active .step-dot {
+  background: #1565C0;
+  border-color: #42A5F5;
+  color: #fff;
+  animation: stepPulse 1.5s infinite;
+}
+
+.api-step .step-label {
+  font-size: 10px;
+  color: #666;
+  text-align: center;
+}
+
+.api-step.done .step-label {
+  color: #4CAF50;
+}
+
+.api-step.active .step-label {
+  color: #42A5F5;
+}
+
+@keyframes stepPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(66, 165, 245, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(66, 165, 245, 0); }
+}
+
+.api-progress-track {
+  height: 4px;
+  background: #222;
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.api-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #1565C0, #4CAF50);
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.api-progress-msg {
+  font-size: 11px;
+  color: #888;
+  text-align: center;
+  margin: 0;
+  min-height: 16px;
 }
 
 .field-group-title {
