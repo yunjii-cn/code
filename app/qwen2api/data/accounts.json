@@ -1,1 +1,16 @@
-[]
+[
+  {
+    "email": "ifoster758@conghua12138.store",
+    "password": "gtemh3d49U$Q6O",
+    "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImM3M2ExYjE4LTFkZWEtNDkwYy05OTNlLWYzN2JiNTFhNjFiYSIsImxhc3RfcGFzc3dvcmRfY2hhbmdlIjoxNzc3NDU2NzYzLCJleHAiOjE3ODAwOTQ5ODN9.NQqtUrx9-_mnLvrgHuSH0iwll54mbV79MJUR3yyHPC0",
+    "cookies": "acw_tc=0a03e59317774567580262266e0f3afa9e1119b8d5073f0b53603fb9df3593; x-ap=cn-hongkong; sca=66b183a7; xlly_s=1; _bl_uid=F9mzbo8yjk0vaqvLF4vIjkU978a0; qwen-theme=dark; qwen-locale=en-US; token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImM3M2ExYjE4LTFkZWEtNDkwYy05OTNlLWYzN2JiNTFhNjFiYSIsImxhc3RfcGFzc3dvcmRfY2hhbmdlIjoxNzc3NDU2NzYzLCJleHAiOjE3ODAwNDg3NjV9.sNkmDTXlz0v-VxnHJ3j94kTDDfJ5JBR36kv-HoXtgY8; cna=d8R4IuzCVicCATuub8GGIsvy; atpsida=540b63fd6f4b38038371d08d_1777456765_2; tfstk=g1rkrIY1-zu56bRVjBo5kUu4kN_TF0iISWKK9DhFujlb2WQS9rmUQ50K8aa8iLZ0sHKRNawexcnF61IOX89SAD5OjtqnibMQ3XWxzM7zrtmF61IAX8wSADy-HAsKn-ljEURUT4RVnAHEY3ue4ERqGvoEYWoFn-ljLDlUTDW03jMEYfRwUbgtuo5wxgbDclq_mY0o_80XYhqDX4caUjxEhoDoOfyriH-K_3-bl-2RZhwxVuFiB7I2q52_cSD4_MfmASaUTvVVfBn7W7Zso7Qw0RonZWu3l1xtE0UmSu45dIyz6b4ZVJpGw-0EIui8k_xZ_P2zWxZdG3l3uyr-PDOP64wUoSDobgSJuFyW7HMVpoYBk4kjnfCi0GWJ0hES-tXD7egrhYyUvtYF24kjn8XcnFLIzxMra; isg=BGZmzcG9MwB6euekVgTMANgWtNzoR6oBZCLtPFAPUglk0wbtuNf6EUwhL0ff4KIZ; ssxmod_itna=1-Qq_xBQG=GQ5iqAKi7eitDRUKgPYFK7QDXDUqAjtGgUDFqApPDHK_NUeoDUON3oN2xD7QBimxriD05xY_Qx0=HDf40W_Cg0iiCibnPbtpeFmL4xC3bmlvhpdfB06pm07Ij_7P6OMKUk6oPWG_QGYDCPDEZnDd7mYDeeDtx0rD0eDPxDYDGbmD7PDoxDrG/YDjmgvwF8IT84DKx0kDY5YIn3DWxDFOFhFO33_u84YDiyD_bDxO4G1ED0HilCiO4DCid1iDm4fnIO3Y4ikY4DkbQkbTKkjDCKgy4STGeqvfbSw8dR426Vh3zrjYr3bPURex4bQ44D9oToSoDhhDDNGY_6mvqDvGAG_mGGemqmDqeKrBD4QGCWbuWAujpF34DDaPpgF3O4ehw8iGnEG9RoHi5M_YLG/02tiOH/hXG0iH8PDbtFDe8nFF0ri_kCiO4b40TPKmd7EQ537vEDD; ssxmod_itna2=1-Qq_xBQG=GQ5iqAKi7eitDRUKgPYFK7QDXDUqAjtGgUDFqApPDHK_NUeoDUON3oN2xD7QBimxrDGbWirdkSmouPB9pLyX3KGWx8yG4D",
+    "username": "Jamie Taylor",
+    "activation_pending": false,
+    "status_code": "invalid",
+    "last_error": "",
+    "last_request_started": 1777502943.1182773,
+    "last_request_finished": 1777502943.3168356,
+    "consecutive_failures": 2,
+    "rate_limit_strikes": 0
+  }
+]

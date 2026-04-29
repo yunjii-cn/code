@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 
 type MessageRole = "user" | "assistant" | "error";
 
@@ -112,6 +112,9 @@ const loadingModels = ref(false);
 const expandedModelId = ref("");
 const hardwareInfo = ref<any>(null);
 const apiServiceRunning = ref(false);
+const qwenToken = ref("");
+const qwenAccountCount = ref(-1);
+const qwenRegisterBusy = ref(false);
 
 const apiSteps = [
   { label: "检测服务", action: "check" },
@@ -666,6 +669,111 @@ async function fetchApiKey() {
   }
 }
 
+async function addQwenAccount() {
+  if (!qwenToken.value.trim()) {
+    showNotice("请输入 chat.qwen.ai 的 Token", "warn");
+    return;
+  }
+  try {
+    const result = await callBackend("addQwenAccount", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      token: qwenToken.value.trim(),
+      adminKey: "admin",
+    }));
+    if (result && result.ok) {
+      qwenToken.value = "";
+      qwenAccountCount.value = -1;
+      showNotice("上游账户添加成功", "ok");
+      await checkQwenAccounts();
+    } else {
+      showNotice(result?.error || "添加账户失败", "warn");
+    }
+  } catch (e) {
+    console.error("[addQwenAccount] error:", e);
+    showNotice("添加账户异常", "warn");
+  }
+}
+
+async function checkQwenAccounts() {
+  try {
+    const result = await callBackend("listQwenAccounts", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      adminKey: "admin",
+    }));
+    if (result && result.ok) {
+      qwenAccountCount.value = result.count || 0;
+    }
+  } catch { /* ignore */ }
+}
+
+const qwenRegisterLogs = ref<string[]>([]);
+let _registerPollTimer: ReturnType<typeof setInterval> | null = null;
+
+watch(qwenRegisterLogs, () => {
+  nextTick(() => {
+    const box = document.querySelector(".register-log-box");
+    if (box) box.scrollTop = box.scrollHeight;
+  });
+}, { deep: true });
+
+async function autoRegisterQwenAccount() {
+  if (qwenRegisterBusy.value) return;
+  qwenRegisterBusy.value = true;
+  qwenRegisterLogs.value = ["[启动] 正在发起自动注册..."];
+
+  try {
+    const startResult = await callBackend("startQwenRegister", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      adminKey: "admin",
+    }));
+    if (!startResult || !startResult.ok) {
+      qwenRegisterBusy.value = false;
+      showNotice(startResult?.error || "启动注册失败", "warn");
+      return;
+    }
+
+    qwenRegisterLogs.value.push("[启动] 注册请求已发送，等待服务端处理...");
+    _registerPollTimer = setInterval(pollRegisterProgress, 2000);
+  } catch (e) {
+    console.error("[autoRegisterQwenAccount] error:", e);
+    qwenRegisterBusy.value = false;
+    showNotice("启动注册异常", "warn");
+  }
+}
+
+async function pollRegisterProgress() {
+  try {
+    const result = await callBackend("pollQwenRegister");
+    if (!result) return;
+
+    if (result.newLines && result.newLines.length > 0) {
+      for (const line of result.newLines) {
+        const clean = line.replace(/^[\d\-:\s]+/, "").trim();
+        if (clean) qwenRegisterLogs.value.push(clean);
+      }
+    }
+
+    if (result.done) {
+      if (_registerPollTimer) {
+        clearInterval(_registerPollTimer);
+        _registerPollTimer = null;
+      }
+      qwenRegisterBusy.value = false;
+      if (result.success) {
+        qwenRegisterLogs.value.push(`[完成] ✓ 注册成功！邮箱: ${result.email || ""}`);
+        qwenAccountCount.value = -1;
+        showNotice(`自动注册成功！邮箱: ${result.email || ""}`, "ok");
+        await checkQwenAccounts();
+      } else {
+        qwenRegisterLogs.value.push(`[失败] ✗ ${result.error || "注册失败"}`);
+        showNotice(result.error || "自动注册失败", "warn");
+      }
+    }
+  } catch (e) {
+    console.error("[pollRegisterProgress] error:", e);
+  }
+}
+
 async function apiStepAutoRun() {
   if (apiStepBusy.value) return;
   apiStepBusy.value = true;
@@ -679,6 +787,14 @@ async function apiStepAutoRun() {
         const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
         if (result && result.running) {
           apiServiceRunning.value = true;
+          if (result.warning) {
+            showNotice(result.warning, "warn");
+          }
+          if (result.accountCount !== undefined) {
+            qwenAccountCount.value = result.accountCount;
+          } else {
+            await checkQwenAccounts();
+          }
           apiStepMessage.value = "服务已运行";
           apiStepProgress.value++;
           continue;
@@ -704,6 +820,7 @@ async function apiStepAutoRun() {
           if (ready) {
             apiServiceRunning.value = true;
             apiStepMessage.value = "服务已启动";
+            await checkQwenAccounts();
             apiStepProgress.value++;
           } else {
             apiStepMessage.value = "服务启动超时";
@@ -1011,7 +1128,7 @@ onMounted(async () => {
         <template v-if="runMode === 'cloud'">
           <label class="field">
             <span>API Key</span>
-            <input v-model="apiKey" type="password" placeholder="输入你的 API Key" />
+            <input v-model="apiKey" type="text" placeholder="输入你的 API Key" />
           </label>
           <label class="field">
             <span>云端模型（固定）</span>
@@ -1068,8 +1185,47 @@ onMounted(async () => {
 
           <label class="field">
             <span>API Key</span>
-            <input v-model="apiKey" type="password" placeholder="自动获取或手动输入" />
+            <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" />
           </label>
+
+          <div class="qwen-account-section">
+            <div class="qwen-account-header">
+              <span>上游账户</span>
+              <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">
+                {{ qwenAccountCount }} 个
+              </span>
+              <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto;">刷新</button>
+            </div>
+            <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 4px 0;">
+              未添加上游账户，AI 对话将返回 500 错误。请点击下方按钮自动注册。
+            </p>
+            <p v-if="qwenAccountCount > 0" class="hint ok" style="margin: 4px 0;">
+              上游账户正常，可进行 AI 对话。
+            </p>
+            <button
+              class="btn-blue"
+              style="width: 100%; margin: 6px 0;"
+              @click="autoRegisterQwenAccount"
+              :disabled="qwenRegisterBusy"
+            >
+              {{ qwenRegisterBusy ? '⏳ 自动注册中...' : '🤖 自动注册上游账户' }}
+            </button>
+            <div v-if="qwenRegisterLogs.length > 0" class="register-log-box">
+              <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">
+                {{ log }}
+              </div>
+            </div>
+            <details style="margin-top: 6px;">
+              <summary style="font-size: 11px; color: #888; cursor: pointer;">手动添加 Token</summary>
+              <div class="qwen-token-input" style="margin-top: 4px;">
+                <input v-model="qwenToken" type="text" placeholder="粘贴 chat.qwen.ai 的 Token" />
+                <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()">添加</button>
+              </div>
+              <p class="hint" style="margin: 4px 0; font-size: 10px;">
+                获取方式：登录 chat.qwen.ai → F12 开发者工具 → Application → Local Storage → 复制 token 值
+              </p>
+            </details>
+          </div>
 
           <div v-if="apiModels.length > 0" class="model-list">
             <div v-for="m in apiModels" :key="m.id" class="model-row-wrapper">
@@ -1517,6 +1673,82 @@ export default { name: "App" };
   border-radius: 8px;
   padding: 12px;
   margin: 4px 0;
+}
+
+.qwen-account-section {
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 0;
+}
+
+.qwen-account-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #ccc;
+  margin-bottom: 6px;
+}
+
+.account-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: bold;
+}
+
+.account-badge.ok {
+  background: #1b3a1b;
+  color: #4CAF50;
+}
+
+.account-badge.warn {
+  background: #3a2a1b;
+  color: #FF9800;
+}
+
+.qwen-token-input {
+  display: flex;
+  gap: 6px;
+}
+
+.qwen-token-input input {
+  flex: 1;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: #f0f0f0;
+  font-size: 11px;
+}
+
+.qwen-token-input input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}
+
+.register-log-box {
+  background: #0a0a0a;
+  border: 1px solid #222;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin: 6px 0;
+  max-height: 160px;
+  overflow-y: auto;
+  font-family: "Consolas", "Monaco", monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.register-log-line {
+  color: #aaa;
+  word-break: break-all;
+}
+
+.register-log-line:last-child {
+  color: #4CAF50;
 }
 
 .api-progress-bar {

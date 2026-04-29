@@ -6,6 +6,7 @@ _CAMOUFOX_OPTS = {
     "headless": True,
     "humanize": False,
     "i_know_what_im_doing": True,
+    "exclude_addons": [],
     "firefox_user_prefs": {
         "layers.acceleration.disabled": True,
         "gfx.webrender.enabled": False,
@@ -17,6 +18,14 @@ _CAMOUFOX_OPTS = {
 }
 
 
+def _get_exclude_addons():
+    try:
+        from camoufox import DefaultAddons
+        return [DefaultAddons.UBO]
+    except (ImportError, AttributeError):
+        return []
+
+
 @asynccontextmanager
 async def _new_browser():
     try:
@@ -24,7 +33,9 @@ async def _new_browser():
     except ImportError:
         raise RuntimeError("camoufox 未安装，浏览器模式不可用。请运行: pip install camoufox")
 
-    async with AsyncCamoufox(**_CAMOUFOX_OPTS) as browser:
+    opts = dict(_CAMOUFOX_OPTS)
+    opts["exclude_addons"] = _get_exclude_addons()
+    async with AsyncCamoufox(**opts) as browser:
         yield browser
 
 
