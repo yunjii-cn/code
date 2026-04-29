@@ -416,10 +416,190 @@ def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
     try:
         result = fetch_json_with_timeout(f"{base.rstrip('/')}/healthz", timeout_ms=timeout_ms)
         if result["ok"]:
-            return {"ok": True, "running": True}
+            info = {"ok": True, "running": True}
+            try:
+                acct_result = fetch_json_with_timeout(
+                    f"{base.rstrip('/')}/api/admin/accounts",
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer admin"},
+                    timeout_ms=timeout_ms,
+                )
+                if acct_result["ok"]:
+                    accounts = (acct_result.get("data") or {}).get("accounts", [])
+                    info["accountCount"] = len(accounts)
+                    if len(accounts) == 0:
+                        info["warning"] = "未添加上游账号，AI 对话将返回 500 错误。请在管理台添加 chat.qwen.ai 的账号 Token。"
+            except Exception:
+                pass
+            return info
     except:
         pass
     return {"ok": True, "running": False}
+
+
+def add_qwen_account(base_url: str, token: str, admin_key: str = "", timeout_ms: int = 15000) -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    ak = (admin_key or "").strip() or "admin"
+    if not token or not token.strip():
+        return {"ok": False, "error": "Token 不能为空"}
+
+    try:
+        body = json.dumps({"token": token.strip()}).encode("utf-8")
+        result = fetch_json_with_timeout(
+            f"{base.rstrip('/')}/api/admin/accounts",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {ak}"},
+            timeout_ms=timeout_ms,
+            method="POST",
+            body=body,
+        )
+        if result["ok"]:
+            data = result.get("data") or {}
+            if data.get("ok"):
+                return {"ok": True, "email": data.get("email", "")}
+            return {"ok": False, "error": data.get("error", "添加账户失败")}
+        err_text = (result.get("text", "") or "")[:200]
+        return {"ok": False, "error": f"请求失败 ({result.get('status', '?')}) {err_text}".strip()}
+    except Exception as e:
+        return {"ok": False, "error": f"添加账户异常: {e}"}
+
+
+def list_qwen_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    ak = (admin_key or "").strip() or "admin"
+
+    try:
+        result = fetch_json_with_timeout(
+            f"{base.rstrip('/')}/api/admin/accounts",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {ak}"},
+            timeout_ms=timeout_ms,
+        )
+        if result["ok"]:
+            data = result.get("data") or {}
+            accounts = data.get("accounts", [])
+            return {"ok": True, "accounts": accounts, "count": len(accounts)}
+        return {"ok": False, "error": "获取账户列表失败"}
+    except Exception as e:
+        return {"ok": False, "error": f"获取账户列表异常: {e}"}
+
+
+_register_state = {
+    "busy": False,
+    "done": False,
+    "ok": False,
+    "email": "",
+    "error": "",
+    "log_offset": 0,
+    "log_lines": [],
+}
+
+
+def _get_qwen2api_log_path() -> str:
+    app_dir = _app_dir()
+    qwen_dir = Path(app_dir) / "qwen2api"
+    if qwen_dir.exists():
+        return str(qwen_dir / "data" / "qwen2api.log")
+    return ""
+
+
+def _read_qwen2api_log_tail(n: int = 50, offset: int = 0) -> dict:
+    log_path = _get_qwen2api_log_path()
+    if not log_path or not os.path.isfile(log_path):
+        return {"ok": True, "lines": [], "total": 0}
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        total = len(all_lines)
+        start = max(offset, 0)
+        selected = all_lines[start:start + n]
+        return {"ok": True, "lines": [l.rstrip("\n\r") for l in selected], "total": total, "nextOffset": start + len(selected)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "lines": [], "total": 0}
+
+
+def _do_register_background(base_url: str, admin_key: str):
+    global _register_state
+    try:
+        body = json.dumps({}).encode("utf-8")
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/accounts/register",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_key}"},
+            timeout_ms=180000,
+            method="POST",
+            body=body,
+        )
+        if result["ok"]:
+            data = result.get("data") or {}
+            if data.get("ok"):
+                _register_state["ok"] = True
+                _register_state["email"] = data.get("email", "")
+                _register_state["error"] = ""
+            else:
+                _register_state["ok"] = False
+                _register_state["error"] = data.get("error", "自动注册失败")
+        else:
+            err_text = (result.get("text", "") or "")[:300]
+            _register_state["ok"] = False
+            _register_state["error"] = f"请求失败 ({result.get('status', '?')}) {err_text}".strip()
+    except Exception as e:
+        _register_state["ok"] = False
+        _register_state["error"] = f"自动注册异常: {e}"
+    finally:
+        _register_state["done"] = True
+        _register_state["busy"] = False
+
+
+def start_qwen_register(base_url: str, admin_key: str = "") -> dict:
+    global _register_state
+    if _register_state["busy"]:
+        return {"ok": False, "error": "注册正在进行中，请稍候"}
+    _register_state = {
+        "busy": True,
+        "done": False,
+        "ok": False,
+        "email": "",
+        "error": "",
+        "log_offset": 0,
+        "log_lines": [],
+    }
+    log_path = _get_qwen2api_log_path()
+    if log_path and os.path.isfile(log_path):
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                _register_state["log_offset"] = len(f.readlines())
+        except Exception:
+            _register_state["log_offset"] = 0
+    ak = (admin_key or "").strip() or "admin"
+    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    t = threading.Thread(target=_do_register_background, args=(base, ak), daemon=True)
+    t.start()
+    return {"ok": True, "message": "注册已启动"}
+
+
+def poll_qwen_register() -> dict:
+    global _register_state
+    log_path = _get_qwen2api_log_path()
+    new_lines = []
+    if log_path and os.path.isfile(log_path):
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = f.readlines()
+            offset = _register_state.get("log_offset", 0)
+            if offset < len(all_lines):
+                new_lines = [l.rstrip("\n\r") for l in all_lines[offset:]]
+                _register_state["log_offset"] = len(all_lines)
+            _register_state["log_lines"].extend(new_lines)
+        except Exception:
+            pass
+    register_lines = [l for l in new_lines if "[Register]" in l or "[注册]" in l or "register" in l.lower()]
+    return {
+        "ok": True,
+        "busy": _register_state["busy"],
+        "done": _register_state["done"],
+        "success": _register_state["ok"],
+        "email": _register_state.get("email", ""),
+        "error": _register_state.get("error", ""),
+        "newLines": register_lines,
+        "allNewLines": new_lines,
+    }
 
 
 def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
@@ -534,7 +714,7 @@ def _check_qwen2api_deps() -> bool:
     try:
         r = subprocess.run(
             [venv_python, "-c",
-             "import fastapi, uvicorn, httpx, pydantic_settings, tiktoken, curl_cffi; print('ok')"],
+             "import fastapi, uvicorn, httpx, pydantic_settings, tiktoken, curl_cffi, camoufox; print('ok')"],
             capture_output=True, text=True, timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
@@ -1535,7 +1715,7 @@ class ClaudeCliRunner:
                 on_log(msg, color)
 
         _log(f"[CLI] 启动: node_path={node_path} entry_exists={os.path.exists(self.cli_entry)}")
-        _log(f"[CLI] MODEL_PROVIDER={env.get('MODEL_PROVIDER')} BASE_URL={env.get('ANTHROPIC_BASE_URL')} MODEL={env.get('ANTHROPIC_MODEL')}")
+        _log(f"[CLI] MODEL_PROVIDER={env.get('MODEL_PROVIDER')} API_BASE_URL={env.get('API_BASE_URL')} OLLAMA_BASE_URL={env.get('OLLAMA_BASE_URL')} API_MODEL={env.get('API_MODEL')} OLLAMA_MODEL={env.get('OLLAMA_MODEL')}")
 
         _log_path = os.path.join(self.project_root, "cli_debug.log")
         _log_file = open(_log_path, "a", encoding="utf-8")

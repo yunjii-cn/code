@@ -655,6 +655,48 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"checkApiService异常: {e}"})
 
+    @pyqtSlot(str, result=str)
+    def addQwenAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            token = payload.get("token", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.add_qwen_account(base_url, token, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"addQwenAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def listQwenAccounts(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.list_qwen_accounts(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"listQwenAccounts异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def startQwenRegister(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.start_qwen_register(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"startQwenRegister异常: {e}"})
+
+    @pyqtSlot(result=str)
+    def pollQwenRegister(self):
+        try:
+            result = backend.poll_qwen_register()
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"pollQwenRegister异常: {e}"})
+
     # ── 内部方法 ──
 
     def _run_cli(self, prompt: str, model: str, provider: str, settings: dict):
