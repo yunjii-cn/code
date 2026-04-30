@@ -115,6 +115,18 @@ const apiServiceRunning = ref(false);
 const qwenToken = ref("");
 const qwenAccountCount = ref(-1);
 const qwenRegisterBusy = ref(false);
+const qwenAccounts = ref<any[]>([]);
+
+const qwenValidCount = computed(() => qwenAccounts.value.filter(a => a.valid).length);
+
+const regEmail = ref("");
+const regPassword = ref("");
+const regUsername = ref("");
+
+const loginEmail = ref("");
+const loginPassword = ref("");
+const qwenLoginBusy = ref(false);
+const qwenLoginError = ref("");
 
 const apiSteps = [
   { label: "检测服务", action: "check" },
@@ -694,6 +706,75 @@ async function addQwenAccount() {
   }
 }
 
+async function deleteQwenAccount(email: string) {
+  if (!email) return;
+  try {
+    const result = await callBackend("deleteQwenAccount", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      email: email,
+      adminKey: "admin",
+    }));
+    if (result && result.ok) {
+      showNotice(`已删除账户: ${email}`, "ok");
+      await checkQwenAccounts();
+    } else {
+      showNotice(result?.error || "删除账户失败", "warn");
+    }
+  } catch (e) {
+    console.error("[deleteQwenAccount] error:", e);
+    showNotice("删除账户异常", "warn");
+  }
+}
+
+let _loginPollTimer: ReturnType<typeof setInterval> | null = null;
+
+async function loginQwenAccount() {
+  if (qwenLoginBusy.value) return;
+  if (!loginEmail.value.trim() || !loginPassword.value.trim()) {
+    showNotice("请输入邮箱和密码", "warn");
+    return;
+  }
+  qwenLoginBusy.value = true;
+  qwenLoginError.value = "";
+
+  try {
+    const startResult = await callBackend("startQwenLogin", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      email: loginEmail.value.trim(),
+      password: loginPassword.value.trim(),
+      adminKey: "admin",
+    }));
+    if (!startResult || !startResult.ok) {
+      qwenLoginBusy.value = false;
+      qwenLoginError.value = startResult?.error || "启动登录失败";
+      return;
+    }
+
+    _loginPollTimer = setInterval(async () => {
+      try {
+        const result = await callBackend("pollQwenLogin");
+        if (!result) return;
+        if (result.done) {
+          qwenLoginBusy.value = false;
+          if (_loginPollTimer) { clearInterval(_loginPollTimer); _loginPollTimer = null; }
+          if (result.success) {
+            loginEmail.value = "";
+            loginPassword.value = "";
+            showNotice(`登录成功: ${result.email}`, "ok");
+            await checkQwenAccounts();
+          } else {
+            qwenLoginError.value = result.error || "登录失败";
+          }
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+  } catch (e) {
+    console.error("[loginQwenAccount] error:", e);
+    qwenLoginBusy.value = false;
+    qwenLoginError.value = "登录异常";
+  }
+}
+
 async function checkQwenAccounts() {
   try {
     const result = await callBackend("listQwenAccounts", JSON.stringify({
@@ -702,6 +783,12 @@ async function checkQwenAccounts() {
     }));
     if (result && result.ok) {
       qwenAccountCount.value = result.count || 0;
+      qwenAccounts.value = (result.accounts || []).map((a: any) => ({
+        email: a.email || "",
+        valid: !!a.valid,
+        status_code: a.status_code || "",
+        activation_pending: !!a.activation_pending,
+      }));
     }
   } catch { /* ignore */ }
 }
@@ -725,6 +812,9 @@ async function autoRegisterQwenAccount() {
     const startResult = await callBackend("startQwenRegister", JSON.stringify({
       baseUrl: apiBaseUrl.value.trim(),
       adminKey: "admin",
+      email: regEmail.value.trim(),
+      password: regPassword.value.trim(),
+      username: regUsername.value.trim(),
     }));
     if (!startResult || !startResult.ok) {
       qwenRegisterBusy.value = false;
@@ -1199,9 +1289,42 @@ onMounted(async () => {
             <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 4px 0;">
               未添加上游账户，AI 对话将返回 500 错误。请点击下方按钮自动注册。
             </p>
-            <p v-if="qwenAccountCount > 0" class="hint ok" style="margin: 4px 0;">
-              上游账户正常，可进行 AI 对话。
+            <div v-if="qwenAccounts.length > 0" class="account-list">
+              <div v-for="acc in qwenAccounts" :key="acc.email" class="account-row">
+                <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
+                <span class="account-email">{{ acc.email }}</span>
+                <span v-if="!acc.valid" class="account-err">{{ acc.status_code || '不可用' }}</span>
+                <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除此账户">✕</button>
+              </div>
+            </div>
+            <p v-if="qwenAccountCount > 0 && qwenValidCount === 0" class="hint warn" style="margin: 4px 0;">
+              所有账户均不可用，请注册新账户或手动添加有效 Token。
             </p>
+            <p v-if="qwenValidCount > 0" class="hint ok" style="margin: 4px 0;">
+              {{ qwenValidCount }} 个账户可用，可进行 AI 对话。
+            </p>
+            <details style="margin-top: 6px;">
+              <summary style="font-size: 11px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+              <div class="reg-form" style="margin-top: 4px;">
+                <input v-model="loginEmail" type="text" placeholder="邮箱" />
+                <input v-model="loginPassword" type="password" placeholder="密码" />
+                <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%;">
+                  {{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}
+                </button>
+              </div>
+              <p v-if="qwenLoginError" class="hint warn" style="margin: 4px 0;">{{ qwenLoginError }}</p>
+              <p class="hint" style="margin: 4px 0; font-size: 10px;">
+                使用已注册的 chat.qwen.ai 账户邮箱和密码登录
+              </p>
+            </details>
+            <details style="margin-top: 6px;">
+              <summary style="font-size: 11px; color: #888; cursor: pointer;">自定义注册信息（可选）</summary>
+              <div class="reg-form" style="margin-top: 4px;">
+                <input v-model="regEmail" type="text" placeholder="邮箱（留空自动生成）" />
+                <input v-model="regPassword" type="password" placeholder="密码（留空自动生成）" />
+                <input v-model="regUsername" type="text" placeholder="用户名（留空自动生成）" />
+              </div>
+            </details>
             <button
               class="btn-blue"
               style="width: 100%; margin: 6px 0;"
@@ -1749,6 +1872,82 @@ export default { name: "App" };
 
 .register-log-line:last-child {
   color: #4CAF50;
+}
+
+.account-list {
+  margin: 4px 0;
+}
+
+.account-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 0;
+}
+
+.account-status {
+  font-size: 8px;
+}
+
+.account-status.valid {
+  color: #4CAF50;
+}
+
+.account-status.invalid {
+  color: #F44336;
+}
+
+.account-email {
+  color: #ccc;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-err {
+  color: #FF9800;
+  font-size: 9px;
+  background: #2a1a00;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.btn-icon.btn-del {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.btn-icon.btn-del:hover {
+  color: #F44336;
+}
+
+.reg-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.reg-form input {
+  background: #1a1a2e;
+  border: 1px solid #333;
+  color: #ddd;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.reg-form input:focus {
+  border-color: #4a9eff;
+  outline: none;
 }
 
 .api-progress-bar {

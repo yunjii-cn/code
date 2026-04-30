@@ -372,7 +372,7 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000, check_health: boo
 
 
 def list_api_models(base_url: str, api_key: str = "", timeout_ms: int = 15000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
     url = f"{base.rstrip('/')}/v1/models"
     headers = {"Content-Type": "application/json"}
     if api_key and api_key.strip():
@@ -412,7 +412,7 @@ def list_api_models(base_url: str, api_key: str = "", timeout_ms: int = 15000) -
 
 
 def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
     try:
         result = fetch_json_with_timeout(f"{base.rstrip('/')}/healthz", timeout_ms=timeout_ms)
         if result["ok"]:
@@ -436,8 +436,44 @@ def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
     return {"ok": True, "running": False}
 
 
+def _ensure_api_service(base_url: str = "", admin_key: str = "admin") -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    ak = (admin_key or "").strip() or "admin"
+
+    def _check_service():
+        import urllib.request
+        try:
+            urllib.request.urlopen(f"{base.rstrip('/')}/healthz", timeout=3)
+            return True
+        except Exception:
+            pass
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(base)
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect((parsed.hostname or "127.0.0.1", parsed.port or 7777))
+            s.close()
+            return True
+        except Exception:
+            return False
+
+    if _check_service():
+        return {"ok": True, "was_running": True}
+    start_result = start_qwen2api("", 7777, ak)
+    if not start_result.get("ok"):
+        return {"ok": False, "error": f"API 服务未运行且自动启动失败: {start_result.get('message', start_result.get('error', ''))}"}
+    import time
+    for _ in range(20):
+        time.sleep(1)
+        if _check_service():
+            return {"ok": True, "was_running": False}
+    return {"ok": False, "error": "API 服务启动超时"}
+
+
 def add_qwen_account(base_url: str, token: str, admin_key: str = "", timeout_ms: int = 15000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
     ak = (admin_key or "").strip() or "admin"
     if not token or not token.strip():
         return {"ok": False, "error": "Token 不能为空"}
@@ -463,7 +499,7 @@ def add_qwen_account(base_url: str, token: str, admin_key: str = "", timeout_ms:
 
 
 def list_qwen_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
     ak = (admin_key or "").strip() or "admin"
 
     try:
@@ -480,6 +516,95 @@ def list_qwen_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 100
     except Exception as e:
         return {"ok": False, "error": f"获取账户列表异常: {e}"}
 
+
+def delete_qwen_account(base_url: str, email: str, admin_key: str = "") -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    ak = (admin_key or "").strip() or "admin"
+    if not email or not email.strip():
+        return {"ok": False, "error": "邮箱不能为空"}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/api/admin/accounts/{urllib.parse.quote(email.strip())}",
+            headers={"Authorization": f"Bearer {ak}"},
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=10000) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return {"ok": data.get("ok", True)}
+    except Exception as e:
+        return {"ok": False, "error": f"删除账户失败: {e}"}
+
+_login_state = {
+    "busy": False,
+    "done": False,
+    "ok": False,
+    "email": "",
+    "error": "",
+}
+
+def _do_login_background(base_url: str, admin_key: str, email: str, password: str):
+    global _login_state
+    try:
+        body = json.dumps({"email": email, "password": password}).encode("utf-8")
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/accounts/login",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_key}"},
+            timeout_ms=120000,
+            method="POST",
+            body=body,
+        )
+        if result["ok"]:
+            data = result.get("data") or {}
+            if data.get("ok"):
+                _login_state["ok"] = True
+                _login_state["email"] = data.get("email", "")
+                _login_state["error"] = ""
+            else:
+                _login_state["ok"] = False
+                _login_state["error"] = data.get("error", "登录失败")
+        else:
+            err_text = (result.get("text", "") or "")[:300]
+            _login_state["ok"] = False
+            _login_state["error"] = f"请求失败 ({result.get('status', '?')}) {err_text}".strip()
+    except Exception as e:
+        _login_state["ok"] = False
+        _login_state["error"] = f"登录异常: {e}"
+    finally:
+        _login_state["done"] = True
+        _login_state["busy"] = False
+
+def start_qwen_login(base_url: str, email: str, password: str, admin_key: str = "") -> dict:
+    global _login_state
+    if _login_state["busy"]:
+        return {"ok": False, "error": "登录正在进行中，请稍候"}
+    if not email or not password:
+        return {"ok": False, "error": "邮箱和密码不能为空"}
+    ak = (admin_key or "").strip() or "admin"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    ensure = _ensure_api_service(base, ak)
+    if not ensure.get("ok"):
+        return {"ok": False, "error": ensure.get("error", "API 服务不可用")}
+    _login_state = {
+        "busy": True,
+        "done": False,
+        "ok": False,
+        "email": "",
+        "error": "",
+    }
+    t = threading.Thread(target=_do_login_background, args=(base, ak, email, password), daemon=True)
+    t.start()
+    return {"ok": True, "message": "登录已启动"}
+
+def poll_qwen_login() -> dict:
+    global _login_state
+    return {
+        "busy": _login_state["busy"],
+        "done": _login_state["done"],
+        "success": _login_state["ok"],
+        "email": _login_state.get("email", ""),
+        "error": _login_state.get("error", ""),
+    }
 
 _register_state = {
     "busy": False,
@@ -515,10 +640,17 @@ def _read_qwen2api_log_tail(n: int = 50, offset: int = 0) -> dict:
         return {"ok": False, "error": str(e), "lines": [], "total": 0}
 
 
-def _do_register_background(base_url: str, admin_key: str):
+def _do_register_background(base_url: str, admin_key: str, custom_email: str = "", custom_password: str = "", custom_username: str = ""):
     global _register_state
     try:
-        body = json.dumps({}).encode("utf-8")
+        reg_body = {}
+        if custom_email:
+            reg_body["email"] = custom_email
+        if custom_password:
+            reg_body["password"] = custom_password
+        if custom_username:
+            reg_body["username"] = custom_username
+        body = json.dumps(reg_body).encode("utf-8")
         result = fetch_json_with_timeout(
             f"{base_url.rstrip('/')}/api/admin/accounts/register",
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {admin_key}"},
@@ -547,10 +679,15 @@ def _do_register_background(base_url: str, admin_key: str):
         _register_state["busy"] = False
 
 
-def start_qwen_register(base_url: str, admin_key: str = "") -> dict:
+def start_qwen_register(base_url: str, admin_key: str = "", custom_email: str = "", custom_password: str = "", custom_username: str = "") -> dict:
     global _register_state
     if _register_state["busy"]:
         return {"ok": False, "error": "注册正在进行中，请稍候"}
+    ak = (admin_key or "").strip() or "admin"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    ensure = _ensure_api_service(base, ak)
+    if not ensure.get("ok"):
+        return {"ok": False, "error": ensure.get("error", "API 服务不可用")}
     _register_state = {
         "busy": True,
         "done": False,
@@ -567,9 +704,7 @@ def start_qwen_register(base_url: str, admin_key: str = "") -> dict:
                 _register_state["log_offset"] = len(f.readlines())
         except Exception:
             _register_state["log_offset"] = 0
-    ak = (admin_key or "").strip() or "admin"
-    base = (base_url or "").strip() or "http://127.0.0.1:7860"
-    t = threading.Thread(target=_do_register_background, args=(base, ak), daemon=True)
+    t = threading.Thread(target=_do_register_background, args=(base, ak, custom_email, custom_password, custom_username), daemon=True)
     t.start()
     return {"ok": True, "message": "注册已启动"}
 
@@ -603,7 +738,7 @@ def poll_qwen_register() -> dict:
 
 
 def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7860"
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
     ak = (admin_key or "").strip() or "admin"
 
     try:
@@ -724,7 +859,7 @@ def _check_qwen2api_deps() -> bool:
 
 _qwen2api_proc = None
 
-def start_qwen2api(project_dir: str = "", port: int = 7860, admin_key: str = "admin") -> dict:
+def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "admin") -> dict:
     global _qwen2api_proc
 
     _debug_log = []
@@ -1982,6 +2117,10 @@ BRIDGE_METHODS = [
     "clearModelSettings", "listModels", "detectHardware",
     "deleteModel", "recommendModels", "fetchApiKey",
     "startQwen2Api", "checkApiService",
+    "listQwenAccounts", "deleteQwenAccount",
+    "startQwenLogin", "pollQwenLogin",
+    "startQwenRegister", "pollQwenRegister",
+    "addQwenAccount",
 ]
 
 BRIDGE_SIGNALS = [

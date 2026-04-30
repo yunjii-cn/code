@@ -403,13 +403,13 @@ class _AsyncMailClient:
     async def get_verify_link_for_email(self, email: str, timeout_sec: int = 300) -> str:
         return await asyncio.to_thread(self._sess.poll_verify_link, email, timeout_sec)
 
-async def register_qwen_account() -> Optional[Account]:
+async def register_qwen_account(custom_email: str = "", custom_password: str = "", custom_username: str = "") -> Optional[Account]:
     log.info("[Register] ── 开始注册流程 ──")
     async with _AsyncMailClient() as mail_client:
         log.info("[Register] [1/7] 生成临时邮箱...")
-        email = await mail_client.generate_email()
-        password = _gen_password()
-        username = _gen_username()
+        email = custom_email.strip() if custom_email and custom_email.strip() else await mail_client.generate_email()
+        password = custom_password.strip() if custom_password and custom_password.strip() else _gen_password()
+        username = custom_username.strip() if custom_username and custom_username.strip() else _gen_username()
         log.info(f"[Register] [1/7] 邮箱: {email}  用户名: {username}")
 
         try:
@@ -656,6 +656,134 @@ async def _login_and_get_token(page, email: str, password: str, timeout_sec: int
             return token
         await asyncio.sleep(1)
     return ""
+
+async def login_qwen_account(email: str, password: str) -> Optional[Account]:
+    log.info(f"[Login] ── 开始登录流程: {email} ──")
+    try:
+        async with _new_browser() as browser:
+            page = await browser.new_page()
+            try:
+                await page.goto(f"{BASE_URL}/auth", wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                log.warning(f"[Login] 页面加载异常: {e}")
+            await asyncio.sleep(3)
+            log.info(f"[Login] 页面URL: {page.url}")
+
+            email_input = None
+            pwd_input = None
+            for sel in ['input[placeholder*="Email"]', 'input[placeholder*="email"]', 'input[type="email"]']:
+                try:
+                    email_input = await page.wait_for_selector(sel, timeout=5000)
+                    if email_input:
+                        log.info(f"[Login] 找到邮箱输入框: {sel}")
+                        break
+                except Exception:
+                    pass
+            if not email_input:
+                inputs = await page.query_selector_all('input')
+                log.info(f"[Login] 页面input数量: {len(inputs)}")
+                for i, inp in enumerate(inputs):
+                    try:
+                        t = await inp.get_attribute('type') or ''
+                        p = await inp.get_attribute('placeholder') or ''
+                        log.info(f"[Login]   input[{i}]: type={t} placeholder={p}")
+                    except Exception:
+                        pass
+                text_inputs = [inp for inp in inputs if (await inp.get_attribute('type') or '') in ('', 'text', 'email')]
+                if text_inputs:
+                    email_input = text_inputs[0]
+
+            if not email_input:
+                log.error("[Login] 找不到邮箱输入框")
+                return None
+
+            await email_input.click()
+            await email_input.fill(email)
+            log.info(f"[Login] ✓ 已填写邮箱")
+
+            for sel in ['input[type="password"]', 'input[placeholder*="Password"]', 'input[placeholder*="password"]']:
+                try:
+                    pwd_input = await page.wait_for_selector(sel, timeout=5000)
+                    if pwd_input:
+                        log.info(f"[Login] 找到密码输入框: {sel}")
+                        break
+                except Exception:
+                    pass
+            if not pwd_input:
+                inputs = await page.query_selector_all('input[type="password"]')
+                if inputs:
+                    pwd_input = inputs[0]
+
+            if not pwd_input:
+                log.error("[Login] 找不到密码输入框")
+                return None
+
+            await pwd_input.click()
+            await pwd_input.fill(password)
+            log.info(f"[Login] ✓ 已填写密码")
+
+            submit = None
+            for sel in [
+                'button:has-text("Log in")',
+                'button:has-text("Login")',
+                'button:has-text("Sign in")',
+                'button[type="submit"]:not([disabled])',
+                'button[type="submit"]',
+            ]:
+                try:
+                    submit = await page.query_selector(sel)
+                    if submit:
+                        log.info(f"[Login] 找到提交按钮: {sel}")
+                        break
+                except Exception:
+                    pass
+
+            if submit:
+                await submit.click()
+                log.info(f"[Login] ✓ 已点击登录按钮")
+            else:
+                log.warning("[Login] 未找到提交按钮，尝试回车提交")
+                await pwd_input.press('Enter')
+
+            log.info(f"[Login] 等待登录完成...")
+            token = None
+            for attempt in range(30):
+                await asyncio.sleep(2)
+                try:
+                    token = await page.evaluate("localStorage.getItem('token')")
+                except Exception:
+                    pass
+                if token:
+                    break
+                cur_url = page.url
+                if "auth" not in cur_url:
+                    log.info(f"[Login] 已跳转: {cur_url}")
+                    await asyncio.sleep(2)
+                    try:
+                        token = await page.evaluate("localStorage.getItem('token')")
+                    except Exception:
+                        pass
+                    if token:
+                        break
+
+            if not token:
+                log.error(f"[Login] 登录失败: 无法获取token (最终URL: {page.url})")
+                try:
+                    screenshot_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "login_debug.png")
+                    await page.screenshot(path=screenshot_path)
+                    log.info(f"[Login] 调试截图已保存: {screenshot_path}")
+                except Exception:
+                    pass
+                return None
+
+            log.info(f"[Login] ✓ 登录成功: {email}")
+            all_cookies = await page.context.cookies()
+            cookie_str = "; ".join(f"{c.get('name','')}={c.get('value','')}" for c in all_cookies if "qwen" in c.get("domain", ""))
+            return Account(email=email, password=password, token=token, cookies=cookie_str, username="", activation_pending=False)
+    except Exception as e:
+        import traceback
+        log.error(f"[Login] 登录异常: {e}\n{traceback.format_exc()}")
+        return None
 
 async def activate_account(acc: Account) -> bool:
     """Use inbox API first, then mailbox-page fallback, to activate an account."""
