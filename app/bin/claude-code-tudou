@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿﻿#!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -706,7 +706,7 @@ function startApiProxy(targetBaseUrl, apiModel, apiKey) {
 
         const proxyOpts = {
           hostname: targetUrl.hostname,
-          port: targetUrl.port || 7860,
+          port: targetUrl.port || 7777,
           path: "/anthropic/v1/messages",
           method: "POST",
           headers: {
@@ -721,7 +721,26 @@ function startApiProxy(targetBaseUrl, apiModel, apiKey) {
         }
 
         const proxyReq = http.request(proxyOpts, (proxyRes) => {
-          if (anthropicBody.stream) {
+          if (proxyRes.statusCode === 500) {
+            const errChunks = [];
+            proxyRes.on("data", (c) => errChunks.push(c));
+            proxyRes.on("end", () => {
+              let errBody = Buffer.concat(errChunks).toString("utf-8");
+              let errMsg = "上游服务 500 错误";
+              try {
+                const parsed = JSON.parse(errBody);
+                errMsg = parsed?.error?.message || parsed?.detail || parsed?.error || errMsg;
+              } catch {}
+              if (errMsg.includes("account") || errMsg.includes("Account") || errMsg.includes("activation") || errMsg.includes("队列已满")) {
+                errMsg = "上游账户不可用（可能未激活或已失效），请在设置中注册新账户或添加有效 Token";
+              }
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                type: "error",
+                error: { type: "api_error", message: errMsg },
+              }));
+            });
+          } else if (anthropicBody.stream) {
             res.writeHead(proxyRes.statusCode, {
               "Content-Type": proxyRes.headers["content-type"] || "text/event-stream",
               "Cache-Control": "no-cache",
@@ -782,7 +801,7 @@ async function main() {
   }
 
   if (isApiMode && !hasExternalProxy) {
-    const apiBaseUrl = process.env.API_BASE_URL || dotEnv.API_BASE_URL || "http://127.0.0.1:7860";
+    const apiBaseUrl = process.env.API_BASE_URL || dotEnv.API_BASE_URL || "http://127.0.0.1:7777";
     const apiModel = process.env.API_MODEL || dotEnv.API_MODEL || "qwen3.6-plus";
     const apiKey = process.env.API_KEY || dotEnv.API_KEY || "";
     const proxyPort = await startApiProxy(apiBaseUrl.trim(), apiModel.trim(), apiKey.trim());

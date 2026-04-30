@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿﻿#!/usr/bin/env python3
 """
 云集智能编程工作站 - 统一启动器 v3.0
 所有功能内嵌在一个 EXE 中，不再依赖 Electron
@@ -519,7 +519,7 @@ class BackendBridge(QObject):
                 check_health = payload.get("checkHealth", False)
                 result = list_ollama_models(base_url, timeout, check_health=check_health)
             elif source == "api":
-                api_base = payload.get("baseUrl", "") or settings.get("API_BASE_URL", "") or "http://127.0.0.1:7860"
+                api_base = payload.get("baseUrl", "") or settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777"
                 api_key = payload.get("apiKey", "") or settings.get("API_KEY", "")
                 result = list_api_models(api_base, api_key, timeout)
             else:
@@ -638,7 +638,7 @@ class BackendBridge(QObject):
         try:
             payload = json.loads(payload_json) if payload_json else {}
             project_dir = payload.get("projectDir", "").strip()
-            port = int(payload.get("port", 7860) or 7860)
+            port = int(payload.get("port", 7777) or 7777)
             admin_key = payload.get("adminKey", "admin").strip() or "admin"
             result = backend.start_qwen2api(project_dir, port, admin_key)
             return json.dumps(result)
@@ -679,12 +679,48 @@ class BackendBridge(QObject):
             return json.dumps({"ok": False, "error": f"listQwenAccounts异常: {e}"})
 
     @pyqtSlot(str, result=str)
+    def deleteQwenAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            email = payload.get("email", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.delete_qwen_account(base_url, email, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"deleteQwenAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def startQwenLogin(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            email = payload.get("email", "").strip()
+            password = payload.get("password", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.start_qwen_login(base_url, email, password, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"startQwenLogin异常: {e}"})
+
+    @pyqtSlot(result=str)
+    def pollQwenLogin(self):
+        try:
+            result = backend.poll_qwen_login()
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"pollQwenLogin异常: {e}"})
+
+    @pyqtSlot(str, result=str)
     def startQwenRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
             base_url = payload.get("baseUrl", "").strip()
             admin_key = payload.get("adminKey", "").strip()
-            result = backend.start_qwen_register(base_url, admin_key)
+            custom_email = payload.get("email", "").strip()
+            custom_password = payload.get("password", "").strip()
+            custom_username = payload.get("username", "").strip()
+            result = backend.start_qwen_register(base_url, admin_key, custom_email, custom_password, custom_username)
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwenRegister异常: {e}"})
@@ -716,7 +752,7 @@ class BackendBridge(QObject):
                 env_overrides["OLLAMA_MODEL"] = ollama_model
                 main.log_signal.emit(f"[代理] Node.js代理模式 模型={ollama_model}", "#2196F3")
             elif provider == "api":
-                api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7860").strip()
+                api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777").strip()
                 api_model = (settings.get("API_MODEL", "") or "qwen3.6-plus").strip()
                 api_key = (settings.get("API_KEY", "") or "").strip()
                 main.log_signal.emit(f"[代理] API模式 模型={api_model} 目标={api_base}", "#2196F3")

@@ -161,7 +161,7 @@ async def list_accounts(request: Request):
 async def register_new_account(request: Request):
     """一键调用浏览器无头注册新千问账号"""
     import logging
-    from backend.services.auth_resolver import register_qwen_account
+    from backend.services.auth_resolver import register_qwen_account, login_qwen_account
     from backend.core.account_pool import AccountPool
     pool: AccountPool = request.app.state.account_pool
 
@@ -176,7 +176,11 @@ async def register_new_account(request: Request):
         return {"ok": False, "error": "账号池已满，请先清理死号"}
 
     try:
-        acc = await register_qwen_account()
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        custom_email = body.get("email", "").strip()
+        custom_password = body.get("password", "").strip()
+        custom_username = body.get("username", "").strip()
+        acc = await register_qwen_account(custom_email, custom_password, custom_username)
         if acc:
             await pool.add(acc)
             log.info(f"[注册] 注册成功: {acc.email}（当前账号数: {len(pool.accounts)}/100）")
@@ -184,6 +188,36 @@ async def register_new_account(request: Request):
         return {"ok": False, "error": "自动化注册失败，可能遇到风控或页面元素改变"}
     except Exception as e:
         return {"ok": False, "error": f"注册发生异常: {str(e)}"}
+
+@router.post("/accounts/login", dependencies=[Depends(verify_admin)])
+async def login_existing_account(request: Request):
+    """用已有邮箱+密码登录千问账号"""
+    import logging
+    from backend.services.auth_resolver import login_qwen_account
+    from backend.core.account_pool import AccountPool
+    pool: AccountPool = request.app.state.account_pool
+
+    log = logging.getLogger("backend.api.admin")
+
+    try:
+        body = await request.json()
+        email = (body.get("email") or "").strip()
+        password = (body.get("password") or "").strip()
+        if not email or not password:
+            return {"ok": False, "error": "邮箱和密码不能为空"}
+
+        existing = [a for a in pool.accounts if a.email == email]
+        if existing:
+            return {"ok": False, "error": f"账户 {email} 已存在于账户池中"}
+
+        acc = await login_qwen_account(email, password)
+        if acc:
+            await pool.add(acc)
+            log.info(f"[登录] 登录成功: {acc.email}（当前账号数: {len(pool.accounts)}/100）")
+            return {"ok": True, "email": acc.email, "message": "登录成功，账户已入池"}
+        return {"ok": False, "error": "登录失败，请检查邮箱和密码是否正确"}
+    except Exception as e:
+        return {"ok": False, "error": f"登录发生异常: {str(e)}"}
 
 @router.post("/verify", dependencies=[Depends(verify_admin)])
 async def verify_all_accounts(request: Request):
