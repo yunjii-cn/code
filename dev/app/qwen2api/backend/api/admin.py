@@ -155,7 +155,7 @@ async def list_accounts(request: Request):
         d["inflight"] = a.inflight
         d["rate_limited_until"] = a.rate_limited_until
         accs.append(d)
-    return {"accounts": accs}
+    return {"accounts": accs, "sticky_email": getattr(pool, "_sticky_email", None)}
 
 @router.post("/accounts/register", dependencies=[Depends(verify_admin)])
 async def register_new_account(request: Request):
@@ -301,6 +301,23 @@ async def delete_account(email: str, request: Request):
     pool: AccountPool = request.app.state.account_pool
     await pool.remove(email)
     return {"ok": True}
+
+@router.post("/accounts/{email}/set-sticky", dependencies=[Depends(verify_admin)])
+async def set_sticky_account(email: str, request: Request):
+    from backend.core.account_pool import AccountPool
+    pool: AccountPool = request.app.state.account_pool
+    acc = next((a for a in pool.accounts if a.email == email), None)
+    if not acc:
+        return {"ok": False, "error": f"账户 {email} 不存在"}
+    pool._sticky_email = email
+    return {"ok": True, "message": f"已设置 {email} 为优先使用账户"}
+
+@router.post("/accounts/clear-sticky", dependencies=[Depends(verify_admin)])
+async def clear_sticky_account(request: Request):
+    from backend.core.account_pool import AccountPool
+    pool: AccountPool = request.app.state.account_pool
+    pool._sticky_email = None
+    return {"ok": True, "message": "已清除优先账户，恢复自动轮换"}
 
 @router.get("/settings", dependencies=[Depends(verify_admin)])
 async def get_settings(request: Request):

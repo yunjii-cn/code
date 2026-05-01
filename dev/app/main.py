@@ -1,4 +1,4 @@
-﻿﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 云集智能编程工作站 - 统一启动器 v3.0
 所有功能内嵌在一个 EXE 中，不再依赖 Electron
@@ -645,6 +645,14 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwen2Api异常: {e}"})
 
+    @pyqtSlot(result=str)
+    def stopQwen2Api(self):
+        try:
+            result = backend.stop_qwen2api()
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"stopQwen2Api异常: {e}"})
+
     @pyqtSlot(str, result=str)
     def checkApiService(self, payload_json: str = "{}"):
         try:
@@ -689,6 +697,29 @@ class BackendBridge(QObject):
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"ok": False, "error": f"deleteQwenAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def setStickyAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            email = payload.get("email", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.set_sticky_account(base_url, email, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"setStickyAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def clearStickyAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.clear_sticky_account(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"clearStickyAccount异常: {e}"})
 
     @pyqtSlot(str, result=str)
     def startQwenLogin(self, payload_json: str = "{}"):
@@ -1266,12 +1297,20 @@ class MainWindow(QMainWindow):
         # 图标
         try:
             if hasattr(sys, 'frozen'):
-                icon_path = os.path.join(os.path.dirname(sys.executable), "app", "icon.ico")
+                icon_path = os.path.join(os.path.dirname(sys.executable), "icon.ico")
+                if not os.path.exists(icon_path):
+                    icon_path = os.path.join(os.path.dirname(sys.executable), "app", "icon.ico")
             else:
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
         except:
+            pass
+
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YunJi.SmartIDE.Workstation")
+        except Exception:
             pass
 
         # 基础目录
