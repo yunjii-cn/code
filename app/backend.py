@@ -511,7 +511,8 @@ def list_qwen_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 100
         if result["ok"]:
             data = result.get("data") or {}
             accounts = data.get("accounts", [])
-            return {"ok": True, "accounts": accounts, "count": len(accounts)}
+            sticky = data.get("sticky_email") or ""
+            return {"ok": True, "accounts": accounts, "count": len(accounts), "sticky_email": sticky}
         return {"ok": False, "error": "获取账户列表失败"}
     except Exception as e:
         return {"ok": False, "error": f"获取账户列表异常: {e}"}
@@ -534,6 +535,42 @@ def delete_qwen_account(base_url: str, email: str, admin_key: str = "") -> dict:
             return {"ok": data.get("ok", True)}
     except Exception as e:
         return {"ok": False, "error": f"删除账户失败: {e}"}
+
+def set_sticky_account(base_url: str, email: str, admin_key: str = "") -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    ak = (admin_key or "").strip() or "admin"
+    if not email or not email.strip():
+        return {"ok": False, "error": "邮箱不能为空"}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/api/admin/accounts/{urllib.parse.quote(email.strip())}/set-sticky",
+            headers={"Authorization": f"Bearer {ak}", "Content-Type": "application/json"},
+            method="POST",
+            data=b"{}",
+        )
+        with urllib.request.urlopen(req, timeout=10000) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data
+    except Exception as e:
+        return {"ok": False, "error": f"设置优先账户失败: {e}"}
+
+def clear_sticky_account(base_url: str, admin_key: str = "") -> dict:
+    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    ak = (admin_key or "").strip() or "admin"
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{base.rstrip('/')}/api/admin/accounts/clear-sticky",
+            headers={"Authorization": f"Bearer {ak}", "Content-Type": "application/json"},
+            method="POST",
+            data=b"{}",
+        )
+        with urllib.request.urlopen(req, timeout=10000) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data
+    except Exception as e:
+        return {"ok": False, "error": f"清除优先账户失败: {e}"}
 
 _login_state = {
     "busy": False,
@@ -858,6 +895,26 @@ def _check_qwen2api_deps() -> bool:
         return False
 
 _qwen2api_proc = None
+
+def stop_qwen2api() -> dict:
+    global _qwen2api_proc
+    if _qwen2api_proc is None or _qwen2api_proc.poll() is not None:
+        _qwen2api_proc = None
+        return {"ok": True, "message": "API 服务未在运行"}
+    try:
+        _qwen2api_proc.terminate()
+        try:
+            _qwen2api_proc.wait(timeout=10)
+        except Exception:
+            _qwen2api_proc.kill()
+            try:
+                _qwen2api_proc.wait(timeout=5)
+            except Exception:
+                pass
+        _qwen2api_proc = None
+        return {"ok": True, "message": "API 服务已停止"}
+    except Exception as e:
+        return {"ok": False, "error": f"停止 API 服务失败: {e}"}
 
 def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "admin") -> dict:
     global _qwen2api_proc

@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 
 type MessageRole = "user" | "assistant" | "error";
@@ -104,7 +104,7 @@ const runMode = ref<"cloud" | "ollama" | "api">("ollama");
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
-const apiBaseUrl = ref("http://127.0.0.1:7860");
+const apiBaseUrl = ref("http://127.0.0.1:7777");
 const apiModel = ref("qwen3.6-plus");
 const apiModels = ref<ModelInfo[]>([]);
 const cloudModels = ref<ModelInfo[]>([]);
@@ -116,6 +116,7 @@ const qwenToken = ref("");
 const qwenAccountCount = ref(-1);
 const qwenRegisterBusy = ref(false);
 const qwenAccounts = ref<any[]>([]);
+const stickyEmail = ref<string>("");
 
 const qwenValidCount = computed(() => qwenAccounts.value.filter(a => a.valid).length);
 
@@ -282,7 +283,7 @@ function applySettings(data?: DesktopSettings) {
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
   ollamaBaseUrl.value = settings.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   ollamaModel.value = settings.OLLAMA_MODEL || "";
-  apiBaseUrl.value = settings.API_BASE_URL || "http://127.0.0.1:7860";
+  apiBaseUrl.value = settings.API_BASE_URL || "http://127.0.0.1:7777";
   apiModel.value = settings.API_MODEL || "qwen3.6-plus";
   if (settings.API_KEY) {
     const ak = settings.API_KEY;
@@ -726,6 +727,42 @@ async function deleteQwenAccount(email: string) {
   }
 }
 
+async function setStickyAccount(email: string) {
+  if (!email) return;
+  try {
+    const result = await callBackend("setStickyAccount", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      email: email,
+      adminKey: "admin",
+    }));
+    if (result && result.ok) {
+      stickyEmail.value = email;
+      showNotice(result.message || `已设置 ${email} 为优先账户`, "ok");
+    } else {
+      showNotice(result?.error || "设置优先账户失败", "warn");
+    }
+  } catch (e) {
+    showNotice("设置优先账户异常", "warn");
+  }
+}
+
+async function clearStickyAccount() {
+  try {
+    const result = await callBackend("clearStickyAccount", JSON.stringify({
+      baseUrl: apiBaseUrl.value.trim(),
+      adminKey: "admin",
+    }));
+    if (result && result.ok) {
+      stickyEmail.value = "";
+      showNotice(result.message || "已恢复自动轮换", "ok");
+    } else {
+      showNotice(result?.error || "清除优先账户失败", "warn");
+    }
+  } catch (e) {
+    showNotice("清除优先账户异常", "warn");
+  }
+}
+
 let _loginPollTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loginQwenAccount() {
@@ -789,6 +826,7 @@ async function checkQwenAccounts() {
         status_code: a.status_code || "",
         activation_pending: !!a.activation_pending,
       }));
+      stickyEmail.value = result.sticky_email || "";
     }
   } catch { /* ignore */ }
 }
@@ -895,7 +933,7 @@ async function apiStepAutoRun() {
 
       else if (step.action === "start") {
         const portMatch = apiBaseUrl.value.match(/:(\d+)/);
-        const port = portMatch ? parseInt(portMatch[1]) : 7860;
+        const port = portMatch ? parseInt(portMatch[1]) : 7777;
         const result = await callBackend("startQwen2Api", JSON.stringify({ port }));
         if (result && result.ok) {
           apiBaseUrl.value = result.baseUrl || `http://127.0.0.1:${port}`;
@@ -964,6 +1002,23 @@ async function apiStepAutoRun() {
     apiStepMessage.value = "配置异常: " + (e as Error).message;
   } finally {
     apiStepBusy.value = false;
+  }
+}
+
+async function stopApiService() {
+  try {
+    const result = await callBackend("stopQwen2Api", "");
+    if (result && result.ok) {
+      apiStepProgress.value = 0;
+      apiServiceRunning.value = false;
+      apiStepMessage.value = "API 服务已停止，点击「一键启动」重新启动";
+      apiModels.value = [];
+      showNotice(result.message || "API 服务已停止", "ok");
+    } else {
+      showNotice(result?.error || "停止服务失败", "warn");
+    }
+  } catch (e) {
+    showNotice("停止服务异常: " + (e as Error).message, "warn");
   }
 }
 
@@ -1241,7 +1296,7 @@ onMounted(async () => {
         <template v-else-if="runMode === 'api'">
           <label class="field">
             <span>API 服务地址</span>
-            <input v-model="apiBaseUrl" placeholder="http://127.0.0.1:7860" />
+            <input v-model="apiBaseUrl" placeholder="http://127.0.0.1:7777" />
           </label>
 
           <div class="api-progress-section">
@@ -1263,14 +1318,25 @@ onMounted(async () => {
               <div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div>
             </div>
             <p class="api-progress-msg">{{ apiStepMessage }}</p>
-            <button
-              class="btn-blue"
-              style="width: 100%; margin-top: 6px;"
-              @click="apiStepAutoRun"
-              :disabled="apiStepBusy || apiStepProgress >= apiSteps.length"
-            >
-              {{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键启动') }}
-            </button>
+            <div style="display: flex; gap: 6px; margin-top: 6px;">
+              <button
+                class="btn-blue"
+                style="flex: 1;"
+                @click="apiStepAutoRun"
+                :disabled="apiStepBusy || apiStepProgress >= apiSteps.length"
+              >
+                {{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键启动') }}
+              </button>
+              <button
+                class="btn-red"
+                style="flex: 0 0 auto; min-width: 80px;"
+                @click="stopApiService"
+                :disabled="apiStepBusy || apiStepProgress < apiSteps.length"
+                v-if="apiStepProgress >= apiSteps.length"
+              >
+                ■ 停止服务
+              </button>
+            </div>
           </div>
 
           <label class="field">
@@ -1290,12 +1356,17 @@ onMounted(async () => {
               未添加上游账户，AI 对话将返回 500 错误。请点击下方按钮自动注册。
             </p>
             <div v-if="qwenAccounts.length > 0" class="account-list">
-              <div v-for="acc in qwenAccounts" :key="acc.email" class="account-row">
+              <div v-for="acc in qwenAccounts" :key="acc.email" :class="['account-row', { sticky: stickyEmail === acc.email }]">
                 <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
                 <span class="account-email">{{ acc.email }}</span>
+                <span v-if="stickyEmail === acc.email" class="sticky-badge">★ 优先</span>
                 <span v-if="!acc.valid" class="account-err">{{ acc.status_code || '不可用' }}</span>
+                <button v-if="stickyEmail !== acc.email && acc.valid" class="btn-icon btn-sticky" @click="setStickyAccount(acc.email)" title="设为优先使用账户">★</button>
                 <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除此账户">✕</button>
               </div>
+              <button v-if="stickyEmail" class="btn-blue btn-sm" @click="clearStickyAccount" style="margin-top: 4px; width: 100%;">
+                取消优先，恢复自动轮换
+              </button>
             </div>
             <p v-if="qwenAccountCount > 0 && qwenValidCount === 0" class="hint warn" style="margin: 4px 0;">
               所有账户均不可用，请注册新账户或手动添加有效 Token。
@@ -1926,6 +1997,34 @@ export default { name: "App" };
 
 .btn-icon.btn-del:hover {
   color: #F44336;
+}
+
+.btn-icon.btn-sticky {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.btn-icon.btn-sticky:hover {
+  color: #fbbf24;
+}
+
+.account-row.sticky {
+  background: rgba(251, 191, 36, 0.08);
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+
+.sticky-badge {
+  color: #fbbf24;
+  font-size: 9px;
+  background: #2a2200;
+  padding: 1px 4px;
+  border-radius: 3px;
 }
 
 .reg-form {
