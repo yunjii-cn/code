@@ -411,6 +411,12 @@ def _deploy_to_dev(release_dir: Path):
         else:
             print(f"  ✓ 复制 _internal/")
     
+    # 3. 复制 icon.ico 到 dev/ 根目录（任务栏图标需要）
+    icon_src = release_dir / "icon.ico"
+    if icon_src.exists():
+        shutil.copy2(str(icon_src), str(DEV_DIR / "icon.ico"))
+        print(f"  ✓ 复制 icon.ico")
+    
     print(f"  ✓ 部署完成，EXE 在 {DEV_DIR}")
 
 

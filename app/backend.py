@@ -371,8 +371,22 @@ def list_ollama_models(base_url: str, timeout_ms: int = 15000, check_health: boo
     return {"ok": True, "models": models}
 
 
+def _default_base(base_url: str = "") -> str:
+    return (base_url or "").strip() or "http://127.0.0.1:7777"
+
+
+def _extract_port(base_url: str = "", default: int = 7777) -> int:
+    base = _default_base(base_url)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(base)
+        return parsed.port or default
+    except Exception:
+        return default
+
+
 def list_api_models(base_url: str, api_key: str = "", timeout_ms: int = 15000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     url = f"{base.rstrip('/')}/v1/models"
     headers = {"Content-Type": "application/json"}
     if api_key and api_key.strip():
@@ -412,7 +426,7 @@ def list_api_models(base_url: str, api_key: str = "", timeout_ms: int = 15000) -
 
 
 def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     try:
         result = fetch_json_with_timeout(f"{base.rstrip('/')}/healthz", timeout_ms=timeout_ms)
         if result["ok"]:
@@ -437,7 +451,7 @@ def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
 
 
 def _ensure_api_service(base_url: str = "", admin_key: str = "admin") -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
 
     def _check_service():
@@ -453,7 +467,7 @@ def _ensure_api_service(base_url: str = "", admin_key: str = "admin") -> dict:
             import socket
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2)
-            s.connect((parsed.hostname or "127.0.0.1", parsed.port or 7777))
+            s.connect((parsed.hostname or "127.0.0.1", parsed.port or _extract_port(base_url, 7777)))
             s.close()
             return True
         except Exception:
@@ -461,7 +475,8 @@ def _ensure_api_service(base_url: str = "", admin_key: str = "admin") -> dict:
 
     if _check_service():
         return {"ok": True, "was_running": True}
-    start_result = start_qwen2api("", 7777, ak)
+    port = _extract_port(base_url, 7777)
+    start_result = start_qwen2api("", port, ak)
     if not start_result.get("ok"):
         return {"ok": False, "error": f"API 服务未运行且自动启动失败: {start_result.get('message', start_result.get('error', ''))}"}
     import time
@@ -473,7 +488,7 @@ def _ensure_api_service(base_url: str = "", admin_key: str = "admin") -> dict:
 
 
 def add_qwen_account(base_url: str, token: str, admin_key: str = "", timeout_ms: int = 15000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
     if not token or not token.strip():
         return {"ok": False, "error": "Token 不能为空"}
@@ -499,7 +514,7 @@ def add_qwen_account(base_url: str, token: str, admin_key: str = "", timeout_ms:
 
 
 def list_qwen_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
 
     try:
@@ -519,7 +534,7 @@ def list_qwen_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 100
 
 
 def delete_qwen_account(base_url: str, email: str, admin_key: str = "") -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
     if not email or not email.strip():
         return {"ok": False, "error": "邮箱不能为空"}
@@ -537,7 +552,7 @@ def delete_qwen_account(base_url: str, email: str, admin_key: str = "") -> dict:
         return {"ok": False, "error": f"删除账户失败: {e}"}
 
 def set_sticky_account(base_url: str, email: str, admin_key: str = "") -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
     if not email or not email.strip():
         return {"ok": False, "error": "邮箱不能为空"}
@@ -556,7 +571,7 @@ def set_sticky_account(base_url: str, email: str, admin_key: str = "") -> dict:
         return {"ok": False, "error": f"设置优先账户失败: {e}"}
 
 def clear_sticky_account(base_url: str, admin_key: str = "") -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
     try:
         import urllib.request
@@ -618,7 +633,7 @@ def start_qwen_login(base_url: str, email: str, password: str, admin_key: str = 
     if not email or not password:
         return {"ok": False, "error": "邮箱和密码不能为空"}
     ak = (admin_key or "").strip() or "admin"
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ensure = _ensure_api_service(base, ak)
     if not ensure.get("ok"):
         return {"ok": False, "error": ensure.get("error", "API 服务不可用")}
@@ -721,7 +736,7 @@ def start_qwen_register(base_url: str, admin_key: str = "", custom_email: str = 
     if _register_state["busy"]:
         return {"ok": False, "error": "注册正在进行中，请稍候"}
     ak = (admin_key or "").strip() or "admin"
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ensure = _ensure_api_service(base, ak)
     if not ensure.get("ok"):
         return {"ok": False, "error": ensure.get("error", "API 服务不可用")}
@@ -775,7 +790,7 @@ def poll_qwen_register() -> dict:
 
 
 def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
-    base = (base_url or "").strip() or "http://127.0.0.1:7777"
+    base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
 
     try:
@@ -896,25 +911,59 @@ def _check_qwen2api_deps() -> bool:
 
 _qwen2api_proc = None
 
-def stop_qwen2api() -> dict:
+def stop_qwen2api(base_url: str = "") -> dict:
     global _qwen2api_proc
-    if _qwen2api_proc is None or _qwen2api_proc.poll() is not None:
-        _qwen2api_proc = None
-        return {"ok": True, "message": "API 服务未在运行"}
-    try:
-        _qwen2api_proc.terminate()
+    stopped = False
+    if _qwen2api_proc is not None and _qwen2api_proc.poll() is None:
         try:
-            _qwen2api_proc.wait(timeout=10)
-        except Exception:
-            _qwen2api_proc.kill()
+            _qwen2api_proc.terminate()
             try:
-                _qwen2api_proc.wait(timeout=5)
+                _qwen2api_proc.wait(timeout=10)
             except Exception:
-                pass
+                _qwen2api_proc.kill()
+                try:
+                    _qwen2api_proc.wait(timeout=5)
+                except Exception:
+                    pass
+            stopped = True
+        except Exception:
+            pass
         _qwen2api_proc = None
+
+    port = _extract_port(base_url, 7777)
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        for line in r.stdout.splitlines():
+            if f":{port}" in line and "LISTENING" in line:
+                parts = line.split()
+                pid = int(parts[-1])
+                if pid and pid != os.getpid():
+                    try:
+                        import signal
+                        os.kill(pid, signal.SIGTERM)
+                        stopped = True
+                    except Exception:
+                        try:
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", str(pid)],
+                                capture_output=True, timeout=10,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                            )
+                            stopped = True
+                        except Exception:
+                            pass
+                break
+    except Exception:
+        pass
+
+    if stopped:
         return {"ok": True, "message": "API 服务已停止"}
-    except Exception as e:
-        return {"ok": False, "error": f"停止 API 服务失败: {e}"}
+    return {"ok": True, "message": "API 服务未在运行"}
 
 def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "admin") -> dict:
     global _qwen2api_proc
