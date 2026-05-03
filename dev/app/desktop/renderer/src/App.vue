@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 
 type MessageRole = "user" | "assistant" | "error";
@@ -104,7 +104,13 @@ const runMode = ref<"cloud" | "ollama" | "api">("ollama");
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
-const apiBaseUrl = ref("http://127.0.0.1:7777");
+const apiHost = ref("127.0.0.1");
+const apiPort = ref("7777");
+const apiBaseUrl = computed(() => {
+  const host = apiHost.value.trim() || "127.0.0.1";
+  const port = apiPort.value.replace(/\D/g, "") || "7777";
+  return `http://${host}:${port}`;
+});
 const apiModel = ref("qwen3.6-plus");
 const apiModels = ref<ModelInfo[]>([]);
 const cloudModels = ref<ModelInfo[]>([]);
@@ -283,7 +289,10 @@ function applySettings(data?: DesktopSettings) {
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
   ollamaBaseUrl.value = settings.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
   ollamaModel.value = settings.OLLAMA_MODEL || "";
-  apiBaseUrl.value = settings.API_BASE_URL || "http://127.0.0.1:7777";
+  const _apiBase = settings.API_BASE_URL || "http://127.0.0.1:7777";
+  const _apiMatch = _apiBase.match(/^https?:\/\/([^:/]+)(?::(\d+))?/);
+  apiHost.value = _apiMatch ? _apiMatch[1] : "127.0.0.1";
+  apiPort.value = _apiMatch && _apiMatch[2] ? _apiMatch[2] : "7777";
   apiModel.value = settings.API_MODEL || "qwen3.6-plus";
   if (settings.API_KEY) {
     const ak = settings.API_KEY;
@@ -932,11 +941,13 @@ async function apiStepAutoRun() {
       }
 
       else if (step.action === "start") {
-        const portMatch = apiBaseUrl.value.match(/:(\d+)/);
-        const port = portMatch ? parseInt(portMatch[1]) : 7777;
+        const port = parseInt(apiPort.value.replace(/\D/g, "")) || 7777;
         const result = await callBackend("startQwen2Api", JSON.stringify({ port }));
         if (result && result.ok) {
-          apiBaseUrl.value = result.baseUrl || `http://127.0.0.1:${port}`;
+          if (result.baseUrl) {
+            const m = result.baseUrl.match(/^https?:\/\/([^:/]+)(?::(\d+))?/);
+            if (m) { apiHost.value = m[1]; if (m[2]) apiPort.value = m[2]; }
+          }
           if (result.message && result.message.includes("已在运行")) {
             apiServiceRunning.value = true;
             apiStepMessage.value = "服务已运行";
@@ -1007,7 +1018,7 @@ async function apiStepAutoRun() {
 
 async function stopApiService() {
   try {
-    const result = await callBackend("stopQwen2Api", "");
+    const result = await callBackend("stopQwen2Api", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
     if (result && result.ok) {
       apiStepProgress.value = 0;
       apiServiceRunning.value = false;
@@ -1296,7 +1307,12 @@ onMounted(async () => {
         <template v-else-if="runMode === 'api'">
           <label class="field">
             <span>API 服务地址</span>
-            <input v-model="apiBaseUrl" placeholder="http://127.0.0.1:7777" />
+            <div style="display: flex; align-items: center; gap: 0;">
+              <span style="padding: 0 6px; font-size: 12px; color: #888; white-space: nowrap; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;">http://</span>
+              <input v-model="apiHost" placeholder="127.0.0.1" style="flex: 1; border-radius: 0;" />
+              <span style="padding: 0 6px; font-size: 14px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;">:</span>
+              <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 80px; text-align: center; border-radius: 0 4px 4px 0;" />
+            </div>
           </label>
 
           <div class="api-progress-section">

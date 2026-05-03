@@ -645,10 +645,17 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwen2Api异常: {e}"})
 
-    @pyqtSlot(result=str)
-    def stopQwen2Api(self):
+    @pyqtSlot(str, result=str)
+    def stopQwen2Api(self, payload: str = ""):
         try:
-            result = backend.stop_qwen2api()
+            base_url = ""
+            if payload:
+                try:
+                    data = json.loads(payload)
+                    base_url = data.get("baseUrl", "")
+                except Exception:
+                    pass
+            result = backend.stop_qwen2api(base_url)
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"ok": False, "error": f"stopQwen2Api异常: {e}"})
@@ -1296,21 +1303,28 @@ class MainWindow(QMainWindow):
 
         # 图标
         try:
+            icon_found = False
             if hasattr(sys, 'frozen'):
-                icon_path = os.path.join(os.path.dirname(sys.executable), "icon.ico")
-                if not os.path.exists(icon_path):
-                    icon_path = os.path.join(os.path.dirname(sys.executable), "app", "icon.ico")
+                candidates = [
+                    os.path.join(os.path.dirname(sys.executable), "icon.ico"),
+                    os.path.join(os.path.dirname(sys.executable), "app", "icon.ico"),
+                    os.path.join(getattr(sys, '_MEIPASS', ''), "icon.ico"),
+                ]
+                for p in candidates:
+                    if os.path.exists(p):
+                        self.setWindowIcon(QIcon(p))
+                        icon_found = True
+                        break
             else:
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
-            if os.path.exists(icon_path):
-                self.setWindowIcon(QIcon(icon_path))
+                if os.path.exists(icon_path):
+                    self.setWindowIcon(QIcon(icon_path))
+                    icon_found = True
+            if not icon_found:
+                app_icon = QIcon.fromTheme("application-x-executable")
+                if not app_icon.isNull():
+                    self.setWindowIcon(app_icon)
         except:
-            pass
-
-        try:
-            import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YunJi.SmartIDE.Workstation")
-        except Exception:
             pass
 
         # 基础目录
@@ -2442,11 +2456,35 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YunJi.SmartIDE.Workstation")
+    except Exception:
+        pass
+
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     app = QApplication(sys.argv)
+
+    try:
+        if hasattr(sys, 'frozen'):
+            icon_candidates = [
+                os.path.join(os.path.dirname(sys.executable), "icon.ico"),
+                os.path.join(os.path.dirname(sys.executable), "app", "icon.ico"),
+                os.path.join(getattr(sys, '_MEIPASS', ''), "icon.ico"),
+            ]
+            for p in icon_candidates:
+                if os.path.exists(p):
+                    app.setWindowIcon(QIcon(p))
+                    break
+        else:
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+            if os.path.exists(icon_path):
+                app.setWindowIcon(QIcon(icon_path))
+    except Exception:
+        pass
 
     palette = app.palette()
     palette.setColor(palette.ColorRole.Window, QColor("#0d0d0d"))
