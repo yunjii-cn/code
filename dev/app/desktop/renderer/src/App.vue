@@ -234,6 +234,7 @@ function makeId() {
 
 const userName = ref("你");
 const assistantName = ref("助手");
+const autoApprove = ref(false);
 const pendingQueue = ref<string[]>([]);
 
 function roleLabel(role: MessageRole) {
@@ -472,6 +473,8 @@ async function doSend(text: string, addUserMsg: boolean = false) {
     ai_temperature: activeConfig.temperature,
     ai_max_tokens: activeConfig.maxTokens,
     system_prompt: activeConfig.systemPrompt,
+    auto_approve: autoApprove.value,
+    workspace_path: workspacePath.value.trim(),
   }));
 
   if (!result?.ok) {
@@ -531,6 +534,17 @@ async function createSession() {
   const result = await callBackend("newSession");
   if (result?.sessionId) {
     sessionId.value = result.sessionId;
+  }
+}
+
+async function selectWorkspaceDir() {
+  try {
+    const result = await callBackend("selectDirectory", "");
+    if (result && result.path) {
+      workspacePath.value = result.path;
+    }
+  } catch (e) {
+    console.warn("selectDirectory failed:", e);
   }
 }
 
@@ -1220,6 +1234,14 @@ onMounted(async () => {
       }
     });
   }
+
+  await nextTick();
+  try {
+    const b = await getBackend();
+    if (b && b.frontendReady) {
+      b.frontendReady();
+    }
+  } catch {}
 });
 </script>
 
@@ -1535,6 +1557,23 @@ onMounted(async () => {
         </template>
 
         <div class="field-group-title">对话设置</div>
+        <label class="field" style="flex-direction: row; align-items: center; justify-content: space-between;">
+          <span style="flex-shrink: 0;">自动授权工具调用</span>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="font-size: 11px; color: #888;">{{ autoApprove ? '已开启' : '需手动审批' }}</span>
+            <button :class="['toggle-btn', { on: autoApprove }]" @click="autoApprove = !autoApprove">
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+        </label>
+        <p v-if="autoApprove" style="font-size: 11px; color: #FF9800; margin: -4px 0 4px 0;">⚠ 开启后 AI 可直接读写文件和执行命令，无需逐次审批</p>
+        <label class="field">
+          <span>项目工作目录</span>
+          <div style="display: flex; gap: 4px;">
+            <input v-model="workspacePath" placeholder="留空则使用默认路径" style="flex: 1;" />
+            <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录">📂</button>
+          </div>
+        </label>
         <label class="field">
           <span>你的称谓</span>
           <input v-model="userName" placeholder="你" class="short-input" />
@@ -2392,6 +2431,37 @@ export default { name: "App" };
   background: #1565C0;
   border-color: #1976D2;
   color: #fff;
+}
+
+.toggle-btn {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  border: 1px solid #555;
+  background: #333;
+  cursor: pointer;
+  position: relative;
+  transition: all 0.2s;
+  padding: 0;
+  flex-shrink: 0;
+}
+.toggle-btn.on {
+  background: #1976D2;
+  border-color: #42A5F5;
+}
+.toggle-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ccc;
+  transition: all 0.2s;
+}
+.toggle-btn.on .toggle-knob {
+  left: 20px;
+  background: #fff;
 }
 
 .model-settings {

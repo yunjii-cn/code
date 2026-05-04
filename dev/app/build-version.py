@@ -188,6 +188,46 @@ def build_exe():
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 生成 Windows 版本信息文件
+    ver_parts = VERSION.split(".")
+    ver_tuple = ", ".join(str(int(p)) for p in ver_parts)
+    version_file_content = f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({ver_tuple}),
+    prodvers=({ver_tuple}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          u'080404B0',
+          [
+            StringStruct(u'CompanyName', u'YunJi'),
+            StringStruct(u'FileDescription', u'YunJi Smart IDE Workstation'),
+            StringStruct(u'FileVersion', u'{VERSION}'),
+            StringStruct(u'InternalName', u'YunJiSmartIDE'),
+            StringStruct(u'LegalCopyright', u'Copyright 2026 YunJi'),
+            StringStruct(u'OriginalFilename', u'YunJiSmartIDE.exe'),
+            StringStruct(u'ProductName', u'YunJi Smart IDE Workstation'),
+            StringStruct(u'ProductVersion', u'{VERSION}'),
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct(u'Translation', [2052, 1200])])
+  ]
+)
+"""
+    version_file_path = DEV_APP_DIR / "version_info.txt"
+    with open(str(version_file_path), "w", encoding="utf-8") as vf:
+        vf.write(version_file_content)
+
     os.chdir(str(DEV_APP_DIR))
 
     icon_path = str(DEV_APP_DIR / "icon.ico")
@@ -228,8 +268,14 @@ def build_exe():
         "--exclude-module", "tkinter",
         "--exclude-module", "tensorflow",
         "--exclude-module", "torch",
+        "--add-data", f"{icon_path};.",
         "main.py"
     ]
+
+    icon_png = str(DEV_APP_DIR / "icon.png")
+    if os.path.exists(icon_png):
+        pyinstaller_args.insert(-1, "--add-data")
+        pyinstaller_args.insert(-1, f"{icon_png};.")
 
     print("  运行 PyInstaller (--onedir)...")
     subprocess.run(pyinstaller_args, check=True)
@@ -260,6 +306,10 @@ def post_build(release_dir: Path):
     icon_src = DEV_APP_DIR / "icon.ico"
     if icon_src.exists():
         shutil.copy2(str(icon_src), str(release_dir / "icon.ico"))
+
+    icon_png_src = DEV_APP_DIR / "icon.png"
+    if icon_png_src.exists():
+        shutil.copy2(str(icon_png_src), str(release_dir / "icon.png"))
 
     # 3. 复制 bin/ (CLI 工具)
     bin_src = DEV_APP_DIR / "bin"
@@ -416,6 +466,11 @@ def _deploy_to_dev(release_dir: Path):
     if icon_src.exists():
         shutil.copy2(str(icon_src), str(DEV_DIR / "icon.ico"))
         print(f"  ✓ 复制 icon.ico")
+    
+    icon_png_src = release_dir / "icon.png"
+    if icon_png_src.exists():
+        shutil.copy2(str(icon_png_src), str(DEV_DIR / "icon.png"))
+        print(f"  ✓ 复制 icon.png")
     
     print(f"  ✓ 部署完成，EXE 在 {DEV_DIR}")
 

@@ -1911,7 +1911,7 @@ class ClaudeCliRunner:
         return "node"
 
     def _build_args(self, session_id: str, model: str, is_resuming: bool,
-                    system_prompt: str = None) -> list:
+                    system_prompt: str = None, auto_approve: bool = False) -> list:
         args = [
             "--env-file=.env",
             self.cli_entry,
@@ -1921,6 +1921,8 @@ class ClaudeCliRunner:
             "--verbose",
             "--max-turns", "3",
         ]
+        if auto_approve:
+            args.append("--dangerously-skip-permissions")
         if is_resuming:
             args.extend(["--resume", session_id])
         else:
@@ -1935,10 +1937,10 @@ class ClaudeCliRunner:
             workspace_path: str, env_overrides: dict = None,
             on_delta: Callable = None, on_status: Callable = None,
             on_log: Callable = None, on_proc: Callable = None,
-            system_prompt: str = None) -> dict:
+            system_prompt: str = None, auto_approve: bool = False) -> dict:
         """运行 CLI，返回结果"""
         node_path = self._find_node()
-        args = self._build_args(session_id, model, is_resuming, system_prompt)
+        args = self._build_args(session_id, model, is_resuming, system_prompt, auto_approve)
 
         env = dict(os.environ)
         if os.path.exists(self.node_dir):
