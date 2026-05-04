@@ -346,6 +346,15 @@ def post_build(release_dir: Path):
         shutil.copytree(str(qwen_src), str(qwen_dst))
         print("  ✓ 复制 qwen2api/ (API 服务)")
 
+    # 8. 复制 src/utils/vendor/ (ripgrep 等工具二进制)
+    vendor_src = DEV_APP_DIR / "src" / "utils" / "vendor"
+    vendor_dst = release_dir / "src" / "utils" / "vendor"
+    if vendor_src.exists():
+        if vendor_dst.exists():
+            shutil.rmtree(str(vendor_dst))
+        shutil.copytree(str(vendor_src), str(vendor_dst))
+        print("  ✓ 复制 src/utils/vendor/ (工具二进制)")
+
     # nodejs/, bun/, node_modules/ 不复制到 build/ 发布包
     # 用户拿到整合包后，通过部署维护功能自动下载安装
 

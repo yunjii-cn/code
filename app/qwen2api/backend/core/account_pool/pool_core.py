@@ -139,11 +139,11 @@ class AccountPool:
         # 计算推荐并发值（对齐 ds2api）
         self.recommended_concurrency = account_count * self.max_inflight_per_account
 
-        # 队列上限 = 推荐并发值（可配置）
-        self.max_queue_size = self.recommended_concurrency
+        # 队列上限 = max(推荐并发值, 8)，保证即使只有1个账号也有足够缓冲
+        self.max_queue_size = max(self.recommended_concurrency, 8)
 
-        # 全局并发上限 = 推荐并发值（可配置）
-        self.global_max_inflight = self.recommended_concurrency
+        # 全局并发上限 = max(推荐并发值, 4)，保证即使只有1个账号也能并发处理
+        self.global_max_inflight = max(self.recommended_concurrency, 4)
 
         log.info(
             f"[init_account_queue] initialized: "

@@ -9,6 +9,7 @@ type ChatMessage = {
   text: string;
   time: string;
   model?: string;
+  toolStatus?: string;
 };
 
 type DesktopSettings = {
@@ -241,8 +242,14 @@ const projects = ref<any[]>([]);
 const activeProject = ref<any>(null);
 const showProjectPanel = ref(false);
 const newProjectName = ref("");
+const newProjectCustomPath = ref(false);
 const newProjectPath = ref("");
+const newProjectDefaultPath = ref("");
 const projectConversations = ref<any[]>([]);
+const editingProjectId = ref<string | null>(null);
+const editProjectName = ref("");
+const editProjectCustomPath = ref(false);
+const editProjectPath = ref("");
 
 function roleLabel(role: MessageRole) {
   if (role === "user") return userName.value;
@@ -548,14 +555,26 @@ async function selectWorkspaceDir() {
   try {
     const result = await callBackend("selectDirectory", "");
     if (result && result.path) {
-      if (showProjectPanel.value) {
+      if (editingProjectId.value) {
+        editProjectPath.value = result.path;
+        editProjectCustomPath.value = true;
+      } else if (showProjectPanel.value) {
         newProjectPath.value = result.path;
+        newProjectCustomPath.value = true;
       } else {
         workspacePath.value = result.path;
       }
     }
   } catch (e) {
     console.warn("selectDirectory failed:", e);
+  }
+}
+
+async function openInExplorer(path: string) {
+  try {
+    await callBackend("openInExplorer", path);
+  } catch (e) {
+    console.warn("openInExplorer failed:", e);
   }
 }
 
@@ -575,15 +594,31 @@ async function loadProjects() {
   }
 }
 
+async function updateDefaultPath() {
+  if (!newProjectName.value.trim()) {
+    newProjectDefaultPath.value = "";
+    return;
+  }
+  try {
+    const path = await callBackend("getDefaultProjectPath", newProjectName.value.trim());
+    newProjectDefaultPath.value = path || "";
+  } catch (e) {
+    console.warn("getDefaultProjectPath failed:", e);
+  }
+}
+
 async function createProject() {
   if (!newProjectName.value.trim()) return;
   try {
-    const proj = await callBackend("createProject", newProjectName.value.trim(), newProjectPath.value.trim());
+    const path = newProjectCustomPath.value ? newProjectPath.value.trim() : "";
+    const proj = await callBackend("createProject", newProjectName.value.trim(), path);
     if (proj) {
       activeProject.value = proj;
       workspacePath.value = proj.path || "";
       newProjectName.value = "";
       newProjectPath.value = "";
+      newProjectCustomPath.value = false;
+      newProjectDefaultPath.value = "";
       await loadProjects();
     }
   } catch (e) {
@@ -606,14 +641,38 @@ async function switchProject(projectId: string) {
   }
 }
 
-async function renameProject(projectId: string) {
-  const newName = prompt("输入新的项目名称：", activeProject.value?.name || "");
-  if (!newName?.trim()) return;
+function startEditProject(projectId: string) {
+  const proj = projects.value.find((p: any) => p.id === projectId);
+  if (!proj) return;
+  editingProjectId.value = projectId;
+  editProjectName.value = proj.name || "";
+  editProjectPath.value = proj.path || "";
+  editProjectCustomPath.value = false;
+}
+
+function cancelEditProject() {
+  editingProjectId.value = null;
+  editProjectName.value = "";
+  editProjectPath.value = "";
+  editProjectCustomPath.value = false;
+}
+
+async function saveEditProject() {
+  if (!editingProjectId.value) return;
   try {
-    await callBackend("renameProject", projectId, newName.trim());
-    await loadProjects();
+    const newName = editProjectName.value.trim();
+    const newPath = editProjectCustomPath.value ? editProjectPath.value.trim() : "";
+    const proj = await callBackend("updateProject", editingProjectId.value, newName, newPath);
+    if (proj && !proj.error) {
+      if (activeProject.value?.id === editingProjectId.value) {
+        activeProject.value = proj;
+        workspacePath.value = proj.path || "";
+      }
+      cancelEditProject();
+      await loadProjects();
+    }
   } catch (e) {
-    console.warn("renameProject failed:", e);
+    console.warn("saveEditProject failed:", e);
   }
 }
 
@@ -1265,6 +1324,11 @@ async function deleteModel(modelName: string) {
 
 const recommendedModels = ref<any[]>([]);
 const showRecommendations = ref(false);
+const librarySearchQuery = ref("");
+const libraryResults = ref<any[]>([]);
+const librarySearching = ref(false);
+const pullingModel = ref("");
+const showModelManager = ref(false);
 
 async function loadRecommendations() {
   const result = await callBackend("recommendModels");
@@ -1280,6 +1344,58 @@ async function detectHardware() {
     hardwareInfo.value = result;
   }
 }
+
+async function searchOllamaLibrary() {
+  if (!librarySearchQuery.value.trim()) return;
+  librarySearching.value = true;
+  try {
+    const result = await callBackend("searchOllamaLibrary", librarySearchQuery.value.trim());
+    if (result?.ok) {
+      libraryResults.value = result.models || [];
+    } else {
+      showNotice(result?.error || "搜索失败", "warn");
+    }
+  } catch (e) {
+    console.warn("searchOllamaLibrary failed:", e);
+  } finally {
+    librarySearching.value = false;
+  }
+}
+
+async function pullModel(modelName: string) {
+  pullingModel.value = modelName;
+  showNotice(`正在下载 ${displayName(modelName)}...`, "ok");
+  try {
+    const result = await callBackend("pullModel", JSON.stringify({ name: modelName }));
+    if (result?.loading) {
+      return;
+    }
+    if (result?.ok) {
+      showNotice(`${displayName(modelName)} 下载完成`, "ok");
+      await detectModels();
+    } else {
+      showNotice(result?.error || "下载失败", "warn");
+    }
+  } catch (e) {
+    showNotice("下载失败", "warn");
+  } finally {
+    pullingModel.value = "";
+  }
+}
+
+const categorizedModels = computed(() => {
+  const models = cloudModels.value;
+  const local: any[] = [];
+  const cloud: any[] = [];
+  for (const m of models) {
+    if (m.provider === "ollama") {
+      local.push(m);
+    } else {
+      cloud.push(m);
+    }
+  }
+  return { local, cloud };
+});
 
 onMounted(async () => {
   await loadProjects();
@@ -1312,8 +1428,14 @@ onMounted(async () => {
         const target = messages.value.find((m) => m.id === currentAssistantId.value);
         if (target) {
           const newText = payload.text;
-          if (target.text === "" && newText.trim() === "") return;
-          target.text += newText;
+          if (newText.startsWith("\x00TOOL\x00")) {
+            const statusLine = newText.slice(5);
+            target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
+          } else {
+            if (target.text === "" && newText.trim() === "") return;
+            if (target.toolStatus) target.toolStatus = "";
+            target.text += newText;
+          }
         }
       } catch {}
     });
@@ -1329,7 +1451,7 @@ onMounted(async () => {
               const checkId = currentAssistantId.value;
               setTimeout(() => {
                 const target = messages.value.find((m) => m.id === checkId);
-                if (target && !target.text.trim()) {
+                if (target && !target.text.trim() && !target.toolStatus?.trim()) {
                   target.text = "[模型未返回文本]";
                 }
               }, 500);
@@ -1345,6 +1467,17 @@ onMounted(async () => {
       try {
         const payload = JSON.parse(jsonStr);
         loadingModels.value = false;
+        if (payload?.action === "pull_complete") {
+          pullingModel.value = "";
+          showNotice(`${displayName(payload.model)} 下载完成`, "ok");
+          detectModels();
+          return;
+        }
+        if (payload?.action === "pull_failed") {
+          pullingModel.value = "";
+          showNotice(`${displayName(payload.model)} 下载失败: ${payload.error}`, "warn");
+          return;
+        }
         if (!payload || !payload.ok) {
           showNotice(payload?.error || "模型列表加载失败", "warn");
           return;
@@ -1404,6 +1537,7 @@ onMounted(async () => {
               <span v-if="m.model" class="msg-model">{{ m.model }}</span>
             </div>
             <pre v-if="m.text">{{ m.text }}</pre>
+            <pre v-else-if="m.toolStatus?.trim()" class="tool-status">{{ m.toolStatus }}</pre>
             <pre v-else class="thinking">思考中<span class="dots">...</span></pre>
           </article>
         </div>
@@ -1627,30 +1761,70 @@ onMounted(async () => {
               <button class="btn-blue btn-sm" @click="detectModels" :disabled="loadingModels">
                 {{ loadingModels ? "检测中..." : "🔍 检测" }}
               </button>
+            </div>
+          </label>
+
+          <div class="model-manager-toggle" @click="showModelManager = !showModelManager">
+            <span style="font-weight: bold; font-size: 12px;">🧠 模型管理</span>
+            <span style="font-size: 11px; color: #888;">{{ showModelManager ? '收起' : '展开' }}</span>
+          </div>
+
+          <div v-if="showModelManager" class="model-manager-panel">
+            <div class="model-search-bar">
+              <input v-model="librarySearchQuery" placeholder="搜索 Ollama 模型库（如 qwen、llama）" @keydown.enter="searchOllamaLibrary" style="flex: 1;" />
+              <button class="btn-blue btn-sm" @click="searchOllamaLibrary" :disabled="librarySearching">
+                {{ librarySearching ? "搜索中..." : "🔍 搜索" }}
+              </button>
               <button class="btn-auto btn-sm" @click="loadRecommendations" :disabled="loadingModels">
                 💡 推荐
               </button>
             </div>
-          </label>
 
-          <div v-if="showRecommendations && recommendedModels.length > 0" class="recommend-section">
-            <div class="recommend-header">
-              <span>推荐安装</span>
-              <button class="btn-icon-sm" @click="showRecommendations = false">✕</button>
-            </div>
-            <div v-for="r in recommendedModels" :key="r.name" class="recommend-item">
-              <div class="recommend-info">
-                <span class="recommend-name">{{ displayName(r.name) }}</span>
-                <span v-if="r.toolSupport" class="tool-badge ok">★ 工具</span>
-                <span v-else class="tool-badge no">无工具</span>
-                <span class="model-size">{{ r.size }}</span>
+            <div v-if="showRecommendations && recommendedModels.length > 0" class="recommend-section">
+              <div class="recommend-header">
+                <span>根据硬件推荐</span>
+                <button class="btn-icon-sm" @click="showRecommendations = false">✕</button>
               </div>
-              <div class="recommend-reason">{{ r.reason }}</div>
+              <div v-for="r in recommendedModels" :key="r.name" class="recommend-item">
+                <div class="recommend-info">
+                  <span class="recommend-name">{{ displayName(r.name) }}</span>
+                  <span v-if="r.toolSupport" class="tool-badge ok">★ 工具</span>
+                  <span v-else class="tool-badge no">无工具</span>
+                  <span class="model-size">{{ r.size }}</span>
+                </div>
+                <div class="recommend-reason">{{ r.reason }}</div>
+                <button class="btn-blue btn-sm" style="margin-top: 4px;" @click="pullModel(r.name)" :disabled="pullingModel === r.name">
+                  {{ pullingModel === r.name ? '⏳ 下载中...' : '⬇ 下载安装' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="libraryResults.length > 0" class="recommend-section">
+              <div class="recommend-header">
+                <span>搜索结果</span>
+                <button class="btn-icon-sm" @click="libraryResults = []">✕</button>
+              </div>
+              <div v-for="r in libraryResults" :key="r.name" class="recommend-item">
+                <div class="recommend-info">
+                  <span class="recommend-name">{{ r.name }}</span>
+                  <span v-if="r.toolSupport" class="tool-badge ok">★ 工具</span>
+                  <span v-if="r.sizeStr" class="model-size">{{ r.sizeStr }}</span>
+                </div>
+                <div v-if="r.description" class="recommend-reason">{{ r.description }}</div>
+                <button class="btn-blue btn-sm" style="margin-top: 4px;" @click="pullModel(r.name)" :disabled="pullingModel === r.name">
+                  {{ pullingModel === r.name ? '⏳ 下载中...' : '⬇ 下载安装' }}
+                </button>
+              </div>
+            </div>
+
+            <div v-if="pullingModel" class="pulling-indicator">
+              ⏳ 正在下载: {{ displayName(pullingModel) }}...（这可能需要几分钟）
             </div>
           </div>
 
-          <div v-if="cloudModels.length > 0" class="model-list">
-            <div v-for="m in cloudModels" :key="m.id" class="model-row-wrapper">
+          <div v-if="categorizedModels.local.length > 0" class="model-list">
+            <div class="model-category-title">本地模型 (Ollama)</div>
+            <div v-for="m in categorizedModels.local" :key="m.id" class="model-row-wrapper">
               <div
                 :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false, 'broken': m.loadable === false }]"
                 @click="m.loadable !== false && selectModel(m.id)"
@@ -1675,7 +1849,29 @@ onMounted(async () => {
               </div>
             </div>
           </div>
-          <div v-else-if="!loadingModels" class="empty-hint">
+
+          <div v-if="categorizedModels.cloud.length > 0" class="model-list" style="margin-top: 8px;">
+            <div class="model-category-title cloud">云端模型</div>
+            <div v-for="m in categorizedModels.cloud" :key="m.id" class="model-row-wrapper">
+              <div
+                :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false }]"
+                @click="selectModel(m.id)"
+              >
+                <div class="model-row-info">
+                  <span class="model-name">{{ displayName(m.name) }}</span>
+                  <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
+                  <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
+                  <span v-if="m.size" class="model-size">{{ m.size }}</span>
+                </div>
+                <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
+              </div>
+              <div v-if="expandedModelId === m.id" class="model-settings">
+                <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
+              </div>
+            </div>
+          </div>
+
+          <div v-if="cloudModels.length === 0 && !loadingModels" class="empty-hint">
             <p>点击"检测"加载并检测可用模型</p>
           </div>
 
@@ -1705,28 +1901,73 @@ onMounted(async () => {
             <button class="btn-sm" @click="showProjectPanel = !showProjectPanel">{{ showProjectPanel ? '收起' : '展开' }}</button>
           </div>
           <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 4px;">
-            当前项目：{{ activeProject.name }}
+            当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.path }}</span>
           </div>
           <div v-if="showProjectPanel">
-            <div style="display: flex; gap: 4px; margin-bottom: 6px;">
-              <input v-model="newProjectName" placeholder="新项目名称" style="flex: 1; font-size: 11px;" />
-              <button class="btn-sm" @click="createProject" :disabled="!newProjectName.trim()">创建</button>
+            <div class="proj-section-title">新建项目</div>
+            <div style="margin-bottom: 4px;">
+              <input v-model="newProjectName" placeholder="项目名称" style="width: 100%; font-size: 11px;" @input="updateDefaultPath" />
             </div>
-            <div style="display: flex; gap: 4px; margin-bottom: 6px;">
-              <input v-model="newProjectPath" placeholder="自定义路径（可选）" style="flex: 1; font-size: 11px;" />
+            <div class="proj-path-row">
+              <div class="proj-default-path" style="flex: 1; min-width: 0;">
+                {{ newProjectDefaultPath || '（输入项目名称后显示默认目录）' }}
+              </div>
+              <button v-if="newProjectDefaultPath" class="btn-icon-sm" @click="openInExplorer(newProjectDefaultPath)" title="打开目录">📁</button>
+              <label class="proj-checkbox" @click="newProjectCustomPath = !newProjectCustomPath">
+                <span :class="['proj-check-box', { checked: newProjectCustomPath }]">
+                  <span v-if="newProjectCustomPath" style="font-size: 10px;">✓</span>
+                </span>
+                <span style="font-size: 11px;">自定义</span>
+              </label>
+            </div>
+            <div v-if="newProjectCustomPath" style="display: flex; gap: 4px; margin: 4px 0;">
+              <input v-model="newProjectPath" placeholder="选择或输入自定义路径" style="flex: 1; font-size: 11px;" />
               <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录" style="font-size: 11px;">📂</button>
             </div>
-            <div v-if="projects.length === 0" style="font-size: 11px; color: #666; padding: 4px 0;">暂无项目，请创建一个</div>
-            <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]" @click="switchProject(p.id)">
-              <div style="display: flex; align-items: center; justify-content: space-between;">
-                <span style="font-size: 12px; font-weight: 500;">{{ p.name }}</span>
-                <div style="display: flex; gap: 2px;">
-                  <button class="btn-icon-sm" @click.stop="renameProject(p.id)" title="重命名">✏️</button>
-                  <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
+            <button class="btn-sm" style="width: 100%; margin-top: 4px;" @click="createProject" :disabled="!newProjectName.trim()">创建项目</button>
+
+            <div v-if="projects.length === 0" style="font-size: 11px; color: #666; padding: 8px 0;">暂无项目，请创建一个</div>
+
+            <div v-if="projects.length > 0" class="proj-section-title" style="margin-top: 8px;">项目列表</div>
+            <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]">
+              <template v-if="editingProjectId === p.id">
+                <div style="margin-bottom: 4px;">
+                  <input v-model="editProjectName" placeholder="项目名称" style="width: 100%; font-size: 11px;" />
                 </div>
-              </div>
-              <div style="font-size: 10px; color: #666; margin-top: 2px;">{{ p.path }}</div>
+                <div class="proj-path-row">
+                  <div class="proj-default-path" style="flex: 1; min-width: 0;">
+                    {{ p.path }}
+                  </div>
+                  <button class="btn-icon-sm" @click="openInExplorer(p.path)" title="打开目录">📁</button>
+                  <label class="proj-checkbox" @click="editProjectCustomPath = !editProjectCustomPath">
+                    <span :class="['proj-check-box', { checked: editProjectCustomPath }]">
+                      <span v-if="editProjectCustomPath" style="font-size: 10px;">✓</span>
+                    </span>
+                    <span style="font-size: 11px;">修改</span>
+                  </label>
+                </div>
+                <div v-if="editProjectCustomPath" style="display: flex; gap: 4px; margin: 4px 0;">
+                  <input v-model="editProjectPath" placeholder="新的项目目录" style="flex: 1; font-size: 11px;" />
+                  <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录" style="font-size: 11px;">📂</button>
+                </div>
+                <div style="display: flex; gap: 4px; margin-top: 4px;">
+                  <button class="btn-sm" style="flex: 1;" @click="saveEditProject">保存</button>
+                  <button class="btn-sm" style="flex: 1; background: #333;" @click="cancelEditProject">取消</button>
+                </div>
+              </template>
+              <template v-else>
+                <div style="display: flex; align-items: center; justify-content: space-between;" @click="switchProject(p.id)">
+                  <span style="font-size: 12px; font-weight: 500;">{{ p.name }}</span>
+                  <div style="display: flex; gap: 2px;">
+                    <button class="btn-icon-sm" @click.stop="openInExplorer(p.path)" title="打开目录">📁</button>
+                    <button class="btn-icon-sm" @click.stop="startEditProject(p.id)" title="编辑">✏️</button>
+                    <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
+                  </div>
+                </div>
+                <div style="font-size: 11px; color: #888; margin-top: 2px;">{{ p.path }}</div>
+              </template>
             </div>
+
             <div v-if="projectConversations.length > 0" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
               <div style="font-size: 11px; color: #888; margin-bottom: 4px;">对话历史</div>
               <div v-for="c in projectConversations" :key="c.session_id" class="conv-item" @click="loadConversationHistory(c.session_id)">
@@ -1961,6 +2202,14 @@ export default { name: "App" };
 .msg .thinking {
   color: #666;
   font-style: italic;
+}
+
+.msg .tool-status {
+  color: #888;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .msg .thinking .dots {
@@ -2559,6 +2808,113 @@ export default { name: "App" };
   border-radius: 3px;
   font-size: 10px;
   padding: 1px 4px;
+}
+
+.model-manager-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  cursor: pointer;
+  margin: 4px 0;
+}
+
+.model-manager-toggle:hover {
+  background: #1a1a1a;
+}
+
+.model-manager-panel {
+  padding: 8px;
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.model-search-bar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.model-category-title {
+  font-size: 11px;
+  font-weight: bold;
+  color: #42A5F5;
+  padding: 4px 8px;
+  border-bottom: 1px solid #1a3a5c;
+  margin-bottom: 4px;
+}
+
+.model-category-title.cloud {
+  color: #AB47BC;
+  border-bottom-color: #3a1a4c;
+}
+
+.pulling-indicator {
+  font-size: 11px;
+  color: #FF9800;
+  padding: 6px 8px;
+  background: #1a1500;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+.proj-section-title {
+  font-size: 11px;
+  font-weight: bold;
+  color: #888;
+  padding: 2px 0;
+  border-bottom: 1px solid #222;
+  margin-bottom: 4px;
+}
+
+.proj-path-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0;
+}
+
+.proj-default-path {
+  font-size: 11px;
+  color: #888;
+  padding: 2px 4px;
+  background: #0a0a0a;
+  border-radius: 3px;
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.proj-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  padding: 2px 0;
+  user-select: none;
+}
+
+.proj-check-box {
+  width: 14px;
+  height: 14px;
+  border: 1px solid #444;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #111;
+  transition: all 0.15s;
+}
+
+.proj-check-box.checked {
+  background: #1565C0;
+  border-color: #1976D2;
 }
 
 .recommend-item {
