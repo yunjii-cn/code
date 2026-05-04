@@ -33,10 +33,10 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
     QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
-    QTabWidget, QScrollArea, QComboBox,
+    QTabWidget, QScrollArea, QComboBox, QSplashScreen,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl
-from PyQt6.QtGui import QFont, QIcon, QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl, QPropertyAnimation, pyqtProperty, QRectF
+from PyQt6.QtGui import QFont, QIcon, QColor, QPixmap, QPainter, QLinearGradient, QPalette
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
 
@@ -351,6 +351,12 @@ class BackendBridge(QObject):
     def _get_main(self):
         return self._app_ref
 
+    @pyqtSlot()
+    def frontendReady(self):
+        main = self._get_main()
+        if main and hasattr(main, '_finish_splash'):
+            QTimer.singleShot(300, main._finish_splash)
+
     # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
     @pyqtSlot(result=str)
@@ -426,6 +432,13 @@ class BackendBridge(QObject):
             settings["AI_MAX_TOKENS"] = payload["ai_max_tokens"]
         if payload.get("system_prompt"):
             settings["SYSTEM_PROMPT"] = payload["system_prompt"]
+        if payload.get("auto_approve"):
+            settings["AUTO_APPROVE"] = True
+        else:
+            settings["AUTO_APPROVE"] = False
+        if payload.get("workspace_path"):
+            settings["WORKSPACE_PATH"] = payload["workspace_path"]
+            main.current_workspace = payload["workspace_path"]
 
         main.is_busy = True
         self.statusReceived.emit(json.dumps({"busy": True}))
@@ -434,6 +447,23 @@ class BackendBridge(QObject):
         t.start()
 
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
+
+    @pyqtSlot(result=str)
+    def selectDirectory(self):
+        try:
+            from PyQt6.QtWidgets import QFileDialog
+            from PyQt6.QtCore import QDir
+            main = self._get_main()
+            parent = main if main else None
+            path = QFileDialog.getExistingDirectory(
+                parent, "选择项目工作目录", QDir.homePath(),
+                QFileDialog.Option.ShowDirsOnly
+            )
+            if path:
+                return json.dumps({"ok": True, "path": path})
+            return json.dumps({"ok": False, "path": ""})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
 
     @pyqtSlot(result=str)
     def stopMessage(self):
@@ -841,6 +871,7 @@ class BackendBridge(QObject):
                 ),
                 on_proc=lambda p: setattr(main, 'active_proc', p),
                 system_prompt=system_prompt,
+                auto_approve=settings.get("AUTO_APPROVE", False),
             )
 
             if result.get("ok"):
@@ -1284,6 +1315,103 @@ try {{
             return False
 
 
+class SplashScreen(QSplashScreen):
+    def __init__(self):
+        pixmap = QPixmap(520, 360)
+        pixmap.fill(QColor("#0d0d0d"))
+        super().__init__(pixmap)
+        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        self._progress = 0.0
+        self._message = "正在初始化..."
+        self._icon_pixmap = None
+        try:
+            if hasattr(sys, '_MEIPASS'):
+                base = sys._MEIPASS
+            elif hasattr(sys, 'frozen'):
+                base = os.path.dirname(sys.executable)
+            else:
+                base = os.path.dirname(os.path.abspath(__file__))
+            for name in ('icon.png', 'icon.ico'):
+                p = os.path.join(base, name)
+                if os.path.exists(p):
+                    self._icon_pixmap = QPixmap(p)
+                    if not self._icon_pixmap.isNull():
+                        break
+                    self._icon_pixmap = None
+        except Exception:
+            pass
+
+    def _get_progress(self):
+        return self._progress
+
+    def _set_progress(self, val):
+        self._progress = val
+        self.repaint()
+
+    progress = pyqtProperty(float, _get_progress, _set_progress)
+
+    def set_progress(self, value, message=""):
+        if message:
+            self._message = message
+        anim = QPropertyAnimation(self, b"progress")
+        anim.setDuration(300)
+        anim.setStartValue(self._progress)
+        anim.setEndValue(value)
+        anim.start()
+        self._anim = anim
+        if message:
+            self._message = message
+            self.repaint()
+
+    def drawContents(self, painter):
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        painter.fillRect(0, 0, w, h, QColor("#0d0d0d"))
+
+        if self._icon_pixmap:
+            icon_size = 80
+            scaled = self._icon_pixmap.scaled(icon_size, icon_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            ix = (w - scaled.width()) // 2
+            painter.drawPixmap(ix, 60, scaled)
+
+        painter.setPen(QColor("#F0F0F0"))
+        title_font = QFont("Microsoft YaHei", 22, QFont.Weight.Bold)
+        painter.setFont(title_font)
+        title = "云集智能编程工作站"
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(title)
+        painter.drawText((w - tw) // 2, 180, title)
+
+        bar_x, bar_y, bar_w, bar_h = 60, 240, w - 120, 10
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#222222"))
+        painter.drawRoundedRect(QRectF(bar_x, bar_y, bar_w, bar_h), 5, 5)
+
+        fill_w = bar_w * min(self._progress, 1.0)
+        if fill_w > 0:
+            grad = QLinearGradient(bar_x, bar_y, bar_x + fill_w, bar_y)
+            grad.setColorAt(0, QColor("#1565C0"))
+            grad.setColorAt(1, QColor("#42A5F5"))
+            painter.setBrush(grad)
+            painter.drawRoundedRect(QRectF(bar_x, bar_y, fill_w, bar_h), 5, 5)
+
+        painter.setPen(QColor("#888888"))
+        msg_font = QFont("Microsoft YaHei", 10)
+        painter.setFont(msg_font)
+        msg = self._message
+        fm2 = painter.fontMetrics()
+        mw = fm2.horizontalAdvance(msg)
+        painter.drawText((w - mw) // 2, 275, msg)
+
+        pct = f"{int(min(self._progress, 1.0) * 100)}%"
+        painter.setPen(QColor("#42A5F5"))
+        pct_font = QFont("Microsoft YaHei", 9)
+        painter.setFont(pct_font)
+        fm3 = painter.fontMetrics()
+        pw = fm3.horizontalAdvance(pct)
+        painter.drawText((w - pw) // 2, 300, pct)
+
+
 # ── 主窗口 ──
 class MainWindow(QMainWindow):
     log_signal = pyqtSignal(str, str)
@@ -1296,35 +1424,33 @@ class MainWindow(QMainWindow):
     _remote_ver_signal = pyqtSignal(object)
     deploy_step_signal = pyqtSignal(str, str, int)
 
-    def __init__(self):
+    def __init__(self, splash=None):
         super().__init__()
+        self._splash = splash
         self.setWindowTitle(f"云集智能编程工作站 v{VERSION}")
         self.setMinimumSize(980, 680)
 
-        # 图标
         try:
-            icon_found = False
-            if hasattr(sys, 'frozen'):
-                candidates = [
-                    os.path.join(os.path.dirname(sys.executable), "icon.ico"),
-                    os.path.join(os.path.dirname(sys.executable), "app", "icon.ico"),
-                    os.path.join(getattr(sys, '_MEIPASS', ''), "icon.ico"),
-                ]
-                for p in candidates:
-                    if os.path.exists(p):
-                        self.setWindowIcon(QIcon(p))
-                        icon_found = True
-                        break
+            if hasattr(sys, '_MEIPASS'):
+                icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
+            elif hasattr(sys, 'frozen'):
+                icon_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
             else:
-                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
-                if os.path.exists(icon_path):
-                    self.setWindowIcon(QIcon(icon_path))
-                    icon_found = True
-            if not icon_found:
-                app_icon = QIcon.fromTheme("application-x-executable")
-                if not app_icon.isNull():
-                    self.setWindowIcon(app_icon)
-        except:
+                icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+                if hasattr(sys, 'frozen'):
+                    import ctypes
+                    hwnd = int(self.winId())
+                    cx = ctypes.windll.user32.GetSystemMetrics(49)
+                    cy = ctypes.windll.user32.GetSystemMetrics(50)
+                    ico_small = ctypes.windll.user32.LoadImageW(0, icon_path, 1, cx, cy, 0x10)
+                    ico_big = ctypes.windll.user32.LoadImageW(0, icon_path, 1, ctypes.windll.user32.GetSystemMetrics(11), ctypes.windll.user32.GetSystemMetrics(12), 0x10)
+                    if ico_small:
+                        ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 0, ico_small)
+                    if ico_big:
+                        ctypes.windll.user32.SendMessageW(hwnd, 0x0080, 1, ico_big)
+        except Exception:
             pass
 
         # 基础目录
@@ -1366,8 +1492,14 @@ class MainWindow(QMainWindow):
         self.is_busy = False
         self.active_proc = None
 
+        if self._splash:
+            self._splash.set_progress(0.3, "正在构建界面...")
+
         # 构建 UI
         self._setup_ui()
+
+        if self._splash:
+            self._splash.set_progress(0.6, "正在连接信号...")
 
         # 连接信号
         self.log_signal.connect(self._append_log)
@@ -1379,8 +1511,14 @@ class MainWindow(QMainWindow):
         self.workspace_choose_requested.connect(self._choose_workspace_dialog)
         self._remote_ver_signal.connect(self._on_remote_ver_fetched)
 
+        if self._splash:
+            self._splash.set_progress(0.9, "即将就绪...")
+
         # 启动时检查环境
         QTimer.singleShot(800, self._auto_check_and_load)
+
+        # 超时保底：如果前端 15 秒内未加载完成，直接关闭 splash 显示主窗口
+        QTimer.singleShot(15000, self._splash_fallback)
 
     def _setup_ui(self):
         self.setStyleSheet("""
@@ -1487,17 +1625,8 @@ class MainWindow(QMainWindow):
         self.web_view = QWebEngineView()
         self.web_view.setStyleSheet("background-color: #0d0d0d;")
 
-        # 防止白色闪屏：初始隐藏 web_view，用深色占位
-        self.web_view.setVisible(False)
-        self._loading_label = QLabel("正在加载...")
-        self._loading_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._loading_label.setStyleSheet("color: #666; font-size: 14px; background-color: #0d0d0d; border: none;")
-        page_layout.addWidget(self._loading_label, 1)
+        self.web_view.page().setBackgroundColor(QColor("#0d0d0d"))
 
-        # 设置 WebEngine 页面背景色为深色（防止渲染白色闪烁）
-        self.web_view.page().setBackgroundColor(Qt.GlobalColor.black)
-
-        # 页面加载完成后显示 web_view，隐藏占位标签
         self.web_view.loadFinished.connect(self._on_web_load_finished)
 
         # QWebChannel 桥接
@@ -1851,10 +1980,23 @@ class MainWindow(QMainWindow):
         t.start()
 
     def _on_web_load_finished(self, ok: bool):
-        """Vue 前端加载完成，隐藏占位标签，显示 web_view"""
         if ok:
-            self._loading_label.setVisible(False)
             self.web_view.setVisible(True)
+            if self._splash and self._splash.isVisible():
+                self._splash.set_progress(0.95, "正在渲染界面...")
+
+    def _finish_splash(self):
+        if self._splash and self._splash.isVisible():
+            self._splash.set_progress(1.0, "加载完成！")
+            self.show()
+            self._splash.finish(self)
+            self._splash = None
+
+    def _splash_fallback(self):
+        if self._splash and self._splash.isVisible():
+            self.show()
+            self._splash.finish(self)
+            self._splash = None
 
     def _load_frontend(self):
         """加载 Vue 前端到 QWebEngineView"""
@@ -2458,46 +2600,64 @@ class MainWindow(QMainWindow):
 def main():
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("YunJi.SmartIDE.Workstation")
-    except Exception:
-        pass
+        app_id = "YunJi.SmartIDE.Workstation"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+        print(f"[APP] SetCurrentProcessExplicitAppUserModelID: {app_id}")
+    except Exception as _e:
+        print(f"[APP] SetCurrentProcessExplicitAppUserModelID failed: {_e}")
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
 
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
 
     try:
-        if hasattr(sys, 'frozen'):
-            icon_candidates = [
-                os.path.join(os.path.dirname(sys.executable), "icon.ico"),
-                os.path.join(os.path.dirname(sys.executable), "app", "icon.ico"),
-                os.path.join(getattr(sys, '_MEIPASS', ''), "icon.ico"),
-            ]
-            for p in icon_candidates:
-                if os.path.exists(p):
-                    app.setWindowIcon(QIcon(p))
-                    break
+        if hasattr(sys, '_MEIPASS'):
+            icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
+        elif hasattr(sys, 'frozen'):
+            icon_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
         else:
-            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
-            if os.path.exists(icon_path):
-                app.setWindowIcon(QIcon(icon_path))
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
     except Exception:
         pass
 
-    palette = app.palette()
-    palette.setColor(palette.ColorRole.Window, QColor("#0d0d0d"))
-    palette.setColor(palette.ColorRole.WindowText, QColor("#f0f0f0"))
-    palette.setColor(palette.ColorRole.Base, QColor("#0d0d0d"))
-    palette.setColor(palette.ColorRole.Text, QColor("#f0f0f0"))
-    palette.setColor(palette.ColorRole.Button, QColor("#1a1a1a"))
-    palette.setColor(palette.ColorRole.ButtonText, QColor("#f0f0f0"))
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("#0d0d0d"))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor("#f0f0f0"))
+    palette.setColor(QPalette.ColorRole.Base, QColor("#0d0d0d"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#f0f0f0"))
+    palette.setColor(QPalette.ColorRole.Button, QColor("#1a1a1a"))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#f0f0f0"))
     app.setPalette(palette)
 
-    window = MainWindow()
+    font = QFont("Microsoft YaHei", 10)
+    app.setFont(font)
+
+    splash = SplashScreen()
+    screen = app.primaryScreen().geometry()
+    x = (screen.width() - splash.width()) // 2
+    y = (screen.height() - splash.height()) // 2
+    splash.move(x, y)
+    splash.show()
+    splash.repaint()
+    app.processEvents()
+
+    try:
+        import pyi_splash
+        pyi_splash.close()
+    except Exception:
+        pass
+
+    splash.set_progress(0.1, "正在创建主窗口...")
+    app.processEvents()
+
+    window = MainWindow(splash=splash)
     window.resize(1260, 860)
-    window.show()
+
     sys.exit(app.exec())
 
 
