@@ -1902,7 +1902,8 @@ class ClaudeCliRunner:
         self.project_root = project_root
         self.node_dir = node_dir
         self.bun_dir = bun_dir
-        self.cli_entry = os.path.join(project_root, "bin", "claude-code-tudou")
+        self.cli_entry = os.path.join(project_root, "src", "entrypoints", "cli.tsx")
+        self.cli_wrapper = os.path.join(project_root, "bin", "claude-code-tudou")
 
     def _find_node(self) -> str:
         local = os.path.join(self.node_dir, "node.exe")
@@ -1910,16 +1911,38 @@ class ClaudeCliRunner:
             return local
         return "node"
 
+    @staticmethod
+    def _tool_display_name(name: str) -> str:
+        _names = {
+            "fs_open_file": "读取文件", "Read": "读取文件",
+            "fs_put_file": "写入文件", "Write": "写入文件",
+            "fs_patch_file": "编辑文件", "Edit": "编辑文件",
+            "shell_run": "执行命令", "Bash": "执行命令",
+            "text_search": "搜索文本", "Grep": "搜索文本",
+            "path_find": "查找文件", "Glob": "查找文件",
+            "http_get_url": "获取网页", "WebFetch": "获取网页",
+            "web_query": "搜索网络", "WebSearch": "搜索网络",
+            "NotebookEdit": "编辑笔记本",
+            "Task": "子任务",
+            "TodoWrite": "更新任务",
+            "AskUserQuestion": "询问用户",
+            "Skill": "调用技能",
+        }
+        return _names.get(name, name)
+
     def _build_args(self, session_id: str, model: str, is_resuming: bool,
                     system_prompt: str = None, auto_approve: bool = False) -> list:
+        env_file = os.path.join(self.project_root, ".env")
         args = [
-            "--env-file=.env",
+            f"--env-file-if-exists={env_file}",
+            "--no-warnings",
+            "--import", "tsx",
             self.cli_entry,
             "-p",
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
-            "--max-turns", "3",
+            "--max-turns", "50",
         ]
         if auto_approve:
             args.append("--dangerously-skip-permissions")
@@ -2026,7 +2049,14 @@ class ClaudeCliRunner:
 
             last_text = ""
             last_result = ""
+            last_tool_info = ""
+            all_tool_calls = []
+            all_tool_results = []
+            all_text_parts = []
+            api_retry_count = 0
+            api_retry_last_error = ""
             stdout_log = ""
+            stdout_tail = []
             cli_session_id = ""
             has_stream_delta = False
             line_count = 0
@@ -2094,6 +2124,9 @@ class ClaudeCliRunner:
                     continue
                 line_count += 1
                 stdout_log += trimmed + "\n"
+                stdout_tail.append(trimmed)
+                if len(stdout_tail) > 20:
+                    stdout_tail.pop(0)
                 try:
                     parsed = json.loads(trimmed)
                 except:
@@ -2112,6 +2145,17 @@ class ClaudeCliRunner:
                         _log(f"[CLI] 捕获session_id={cli_session_id}")
                         _log_file.write(f"  [SESSION] cli_session_id={cli_session_id}\n")
                         _log_file.flush()
+
+                if evt_type == "system" and parsed.get("subtype") == "api_retry":
+                    api_retry_count += 1
+                    api_retry_last_error = parsed.get("error", "")
+                    attempt = parsed.get("attempt", "?")
+                    max_retries = parsed.get("max_retries", "?")
+                    status = parsed.get("error_status", "?")
+                    if api_retry_count <= 3:
+                        _log(f"[CLI] API重试 {attempt}/{max_retries} (HTTP {status})", "#FF9800")
+                    if on_delta:
+                        on_delta(f"\x00TOOL\x00⚠️ API重试 {attempt}/{max_retries} (HTTP {status})")
 
                 if evt_type == "stream_event":
                     sub_type = parsed.get("event", {}).get("type", "?")
@@ -2137,17 +2181,57 @@ class ClaudeCliRunner:
                         parts = [b.get("text", "") for b in msg["content"] if b.get("type") == "text" and isinstance(b.get("text"), str)]
                         if parts:
                             last_text = "\n".join(parts)
+                            all_text_parts.extend(parts)
                             if not has_stream_delta and on_delta:
                                 on_delta(last_text)
                                 _log(f"[CLI] 从assistant消息补充文本 len={len(last_text)}", "#FF9800")
+                        tool_uses = [b for b in msg["content"] if b.get("type") == "tool_use"]
+                        if tool_uses:
+                            for tu in tool_uses:
+                                all_tool_calls.append(tu.get("name", "?"))
+                            if not parts:
+                                tool_names = [t.get("name", "?") for t in tool_uses]
+                                last_tool_info = f"[AI调用了工具: {', '.join(tool_names)}]"
+                                _log(f"[CLI] assistant仅含工具调用: {tool_names}", "#FF9800")
+                                if on_delta:
+                                    tool_display = [self._tool_display_name(n) for n in tool_names]
+                                    on_delta(f"\x00TOOL\x00🔧 调用工具: {', '.join(tool_display)}")
 
                 # result
-                if parsed.get("type") == "result" and isinstance(parsed.get("result"), str):
-                    last_result = parsed["result"]
+                if parsed.get("type") == "result":
+                    raw_result = parsed.get("result")
+                    if raw_result is not None:
+                        last_result = str(raw_result) if not isinstance(raw_result, str) else raw_result
+                    result_subtype = parsed.get("subtype", "")
                     if not has_stream_delta and not last_text and on_delta:
-                        on_delta(last_result)
-                        has_stream_delta = True
-                        _log(f"[CLI] 从result补充文本 len={len(last_result)}", "#FF9800")
+                        if last_result.strip():
+                            on_delta(last_result)
+                            has_stream_delta = True
+                            _log(f"[CLI] 从result补充文本 len={len(last_result)}", "#FF9800")
+                        elif result_subtype == "error_max_turns":
+                            _log(f"[CLI] result subtype=error_max_turns, num_turns={parsed.get('num_turns')}", "#FF9800")
+
+                if parsed.get("type") == "user":
+                    msg = parsed.get("message", {})
+                    if isinstance(msg.get("content"), list):
+                        for block in msg["content"]:
+                            if block.get("type") == "tool_result":
+                                content = block.get("content", "")
+                                if isinstance(content, str):
+                                    summary = content[:200].replace("\n", " ")
+                                elif isinstance(content, list):
+                                    texts = [b.get("text", "") for b in content if b.get("type") == "text"]
+                                    summary = " ".join(texts)[:200].replace("\n", " ")
+                                else:
+                                    summary = ""
+                                is_error = block.get("is_error", False)
+                                all_tool_results.append({"error": is_error, "summary": summary})
+                                if on_delta and len(all_tool_results) <= len(all_tool_calls):
+                                    idx = len(all_tool_results) - 1
+                                    tc_name = all_tool_calls[idx] if idx < len(all_tool_calls) else "?"
+                                    tc_display = self._tool_display_name(tc_name)
+                                    status_icon = "❌" if is_error else "✅"
+                                    on_delta(f"\x00TOOL\x00{status_icon} {tc_display}: {summary[:80]}")
 
             try:
                 proc.wait(timeout=10)
@@ -2162,10 +2246,13 @@ class ClaudeCliRunner:
 
             _log_file.write(f"\n=== RESULT ===\n")
             _log_file.write(f"lines={line_count} types={event_types} has_delta={has_stream_delta} last_text_len={len(last_text)} rc={proc.returncode}\n")
+            _log_file.write(f"tool_calls={all_tool_calls} tool_results_count={len(all_tool_results)} text_parts_count={len(all_text_parts)} api_retry_count={api_retry_count}\n")
             if stderr_out:
                 _log_file.write(f"stderr={stderr_out[:2000]}\n")
             if not has_stream_delta and not last_text and stdout_log:
                 _log_file.write(f"stdout_sample={stdout_log[:3000]}\n")
+            if proc.returncode != 0 and stdout_tail:
+                _log_file.write(f"stdout_tail_last5={stdout_tail[-5:]}\n")
             _log_file.flush()
             _log_file.close()
 
@@ -2175,30 +2262,50 @@ class ClaudeCliRunner:
                 _log(f"[CLI] stderr: {stderr_out[:300]}", "#F44336")
 
             if proc.returncode == 0:
-                return {"ok": True, "text": last_text.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id}
+                return {"ok": True, "text": last_text.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id, "streamed": has_stream_delta}
             else:
                 if timed_out:
                     return {"ok": False, "error": f"CLI执行超时({cli_timeout}秒)，已自动终止", "sessionId": session_id, "cliSessionId": cli_session_id or session_id}
                 if has_stream_delta:
                     _log(f"[CLI] rc={proc.returncode} 但已收到流式文本(has_delta=True)，视为成功", "#FF9800")
-                    return {"ok": True, "text": last_text.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id}
+                    return {"ok": True, "text": last_text.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id, "streamed": True}
                 if last_text.strip():
                     _log(f"[CLI] rc={proc.returncode} 但已收到文本内容(len={len(last_text.strip())})，视为成功", "#FF9800")
-                    return {"ok": True, "text": last_text.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id}
+                    return {"ok": True, "text": last_text.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id, "streamed": False}
                 if last_result.strip():
                     _log(f"[CLI] rc={proc.returncode} 但已收到result内容(len={len(last_result.strip())})，视为成功", "#FF9800")
-                    return {"ok": True, "text": last_result.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id}
+                    return {"ok": True, "text": last_result.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id, "streamed": False}
+                if last_tool_info.strip():
+                    _log(f"[CLI] rc={proc.returncode} 但AI已调用工具，返回工具信息", "#FF9800")
+                    summary_parts = []
+                    if all_text_parts:
+                        summary_parts.append("\n".join(all_text_parts))
+                    for i, tc_name in enumerate(all_tool_calls):
+                        tr = all_tool_results[i] if i < len(all_tool_results) else None
+                        if tr and tr.get("error"):
+                            summary_parts.append(f"🔧 {tc_name}: ❌ {tr['summary'][:100]}")
+                        elif tr:
+                            summary_parts.append(f"🔧 {tc_name}: ✅ {tr['summary'][:100]}")
+                        else:
+                            summary_parts.append(f"🔧 {tc_name}")
+                    combined = "\n".join(summary_parts) if summary_parts else last_tool_info
+                    return {"ok": True, "text": combined.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id, "streamed": False}
                 error = stderr_out.strip() or "Unknown CLI error."
                 fallback = ""
-                if error == "Unknown CLI error.":
+                if api_retry_count > 0:
+                    fallback = f"API服务暂时不可用(重试{api_retry_count}次后失败，HTTP {api_retry_last_error})，请稍后再试"
+                if not fallback and error == "Unknown CLI error.":
                     for raw_line in stdout_log.split("\n"):
                         raw_line = raw_line.strip()
                         if not raw_line:
                             continue
                         try:
                             pj = json.loads(raw_line)
-                            if pj.get("type") == "result" and pj.get("subtype") == "error":
+                            pj_sub = pj.get("subtype", "")
+                            if pj.get("type") == "result" and pj_sub.startswith("error"):
                                 fallback = pj.get("result", "") or pj.get("error", "")
+                                if not fallback and pj_sub == "error_max_turns":
+                                    fallback = f"已达到最大对话轮次限制({pj.get('num_turns', '?')}轮)，请发送新消息继续"
                                 if fallback:
                                     break
                             if pj.get("type") == "error":

@@ -96,12 +96,24 @@ MIRROR_SETTINGS_FILE = "mirror_source.json"
 
 
 class ProjectManager:
-    def __init__(self, app_dir: str):
+    def __init__(self, app_dir: str, base_dir: str):
         self.app_dir = app_dir
-        self.projects_dir = os.path.join(app_dir, "projects")
+        self.base_dir = base_dir
+        self.projects_dir = os.path.join(base_dir, "projects")
         self.registry_path = os.path.join(self.projects_dir, "registry.json")
         os.makedirs(self.projects_dir, exist_ok=True)
         self._registry = self._load_registry()
+
+    def get_default_path(self, name: str) -> str:
+        safe_name = "".join(c for c in name if c not in r'\/:*?"<>|').strip()
+        if not safe_name:
+            safe_name = "project"
+        candidate = os.path.join(self.projects_dir, safe_name)
+        suffix = 1
+        while os.path.exists(candidate):
+            candidate = os.path.join(self.projects_dir, f"{safe_name}_{suffix}")
+            suffix += 1
+        return candidate
 
     def _load_registry(self) -> dict:
         if os.path.exists(self.registry_path):
@@ -131,15 +143,7 @@ class ProjectManager:
     def create_project(self, name: str, path: str = "") -> dict:
         pid = _uuid()
         if not path:
-            safe_name = "".join(c for c in name if c not in r'\/:*?"<>|').strip()
-            if not safe_name:
-                safe_name = pid
-            candidate = os.path.join(self.projects_dir, safe_name)
-            suffix = 1
-            while os.path.exists(candidate):
-                candidate = os.path.join(self.projects_dir, f"{safe_name}_{suffix}")
-                suffix += 1
-            path = candidate
+            path = self.get_default_path(name)
         os.makedirs(path, exist_ok=True)
         conv_dir = os.path.join(path, "conversations")
         os.makedirs(conv_dir, exist_ok=True)
@@ -176,6 +180,35 @@ class ProjectManager:
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump({"id": project_id, **self._registry["projects"][project_id]}, f, ensure_ascii=False, indent=2)
         return True
+
+    def update_project(self, project_id: str, new_name: str = None, new_path: str = None) -> dict:
+        if project_id not in self._registry.get("projects", {}):
+            return None
+        info = self._registry["projects"][project_id]
+        if new_name is not None and new_name.strip():
+            info["name"] = new_name.strip()
+        if new_path is not None and new_path.strip():
+            new_dir = new_path.strip()
+            os.makedirs(new_dir, exist_ok=True)
+            conv_dir = os.path.join(new_dir, "conversations")
+            os.makedirs(conv_dir, exist_ok=True)
+            old_path = info.get("path", "")
+            info["path"] = new_dir
+            if old_path and os.path.exists(old_path):
+                old_conv = os.path.join(old_path, "conversations")
+                new_conv = os.path.join(new_dir, "conversations")
+                if os.path.exists(old_conv) and old_conv != new_conv:
+                    for fname in os.listdir(old_conv):
+                        if fname.endswith(".json"):
+                            import shutil
+                            shutil.copy2(os.path.join(old_conv, fname), os.path.join(new_conv, fname))
+        info["updated_at"] = datetime.now().isoformat()
+        self._save_registry()
+        proj_path = info["path"]
+        meta_path = os.path.join(proj_path, "project.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({"id": project_id, **info}, f, ensure_ascii=False, indent=2)
+        return {"id": project_id, **info}
 
     def delete_project(self, project_id: str) -> bool:
         if project_id not in self._registry.get("projects", {}):
@@ -593,6 +626,23 @@ class BackendBridge(QObject):
             main.current_workspace = main.app_dir
         return result
 
+    @pyqtSlot(str, str, str, result=str)
+    def updateProject(self, project_id: str, new_name: str, new_path: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps({"error": "no main"})
+        proj = main.project_mgr.update_project(project_id, new_name or None, new_path or None)
+        if proj and main.active_project_id == project_id:
+            main.current_workspace = proj["path"]
+        return json.dumps(proj)
+
+    @pyqtSlot(str, result=str)
+    def getDefaultProjectPath(self, name: str):
+        main = self._get_main()
+        if not main:
+            return ""
+        return main.project_mgr.get_default_path(name)
+
     @pyqtSlot(str, result=str)
     def listConversations(self, project_id: str):
         main = self._get_main()
@@ -742,6 +792,17 @@ class BackendBridge(QObject):
             return json.dumps({"ok": False, "path": ""})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
+
+    @pyqtSlot(str, result=bool)
+    def openInExplorer(self, path: str):
+        try:
+            import subprocess
+            if os.path.isdir(path):
+                subprocess.Popen(f'explorer "{path}"')
+                return True
+            return False
+        except Exception:
+            return False
 
     @pyqtSlot(result=str)
     def stopMessage(self):
@@ -903,6 +964,68 @@ class BackendBridge(QObject):
             return json.dumps({"ok": False, "error": f"删除失败({e.code}): {err}"})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)[:200]})
+
+    @pyqtSlot(str, result=str)
+    def searchOllamaLibrary(self, query: str):
+        try:
+            q = (query or "").strip()
+            url = f"https://ollama.com/api/models?q={urllib.parse.quote(q)}" if q else "https://ollama.com/api/models"
+            req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"})
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read().decode("utf-8"))
+            models = []
+            for m in (data if isinstance(data, list) else data.get("models", [])):
+                name = m.get("name", "") or m.get("id", "")
+                desc = m.get("description", "") or ""
+                sizes = m.get("sizes", []) or []
+                pulls = m.get("pulls", 0) or 0
+                tags = m.get("tags", []) or []
+                cap_tool = m.get("capabilities", {}).get("tools", False) if isinstance(m.get("capabilities"), dict) else False
+                size_str = ""
+                if sizes:
+                    size_str = ", ".join(str(s) for s in sizes[:4])
+                elif m.get("size"):
+                    size_str = str(m["size"])
+                models.append({
+                    "name": name,
+                    "description": desc,
+                    "sizes": sizes,
+                    "sizeStr": size_str,
+                    "pulls": pulls,
+                    "tags": tags,
+                    "toolSupport": cap_tool,
+                })
+            return json.dumps({"ok": True, "models": models})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)[:200]})
+
+    @pyqtSlot(str, result=str)
+    def pullModel(self, payload_json: str):
+        try:
+            payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
+        except:
+            return json.dumps({"ok": False, "error": "Invalid payload"})
+        model_name = (payload.get("name") or "").strip()
+        if not model_name:
+            return json.dumps({"ok": False, "error": "模型名称不能为空"})
+        main = self._get_main()
+        settings = main.env_manager.read_settings() if main else {}
+        base_url = (settings.get("OLLAMA_BASE_URL", "") or "http://127.0.0.1:11434").strip()
+
+        def _do_pull():
+            try:
+                url = f"{base_url.rstrip('/')}/api/pull"
+                body = json.dumps({"name": model_name, "stream": False}).encode("utf-8")
+                req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+                resp = urllib.request.urlopen(req, timeout=600)
+                result = json.loads(resp.read().decode("utf-8"))
+                self.modelsLoaded.emit(json.dumps({"ok": True, "action": "pull_complete", "model": model_name}))
+            except Exception as e:
+                self.modelsLoaded.emit(json.dumps({"ok": False, "action": "pull_failed", "model": model_name, "error": str(e)[:200]}))
+
+        t = threading.Thread(target=_do_pull, daemon=True)
+        t.start()
+        return json.dumps({"ok": True, "loading": True, "action": "pulling", "model": model_name})
 
     @pyqtSlot(result=str)
     def recommendModels(self):
@@ -1158,6 +1281,9 @@ class BackendBridge(QObject):
                     main.log_signal.emit(f"[CLI] 更新session_id: {main.active_session_id} -> {cli_sid}", "#2196F3")
                     main.active_session_id = cli_sid
                 main.started_sessions.add(main.active_session_id)
+                result_text = result.get("text", "").strip()
+                if result_text and not result.get("streamed"):
+                    self.deltaReceived.emit(json.dumps({"text": result_text}))
             else:
                 cli_sid = result.get("cliSessionId", "")
                 if cli_sid and cli_sid != main.active_session_id:
@@ -1762,7 +1888,7 @@ class MainWindow(QMainWindow):
         )
         self.installer = EnvInstaller(self.app_dir)
         self.updater = SoftwareUpdater(self.dev_dir)
-        self.project_mgr = ProjectManager(self.app_dir)
+        self.project_mgr = ProjectManager(self.app_dir, self.base_dir)
 
         # 状态
         self.active_session_id = _uuid()

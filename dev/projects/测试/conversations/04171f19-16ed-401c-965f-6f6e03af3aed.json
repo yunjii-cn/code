@@ -1,0 +1,26 @@
+{
+  "session_id": "04171f19-16ed-401c-965f-6f6e03af3aed",
+  "project_id": "3f89ae52-7cdc-45a9-8e1f-48884efae900",
+  "messages": [
+    {
+      "id": "1777923857473-6f793276b5e6c8",
+      "role": "assistant",
+      "text": "选择模型并配置参数，打开项目目录后即可下达编码任务。",
+      "time": "05-05 03:44"
+    },
+    {
+      "id": "1777924512001-541b48896654a",
+      "role": "user",
+      "text": "你能正常工作吗",
+      "time": "05-05 03:55"
+    },
+    {
+      "id": "1777924512001-f962818401cdb8",
+      "role": "assistant",
+      "text": "❌ E:\\软件开发\\云集智能编程工作站\\dev\\app\\nodejs\\node-v24.11.1-win-x64\\node.exe: .env: not found",
+      "time": "05-05 03:55",
+      "model": "qwen3.6-plus"
+    }
+  ],
+  "updated_at": "2026-05-05T03:55:12.629654"
+}
