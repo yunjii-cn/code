@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 云集智能编程工作站 - 统一启动器 v3.0
 所有功能内嵌在一个 EXE 中，不再依赖 Electron
@@ -93,6 +93,186 @@ MIRROR_SOURCES = {
     },
 }
 MIRROR_SETTINGS_FILE = "mirror_source.json"
+
+
+class ProjectManager:
+    def __init__(self, app_dir: str):
+        self.app_dir = app_dir
+        self.projects_dir = os.path.join(app_dir, "projects")
+        self.registry_path = os.path.join(self.projects_dir, "registry.json")
+        os.makedirs(self.projects_dir, exist_ok=True)
+        self._registry = self._load_registry()
+
+    def _load_registry(self) -> dict:
+        if os.path.exists(self.registry_path):
+            try:
+                with open(self.registry_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"projects": {}, "active_project": None}
+
+    def _save_registry(self):
+        with open(self.registry_path, "w", encoding="utf-8") as f:
+            json.dump(self._registry, f, ensure_ascii=False, indent=2)
+
+    def list_projects(self) -> list:
+        result = []
+        for pid, info in self._registry.get("projects", {}).items():
+            result.append({"id": pid, **info})
+        return result
+
+    def get_active_project(self) -> dict:
+        pid = self._registry.get("active_project")
+        if pid and pid in self._registry.get("projects", {}):
+            return {"id": pid, **self._registry["projects"][pid]}
+        return None
+
+    def create_project(self, name: str, path: str = "") -> dict:
+        pid = _uuid()
+        if not path:
+            safe_name = "".join(c for c in name if c not in r'\/:*?"<>|').strip()
+            if not safe_name:
+                safe_name = pid
+            candidate = os.path.join(self.projects_dir, safe_name)
+            suffix = 1
+            while os.path.exists(candidate):
+                candidate = os.path.join(self.projects_dir, f"{safe_name}_{suffix}")
+                suffix += 1
+            path = candidate
+        os.makedirs(path, exist_ok=True)
+        conv_dir = os.path.join(path, "conversations")
+        os.makedirs(conv_dir, exist_ok=True)
+        info = {
+            "name": name,
+            "path": path,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        self._registry["projects"][pid] = info
+        self._registry["active_project"] = pid
+        self._save_registry()
+        with open(os.path.join(path, "project.json"), "w", encoding="utf-8") as f:
+            json.dump({"id": pid, **info}, f, ensure_ascii=False, indent=2)
+        return {"id": pid, **info}
+
+    def switch_project(self, project_id: str) -> dict:
+        if project_id not in self._registry.get("projects", {}):
+            return None
+        self._registry["active_project"] = project_id
+        self._registry["projects"][project_id]["updated_at"] = datetime.now().isoformat()
+        self._save_registry()
+        return {"id": project_id, **self._registry["projects"][project_id]}
+
+    def rename_project(self, project_id: str, new_name: str) -> bool:
+        if project_id not in self._registry.get("projects", {}):
+            return False
+        self._registry["projects"][project_id]["name"] = new_name
+        self._registry["projects"][project_id]["updated_at"] = datetime.now().isoformat()
+        self._save_registry()
+        proj_path = self._registry["projects"][project_id]["path"]
+        meta_path = os.path.join(proj_path, "project.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump({"id": project_id, **self._registry["projects"][project_id]}, f, ensure_ascii=False, indent=2)
+        return True
+
+    def delete_project(self, project_id: str) -> bool:
+        if project_id not in self._registry.get("projects", {}):
+            return False
+        info = self._registry["projects"].pop(project_id)
+        if self._registry.get("active_project") == project_id:
+            self._registry["active_project"] = None
+        self._save_registry()
+        return True
+
+    def save_conversation(self, project_id: str, session_id: str, messages: list):
+        if project_id not in self._registry.get("projects", {}):
+            return False
+        proj_path = self._registry["projects"][project_id]["path"]
+        conv_dir = os.path.join(proj_path, "conversations")
+        os.makedirs(conv_dir, exist_ok=True)
+        conv_path = os.path.join(conv_dir, f"{session_id}.json")
+        data = {
+            "session_id": session_id,
+            "project_id": project_id,
+            "messages": messages,
+            "updated_at": datetime.now().isoformat(),
+        }
+        with open(conv_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+
+    def load_conversation(self, project_id: str, session_id: str) -> list:
+        if project_id not in self._registry.get("projects", {}):
+            return []
+        proj_path = self._registry["projects"][project_id]["path"]
+        conv_path = os.path.join(proj_path, "conversations", f"{session_id}.json")
+        if not os.path.exists(conv_path):
+            return []
+        try:
+            with open(conv_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("messages", [])
+        except Exception:
+            return []
+
+    def list_conversations(self, project_id: str) -> list:
+        if project_id not in self._registry.get("projects", {}):
+            return []
+        proj_path = self._registry["projects"][project_id]["path"]
+        conv_dir = os.path.join(proj_path, "conversations")
+        if not os.path.exists(conv_dir):
+            return []
+        result = []
+        for fname in os.listdir(conv_dir):
+            if fname.endswith(".json"):
+                try:
+                    with open(os.path.join(conv_dir, fname), "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    result.append({
+                        "session_id": data.get("session_id", fname[:-5]),
+                        "updated_at": data.get("updated_at", ""),
+                        "message_count": len(data.get("messages", [])),
+                    })
+                except Exception:
+                    pass
+        return result
+
+    def copy_conversation(self, source_project_id: str, session_id: str, target_project_id: str) -> bool:
+        if source_project_id not in self._registry.get("projects", {}):
+            return False
+        if target_project_id not in self._registry.get("projects", {}):
+            return False
+        src_path = self._registry["projects"][source_project_id]["path"]
+        dst_path = self._registry["projects"][target_project_id]["path"]
+        src_file = os.path.join(src_path, "conversations", f"{session_id}.json")
+        if not os.path.exists(src_file):
+            return False
+        dst_dir = os.path.join(dst_path, "conversations")
+        os.makedirs(dst_dir, exist_ok=True)
+        try:
+            with open(src_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["project_id"] = target_project_id
+            data["updated_at"] = datetime.now().isoformat()
+            with open(os.path.join(dst_dir, f"{session_id}.json"), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    def get_project_context(self, project_id: str, max_conversations: int = 3) -> list:
+        if project_id not in self._registry.get("projects", {}):
+            return []
+        convs = self.list_conversations(project_id)
+        convs.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+        context = []
+        for c in convs[:max_conversations]:
+            msgs = self.load_conversation(project_id, c["session_id"])
+            if msgs:
+                context.extend(msgs)
+        return context
 
 # ── Git 仓库配置 ──
 GIT_REMOTE = "git@gitee.com:yunjii/code.git"
@@ -357,6 +537,103 @@ class BackendBridge(QObject):
         if main and hasattr(main, '_finish_splash'):
             QTimer.singleShot(300, main._finish_splash)
 
+    # ── 项目管理 API ──
+
+    @pyqtSlot(result=str)
+    def listProjects(self):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        return json.dumps(main.project_mgr.list_projects())
+
+    @pyqtSlot(result=str)
+    def getActiveProject(self):
+        main = self._get_main()
+        if not main:
+            return json.dumps(None)
+        proj = main.project_mgr.get_active_project()
+        return json.dumps(proj)
+
+    @pyqtSlot(str, str, result=str)
+    def createProject(self, name: str, path: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps({"error": "no main"})
+        proj = main.project_mgr.create_project(name, path)
+        main.active_project_id = proj["id"]
+        main.current_workspace = proj["path"]
+        return json.dumps(proj)
+
+    @pyqtSlot(str, result=str)
+    def switchProject(self, project_id: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps({"error": "no main"})
+        proj = main.project_mgr.switch_project(project_id)
+        if proj:
+            main.active_project_id = proj["id"]
+            main.current_workspace = proj["path"]
+        return json.dumps(proj)
+
+    @pyqtSlot(str, str, result=bool)
+    def renameProject(self, project_id: str, new_name: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.rename_project(project_id, new_name)
+
+    @pyqtSlot(str, result=bool)
+    def deleteProject(self, project_id: str):
+        main = self._get_main()
+        if not main:
+            return False
+        result = main.project_mgr.delete_project(project_id)
+        if result and main.active_project_id == project_id:
+            main.active_project_id = None
+            main.current_workspace = main.app_dir
+        return result
+
+    @pyqtSlot(str, result=str)
+    def listConversations(self, project_id: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        return json.dumps(main.project_mgr.list_conversations(project_id))
+
+    @pyqtSlot(str, str, result=str)
+    def loadConversation(self, project_id: str, session_id: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        msgs = main.project_mgr.load_conversation(project_id, session_id)
+        return json.dumps(msgs)
+
+    @pyqtSlot(str, str, str, result=bool)
+    def copyConversation(self, source_project_id: str, session_id: str, target_project_id: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.copy_conversation(source_project_id, session_id, target_project_id)
+
+    @pyqtSlot(str, result=str)
+    def getProjectContext(self, project_id: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        ctx = main.project_mgr.get_project_context(project_id)
+        return json.dumps(ctx)
+
+    @pyqtSlot(str, str, str, result=bool)
+    def saveConversation(self, project_id: str, session_id: str, messages_json: str):
+        main = self._get_main()
+        if not main:
+            return False
+        try:
+            msgs = json.loads(messages_json)
+        except Exception:
+            msgs = []
+        return main.project_mgr.save_conversation(project_id, session_id, msgs)
+
     # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
     @pyqtSlot(result=str)
@@ -373,6 +650,7 @@ class BackendBridge(QObject):
             "busy": main.is_busy,
             "settings": settings,
             "workspacePath": main.current_workspace,
+            "activeProjectId": main.active_project_id,
         })
 
     @pyqtSlot(result=str)
@@ -1484,11 +1762,18 @@ class MainWindow(QMainWindow):
         )
         self.installer = EnvInstaller(self.app_dir)
         self.updater = SoftwareUpdater(self.dev_dir)
+        self.project_mgr = ProjectManager(self.app_dir)
 
         # 状态
         self.active_session_id = _uuid()
         self.started_sessions = set()
-        self.current_workspace = self.app_dir
+        self.active_project_id = None
+        active_proj = self.project_mgr.get_active_project()
+        if active_proj:
+            self.active_project_id = active_proj["id"]
+            self.current_workspace = active_proj["path"]
+        else:
+            self.current_workspace = self.app_dir
         self.is_busy = False
         self.active_proc = None
 

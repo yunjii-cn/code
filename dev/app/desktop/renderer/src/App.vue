@@ -237,6 +237,13 @@ const assistantName = ref("助手");
 const autoApprove = ref(false);
 const pendingQueue = ref<string[]>([]);
 
+const projects = ref<any[]>([]);
+const activeProject = ref<any>(null);
+const showProjectPanel = ref(false);
+const newProjectName = ref("");
+const newProjectPath = ref("");
+const projectConversations = ref<any[]>([]);
+
 function roleLabel(role: MessageRole) {
   if (role === "user") return userName.value;
   if (role === "assistant") return assistantName.value;
@@ -541,10 +548,130 @@ async function selectWorkspaceDir() {
   try {
     const result = await callBackend("selectDirectory", "");
     if (result && result.path) {
-      workspacePath.value = result.path;
+      if (showProjectPanel.value) {
+        newProjectPath.value = result.path;
+      } else {
+        workspacePath.value = result.path;
+      }
     }
   } catch (e) {
     console.warn("selectDirectory failed:", e);
+  }
+}
+
+async function loadProjects() {
+  try {
+    const list = await callBackend("listProjects");
+    projects.value = list || [];
+    const active = await callBackend("getActiveProject");
+    activeProject.value = active || null;
+    if (active) {
+      workspacePath.value = active.path || "";
+      const convs = await callBackend("listConversations", active.id);
+      projectConversations.value = convs || [];
+    }
+  } catch (e) {
+    console.warn("loadProjects failed:", e);
+  }
+}
+
+async function createProject() {
+  if (!newProjectName.value.trim()) return;
+  try {
+    const proj = await callBackend("createProject", newProjectName.value.trim(), newProjectPath.value.trim());
+    if (proj) {
+      activeProject.value = proj;
+      workspacePath.value = proj.path || "";
+      newProjectName.value = "";
+      newProjectPath.value = "";
+      await loadProjects();
+    }
+  } catch (e) {
+    console.warn("createProject failed:", e);
+  }
+}
+
+async function switchProject(projectId: string) {
+  try {
+    const proj = await callBackend("switchProject", projectId);
+    if (proj) {
+      activeProject.value = proj;
+      workspacePath.value = proj.path || "";
+      messages.value = [];
+      await createSession();
+      await loadProjects();
+    }
+  } catch (e) {
+    console.warn("switchProject failed:", e);
+  }
+}
+
+async function renameProject(projectId: string) {
+  const newName = prompt("输入新的项目名称：", activeProject.value?.name || "");
+  if (!newName?.trim()) return;
+  try {
+    await callBackend("renameProject", projectId, newName.trim());
+    await loadProjects();
+  } catch (e) {
+    console.warn("renameProject failed:", e);
+  }
+}
+
+async function deleteProject(projectId: string) {
+  if (!confirm("确定删除此项目？对话历史也将被删除。")) return;
+  try {
+    await callBackend("deleteProject", projectId);
+    if (activeProject.value?.id === projectId) {
+      activeProject.value = null;
+      workspacePath.value = "";
+    }
+    await loadProjects();
+  } catch (e) {
+    console.warn("deleteProject failed:", e);
+  }
+}
+
+async function loadConversationHistory(sessionId: string) {
+  if (!activeProject.value) return;
+  try {
+    const msgs = await callBackend("loadConversation", activeProject.value.id, sessionId);
+    if (msgs && Array.isArray(msgs)) {
+      messages.value = msgs.map((m: any) => ({
+        id: m.id || String(Math.random()),
+        role: m.role || "assistant",
+        text: m.text || "",
+        time: m.time || new Date().toLocaleTimeString(),
+        model: m.model,
+      }));
+    }
+  } catch (e) {
+    console.warn("loadConversationHistory failed:", e);
+  }
+}
+
+async function copyConversationToProject(sessionId: string, targetProjectId: string) {
+  if (!activeProject.value) return;
+  try {
+    await callBackend("copyConversation", activeProject.value.id, sessionId, targetProjectId);
+    showNotice("对话已复制到目标项目", "ok");
+  } catch (e) {
+    console.warn("copyConversationToProject failed:", e);
+  }
+}
+
+async function saveCurrentConversation() {
+  if (!activeProject.value || messages.value.length === 0) return;
+  try {
+    const msgs = messages.value.map(m => ({
+      id: m.id,
+      role: m.role,
+      text: m.text,
+      time: m.time,
+      model: m.model,
+    }));
+    await callBackend("saveConversation", activeProject.value.id, sessionId.value, JSON.stringify(msgs));
+  } catch (e) {
+    console.warn("saveCurrentConversation failed:", e);
   }
 }
 
@@ -1155,10 +1282,13 @@ async function detectHardware() {
 }
 
 onMounted(async () => {
+  await loadProjects();
   const appState = await callBackend("getState");
   if (appState) {
     sessionId.value = appState.sessionId || "";
-    workspacePath.value = appState.workspacePath || "";
+    if (!activeProject.value) {
+      workspacePath.value = appState.workspacePath || "";
+    }
     isBusy.value = Boolean(appState.busy);
     applySettings(appState.settings || {});
   }
@@ -1204,6 +1334,7 @@ onMounted(async () => {
                 }
               }, 500);
             }
+            saveCurrentConversation();
             processQueue();
           }
         }
@@ -1567,13 +1698,47 @@ onMounted(async () => {
           </div>
         </label>
         <p v-if="autoApprove" style="font-size: 11px; color: #FF9800; margin: -4px 0 4px 0;">⚠ 开启后 AI 可直接读写文件和执行命令，无需逐次审批</p>
-        <label class="field">
-          <span>项目工作目录</span>
-          <div style="display: flex; gap: 4px;">
-            <input v-model="workspacePath" placeholder="留空则使用默认路径" style="flex: 1;" />
-            <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录">📂</button>
+
+        <div class="field" style="border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+            <span style="font-weight: bold; font-size: 12px;">📁 项目管理</span>
+            <button class="btn-sm" @click="showProjectPanel = !showProjectPanel">{{ showProjectPanel ? '收起' : '展开' }}</button>
           </div>
-        </label>
+          <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 4px;">
+            当前项目：{{ activeProject.name }}
+          </div>
+          <div v-if="showProjectPanel">
+            <div style="display: flex; gap: 4px; margin-bottom: 6px;">
+              <input v-model="newProjectName" placeholder="新项目名称" style="flex: 1; font-size: 11px;" />
+              <button class="btn-sm" @click="createProject" :disabled="!newProjectName.trim()">创建</button>
+            </div>
+            <div style="display: flex; gap: 4px; margin-bottom: 6px;">
+              <input v-model="newProjectPath" placeholder="自定义路径（可选）" style="flex: 1; font-size: 11px;" />
+              <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录" style="font-size: 11px;">📂</button>
+            </div>
+            <div v-if="projects.length === 0" style="font-size: 11px; color: #666; padding: 4px 0;">暂无项目，请创建一个</div>
+            <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]" @click="switchProject(p.id)">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <span style="font-size: 12px; font-weight: 500;">{{ p.name }}</span>
+                <div style="display: flex; gap: 2px;">
+                  <button class="btn-icon-sm" @click.stop="renameProject(p.id)" title="重命名">✏️</button>
+                  <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
+                </div>
+              </div>
+              <div style="font-size: 10px; color: #666; margin-top: 2px;">{{ p.path }}</div>
+            </div>
+            <div v-if="projectConversations.length > 0" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+              <div style="font-size: 11px; color: #888; margin-bottom: 4px;">对话历史</div>
+              <div v-for="c in projectConversations" :key="c.session_id" class="conv-item" @click="loadConversationHistory(c.session_id)">
+                <span style="font-size: 11px;">{{ c.session_id.slice(0, 8) }}... ({{ c.message_count }}条)</span>
+                <select v-if="projects.length > 1" class="copy-select" @change="(e: any) => { copyConversationToProject(c.session_id, e.target.value); e.target.value = ''; }">
+                  <option value="">复制到...</option>
+                  <option v-for="tp in projects.filter((x: any) => x.id !== activeProject?.id)" :key="tp.id" :value="tp.id">{{ tp.name }}</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
         <label class="field">
           <span>你的称谓</span>
           <input v-model="userName" placeholder="你" class="short-input" />
@@ -2332,6 +2497,68 @@ export default { name: "App" };
 
 .btn-icon-sm:hover {
   color: #fff;
+}
+
+.btn-sm {
+  padding: 2px 8px;
+  font-size: 11px;
+  background: #1565C0;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.btn-sm:hover {
+  background: #1976D2;
+}
+
+.btn-sm:disabled {
+  background: #333;
+  color: #666;
+  cursor: not-allowed;
+}
+
+.project-item {
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+
+.project-item:hover {
+  background: #1a1a1a;
+  border-color: #2a2a2a;
+}
+
+.project-item.active {
+  background: #0d2137;
+  border-color: #1565C0;
+}
+
+.conv-item {
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.conv-item:hover {
+  background: #1a1a1a;
+}
+
+.copy-select {
+  background: #111;
+  color: #888;
+  border: 1px solid #333;
+  border-radius: 3px;
+  font-size: 10px;
+  padding: 1px 4px;
 }
 
 .recommend-item {
