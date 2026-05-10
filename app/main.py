@@ -479,6 +479,343 @@ class ProjectManager:
         except Exception:
             return False
 
+    def list_memories(self, project_path: str) -> list:
+        mem_dir = os.path.join(project_path, ".claude", "memories")
+        if not os.path.exists(mem_dir):
+            return []
+        result = []
+        for fname in os.listdir(mem_dir):
+            if not fname.endswith(".md"):
+                continue
+            fpath = os.path.join(mem_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                mem_type = "project"
+                title = fname[:-3]
+                if content.startswith("---"):
+                    end = content.find("---", 3)
+                    if end > 0:
+                        header = content[3:end].strip()
+                        for line in header.split("\n"):
+                            if line.startswith("type:"):
+                                mem_type = line.split(":", 1)[1].strip().strip('"').strip("'")
+                            elif line.startswith("title:"):
+                                title = line.split(":", 1)[1].strip().strip('"').strip("'")
+                result.append({
+                    "filename": fname,
+                    "title": title,
+                    "type": mem_type,
+                    "content": content,
+                    "updated_at": os.path.getmtime(fpath),
+                })
+            except Exception:
+                pass
+        result.sort(key=lambda m: m.get("updated_at", 0), reverse=True)
+        return result
+
+    def save_memory(self, project_path: str, filename: str, content: str, mem_type: str = "project") -> bool:
+        mem_dir = os.path.join(project_path, ".claude", "memories")
+        os.makedirs(mem_dir, exist_ok=True)
+        if not filename.endswith(".md"):
+            filename += ".md"
+        fpath = os.path.join(mem_dir, filename)
+        try:
+            header = f"---\ntype: {mem_type}\ntitle: {filename[:-3]}\nupdated: {datetime.now().isoformat()}\n---\n\n"
+            if content.startswith("---"):
+                end = content.find("---", 3)
+                if end > 0:
+                    header = ""
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(header + content if header else content)
+            return True
+        except Exception:
+            return False
+
+    def delete_memory(self, project_path: str, filename: str) -> bool:
+        fpath = os.path.join(project_path, ".claude", "memories", filename)
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+                return True
+            except Exception:
+                return False
+        return False
+
+    def search_memories(self, project_path: str, keyword: str) -> list:
+        all_mems = self.list_memories(project_path)
+        if not keyword.strip():
+            return all_mems
+        kw = keyword.strip().lower()
+        scored = []
+        for m in all_mems:
+            score = 0
+            title = m.get("title", "").lower()
+            content = m.get("content", "").lower()
+            if kw in title:
+                score += 10
+            if kw in content:
+                score += 5
+                idx = content.find(kw)
+                m["match_snippet"] = m.get("content", "")[max(0, idx - 30):idx + len(kw) + 30]
+            if score > 0:
+                m["relevance"] = score
+                scored.append(m)
+        scored.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+        return scored
+
+    def auto_extract_memories(self, project_path: str, messages: list) -> list:
+        extracted = []
+        user_prefs = []
+        feedback_items = []
+        project_facts = []
+        reference_items = []
+        pref_patterns = [
+            (r"我喜欢", "用户偏好"), (r"我偏好", "用户偏好"), (r"我习惯", "用户偏好"),
+            (r"请用", "用户偏好"), (r"我喜欢用", "用户偏好"), (r"我更喜欢", "用户偏好"),
+            (r"我通常", "用户偏好"), (r"我的风格", "用户偏好"), (r"我倾向于", "用户偏好"),
+            (r"我一般", "用户偏好"), (r"我常用", "用户偏好"), (r"我习惯用", "用户偏好"),
+            (r"我比较喜欢", "用户偏好"), (r"我偏好使用", "用户偏好"),
+        ]
+        feedback_patterns = [
+            (r"不要", "反馈纠正"), (r"别这样", "反馈纠正"), (r"不对", "反馈纠正"),
+            (r"错了", "反馈纠正"), (r"不是这样的", "反馈纠正"), (r"应该", "反馈纠正"),
+            (r"改一下", "反馈纠正"), (r"换个方式", "反馈纠正"), (r"不行", "反馈纠正"),
+            (r"这不对", "反馈纠正"), (r"重新来", "反馈纠正"), (r"不对劲", "反馈纠正"),
+            (r"有问题", "反馈纠正"), (r"需要修改", "反馈纠正"), (r"请修正", "反馈纠正"),
+        ]
+        fact_patterns = [
+            (r"项目是", "项目上下文"), (r"用的是", "项目上下文"), (r"技术栈是", "项目上下文"),
+            (r"框架是", "项目上下文"), (r"基于", "项目上下文"), (r"运行在", "项目上下文"),
+            (r"版本是", "项目上下文"), (r"数据库是", "项目上下文"), (r"语言是", "项目上下文"),
+            (r"使用的是", "项目上下文"), (r"开发环境", "项目上下文"), (r"部署在", "项目上下文"),
+        ]
+        ref_patterns = [
+            (r"参考", "外部引用"), (r"文档在", "外部引用"), (r"链接是", "外部引用"),
+            (r"官方文档", "外部引用"), (r"API文档", "外部引用"), (r"教程在", "外部引用"),
+            (r"仓库是", "外部引用"), (r"源码在", "外部引用"), (r"https?://", "外部引用"),
+        ]
+        import re
+        for m in messages:
+            text = m.get("text", "")
+            if not text.strip():
+                continue
+            text_lower = text.lower()
+            role = m.get("role", "")
+            if role != "user":
+                continue
+            for pattern, _ in pref_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    start = max(0, match.start() - 15)
+                    end = min(len(text), match.end() + 60)
+                    snippet = text[start:end].strip()
+                    if snippet not in user_prefs:
+                        user_prefs.append(snippet)
+                    break
+            for pattern, _ in feedback_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    start = max(0, match.start() - 15)
+                    end = min(len(text), match.end() + 60)
+                    snippet = text[start:end].strip()
+                    if snippet not in feedback_items:
+                        feedback_items.append(snippet)
+                    break
+            for pattern, _ in fact_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    start = max(0, match.start() - 15)
+                    end = min(len(text), match.end() + 60)
+                    snippet = text[start:end].strip()
+                    if snippet not in project_facts:
+                        project_facts.append(snippet)
+                    break
+            for pattern, _ in ref_patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    start = max(0, match.start() - 15)
+                    end = min(len(text), match.end() + 80)
+                    snippet = text[start:end].strip()
+                    if snippet not in reference_items:
+                        reference_items.append(snippet)
+                    break
+        if user_prefs:
+            content = self._merge_memory_content(project_path, "user-preferences.md", user_prefs)
+            self.save_memory(project_path, "user-preferences.md", content, "user")
+            extracted.append({"type": "user", "count": len(user_prefs)})
+        if feedback_items:
+            content = self._merge_memory_content(project_path, "user-feedback.md", feedback_items)
+            self.save_memory(project_path, "user-feedback.md", content, "feedback")
+            extracted.append({"type": "feedback", "count": len(feedback_items)})
+        if project_facts:
+            content = self._merge_memory_content(project_path, "project-context.md", project_facts)
+            self.save_memory(project_path, "project-context.md", content, "project")
+            extracted.append({"type": "project", "count": len(project_facts)})
+        if reference_items:
+            content = self._merge_memory_content(project_path, "external-references.md", reference_items)
+            self.save_memory(project_path, "external-references.md", content, "reference")
+            extracted.append({"type": "reference", "count": len(reference_items)})
+        return extracted
+
+    def _merge_memory_content(self, project_path: str, filename: str, new_items: list) -> str:
+        mem_dir = os.path.join(project_path, ".claude", "memories")
+        fpath = os.path.join(mem_dir, filename)
+        existing_lines = set()
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+                body = old_content
+                if body.startswith("---"):
+                    end = body.find("---", 3)
+                    if end > 0:
+                        body = body[end + 3:].strip()
+                for line in body.split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        existing_lines.add(stripped[2:].strip().lower())
+            except Exception:
+                pass
+        merged = []
+        for item in new_items:
+            if item.lower() not in existing_lines:
+                merged.append(item)
+        if not merged:
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+        all_items = list(existing_lines) + [m.lower() for m in merged]
+        content_lines = []
+        for item in new_items:
+            content_lines.append(f"- {item}")
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    old_content = f.read()
+                body = old_content
+                if body.startswith("---"):
+                    end = body.find("---", 3)
+                    if end > 0:
+                        body = body[end + 3:].strip()
+                for line in body.split("\n"):
+                    stripped = line.strip()
+                    if stripped.startswith("- "):
+                        item_text = stripped[2:].strip()
+                        if item_text.lower() not in [m.lower() for m in merged]:
+                            content_lines.append(stripped)
+            except Exception:
+                pass
+        return "\n".join(content_lines)
+
+    def get_memory_stats(self, project_path: str) -> dict:
+        mems = self.list_memories(project_path)
+        stats = {"total": len(mems), "by_type": {}, "total_size": 0}
+        for m in mems:
+            t = m.get("type", "project")
+            stats["by_type"][t] = stats["by_type"].get(t, 0) + 1
+            stats["total_size"] += len(m.get("content", ""))
+        return stats
+
+    def get_relevant_memories(self, project_path: str, query: str, limit: int = 5) -> list:
+        results = self.search_memories(project_path, query)
+        return results[:limit]
+
+    def save_custom_template(self, name: str, category: str, desc: str, prompt: str, files: str = "") -> bool:
+        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        os.makedirs(tpl_dir, exist_ok=True)
+        safe_name = name.replace(" ", "-").lower()
+        fpath = os.path.join(tpl_dir, f"{safe_name}.json")
+        tpl = {
+            "id": safe_name,
+            "name": name,
+            "desc": desc,
+            "category": category,
+            "prompt": prompt,
+            "files": files,
+            "custom": True,
+            "created_at": datetime.now().isoformat(),
+        }
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(tpl, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    def list_custom_templates(self) -> list:
+        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        if not os.path.exists(tpl_dir):
+            return []
+        result = []
+        for fname in os.listdir(tpl_dir):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(tpl_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    tpl = json.load(f)
+                tpl["custom"] = True
+                result.append(tpl)
+            except Exception:
+                pass
+        return result
+
+    def delete_custom_template(self, template_id: str) -> bool:
+        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        fpath = os.path.join(tpl_dir, f"{template_id}.json")
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+                return True
+            except Exception:
+                return False
+        return False
+
+    def create_project_from_template(self, project_path: str, template_id: str) -> dict:
+        builtin = {
+            "react-app": {"files": {"package.json": '{"name": "react-app", "version": "0.1.0", "scripts": {"dev": "vite", "build": "vite build"}}', "src/App.tsx": 'export default function App() { return <div>Hello React</div>; }', "vite.config.ts": 'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\nexport default defineConfig({ plugins: [react()] });'}, "init_cmd": "npm install"},
+            "vue-app": {"files": {"package.json": '{"name": "vue-app", "version": "0.1.0", "scripts": {"dev": "vite", "build": "vite build"}}', "src/App.vue": '<template><div>Hello Vue</div></template>', "vite.config.ts": 'import { defineConfig } from "vite";\nimport vue from "@vitejs/plugin-vue";\nexport default defineConfig({ plugins: [vue()] });'}, "init_cmd": "npm install"},
+            "flask-api": {"files": {"requirements.txt": "flask\nflask-sqlalchemy", "app.py": 'from flask import Flask\napp = Flask(__name__)\n\n@app.route("/")\ndef hello():\n    return "Hello Flask"\n\nif __name__ == "__main__":\n    app.run(debug=True)'}, "init_cmd": "pip install -r requirements.txt"},
+            "fastapi-app": {"files": {"requirements.txt": "fastapi\nuvicorn", "main.py": 'from fastapi import FastAPI\napp = FastAPI()\n\n@app.get("/")\ndef hello():\n    return {"msg": "Hello FastAPI"}'}, "init_cmd": "pip install -r requirements.txt"},
+            "static-site": {"files": {"index.html": '<!DOCTYPE html>\n<html><head><title>My Site</title></head><body><h1>Hello World</h1></body></html>', "style.css": "body { font-family: sans-serif; }", "script.js": 'console.log("Hello");'}},
+            "landing-page": {"files": {"index.html": '<!DOCTYPE html>\n<html><head><title>Landing Page</title><link rel="stylesheet" href="style.css"></head><body><header><h1>Welcome</h1></header><main><section class="hero"><h2>Our Product</h2><p>Description here</p></section></main></body></html>', "style.css": "* { margin: 0; padding: 0; box-sizing: border-box; }\nbody { font-family: sans-serif; }\n.hero { padding: 80px 20px; text-align: center; }"}},
+        }
+        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        custom_fpath = os.path.join(tpl_dir, f"{template_id}.json")
+        tpl_data = None
+        if os.path.exists(custom_fpath):
+            try:
+                with open(custom_fpath, "r", encoding="utf-8") as f:
+                    tpl_data = json.load(f)
+            except Exception:
+                pass
+        if not tpl_data and template_id in builtin:
+            tpl_data = builtin[template_id]
+        if not tpl_data:
+            return {"success": False, "error": f"模板 {template_id} 不存在"}
+        os.makedirs(project_path, exist_ok=True)
+        files_created = []
+        tpl_files = tpl_data.get("files", {})
+        if isinstance(tpl_files, str):
+            try:
+                tpl_files = json.loads(tpl_files)
+            except Exception:
+                tpl_files = {}
+        for rel_path, content in tpl_files.items():
+            fpath = os.path.join(project_path, rel_path)
+            os.makedirs(os.path.dirname(fpath), exist_ok=True)
+            try:
+                with open(fpath, "w", encoding="utf-8") as f:
+                    f.write(content)
+                files_created.append(rel_path)
+            except Exception:
+                pass
+        init_cmd = tpl_data.get("init_cmd", "")
+        return {"success": True, "files": files_created, "init_cmd": init_cmd}
+
 # ── Git 仓库配置 ──
 GIT_REMOTE = "git@gitee.com:yunjii/code.git"
 GIT_BRANCH = "main"
@@ -904,6 +1241,110 @@ class BackendBridge(QObject):
         if not main:
             return False
         return main.project_mgr.save_global_claude_md(content)
+
+    @pyqtSlot(str, result=str)
+    def listMemories(self, project_path: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        return json.dumps(main.project_mgr.list_memories(project_path))
+
+    @pyqtSlot(str, str, str, str, result=bool)
+    def saveMemory(self, project_path: str, filename: str, content: str, mem_type: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.save_memory(project_path, filename, content, mem_type)
+
+    @pyqtSlot(str, str, result=bool)
+    def deleteMemory(self, project_path: str, filename: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.delete_memory(project_path, filename)
+
+    @pyqtSlot(str, str, result=str)
+    def searchMemories(self, project_path: str, keyword: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        return json.dumps(main.project_mgr.search_memories(project_path, keyword))
+
+    @pyqtSlot(str, str, result=str)
+    def autoExtractMemories(self, project_path: str, messages_json: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        try:
+            msgs = json.loads(messages_json)
+        except Exception:
+            msgs = []
+        return json.dumps(main.project_mgr.auto_extract_memories(project_path, msgs))
+
+    @pyqtSlot(str, result=str)
+    def getMemoryStats(self, project_path: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps({"total": 0, "by_type": {}, "total_size": 0})
+        return json.dumps(main.project_mgr.get_memory_stats(project_path))
+
+    @pyqtSlot(str, str, result=str)
+    def getRelevantMemories(self, project_path: str, query: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        return json.dumps(main.project_mgr.get_relevant_memories(project_path, query))
+
+    @pyqtSlot(str, result=str)
+    def listProjectTemplates(self, category: str):
+        templates = [
+            {"id": "react-app", "name": "React 应用", "desc": "React + TypeScript + Vite", "category": "frontend", "prompt": "创建一个 React + TypeScript + Vite 项目，包含基本路由和状态管理", "scaffold": True},
+            {"id": "vue-app", "name": "Vue 应用", "desc": "Vue 3 + TypeScript + Vite", "category": "frontend", "prompt": "创建一个 Vue 3 + TypeScript + Vite 项目，包含 Vue Router 和 Pinia", "scaffold": True},
+            {"id": "next-app", "name": "Next.js 应用", "desc": "Next.js + React + TypeScript", "category": "frontend", "prompt": "创建一个 Next.js + TypeScript 项目，包含 App Router 和基本页面", "scaffold": False},
+            {"id": "flask-api", "name": "Flask API", "desc": "Flask + SQLAlchemy + SQLite", "category": "backend", "prompt": "创建一个 Flask REST API 项目，包含 SQLAlchemy ORM 和 SQLite 数据库", "scaffold": True},
+            {"id": "fastapi-app", "name": "FastAPI 应用", "desc": "FastAPI + SQLAlchemy + Pydantic", "category": "backend", "prompt": "创建一个 FastAPI 项目，包含 SQLAlchemy ORM、Pydantic 模型和自动文档", "scaffold": True},
+            {"id": "express-api", "name": "Express API", "desc": "Express + TypeScript + Prisma", "category": "backend", "prompt": "创建一个 Express + TypeScript REST API 项目，包含 Prisma ORM", "scaffold": False},
+            {"id": "fullstack-vue", "name": "Vue 全栈", "desc": "Vue 3 + FastAPI + SQLite", "category": "fullstack", "prompt": "创建一个全栈项目：前端 Vue 3 + Vite，后端 FastAPI + SQLite，包含前后端通信", "scaffold": False},
+            {"id": "fullstack-react", "name": "React 全栈", "desc": "React + Express + MongoDB", "category": "fullstack", "prompt": "创建一个全栈项目：前端 React + Vite，后端 Express + MongoDB，包含 REST API", "scaffold": False},
+            {"id": "static-site", "name": "静态网站", "desc": "HTML + CSS + JavaScript", "category": "frontend", "prompt": "创建一个静态网站项目，包含 HTML5 + CSS3 + 原生 JavaScript，响应式设计", "scaffold": True},
+            {"id": "landing-page", "name": "落地页", "desc": "单页营销/宣传网站", "category": "frontend", "prompt": "创建一个精美的单页落地页/宣传网站，包含 Hero、功能展示、定价、联系方式等区块", "scaffold": True},
+            {"id": "cli-tool", "name": "CLI 工具", "desc": "Python CLI + Click/Typer", "category": "backend", "prompt": "创建一个 Python CLI 工具项目，使用 Typer 框架，包含命令行参数解析和配置管理", "scaffold": False},
+            {"id": "python-scraper", "name": "爬虫项目", "desc": "Python + httpx + BeautifulSoup", "category": "backend", "prompt": "创建一个 Python 爬虫项目，包含 httpx 请求、BeautifulSoup 解析、数据存储", "scaffold": False},
+            {"id": "desktop-electron", "name": "Electron 桌面应用", "desc": "Electron + Vue 3 + TypeScript", "category": "desktop", "prompt": "创建一个 Electron 桌面应用项目，使用 Vue 3 + TypeScript，包含主进程和渲染进程", "scaffold": False},
+            {"id": "desktop-pyqt", "name": "PyQt 桌面应用", "desc": "PyQt6 + Python", "category": "desktop", "prompt": "创建一个 PyQt6 桌面应用项目，包含主窗口、菜单栏、工具栏和状态栏", "scaffold": False},
+            {"id": "data-analysis", "name": "数据分析", "desc": "Python + Pandas + Matplotlib", "category": "datascience", "prompt": "创建一个 Python 数据分析项目，包含 Pandas 数据处理、Matplotlib 可视化和 Jupyter Notebook", "scaffold": False},
+            {"id": "ml-project", "name": "机器学习项目", "desc": "Python + scikit-learn", "category": "datascience", "prompt": "创建一个机器学习项目，包含数据预处理、模型训练、评估和预测脚本", "scaffold": False},
+        ]
+        if category and category != "all":
+            templates = [t for t in templates if t["category"] == category]
+        main = self._get_main()
+        if main:
+            custom = main.project_mgr.list_custom_templates()
+            if category and category != "all":
+                custom = [t for t in custom if t.get("category") == category]
+            templates = templates + custom
+        return json.dumps(templates)
+
+    @pyqtSlot(str, str, str, str, str, result=bool)
+    def saveCustomTemplate(self, name: str, category: str, desc: str, prompt: str, files: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.save_custom_template(name, category, desc, prompt, files)
+
+    @pyqtSlot(str, result=bool)
+    def deleteCustomTemplate(self, template_id: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.delete_custom_template(template_id)
+
+    @pyqtSlot(str, str, result=str)
+    def createProjectFromTemplate(self, project_path: str, template_id: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps({"success": False, "error": "main not available"})
+        return json.dumps(main.project_mgr.create_project_from_template(project_path, template_id))
 
     # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 

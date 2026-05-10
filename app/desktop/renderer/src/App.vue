@@ -330,6 +330,30 @@ const convSearchQuery = ref("");
 const showMemoryPanel = ref(false);
 const memoryContent = ref("");
 const globalMemoryContent = ref("");
+const memoryTab = ref<"claude-md" | "smart">("claude-md");
+const smartMemories = ref<any[]>([]);
+const newMemoryType = ref("project");
+const newMemoryTitle = ref("");
+const newMemoryContent = ref("");
+const memorySearchQuery = ref("");
+const showTemplatePanel = ref(false);
+const templateCategory = ref("all");
+const projectTemplates = ref<any[]>([]);
+const showAddTemplate = ref(false);
+const newTplName = ref("");
+const newTplCategory = ref("frontend");
+const newTplDesc = ref("");
+const newTplPrompt = ref("");
+const showPreviewPanel = ref(false);
+const previewUrl = ref("");
+const previewPath = ref("");
+const showTaskPanel = ref(false);
+const taskList = ref<any[]>([]);
+const newTaskName = ref("");
+const newTaskDesc = ref("");
+const collaborationMode = ref<"none" | "plan-code-review" | "pair" | "review-only">("none");
+const collabPhase = ref<"planning" | "coding" | "reviewing">("planning");
+const collabHistory = ref<any[]>([]);
 const editingConvId = ref<string | null>(null);
 const editingConvTitle = ref("");
 const showSlashMenu = ref(false);
@@ -345,7 +369,11 @@ const SLASH_COMMANDS: Record<string, { name: string; desc: string; action: strin
   memory: { name: "/memory", desc: "打开记忆管理", action: "memory" },
   export: { name: "/export", desc: "导出对话", action: "export" },
   files: { name: "/files", desc: "查看文件变更", action: "files" },
-  undo: { name: "/undo", desc: "撤销上次文件修改", action: "undo" },
+  extract: { name: "/extract", desc: "从对话提取记忆", action: "extract" },
+  template: { name: "/template", desc: "项目模板", action: "template" },
+  preview: { name: "/preview", desc: "预览 Web 项目", action: "preview" },
+  task: { name: "/task", desc: "任务编排", action: "task" },
+  collab: { name: "/collab", desc: "AI 协作模式", action: "collab" },
 };
 
 const WORKFLOW_PRESETS: Record<string, { name: string; prompt: string; steps: string[] }> = {
@@ -1058,6 +1086,220 @@ function appendMemory(text: string) {
   saveMemoryContent();
 }
 
+async function loadSmartMemories() {
+  if (!activeProject.value) return;
+  try {
+    const result = await callBackend("listMemories", activeProject.value.path);
+    smartMemories.value = Array.isArray(result) ? result : [];
+  } catch (e) {
+    console.warn("loadSmartMemories failed:", e);
+  }
+}
+
+async function searchSmartMemories() {
+  if (!activeProject.value) return;
+  try {
+    const result = await callBackend("searchMemories", activeProject.value.path, memorySearchQuery.value);
+    smartMemories.value = Array.isArray(result) ? result : [];
+  } catch (e) {
+    console.warn("searchSmartMemories failed:", e);
+  }
+}
+
+async function addSmartMemory() {
+  if (!activeProject.value || !newMemoryTitle.value.trim() || !newMemoryContent.value.trim()) return;
+  try {
+    const filename = newMemoryTitle.value.trim().replace(/\s+/g, "-").toLowerCase();
+    await callBackend("saveMemory", activeProject.value.path, filename, newMemoryContent.value.trim(), newMemoryType.value);
+    newMemoryTitle.value = "";
+    newMemoryContent.value = "";
+    loadSmartMemories();
+    showNotice("记忆已添加", "ok");
+  } catch (e) {
+    console.warn("addSmartMemory failed:", e);
+  }
+}
+
+async function deleteSmartMemory(filename: string) {
+  if (!activeProject.value) return;
+  try {
+    await callBackend("deleteMemory", activeProject.value.path, filename);
+    loadSmartMemories();
+    showNotice("记忆已删除", "ok");
+  } catch (e) {
+    console.warn("deleteSmartMemory failed:", e);
+  }
+}
+
+async function extractMemoriesFromConversation() {
+  if (!activeProject.value || messages.value.length === 0) return;
+  try {
+    const msgs = messages.value.map(m => ({ role: m.role, text: m.text }));
+    const result = await callBackend("autoExtractMemories", activeProject.value.path, JSON.stringify(msgs));
+    if (Array.isArray(result) && result.length > 0) {
+      const summary = result.map((r: any) => `${r.type}: ${r.count}条`).join(", ");
+      showNotice(`已提取记忆: ${summary}`, "ok");
+      loadSmartMemories();
+    } else {
+      showNotice("未发现可提取的记忆", "warn");
+    }
+  } catch (e) {
+    console.warn("extractMemories failed:", e);
+  }
+}
+
+async function loadProjectTemplates() {
+  try {
+    const result = await callBackend("listProjectTemplates", templateCategory.value);
+    projectTemplates.value = Array.isArray(result) ? result : [];
+  } catch (e) {
+    console.warn("loadProjectTemplates failed:", e);
+  }
+}
+
+function useTemplate(template: any) {
+  if (!template) return;
+  inputText.value = template.prompt;
+  showTemplatePanel.value = false;
+  showNotice(`已加载"${template.name}"模板`, "ok");
+}
+
+async function scaffoldFromTemplate(template: any) {
+  if (!template || !activeProject.value) return;
+  try {
+    const result = await callBackend("createProjectFromTemplate", activeProject.value.path, template.id);
+    const data = typeof result === "string" ? JSON.parse(result) : result;
+    if (data.success) {
+      showNotice(`已创建项目脚手架：${data.files?.length || 0} 个文件`, "ok");
+      if (data.init_cmd) {
+        showNotice(`请运行: ${data.init_cmd}`, "warn");
+      }
+    } else {
+      showNotice(data.error || "创建脚手架失败", "warn");
+    }
+  } catch (e) {
+    console.warn("scaffoldFromTemplate failed:", e);
+  }
+}
+
+async function addCustomTemplate() {
+  if (!newTplName.value.trim() || !newTplPrompt.value.trim()) return;
+  try {
+    await callBackend("saveCustomTemplate", newTplName.value.trim(), newTplCategory.value, newTplDesc.value.trim(), newTplPrompt.value.trim(), "");
+    newTplName.value = "";
+    newTplDesc.value = "";
+    newTplPrompt.value = "";
+    showAddTemplate.value = false;
+    loadProjectTemplates();
+    showNotice("自定义模板已保存", "ok");
+  } catch (e) {
+    console.warn("addCustomTemplate failed:", e);
+  }
+}
+
+async function deleteCustomTemplate(tplId: string) {
+  try {
+    await callBackend("deleteCustomTemplate", tplId);
+    loadProjectTemplates();
+    showNotice("模板已删除", "ok");
+  } catch (e) {
+    console.warn("deleteCustomTemplate failed:", e);
+  }
+}
+
+function openPreview() {
+  if (!activeProject.value) {
+    showNotice("请先选择项目", "warn");
+    return;
+  }
+  const projPath = activeProject.value.path;
+  previewPath.value = projPath;
+  const indexPath = projPath.replace(/\\/g, "/") + "/index.html";
+  previewUrl.value = `file:///${indexPath}`;
+  showPreviewPanel.value = true;
+}
+
+function refreshPreview() {
+  if (previewUrl.value) {
+    const url = previewUrl.value;
+    previewUrl.value = "";
+    nextTick(() => { previewUrl.value = url; });
+  }
+}
+
+function closePreview() {
+  showPreviewPanel.value = false;
+  previewUrl.value = "";
+}
+
+function addTask() {
+  if (!newTaskName.value.trim()) return;
+  taskList.value.push({
+    id: makeId(),
+    name: newTaskName.value.trim(),
+    desc: newTaskDesc.value.trim(),
+    status: "pending",
+    createdAt: new Date().toISOString(),
+  });
+  newTaskName.value = "";
+  newTaskDesc.value = "";
+}
+
+function updateTaskStatus(taskId: string, status: "pending" | "in_progress" | "done") {
+  const task = taskList.value.find(t => t.id === taskId);
+  if (task) task.status = status;
+}
+
+function removeTask(taskId: string) {
+  taskList.value = taskList.value.filter(t => t.id !== taskId);
+}
+
+function executeTaskAsPrompt(task: any) {
+  inputText.value = task.desc || task.name;
+  task.status = "in_progress";
+  showTaskPanel.value = false;
+  sendMessage();
+}
+
+function setCollaborationMode(mode: "none" | "plan-code-review" | "pair" | "review-only") {
+  collaborationMode.value = mode;
+  if (mode === "none") {
+    collabPhase.value = "planning";
+    return;
+  }
+  collabPhase.value = "planning";
+  let prompt = "";
+  if (mode === "plan-code-review") {
+    prompt = "我们采用规划-编码-审查三阶段协作模式。当前是【规划阶段】，请先分析需求，制定详细的开发计划，列出所有需要完成的任务。不要直接编码，只做规划。";
+  } else if (mode === "pair") {
+    prompt = "我们采用结对编程模式。你和我交替工作：你写一段代码，我审查并提出修改意见，你再修改。请先从第一个功能开始编码。";
+  } else if (mode === "review-only") {
+    prompt = "我们采用纯审查模式。你只负责审查我提供的代码，指出问题、安全漏洞、性能瓶颈和改进建议，不直接修改代码。请等待我提供代码。";
+  }
+  if (prompt) {
+    inputText.value = prompt;
+    sendMessage();
+  }
+}
+
+function advanceCollabPhase() {
+  if (collaborationMode.value === "plan-code-review") {
+    if (collabPhase.value === "planning") {
+      collabPhase.value = "coding";
+      inputText.value = "规划阶段完成，现在进入【编码阶段】。请按照规划逐步实现功能，每完成一个功能点向我确认。";
+    } else if (collabPhase.value === "coding") {
+      collabPhase.value = "reviewing";
+      inputText.value = "编码阶段完成，现在进入【审查阶段】。请全面审查已编写的代码，检查：1.功能完整性 2.代码质量 3.安全漏洞 4.性能问题 5.最佳实践遵循情况。";
+    } else {
+      collabPhase.value = "planning";
+      collaborationMode.value = "none";
+      showNotice("协作流程已完成", "ok");
+      return;
+    }
+    sendMessage();
+  }
+}
+
 function handleInputChange() {
   if (inputText.value.startsWith("/")) {
     slashMenuFilter.value = inputText.value.slice(1).toLowerCase();
@@ -1098,8 +1340,21 @@ function executeSlashCommand(cmdKey: string) {
       inputText.value = "请总结我们目前的对话要点，然后我们继续。保持简洁。";
       sendMessage();
       break;
-    case "undo":
-      showNotice("撤销功能需要文件版本控制支持", "warn");
+    case "extract":
+      extractMemoriesFromConversation();
+      break;
+    case "template":
+      showTemplatePanel.value = true;
+      loadProjectTemplates();
+      break;
+    case "preview":
+      openPreview();
+      break;
+    case "task":
+      showTaskPanel.value = !showTaskPanel.value;
+      break;
+    case "collab":
+      showPanel.value = true;
       break;
   }
 }
@@ -2103,8 +2358,10 @@ onMounted(async () => {
     <main class="workbench" :class="{ single: !showPanel }">
       <section class="chat card">
         <div class="toolbar">
-          <div class="session">会话：{{ sessionId || "未创建" }}</div>
+          <div class="session">会话：{{ sessionId || "未创建" }}<span v-if="collaborationMode !== 'none'" style="margin-left: 8px; color: #4af; font-size: 11px;">🤝 {{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}<span v-if="collaborationMode === 'plan-code-review'"> ({{ collabPhase === 'planning' ? '规划' : collabPhase === 'coding' ? '编码' : '审查' }})</span></span></div>
           <div class="actions">
+            <button v-if="showPreviewPanel" class="btn-blue" @click="closePreview">关闭预览</button>
+            <button v-else class="btn-blue" @click="openPreview">预览</button>
             <button class="btn-blue" @click="chooseWorkspace">打开项目</button>
             <button class="btn-blue" @click="createSession" :disabled="isBusy">新会话</button>
             <button class="btn-red" @click="stopMessage" :disabled="!isBusy">停止</button>
@@ -2144,6 +2401,17 @@ onMounted(async () => {
               </div>
             </div>
           </article>
+        </div>
+
+        <div v-if="showPreviewPanel && previewUrl" class="preview-panel">
+          <div class="preview-toolbar">
+            <span style="font-size: 11px; color: #888;">🖥️ 实时预览</span>
+            <div style="display: flex; gap: 4px;">
+              <button class="btn-icon-sm" @click="refreshPreview" style="font-size: 10px;">🔄</button>
+              <button class="btn-icon-sm" @click="closePreview" style="font-size: 10px;">✕</button>
+            </div>
+          </div>
+          <iframe :src="previewUrl" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
         </div>
 
         <div class="composer">
@@ -2669,21 +2937,168 @@ onMounted(async () => {
 
           <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">项目记忆 (CLAUDE.md)</span>
-              <button class="btn-icon-sm" @click="showMemoryPanel = !showMemoryPanel; if (showMemoryPanel) loadMemoryContent()" :title="showMemoryPanel ? '收起' : '展开'" style="font-size: 10px;">{{ showMemoryPanel ? '▼' : '▶' }}</button>
+              <span style="font-size: 11px; color: #888;">🧠 项目记忆</span>
+              <button class="btn-icon-sm" @click="showMemoryPanel = !showMemoryPanel; if (showMemoryPanel) { loadMemoryContent(); loadSmartMemories(); }" :title="showMemoryPanel ? '收起' : '展开'" style="font-size: 10px;">{{ showMemoryPanel ? '▼' : '▶' }}</button>
             </div>
             <div v-if="showMemoryPanel" style="margin-top: 4px;">
-              <div style="font-size: 10px; color: #666; margin-bottom: 4px;">项目级记忆（当前项目目录下的 CLAUDE.md）</div>
-              <textarea v-model="memoryContent" rows="6" placeholder="在此编辑项目记忆，AI 每次对话都会读取此内容..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-              <div style="display: flex; gap: 4px; margin-top: 4px;">
-                <button class="btn-sm" @click="saveMemoryContent" style="flex: 1;">保存项目记忆</button>
-                <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: #2a3a2a;">+ 技术栈</button>
-                <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: #2a3a2a;">+ 规范</button>
-                <button class="btn-sm" @click="appendMemory('常用命令: ')" style="background: #2a3a2a;">+ 命令</button>
+              <div style="display: flex; gap: 2px; margin-bottom: 6px;">
+                <button :class="['tab-btn', { active: memoryTab === 'claude-md' }]" @click="memoryTab = 'claude-md'">CLAUDE.md</button>
+                <button :class="['tab-btn', { active: memoryTab === 'smart' }]" @click="memoryTab = 'smart'; loadSmartMemories()">智能记忆</button>
               </div>
-              <div style="font-size: 10px; color: #666; margin-top: 8px; margin-bottom: 4px;">全局记忆（所有项目共享，存储在 ~/.claude/CLAUDE.md）</div>
-              <textarea v-model="globalMemoryContent" rows="3" placeholder="全局记忆，适用于所有项目..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-              <button class="btn-sm" @click="saveGlobalMemory" style="margin-top: 4px;">保存全局记忆</button>
+              <template v-if="memoryTab === 'claude-md'">
+                <div style="font-size: 10px; color: #666; margin-bottom: 4px;">项目级记忆（当前项目目录下的 CLAUDE.md）</div>
+                <textarea v-model="memoryContent" rows="5" placeholder="在此编辑项目记忆，AI 每次对话都会读取此内容..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+                <div style="display: flex; gap: 4px; margin-top: 4px;">
+                  <button class="btn-sm" @click="saveMemoryContent" style="flex: 1;">保存项目记忆</button>
+                  <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: #2a3a2a;">+ 技术栈</button>
+                  <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: #2a3a2a;">+ 规范</button>
+                </div>
+                <div style="font-size: 10px; color: #666; margin-top: 6px; margin-bottom: 4px;">全局记忆（~/.claude/CLAUDE.md）</div>
+                <textarea v-model="globalMemoryContent" rows="2" placeholder="全局记忆，适用于所有项目..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+                <button class="btn-sm" @click="saveGlobalMemory" style="margin-top: 4px;">保存全局记忆</button>
+              </template>
+              <template v-if="memoryTab === 'smart'">
+                <div style="display: flex; gap: 4px; margin-bottom: 6px; align-items: center;">
+                  <input v-model="memorySearchQuery" placeholder="搜索记忆..." style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="searchSmartMemories" />
+                  <button class="btn-sm" @click="searchSmartMemories" style="background: #2a3a2a; font-size: 10px;">🔍</button>
+                  <button class="btn-sm" @click="extractMemoriesFromConversation" style="background: #2a3a2a; font-size: 10px;">📥 提取</button>
+                </div>
+                <div style="font-size: 10px; color: #666; margin-bottom: 4px;">四类记忆：👤 用户偏好 | 🔄 反馈纠正 | 📋 项目上下文 | 🔗 外部引用</div>
+                <div v-if="smartMemories.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 8px;">暂无智能记忆<br>点击"提取"从对话中自动提取</div>
+                <div v-for="mem in smartMemories" :key="mem.filename" class="memory-item">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span :class="['mem-type-badge', mem.type]">{{ mem.type === 'user' ? '👤' : mem.type === 'feedback' ? '🔄' : mem.type === 'reference' ? '🔗' : '📋' }} {{ mem.title }}</span>
+                    <div style="display: flex; gap: 2px;">
+                      <button v-if="mem.relevance" style="font-size: 9px; color: #4af; background: none; border: none; cursor: default;">相关度: {{ mem.relevance }}</button>
+                      <button class="btn-icon-sm" @click="deleteSmartMemory(mem.filename)" style="font-size: 9px;">🗑️</button>
+                    </div>
+                  </div>
+                  <div v-if="mem.match_snippet" style="font-size: 10px; color: #4af; margin-top: 2px; padding: 2px 4px; background: #1a2a3a; border-radius: 2px;">匹配: {{ mem.match_snippet }}</div>
+                  <div style="font-size: 10px; color: #888; margin-top: 2px; white-space: pre-wrap; max-height: 60px; overflow-y: auto;">{{ mem.content.replace(/^---[\s\S]*?---\n*/, '').slice(0, 200) }}</div>
+                </div>
+                <div style="margin-top: 6px; border-top: 1px solid #222; padding-top: 6px;">
+                  <div style="font-size: 10px; color: #666; margin-bottom: 4px;">添加新记忆</div>
+                  <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                    <input v-model="newMemoryTitle" placeholder="标题" style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" />
+                    <select v-model="newMemoryType" style="font-size: 10px; padding: 2px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;">
+                      <option value="user">👤 用户</option>
+                      <option value="feedback">🔄 反馈</option>
+                      <option value="project">📋 项目</option>
+                      <option value="reference">🔗 引用</option>
+                    </select>
+                  </div>
+                  <textarea v-model="newMemoryContent" rows="2" placeholder="记忆内容..." style="width: 100%; font-size: 10px; padding: 4px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+                  <button class="btn-sm" @click="addSmartMemory" style="margin-top: 3px; width: 100%;">添加记忆</button>
+                </div>
+              </template>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">📦 项目模板</span>
+              <div style="display: flex; gap: 2px;">
+                <button class="btn-icon-sm" @click="showAddTemplate = !showAddTemplate" style="font-size: 10px;" title="添加自定义模板">➕</button>
+                <button class="btn-icon-sm" @click="showTemplatePanel = !showTemplatePanel; if (showTemplatePanel) loadProjectTemplates()" style="font-size: 10px;">{{ showTemplatePanel ? '▼' : '▶' }}</button>
+              </div>
+            </div>
+            <div v-if="showAddTemplate" style="margin-bottom: 6px; padding: 6px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
+              <div style="font-size: 10px; color: #888; margin-bottom: 4px;">添加自定义模板</div>
+              <input v-model="newTplName" placeholder="模板名称" style="width: 100%; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd; margin-bottom: 3px;" />
+              <div style="display: flex; gap: 4px; margin-bottom: 3px;">
+                <select v-model="newTplCategory" style="flex: 1; font-size: 10px; padding: 2px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd;">
+                  <option value="frontend">前端</option>
+                  <option value="backend">后端</option>
+                  <option value="fullstack">全栈</option>
+                  <option value="desktop">桌面</option>
+                  <option value="datascience">数据科学</option>
+                </select>
+                <input v-model="newTplDesc" placeholder="描述" style="flex: 2; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd;" />
+              </div>
+              <textarea v-model="newTplPrompt" rows="2" placeholder="模板提示词（发送给AI的指令）" style="width: 100%; font-size: 10px; padding: 4px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+              <div style="display: flex; gap: 4px; margin-top: 3px;">
+                <button class="btn-sm" @click="addCustomTemplate" style="flex: 1;">保存模板</button>
+                <button class="btn-sm" @click="showAddTemplate = false" style="flex: 1; background: #333;">取消</button>
+              </div>
+            </div>
+            <div v-if="showTemplatePanel" style="margin-top: 4px;">
+              <div style="display: flex; gap: 3px; margin-bottom: 6px; flex-wrap: wrap;">
+                <button v-for="cat in ['all', 'frontend', 'backend', 'fullstack', 'desktop', 'datascience']" :key="cat" :class="['tab-btn', { active: templateCategory === cat }]" @click="templateCategory = cat; loadProjectTemplates()" style="font-size: 10px;">{{ cat === 'all' ? '全部' : cat === 'frontend' ? '前端' : cat === 'backend' ? '后端' : cat === 'fullstack' ? '全栈' : cat === 'desktop' ? '桌面' : '数据' }}</button>
+              </div>
+              <div v-for="t in projectTemplates" :key="t.id" class="template-item" style="cursor: pointer;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <div @click="useTemplate(t)" style="flex: 1; min-width: 0;">
+                    <div style="font-size: 11px; color: #ddd;">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
+                    <div style="font-size: 10px; color: #888;">{{ t.desc }}</div>
+                  </div>
+                  <div style="display: flex; gap: 2px; flex-shrink: 0;">
+                    <button v-if="t.scaffold" class="btn-icon-sm" @click.stop="scaffoldFromTemplate(t)" title="创建脚手架" style="font-size: 9px;">🏗️</button>
+                    <button v-if="t.custom" class="btn-icon-sm" @click.stop="deleteCustomTemplate(t.id)" title="删除" style="font-size: 9px;">🗑️</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">🖥️ 实时预览</span>
+              <button class="btn-icon-sm" @click="showPreviewPanel = !showPreviewPanel" style="font-size: 10px;">{{ showPreviewPanel ? '▼' : '▶' }}</button>
+            </div>
+            <div v-if="showPreviewPanel" style="margin-top: 4px;">
+              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                <button class="btn-sm" @click="openPreview" style="flex: 1; font-size: 10px;">📂 打开预览</button>
+                <button class="btn-sm" @click="refreshPreview" style="font-size: 10px;">🔄 刷新</button>
+                <button class="btn-sm" @click="closePreview" style="font-size: 10px; background: #333;">✕</button>
+              </div>
+              <div v-if="previewUrl" style="border: 1px solid #333; border-radius: 4px; overflow: hidden; background: #fff; height: 200px;">
+                <iframe :src="previewUrl" style="width: 100%; height: 100%; border: none;"></iframe>
+              </div>
+              <div v-else style="font-size: 10px; color: #555; text-align: center; padding: 12px;">点击"打开预览"查看项目网页</div>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">📋 任务编排</span>
+              <button class="btn-icon-sm" @click="showTaskPanel = !showTaskPanel" style="font-size: 10px;">{{ showTaskPanel ? '▼' : '▶' }}</button>
+            </div>
+            <div v-if="showTaskPanel" style="margin-top: 4px;">
+              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                <input v-model="newTaskName" placeholder="任务名称" style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="addTask" />
+                <button class="btn-sm" @click="addTask" style="font-size: 10px;">添加</button>
+              </div>
+              <textarea v-model="newTaskDesc" rows="1" placeholder="任务描述（可选）" style="width: 100%; font-size: 10px; padding: 2px 4px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; margin-bottom: 4px;"></textarea>
+              <div v-if="taskList.length === 0" style="font-size: 10px; color: #555; text-align: center; padding: 6px;">暂无任务，添加任务来编排开发流程</div>
+              <div v-for="task in taskList" :key="task.id" style="display: flex; align-items: center; gap: 4px; padding: 3px 0; border-bottom: 1px solid #222;">
+                <span :style="{ color: task.status === 'done' ? '#4CAF50' : task.status === 'in_progress' ? '#FF9800' : '#888', fontSize: '10px', cursor: 'pointer' }" @click="updateTaskStatus(task.id, task.status === 'pending' ? 'in_progress' : task.status === 'in_progress' ? 'done' : 'pending')">
+                  {{ task.status === 'done' ? '✅' : task.status === 'in_progress' ? '🔄' : '⬜' }}
+                </span>
+                <span style="flex: 1; font-size: 10px; color: #ddd; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :style="{ textDecoration: task.status === 'done' ? 'line-through' : 'none' }">{{ task.name }}</span>
+                <button class="btn-icon-sm" @click="executeTaskAsPrompt(task)" title="执行此任务" style="font-size: 9px;">▶</button>
+                <button class="btn-icon-sm" @click="removeTask(task.id)" title="删除" style="font-size: 9px;">✕</button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">🤝 AI 协作</span>
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 3px;">
+              <button :class="['workflow-btn', { active: collaborationMode === 'plan-code-review' }]" @click="setCollaborationMode('plan-code-review')">📋 规划→编码→审查</button>
+              <button :class="['workflow-btn', { active: collaborationMode === 'pair' }]" @click="setCollaborationMode('pair')">👥 结对编程</button>
+              <button :class="['workflow-btn', { active: collaborationMode === 'review-only' }]" @click="setCollaborationMode('review-only')">🔍 纯审查</button>
+              <button v-if="collaborationMode !== 'none'" class="workflow-btn" @click="setCollaborationMode('none')" style="background: #3a2222;">✕ 退出协作</button>
+            </div>
+            <div v-if="collaborationMode !== 'none'" style="margin-top: 4px; padding: 4px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
+              <div style="font-size: 10px; color: #888;">
+                模式：{{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}
+                <span v-if="collaborationMode === 'plan-code-review'" style="color: #4af;"> | 阶段：{{ collabPhase === 'planning' ? '📋 规划中' : collabPhase === 'coding' ? '💻 编码中' : '🔍 审查中' }}</span>
+              </div>
+              <div v-if="collaborationMode === 'plan-code-review'" style="display: flex; gap: 4px; margin-top: 4px;">
+                <button class="btn-sm" @click="advanceCollabPhase" style="flex: 1; font-size: 10px;">⏭ 进入下一阶段</button>
+              </div>
             </div>
           </div>
         </div>
@@ -3168,6 +3583,84 @@ export default { name: "App" };
   border-color: #4af;
   color: #4af;
   background: rgba(68, 170, 255, 0.08);
+}
+
+.workflow-btn.active {
+  border-color: #4af;
+  color: #4af;
+  background: rgba(68, 170, 255, 0.12);
+}
+
+.tab-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.tab-btn:hover {
+  color: #bbb;
+  border-color: #444;
+}
+
+.tab-btn.active {
+  color: #4af;
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.08);
+}
+
+.memory-item {
+  padding: 6px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  border: 1px solid #222;
+  background: #111;
+}
+
+.mem-type-badge {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.mem-type-badge.user { color: #4af; }
+.mem-type-badge.feedback { color: #fa0; }
+.mem-type-badge.project { color: #4f4; }
+.mem-type-badge.reference { color: #a8f; }
+
+.template-item {
+  padding: 6px 8px;
+  margin-bottom: 3px;
+  border-radius: 4px;
+  border: 1px solid #222;
+  background: #111;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.template-item:hover {
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.05);
+}
+
+.preview-panel {
+  height: 250px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #2a2a2a;
+  background: #0d0d0d;
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  border-bottom: 1px solid #222;
+  background: #111;
 }
 
 .msg .msg-footer {
