@@ -346,14 +346,14 @@ def post_build(release_dir: Path):
         shutil.copytree(str(qwen_src), str(qwen_dst))
         print("  ✓ 复制 qwen2api/ (API 服务)")
 
-    # 8. 复制 src/utils/vendor/ (ripgrep 等工具二进制)
-    vendor_src = DEV_APP_DIR / "src" / "utils" / "vendor"
-    vendor_dst = release_dir / "src" / "utils" / "vendor"
-    if vendor_src.exists():
-        if vendor_dst.exists():
-            shutil.rmtree(str(vendor_dst))
-        shutil.copytree(str(vendor_src), str(vendor_dst))
-        print("  ✓ 复制 src/utils/vendor/ (工具二进制)")
+    # 8. 复制整个 src/ (CLI 代码和工具) - 这是关键！
+    src_src = DEV_APP_DIR / "src"
+    src_dst = release_dir / "src"
+    if src_src.exists():
+        if src_dst.exists():
+            shutil.rmtree(str(src_dst))
+        shutil.copytree(str(src_src), str(src_dst))
+        print("  ✓ 复制 src/ (CLI 代码)")
 
     # nodejs/, bun/, node_modules/ 不复制到 build/ 发布包
     # 用户拿到整合包后，通过部署维护功能自动下载安装
@@ -420,6 +420,7 @@ def _deploy_to_dev(release_dir: Path):
     - EXE 直接放在 dev/ 下（dev/云集智能编程工作站vX.X.exe）
     - _internal/ 在 dev/ 下（隐藏文件夹，包含 PyInstaller 运行时）
     - app/ 在 dev/ 下（用户可见的资源文件夹）
+    - 关键资源同时复制到 _internal/app/ 下，确保 PyInstaller 打包后能找到
     """
     release_name = release_dir.name
     
