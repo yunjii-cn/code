@@ -1344,7 +1344,7 @@ class BackendBridge(QObject):
 
         if workspace:
             parts.append(f"当前项目工作目录: {workspace}")
-            parts.append(f"所有文件操作（创建、读取、编辑）都应在此目录下进行。创建文件时请使用相对于此目录的路径。")
+            parts.append(f"所有文件操作（创建、读取、编辑）都必须使用绝对路径，以 {workspace} 为根目录。例如创建文件应写 {workspace}\\index.html 而非 index.html。")
             parts.append("")
 
         if language == "zh":
