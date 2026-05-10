@@ -1987,8 +1987,11 @@ class ClaudeCliRunner:
                 env["NODE_PATH"] = node_modules_dir
         if env_overrides:
             env.update(env_overrides)
-        if workspace_path and os.path.isdir(workspace_path):
+        if workspace_path:
+            if not os.path.isdir(workspace_path):
+                os.makedirs(workspace_path, exist_ok=True)
             env["CLAUDE_CODE_WORKSPACE"] = workspace_path
+            env["CLI_WORKSPACE"] = workspace_path
 
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -2006,7 +2009,7 @@ class ClaudeCliRunner:
         _log_file.write(f"runner={runner_path}\n")
         _log_file.write(f"use_bun={use_bun}\n")
         _log_file.write(f"args={[runner_path] + args}\n")
-        _log_file.write(f"cwd={self.project_root}\n")
+        _log_file.write(f"actual_cwd={workspace_path or self.project_root}\n")
         _log_file.write(f"workspace_path={workspace_path}\n")
         _log_file.write(f"project_root={self.project_root}\n")
         _log_file.write(f"env_overrides={env_overrides}\n")
@@ -2021,7 +2024,7 @@ class ClaudeCliRunner:
         try:
             proc = subprocess.Popen(
                 [runner_path] + args,
-                cwd=self.project_root,
+                cwd=workspace_path or self.project_root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
