@@ -1,3 +1,4 @@
-if (process.env.CLI_WORKSPACE && process.env.CLI_WORKSPACE !== process.cwd()) {
-  try { process.chdir(process.env.CLI_WORKSPACE) } catch {}
+const _ws = process.env.CLI_WORKSPACE || process.env.CLAUDE_CODE_WORKSPACE;
+if (_ws && _ws !== process.cwd()) {
+  try { process.chdir(_ws) } catch {}
 }
