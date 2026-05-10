@@ -1992,6 +1992,7 @@ class ClaudeCliRunner:
                 os.makedirs(workspace_path, exist_ok=True)
             env["CLAUDE_CODE_WORKSPACE"] = workspace_path
             env["CLI_WORKSPACE"] = workspace_path
+        env.setdefault("CLAUDE_CODE_GLOB_TIMEOUT_SECONDS", "60")
 
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -2304,15 +2305,21 @@ class ClaudeCliRunner:
                     summary_parts = []
                     if all_text_parts:
                         summary_parts.append("\n".join(all_text_parts))
+                    tool_errors = []
                     for i, tc_name in enumerate(all_tool_calls):
                         tr = all_tool_results[i] if i < len(all_tool_results) else None
                         if tr and tr.get("error"):
                             summary_parts.append(f"🔧 {tc_name}: ❌ {tr['summary'][:100]}")
+                            tool_errors.append(tc_name)
                         elif tr:
                             summary_parts.append(f"🔧 {tc_name}: ✅ {tr['summary'][:100]}")
                         else:
                             summary_parts.append(f"🔧 {tc_name}")
                     combined = "\n".join(summary_parts) if summary_parts else last_tool_info
+                    if tool_errors:
+                        combined += f"\n\n⚠️ 部分工具执行出错({', '.join(tool_errors)})，AI未能完成回复。请尝试更具体的指令或缩小搜索范围后重试。"
+                    else:
+                        combined += "\n\n⚠️ AI在调用工具后中断，未能生成最终回复。请发送新消息继续对话。"
                     return {"ok": True, "text": combined.strip(), "sessionId": session_id, "cliSessionId": cli_session_id or session_id, "streamed": False}
                 error = stderr_out.strip() or "Unknown CLI error."
                 fallback = ""

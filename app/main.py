@@ -243,17 +243,33 @@ class ProjectManager:
         self._save_registry()
         return True
 
-    def save_conversation(self, project_id: str, session_id: str, messages: list):
+    def save_conversation(self, project_id: str, session_id: str, messages: list, title: str = ""):
         if project_id not in self._registry.get("projects", {}):
             return False
         proj_path = self._registry["projects"][project_id]["path"]
         conv_dir = os.path.join(proj_path, "conversations")
         os.makedirs(conv_dir, exist_ok=True)
         conv_path = os.path.join(conv_dir, f"{session_id}.json")
+        existing_data = {}
+        if os.path.exists(conv_path):
+            try:
+                with open(conv_path, "r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+            except Exception:
+                pass
+        if not title:
+            for m in messages:
+                if m.get("role") == "user" and m.get("text", "").strip():
+                    title = m["text"].strip()[:50]
+                    break
+        if not title:
+            title = existing_data.get("title", "")
         data = {
             "session_id": session_id,
             "project_id": project_id,
+            "title": title,
             "messages": messages,
+            "created_at": existing_data.get("created_at", datetime.now().isoformat()),
             "updated_at": datetime.now().isoformat(),
         }
         with open(conv_path, "w", encoding="utf-8") as f:
@@ -287,13 +303,23 @@ class ProjectManager:
                 try:
                     with open(os.path.join(conv_dir, fname), "r", encoding="utf-8") as f:
                         data = json.load(f)
+                    msgs = data.get("messages", [])
+                    title = data.get("title", "")
+                    if not title:
+                        for m in msgs:
+                            if m.get("role") == "user" and m.get("text", "").strip():
+                                title = m["text"].strip()[:50]
+                                break
                     result.append({
                         "session_id": data.get("session_id", fname[:-5]),
+                        "title": title,
                         "updated_at": data.get("updated_at", ""),
-                        "message_count": len(data.get("messages", [])),
+                        "created_at": data.get("created_at", ""),
+                        "message_count": len(msgs),
                     })
                 except Exception:
                     pass
+        result.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
         return result
 
     def copy_conversation(self, source_project_id: str, session_id: str, target_project_id: str) -> bool:
@@ -323,13 +349,135 @@ class ProjectManager:
         if project_id not in self._registry.get("projects", {}):
             return []
         convs = self.list_conversations(project_id)
-        convs.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
         context = []
         for c in convs[:max_conversations]:
             msgs = self.load_conversation(project_id, c["session_id"])
             if msgs:
                 context.extend(msgs)
         return context
+
+    def search_conversations(self, project_id: str, keyword: str) -> list:
+        if project_id not in self._registry.get("projects", {}):
+            return []
+        if not keyword.strip():
+            return self.list_conversations(project_id)
+        proj_path = self._registry["projects"][project_id]["path"]
+        conv_dir = os.path.join(proj_path, "conversations")
+        if not os.path.exists(conv_dir):
+            return []
+        kw = keyword.strip().lower()
+        result = []
+        for fname in os.listdir(conv_dir):
+            if not fname.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(conv_dir, fname), "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                msgs = data.get("messages", [])
+                title = data.get("title", "")
+                matched = False
+                snippet = ""
+                if kw in title.lower():
+                    matched = True
+                for m in msgs:
+                    text = m.get("text", "").lower()
+                    if kw in text:
+                        matched = True
+                        if not snippet:
+                            idx = text.find(kw)
+                            start = max(0, idx - 20)
+                            end = min(len(m.get("text", "")), idx + len(kw) + 20)
+                            snippet = "..." + m.get("text", "")[start:end] + "..."
+                if matched:
+                    result.append({
+                        "session_id": data.get("session_id", fname[:-5]),
+                        "title": title,
+                        "updated_at": data.get("updated_at", ""),
+                        "created_at": data.get("created_at", ""),
+                        "message_count": len(msgs),
+                        "snippet": snippet,
+                    })
+            except Exception:
+                pass
+        result.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
+        return result
+
+    def delete_conversation(self, project_id: str, session_id: str) -> bool:
+        if project_id not in self._registry.get("projects", {}):
+            return False
+        proj_path = self._registry["projects"][project_id]["path"]
+        conv_path = os.path.join(proj_path, "conversations", f"{session_id}.json")
+        if os.path.exists(conv_path):
+            try:
+                os.remove(conv_path)
+                return True
+            except Exception:
+                return False
+        return False
+
+    def rename_conversation(self, project_id: str, session_id: str, new_title: str) -> bool:
+        if project_id not in self._registry.get("projects", {}):
+            return False
+        proj_path = self._registry["projects"][project_id]["path"]
+        conv_path = os.path.join(proj_path, "conversations", f"{session_id}.json")
+        if not os.path.exists(conv_path):
+            return False
+        try:
+            with open(conv_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["title"] = new_title.strip()
+            data["updated_at"] = datetime.now().isoformat()
+            with open(conv_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return True
+        except Exception:
+            return False
+
+    def get_claude_md(self, project_path: str) -> str:
+        candidates = [
+            os.path.join(project_path, "CLAUDE.md"),
+            os.path.join(project_path, ".claude", "CLAUDE.md"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        return f.read()
+                except Exception:
+                    pass
+        return ""
+
+    def save_claude_md(self, project_path: str, content: str) -> bool:
+        target = os.path.join(project_path, "CLAUDE.md")
+        try:
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+        except Exception:
+            return False
+
+    def get_global_claude_md(self) -> str:
+        home = os.path.expanduser("~")
+        path = os.path.join(home, ".claude", "CLAUDE.md")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return f.read()
+            except Exception:
+                pass
+        return ""
+
+    def save_global_claude_md(self, content: str) -> bool:
+        home = os.path.expanduser("~")
+        claude_dir = os.path.join(home, ".claude")
+        os.makedirs(claude_dir, exist_ok=True)
+        path = os.path.join(claude_dir, "CLAUDE.md")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            return True
+        except Exception:
+            return False
 
 # ── Git 仓库配置 ──
 GIT_REMOTE = "git@gitee.com:yunjii/code.git"
@@ -707,6 +855,55 @@ class BackendBridge(QObject):
         except Exception:
             msgs = []
         return main.project_mgr.save_conversation(project_id, session_id, msgs)
+
+    @pyqtSlot(str, str, result=str)
+    def searchConversations(self, project_id: str, keyword: str):
+        main = self._get_main()
+        if not main:
+            return json.dumps([])
+        return json.dumps(main.project_mgr.search_conversations(project_id, keyword))
+
+    @pyqtSlot(str, str, result=bool)
+    def deleteConversation(self, project_id: str, session_id: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.delete_conversation(project_id, session_id)
+
+    @pyqtSlot(str, str, str, result=bool)
+    def renameConversation(self, project_id: str, session_id: str, new_title: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.rename_conversation(project_id, session_id, new_title)
+
+    @pyqtSlot(str, result=str)
+    def getClaudeMd(self, project_path: str):
+        main = self._get_main()
+        if not main:
+            return ""
+        return main.project_mgr.get_claude_md(project_path)
+
+    @pyqtSlot(str, str, result=bool)
+    def saveClaudeMd(self, project_path: str, content: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.save_claude_md(project_path, content)
+
+    @pyqtSlot(result=str)
+    def getGlobalClaudeMd(self):
+        main = self._get_main()
+        if not main:
+            return ""
+        return main.project_mgr.get_global_claude_md()
+
+    @pyqtSlot(str, result=bool)
+    def saveGlobalClaudeMd(self, content: str):
+        main = self._get_main()
+        if not main:
+            return False
+        return main.project_mgr.save_global_claude_md(content)
 
     # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
@@ -2183,6 +2380,7 @@ class MainWindow(QMainWindow):
         self.web_view.page().setBackgroundColor(QColor("#0d0d0d"))
 
         self.web_view.loadFinished.connect(self._on_web_load_finished)
+        self.web_view.page().javaScriptConsoleMessage = self._on_js_console
 
         # QWebChannel 桥接
         self.channel = QWebChannel()
@@ -2577,6 +2775,13 @@ class MainWindow(QMainWindow):
         for k, v in checks.items():
             parts.append(f"{labels.get(k, k)}:{'✓' if v else '✗'}")
         self.env_status.setText("环境: " + " | ".join(parts))
+
+    def _on_js_console(self, level, message, line, source):
+        level_map = {0: "INFO", 1: "WARN", 2: "ERROR", 3: "DEBUG"}
+        lvl = level_map.get(level, str(level))
+        color = "#F44336" if level == 2 else "#FF9800" if level == 1 else "#888"
+        short_src = source.split("/")[-1] if source else "?"
+        self.debug_log_signal.emit(f"[JS {lvl}] {message} ({short_src}:{line})", color)
 
     def _refresh_deploy_env_status(self):
         """刷新部署维护页面的环境状态"""

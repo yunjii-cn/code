@@ -14,6 +14,14 @@ type ChatMessage = {
   durationMs?: number;
   tokens?: number;
   rating?: number;
+  fileChanges?: FileChange[];
+};
+
+type FileChange = {
+  tool: string;
+  path: string;
+  action: "create" | "modify" | "delete";
+  time: string;
 };
 
 type DesktopSettings = {
@@ -299,7 +307,11 @@ function makeId() {
 
 const userName = ref("你");
 const assistantName = ref("助手");
-const autoApprove = ref(true); // 默认启用自动授权
+const autoApprove = ref(true);
+const toolApprovalMode = ref<"auto" | "smart" | "manual">("auto");
+watch(toolApprovalMode, (mode) => {
+  autoApprove.value = mode === "auto";
+});
 const pendingQueue = ref<string[]>([]);
 
 const projects = ref<any[]>([]);
@@ -314,6 +326,87 @@ const editingProjectId = ref<string | null>(null);
 const editProjectName = ref("");
 const editProjectCustomPath = ref(false);
 const editProjectPath = ref("");
+const convSearchQuery = ref("");
+const showMemoryPanel = ref(false);
+const memoryContent = ref("");
+const globalMemoryContent = ref("");
+const editingConvId = ref<string | null>(null);
+const editingConvTitle = ref("");
+const showSlashMenu = ref(false);
+const slashMenuFilter = ref("");
+const showFileChanges = ref(false);
+const sessionFileChanges = ref<FileChange[]>([]);
+
+const SLASH_COMMANDS: Record<string, { name: string; desc: string; action: string }> = {
+  compact: { name: "/compact", desc: "压缩上下文，节省 token", action: "compact" },
+  clear: { name: "/clear", desc: "清空当前对话", action: "clear" },
+  save: { name: "/save", desc: "保存当前对话", action: "save" },
+  role: { name: "/role", desc: "切换开发角色", action: "role" },
+  memory: { name: "/memory", desc: "打开记忆管理", action: "memory" },
+  export: { name: "/export", desc: "导出对话", action: "export" },
+  files: { name: "/files", desc: "查看文件变更", action: "files" },
+  undo: { name: "/undo", desc: "撤销上次文件修改", action: "undo" },
+};
+
+const WORKFLOW_PRESETS: Record<string, { name: string; prompt: string; steps: string[] }> = {
+  "new-project": {
+    name: "新项目",
+    prompt: "请按照以下步骤创建新项目：1. 分析需求并确定技术栈 2. 初始化项目结构 3. 创建核心文件 4. 实现基础功能 5. 测试运行。每完成一步向我确认后再继续。",
+    steps: ["需求分析", "技术选型", "项目初始化", "核心编码", "测试验证"],
+  },
+  bugfix: {
+    name: "Bug修复",
+    prompt: "请按照以下步骤修复Bug：1. 复现问题 2. 定位根因 3. 制定修复方案 4. 实施修复 5. 验证修复。每步确认后继续。",
+    steps: ["复现问题", "定位根因", "修复方案", "实施修复", "验证修复"],
+  },
+  refactor: {
+    name: "重构",
+    prompt: "请按照以下步骤进行代码重构：1. 分析现有代码结构 2. 识别重构目标 3. 制定重构计划 4. 逐步实施 5. 回归测试。每步确认后继续，确保不破坏现有功能。",
+    steps: ["分析现状", "识别目标", "制定计划", "逐步重构", "回归测试"],
+  },
+  docs: {
+    name: "文档化",
+    prompt: "请按照以下步骤生成文档：1. 扫描代码结构 2. 提取关键接口和函数 3. 生成 API 文档 4. 编写使用说明 5. 审查完善。",
+    steps: ["扫描代码", "提取接口", "生成文档", "编写说明", "审查完善"],
+  },
+  deploy: {
+    name: "部署",
+    prompt: "请按照以下步骤进行部署：1. 检查环境配置 2. 构建项目 3. 配置部署环境 4. 执行部署 5. 验证部署结果。",
+    steps: ["环境检查", "项目构建", "配置部署", "执行部署", "验证结果"],
+  },
+};
+
+const totalTokens = computed(() => {
+  return messages.value.reduce((sum, m) => sum + (m.tokens || 0), 0);
+});
+
+const contextWindowMax = computed(() => {
+  const config = getModelConfig(
+    runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : "openrouter/auto"
+  );
+  return parseInt(config.maxTokens || "128000") * 4;
+});
+
+const contextPercent = computed(() => {
+  if (contextWindowMax.value <= 0) return 0;
+  return Math.min(100, Math.round((totalTokens.value / contextWindowMax.value) * 100));
+});
+
+const contextBarColor = computed(() => {
+  if (contextPercent.value > 90) return "#f44";
+  if (contextPercent.value > 70) return "#fa0";
+  return "#4af";
+});
+
+const ROLE_PRESETS: Record<string, { icon: string; name: string; prompt: string; temp: string; desc: string }> = {
+  fullstack: { icon: "💻", name: "全栈开发", prompt: "你是一个专业的全栈开发工程师，精通前端（HTML/CSS/JS/TypeScript/Vue/React）和后端（Python/Node.js/Java/Go）技术。请始终使用中文回答。对于编程任务，直接编写高质量代码，遵循最佳实践。", temp: "0.3", desc: "前后端全能" },
+  frontend: { icon: "🎨", name: "前端开发", prompt: "你是一个前端开发专家，精通 HTML/CSS/JavaScript/TypeScript/Vue/React 和现代 UI 框架。请始终使用中文回答。专注于创建美观、响应式、高性能的用户界面。", temp: "0.5", desc: "专注 UI/UX" },
+  backend: { icon: "⚙️", name: "后端开发", prompt: "你是一个后端架构师，精通 Python/Node.js/Java/Go、数据库设计、API 开发和系统架构。请始终使用中文回答。专注于构建高性能、可扩展、安全的后端服务。", temp: "0.3", desc: "专注 API/DB" },
+  review: { icon: "🔍", name: "代码审查", prompt: "你是一个严格的代码审查专家。请始终使用中文回答。只审查代码，不直接修改文件。指出潜在问题、安全漏洞、性能瓶颈和改进建议，给出具体的修改方案。", temp: "0.2", desc: "只读审查" },
+  learner: { icon: "📖", name: "学习助手", prompt: "你是一个耐心的编程学习助手。请始终使用中文回答。用通俗易懂的语言解释概念，提供示例代码，循序渐进地引导学习。鼓励提问，不厌其烦地解答。", temp: "0.7", desc: "耐心讲解" },
+  devops: { icon: "🛠️", name: "DevOps", prompt: "你是一个 DevOps 和运维专家，精通 Docker/K8s/CI-CD/云服务/监控告警。请始终使用中文回答。专注于部署自动化、基础设施管理和系统可靠性。", temp: "0.2", desc: "部署运维" },
+};
+const activeRole = ref("");
 
 function roleLabel(role: MessageRole) {
   if (role === "user") return userName.value;
@@ -770,7 +863,9 @@ async function loadConversationHistory(sessionId: string) {
         durationMs: m.durationMs,
         tokens: m.tokens,
         rating: m.rating,
+        fileChanges: m.fileChanges || [],
       }));
+      sessionFileChanges.value = messages.value.flatMap((m: any) => m.fileChanges || []);
     }
   } catch (e) {
     console.warn("loadConversationHistory failed:", e);
@@ -800,6 +895,7 @@ async function saveCurrentConversation() {
       durationMs: m.durationMs,
       tokens: m.tokens,
       rating: m.rating,
+      fileChanges: m.fileChanges,
     }));
     await callBackend("saveConversation", activeProject.value.id, sessionId.value, JSON.stringify(msgs));
   } catch (e) {
@@ -809,6 +905,7 @@ async function saveCurrentConversation() {
 
 async function clearMessages() {
   messages.value = [];
+  sessionFileChanges.value = [];
   await createSession();
 }
 
@@ -823,6 +920,241 @@ function rateMessage(id: string, rating: number) {
 function deleteMessage(id: string) {
   messages.value = messages.value.filter((m) => m.id !== id);
   saveCurrentConversation();
+}
+
+async function searchConversations() {
+  if (!activeProject.value) return;
+  try {
+    const result = await callBackend("searchConversations", activeProject.value.id, convSearchQuery.value);
+    if (Array.isArray(result)) {
+      projectConversations.value = result;
+    }
+  } catch (e) {
+    console.warn("searchConversations failed:", e);
+  }
+}
+
+function clearConvSearch() {
+  convSearchQuery.value = "";
+  loadProjectConversations();
+}
+
+async function deleteConversation(sessionId: string) {
+  if (!activeProject.value) return;
+  try {
+    await callBackend("deleteConversation", activeProject.value.id, sessionId);
+    showNotice("对话已删除", "ok");
+    loadProjectConversations();
+  } catch (e) {
+    console.warn("deleteConversation failed:", e);
+  }
+}
+
+function startRenameConversation(sessionId: string, currentTitle: string) {
+  editingConvId.value = sessionId;
+  editingConvTitle.value = currentTitle;
+}
+
+async function saveRenameConversation(sessionId: string) {
+  if (!activeProject.value || !editingConvTitle.value.trim()) return;
+  try {
+    await callBackend("renameConversation", activeProject.value.id, sessionId, editingConvTitle.value.trim());
+    editingConvId.value = null;
+    editingConvTitle.value = "";
+    loadProjectConversations();
+  } catch (e) {
+    console.warn("renameConversation failed:", e);
+  }
+}
+
+function cancelRenameConversation() {
+  editingConvId.value = null;
+  editingConvTitle.value = "";
+}
+
+function resendMessage(id: string) {
+  const target = messages.value.find((m) => m.id === id);
+  if (target && target.role === "user") {
+    inputText.value = target.text;
+    sendMessage();
+  }
+}
+
+function editMessage(id: string) {
+  const target = messages.value.find((m) => m.id === id);
+  if (target && target.role === "user") {
+    inputText.value = target.text;
+  }
+}
+
+function branchFromMessage(id: string) {
+  const idx = messages.value.findIndex((m) => m.id === id);
+  if (idx < 0) return;
+  const branchMsg = messages.value[idx];
+  messages.value = messages.value.slice(0, idx + 1);
+  sessionFileChanges.value = messages.value.flatMap((m: any) => m.fileChanges || []);
+  saveCurrentConversation();
+  inputText.value = "";
+  showNotice(`已从"${branchMsg.text.slice(0, 20)}..."处分支，后续消息已移除`, "ok");
+}
+
+function applyRole(roleKey: string) {
+  const preset = ROLE_PRESETS[roleKey];
+  if (!preset) return;
+  if (activeRole.value === roleKey) {
+    activeRole.value = "";
+    return;
+  }
+  activeRole.value = roleKey;
+  systemPrompt.value = preset.prompt;
+  temperature.value = preset.temp;
+  saveLocalSettings();
+}
+
+function applyWorkflow(workflowKey: string) {
+  const workflow = WORKFLOW_PRESETS[workflowKey];
+  if (!workflow) return;
+  inputText.value = workflow.prompt;
+  showNotice(`已加载"${workflow.name}"工作流：${workflow.steps.join(" → ")}`, "ok");
+}
+
+async function loadMemoryContent() {
+  if (!activeProject.value) return;
+  try {
+    const content = await callBackend("getClaudeMd", activeProject.value.path);
+    memoryContent.value = content || "";
+    const global = await callBackend("getGlobalClaudeMd");
+    globalMemoryContent.value = global || "";
+  } catch (e) {
+    console.warn("loadMemoryContent failed:", e);
+  }
+}
+
+async function saveMemoryContent() {
+  if (!activeProject.value) return;
+  try {
+    await callBackend("saveClaudeMd", activeProject.value.path, memoryContent.value);
+    showNotice("项目记忆已保存", "ok");
+  } catch (e) {
+    console.warn("saveMemoryContent failed:", e);
+  }
+}
+
+async function saveGlobalMemory() {
+  try {
+    await callBackend("saveGlobalClaudeMd", globalMemoryContent.value);
+    showNotice("全局记忆已保存", "ok");
+  } catch (e) {
+    console.warn("saveGlobalMemory failed:", e);
+  }
+}
+
+function appendMemory(text: string) {
+  if (!text.trim()) return;
+  if (memoryContent.value && !memoryContent.value.endsWith("\n")) {
+    memoryContent.value += "\n";
+  }
+  memoryContent.value += "- " + text.trim() + "\n";
+  saveMemoryContent();
+}
+
+function handleInputChange() {
+  if (inputText.value.startsWith("/")) {
+    slashMenuFilter.value = inputText.value.slice(1).toLowerCase();
+    showSlashMenu.value = true;
+  } else {
+    showSlashMenu.value = false;
+  }
+}
+
+function executeSlashCommand(cmdKey: string) {
+  showSlashMenu.value = false;
+  inputText.value = "";
+  const cmd = SLASH_COMMANDS[cmdKey];
+  if (!cmd) return;
+  switch (cmd.action) {
+    case "clear":
+      clearMessages();
+      break;
+    case "save":
+      saveCurrentConversation();
+      showNotice("对话已保存", "ok");
+      break;
+    case "role":
+      showPanel.value = true;
+      break;
+    case "memory":
+      showPanel.value = true;
+      showMemoryPanel.value = true;
+      loadMemoryContent();
+      break;
+    case "export":
+      exportConversation("markdown");
+      break;
+    case "files":
+      showFileChanges.value = !showFileChanges.value;
+      break;
+    case "compact":
+      inputText.value = "请总结我们目前的对话要点，然后我们继续。保持简洁。";
+      sendMessage();
+      break;
+    case "undo":
+      showNotice("撤销功能需要文件版本控制支持", "warn");
+      break;
+  }
+}
+
+function exportConversation(format: string) {
+  if (messages.value.length === 0) return;
+  let content = "";
+  const title = messages.value.find(m => m.role === "user")?.text?.slice(0, 50) || "对话";
+  if (format === "markdown") {
+    content += `# ${title}\n\n`;
+    content += `导出时间: ${new Date().toLocaleString("zh-CN")}\n\n---\n\n`;
+    for (const m of messages.value) {
+      const label = m.role === "user" ? userName.value : assistantName.value;
+      const time = m.time || "";
+      content += `### ${label} ${time}\n\n${m.text}\n\n`;
+      if (m.toolStatus) {
+        content += `> ${m.toolStatus}\n\n`;
+      }
+      if (m.rating) {
+        content += `> 评分: ${"★".repeat(m.rating)}${"☆".repeat(5 - m.rating)}\n\n`;
+      }
+    }
+  } else {
+    content = JSON.stringify({
+      title,
+      exported_at: new Date().toISOString(),
+      messages: messages.value.map(m => ({
+        role: m.role,
+        text: m.text,
+        time: m.time,
+        model: m.model,
+        tokens: m.tokens,
+        rating: m.rating,
+        fileChanges: m.fileChanges,
+      })),
+    }, null, 2);
+  }
+  const blob = new Blob([content], { type: format === "markdown" ? "text/markdown" : "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${title.slice(0, 20)}.${format === "markdown" ? "md" : "json"}`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showNotice(`对话已导出为 ${format === "markdown" ? "Markdown" : "JSON"}`, "ok");
+}
+
+function trackFileChange(tool: string, filePath: string, action: "create" | "modify" | "delete") {
+  const change: FileChange = { tool, path: filePath, action, time: new Date().toLocaleTimeString() };
+  sessionFileChanges.value.push(change);
+  const lastMsg = messages.value[messages.value.length - 1];
+  if (lastMsg) {
+    if (!lastMsg.fileChanges) lastMsg.fileChanges = [];
+    lastMsg.fileChanges.push(change);
+  }
 }
 
 function formatDuration(ms: number): string {
@@ -1500,6 +1832,11 @@ function loadLocalSettings() {
       const data = JSON.parse(saved);
       if (typeof data.autoApprove === "boolean") {
         autoApprove.value = data.autoApprove;
+        if (!data.autoApprove) toolApprovalMode.value = "manual";
+      }
+      if (typeof data.toolApprovalMode === "string") {
+        toolApprovalMode.value = data.toolApprovalMode;
+        autoApprove.value = data.toolApprovalMode === "auto";
       }
       if (typeof data.runMode === "string") {
         runMode.value = data.runMode;
@@ -1532,6 +1869,9 @@ function loadLocalSettings() {
       if (typeof data.stickyEmail === "string") {
         stickyEmail.value = data.stickyEmail;
       }
+      if (typeof data.activeRole === "string") {
+        activeRole.value = data.activeRole;
+      }
     }
   } catch (e) {
     console.error("Failed to load local settings:", e);
@@ -1542,6 +1882,7 @@ function saveLocalSettings() {
   try {
     const data = {
       autoApprove: autoApprove.value,
+      toolApprovalMode: toolApprovalMode.value,
       runMode: runMode.value,
       apiHost: apiHost.value,
       apiPort: apiPort.value,
@@ -1552,6 +1893,7 @@ function saveLocalSettings() {
       apiStepProgress: apiStepProgress.value,
       qwenAccounts: qwenAccounts.value,
       stickyEmail: stickyEmail.value,
+      activeRole: activeRole.value,
     };
     localStorage.setItem("claude-desktop-settings", JSON.stringify(data));
   } catch (e) {
@@ -1563,6 +1905,7 @@ function saveLocalSettings() {
 watch(
   [
     autoApprove,
+    toolApprovalMode,
     runMode,
     apiHost,
     apiPort,
@@ -1655,6 +1998,14 @@ onMounted(async () => {
           if (newText.startsWith("\x00TOOL\x00")) {
             const statusLine = newText.slice(5);
             target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
+            const writeMatch = statusLine.match(/写入文件|Write.*?✅\s*(.+)/);
+            const editMatch = statusLine.match(/编辑文件|Edit.*?✅\s*(.+)/);
+            const bashMatch = statusLine.match(/执行命令|Bash.*?✅/);
+            if (writeMatch) {
+              trackFileChange("Write", writeMatch[1].trim(), "create");
+            } else if (editMatch) {
+              trackFileChange("Edit", editMatch[1].trim(), "modify");
+            }
           } else {
             if (target.text === "" && newText.trim() === "") return;
             if (target.toolStatus) target.toolStatus = "";
@@ -1768,6 +2119,9 @@ onMounted(async () => {
               <span class="msg-time">{{ m.time }}</span>
               <span v-if="m.model" class="msg-model">{{ m.model }}</span>
               <div class="msg-actions">
+                <button v-if="m.role === 'user'" class="btn-msg-action" @click="resendMessage(m.id)" title="重发">↻</button>
+                <button v-if="m.role === 'user'" class="btn-msg-action" @click="editMessage(m.id)" title="编辑">✎</button>
+                <button v-if="m.role === 'user'" class="btn-msg-action" @click="branchFromMessage(m.id)" title="从此处分支">⎇</button>
                 <button class="btn-msg-del" @click="deleteMessage(m.id)" title="删除">✕</button>
               </div>
             </div>
@@ -1793,16 +2147,41 @@ onMounted(async () => {
         </div>
 
         <div class="composer">
-          <textarea
-            v-model="inputText"
-            placeholder="输入编码任务（Enter 发送，Shift+Enter 换行）"
-            @keydown.enter.exact.prevent="sendMessage"
-          />
+          <div style="position: relative;">
+            <textarea
+              v-model="inputText"
+              placeholder="输入编码任务（Enter 发送，Shift+Enter 换行，/ 快捷指令）"
+              @keydown.enter.exact.prevent="sendMessage"
+              @input="handleInputChange"
+            />
+            <div v-if="showSlashMenu" class="slash-menu">
+              <div v-for="(cmd, key) in SLASH_COMMANDS" :key="key" v-show="!slashMenuFilter || key.startsWith(slashMenuFilter)" class="slash-item" @click="executeSlashCommand(key)">
+                <span class="slash-name">{{ cmd.name }}</span>
+                <span class="slash-desc">{{ cmd.desc }}</span>
+              </div>
+            </div>
+          </div>
           <div class="composer-foot">
-            <span>{{ isBusy ? (pendingQueue.length > 0 ? `执行中... 排队${pendingQueue.length}条` : "执行中...") : "就绪" }}</span>
+            <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
+              <span>{{ isBusy ? (pendingQueue.length > 0 ? `执行中... 排队${pendingQueue.length}条` : "执行中...") : "就绪" }}</span>
+              <div class="context-bar-wrap" :title="`上下文: ~${totalTokens} / ${contextWindowMax} tokens (${contextPercent}%)`">
+                <div class="context-bar" :style="{ width: contextPercent + '%', background: contextBarColor }"></div>
+              </div>
+              <span style="font-size: 10px; color: #666;">~{{ totalTokens }}tk</span>
+              <button v-if="sessionFileChanges.length > 0" class="btn-icon-sm" @click="showFileChanges = !showFileChanges" :title="`${sessionFileChanges.length} 个文件变更`" style="font-size: 10px;">📁{{ sessionFileChanges.length }}</button>
+            </div>
             <div>
+              <button class="btn-sm" @click="exportConversation('markdown')" :disabled="messages.length === 0" title="导出 Markdown" style="background: #2a3a2a;">📤</button>
               <button class="btn-blue" @click="clearMessages" :disabled="isBusy">新会话</button>
               <button class="btn-red" @click="sendMessage">发送任务</button>
+            </div>
+          </div>
+          <div v-if="showFileChanges && sessionFileChanges.length > 0" class="file-changes-panel">
+            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">本次会话文件变更</div>
+            <div v-for="(fc, i) in sessionFileChanges" :key="i" class="file-change-item">
+              <span :class="['fc-action', fc.action]">{{ fc.action === 'create' ? '+' : fc.action === 'delete' ? '-' : '~' }}</span>
+              <span class="fc-path">{{ fc.path }}</span>
+              <span class="fc-time">{{ fc.time }}</span>
             </div>
           </div>
         </div>
@@ -1838,6 +2217,12 @@ onMounted(async () => {
 
           <div v-if="expandedModelId === 'openrouter/auto'" class="model-settings">
             <ModelSettingsPanel :config="getModelConfig('openrouter/auto')" :hint="getAutoConfigHint('openrouter/auto')" @auto-configure="autoConfigure('openrouter/auto')" />
+          </div>
+          <div class="role-presets">
+            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
+            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
+              {{ preset.icon }} {{ preset.name }}
+            </button>
           </div>
         </template>
 
@@ -1917,6 +2302,12 @@ onMounted(async () => {
             <span>模型名称</span>
             <input v-model="apiModel" placeholder="qwen3.6-plus" />
           </label>
+          <div class="role-presets">
+            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
+            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
+              {{ preset.icon }} {{ preset.name }}
+            </button>
+          </div>
           <div v-if="expandedModelId && apiModels.find(m => m.id === expandedModelId)" class="model-settings">
             <ModelSettingsPanel :config="getModelConfig(expandedModelId)" :hint="getAutoConfigHint(expandedModelId)" @auto-configure="autoConfigure(expandedModelId)" />
           </div>
@@ -2133,19 +2524,26 @@ onMounted(async () => {
           <p v-else-if="ollamaModel && selectedOllamaModelToolSupport === true" class="hint ok">
             ★ 该模型支持工具调用，可使用全功能编程。
           </p>
+          <div class="role-presets">
+            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
+            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
+              {{ preset.icon }} {{ preset.name }}
+            </button>
+          </div>
         </template>
 
         <div class="field-group-title">对话设置</div>
-        <label class="field" style="flex-direction: row; align-items: center; justify-content: space-between;">
-          <span style="flex-shrink: 0;">自动授权工具调用</span>
-          <div style="display: flex; align-items: center; gap: 6px;">
-            <span style="font-size: 11px; color: #888;">{{ autoApprove ? '已开启' : '需手动审批' }}</span>
-            <button :class="['toggle-btn', { on: autoApprove }]" @click="autoApprove = !autoApprove">
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
+        <label class="field">
+          <span>工具调用审批</span>
+          <select v-model="toolApprovalMode" class="select-input" style="width: 100%;">
+            <option value="auto">🟢 全部自动 — AI 直接执行所有操作</option>
+            <option value="smart">🟡 智能审批 — 安全操作自动，风险操作需确认</option>
+            <option value="manual">🔴 全部手动 — 每次操作都需确认</option>
+          </select>
         </label>
-        <p v-if="autoApprove" style="font-size: 11px; color: #FF9800; margin: -4px 0 4px 0;">⚠ 开启后 AI 可直接读写文件和执行命令，无需逐次审批</p>
+        <p v-if="toolApprovalMode === 'auto'" style="font-size: 11px; color: #FF9800; margin: -4px 0 4px 0;">⚠ AI 可直接读写文件和执行命令，无需审批</p>
+        <p v-else-if="toolApprovalMode === 'smart'" style="font-size: 11px; color: #4af; margin: -4px 0 4px 0;">读取/搜索自动通过，写入/编辑/命令需确认</p>
+        <p v-else style="font-size: 11px; color: #888; margin: -4px 0 4px 0;">所有工具调用都需要手动确认</p>
 
         <div class="field" style="border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;">
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
@@ -2221,14 +2619,71 @@ onMounted(async () => {
             </div>
 
             <div v-if="projectConversations.length > 0" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-              <div style="font-size: 11px; color: #888; margin-bottom: 4px;">对话历史</div>
-              <div v-for="c in projectConversations" :key="c.session_id" class="conv-item" @click="loadConversationHistory(c.session_id)">
-                <span style="font-size: 11px;">{{ c.session_id.slice(0, 8) }}... ({{ c.message_count }}条)</span>
-                <select v-if="projects.length > 1" class="copy-select" @change="(e: any) => { copyConversationToProject(c.session_id, e.target.value); e.target.value = ''; }">
-                  <option value="">复制到...</option>
-                  <option v-for="tp in projects.filter((x: any) => x.id !== activeProject?.id)" :key="tp.id" :value="tp.id">{{ tp.name }}</option>
-                </select>
+              <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 4px;">
+                <span style="font-size: 11px; color: #888;">对话历史</span>
+                <div style="flex: 1; display: flex; gap: 2px;">
+                  <input v-model="convSearchQuery" placeholder="搜索对话..." style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="searchConversations" />
+                  <button v-if="convSearchQuery" class="btn-icon-sm" @click="clearConvSearch" title="清除搜索" style="font-size: 10px;">✕</button>
+                  <button class="btn-icon-sm" @click="searchConversations" title="搜索" style="font-size: 10px;">🔍</button>
+                </div>
               </div>
+              <div v-for="c in projectConversations" :key="c.session_id" class="conv-item">
+                <div style="flex: 1; min-width: 0;" @click="loadConversationHistory(c.session_id)">
+                  <template v-if="editingConvId === c.session_id">
+                    <div style="display: flex; gap: 2px;">
+                      <input v-model="editingConvTitle" style="flex: 1; font-size: 10px; padding: 1px 4px; border-radius: 2px; border: 1px solid #555; background: #1a1a1a; color: #ddd;" @keydown.enter="saveRenameConversation(c.session_id)" @keydown.escape="cancelRenameConversation" />
+                      <button class="btn-icon-sm" @click="saveRenameConversation(c.session_id)" style="font-size: 9px;">✓</button>
+                      <button class="btn-icon-sm" @click="cancelRenameConversation" style="font-size: 9px;">✕</button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div style="font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" :title="c.title || c.session_id">{{ c.title || c.session_id.slice(0, 8) + '...' }}</div>
+                    <div style="font-size: 10px; color: #666;">{{ c.message_count }}条 · {{ c.updated_at ? c.updated_at.slice(0, 10) : '' }}</div>
+                    <div v-if="c.snippet" style="font-size: 10px; color: #888; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" v-html="c.snippet"></div>
+                  </template>
+                </div>
+                <div style="display: flex; gap: 1px; flex-shrink: 0;">
+                  <button class="btn-icon-sm" @click.stop="startRenameConversation(c.session_id, c.title || '')" title="重命名" style="font-size: 9px;">✏️</button>
+                  <button class="btn-icon-sm" @click.stop="deleteConversation(c.session_id)" title="删除" style="font-size: 9px;">🗑️</button>
+                  <select v-if="projects.length > 1" class="copy-select" style="font-size: 9px;" @change="(e: any) => { copyConversationToProject(c.session_id, e.target.value); e.target.value = ''; }">
+                    <option value="">复制</option>
+                    <option v-for="tp in projects.filter((x: any) => x.id !== activeProject?.id)" :key="tp.id" :value="tp.id">{{ tp.name }}</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">开发工作流</span>
+            </div>
+            <div style="display: flex; flex-wrap: wrap; gap: 3px;">
+              <button class="workflow-btn" @click="applyWorkflow('new-project')">🏗️ 新项目</button>
+              <button class="workflow-btn" @click="applyWorkflow('bugfix')">🐛 Bug修复</button>
+              <button class="workflow-btn" @click="applyWorkflow('refactor')">🔧 重构</button>
+              <button class="workflow-btn" @click="applyWorkflow('docs')">📚 文档化</button>
+              <button class="workflow-btn" @click="applyWorkflow('deploy')">🚀 部署</button>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">项目记忆 (CLAUDE.md)</span>
+              <button class="btn-icon-sm" @click="showMemoryPanel = !showMemoryPanel; if (showMemoryPanel) loadMemoryContent()" :title="showMemoryPanel ? '收起' : '展开'" style="font-size: 10px;">{{ showMemoryPanel ? '▼' : '▶' }}</button>
+            </div>
+            <div v-if="showMemoryPanel" style="margin-top: 4px;">
+              <div style="font-size: 10px; color: #666; margin-bottom: 4px;">项目级记忆（当前项目目录下的 CLAUDE.md）</div>
+              <textarea v-model="memoryContent" rows="6" placeholder="在此编辑项目记忆，AI 每次对话都会读取此内容..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+              <div style="display: flex; gap: 4px; margin-top: 4px;">
+                <button class="btn-sm" @click="saveMemoryContent" style="flex: 1;">保存项目记忆</button>
+                <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: #2a3a2a;">+ 技术栈</button>
+                <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: #2a3a2a;">+ 规范</button>
+                <button class="btn-sm" @click="appendMemory('常用命令: ')" style="background: #2a3a2a;">+ 命令</button>
+              </div>
+              <div style="font-size: 10px; color: #666; margin-top: 8px; margin-bottom: 4px;">全局记忆（所有项目共享，存储在 ~/.claude/CLAUDE.md）</div>
+              <textarea v-model="globalMemoryContent" rows="3" placeholder="全局记忆，适用于所有项目..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+              <button class="btn-sm" @click="saveGlobalMemory" style="margin-top: 4px;">保存全局记忆</button>
             </div>
           </div>
         </div>
@@ -2263,6 +2718,7 @@ const ModelSettingsPanel = defineComponent({
   },
   emits: ["auto-configure"],
   setup(props, { emit }) {
+    const showAdvanced = ref(false);
     return () => h("div", { class: "model-settings-inner" }, [
       h("div", { class: "settings-header" }, [
         h("span", { class: "settings-title" }, "模型参数"),
@@ -2318,6 +2774,60 @@ const ModelSettingsPanel = defineComponent({
           onInput: (e: Event) => { props.config.systemPrompt = (e.target as HTMLTextAreaElement).value; },
         }),
       ]),
+      h("div", {
+        class: "advanced-toggle",
+        onClick: () => { showAdvanced.value = !showAdvanced.value; },
+      }, [
+        h("span", {}, showAdvanced.value ? "▼ 高级参数" : "▶ 高级参数"),
+      ]),
+      showAdvanced.value ? h("div", { class: "advanced-params" }, [
+        h("label", { class: "field" }, [
+          h("span", "Top P（核采样）"),
+          h("div", { class: "range-row" }, [
+            h("input", {
+              type: "number", min: "0", max: "1", step: "0.05",
+              placeholder: "1.0", class: "short-input",
+              value: props.config.topP || "",
+              onInput: (e: Event) => { props.config.topP = (e.target as HTMLInputElement).value; },
+            }),
+            h("span", { class: "range-hint" }, "0.1=聚焦 1.0=开放"),
+          ]),
+        ]),
+        h("label", { class: "field" }, [
+          h("span", "频率惩罚"),
+          h("div", { class: "range-row" }, [
+            h("input", {
+              type: "number", min: "-2", max: "2", step: "0.1",
+              placeholder: "0", class: "short-input",
+              value: props.config.frequencyPenalty || "",
+              onInput: (e: Event) => { props.config.frequencyPenalty = (e.target as HTMLInputElement).value; },
+            }),
+            h("span", { class: "range-hint" }, "降低重复词"),
+          ]),
+        ]),
+        h("label", { class: "field" }, [
+          h("span", "存在惩罚"),
+          h("div", { class: "range-row" }, [
+            h("input", {
+              type: "number", min: "-2", max: "2", step: "0.1",
+              placeholder: "0", class: "short-input",
+              value: props.config.presencePenalty || "",
+              onInput: (e: Event) => { props.config.presencePenalty = (e.target as HTMLInputElement).value; },
+            }),
+            h("span", { class: "range-hint" }, "鼓励新话题"),
+          ]),
+        ]),
+        h("label", { class: "field" }, [
+          h("span", "停止词"),
+          h("input", {
+            type: "text",
+            placeholder: "用逗号分隔，如: \\n,###",
+            class: "short-input",
+            value: props.config.stopSequences || "",
+            onInput: (e: Event) => { props.config.stopSequences = (e.target as HTMLInputElement).value; },
+          }),
+        ]),
+      ]) : null,
     ]);
   },
 });
@@ -2477,6 +2987,187 @@ export default { name: "App" };
 .btn-msg-del:hover {
   color: #f44;
   background: rgba(255, 68, 68, 0.1);
+}
+
+.btn-msg-action {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+.btn-msg-action:hover {
+  color: #4af;
+  background: rgba(68, 170, 255, 0.1);
+}
+
+.role-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: center;
+  margin: 4px 0;
+}
+
+.role-btn {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #aaa;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+
+.role-btn:hover {
+  border-color: #555;
+  color: #ddd;
+}
+
+.role-btn.active {
+  border-color: #4af;
+  color: #4af;
+  background: rgba(68, 170, 255, 0.1);
+}
+
+.context-bar-wrap {
+  flex: 1;
+  max-width: 120px;
+  height: 4px;
+  background: #222;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.context-bar {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s, background 0.3s;
+}
+
+.slash-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.4);
+}
+
+.slash-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.slash-item:hover {
+  background: #252525;
+}
+
+.slash-name {
+  font-size: 12px;
+  color: #4af;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.slash-desc {
+  font-size: 11px;
+  color: #888;
+}
+
+.file-changes-panel {
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: #111;
+  border-radius: 4px;
+  border: 1px solid #222;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.file-change-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.fc-action {
+  font-weight: bold;
+  width: 14px;
+  text-align: center;
+  font-family: monospace;
+}
+
+.fc-action.create { color: #4f4; }
+.fc-action.modify { color: #fa0; }
+.fc-action.delete { color: #f44; }
+
+.fc-path {
+  flex: 1;
+  min-width: 0;
+  color: #aaa;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: monospace;
+}
+
+.fc-time {
+  color: #555;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.advanced-toggle {
+  padding: 4px 0;
+  cursor: pointer;
+  color: #666;
+  font-size: 11px;
+  user-select: none;
+  transition: color 0.15s;
+}
+
+.advanced-toggle:hover {
+  color: #aaa;
+}
+
+.advanced-params {
+  padding-top: 4px;
+  border-top: 1px solid #222;
+}
+
+.workflow-btn {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #aaa;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.workflow-btn:hover {
+  border-color: #4af;
+  color: #4af;
+  background: rgba(68, 170, 255, 0.08);
 }
 
 .msg .msg-footer {
