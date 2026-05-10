@@ -10,6 +10,10 @@ type ChatMessage = {
   time: string;
   model?: string;
   toolStatus?: string;
+  completedAt?: string;
+  durationMs?: number;
+  tokens?: number;
+  rating?: number;
 };
 
 type DesktopSettings = {
@@ -117,6 +121,8 @@ const apiModels = ref<ModelInfo[]>([]);
 const cloudModels = ref<ModelInfo[]>([]);
 const loadingModels = ref(false);
 const expandedModelId = ref("");
+const modelDropdownOpen = ref(false);
+const messageStartTime = ref(0);
 const hardwareInfo = ref<any>(null);
 const apiServiceRunning = ref(false);
 const qwenToken = ref("");
@@ -229,13 +235,71 @@ async function checkApiServiceStatus() {
   }
 }
 
+async function autoActivateApiService() {
+  try {
+    if (apiBaseUrl.value.trim()) {
+      await checkQwenAccounts();
+    }
+
+    if (stickyEmail.value && qwenAccounts.value.length > 0) {
+      const isStickyValid = qwenAccounts.value.find((a: any) => a.email === stickyEmail.value && a.valid);
+      if (isStickyValid) {
+        try {
+          await callBackend("setStickyAccount", JSON.stringify({
+            baseUrl: apiBaseUrl.value.trim(),
+            adminKey: "admin",
+            email: stickyEmail.value,
+          }));
+        } catch { /* ignore */ }
+      }
+    } else if (qwenAccounts.value.length > 0) {
+      const firstValid = qwenAccounts.value.find((a: any) => a.valid);
+      if (firstValid) {
+        await setStickyAccount(firstValid.email);
+      }
+    }
+
+    const checkResult = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
+    const serviceRunning = checkResult && checkResult.running;
+
+    if (serviceRunning) {
+      apiServiceRunning.value = true;
+      apiStepProgress.value = 2;
+    }
+
+    if (apiModels.value.length === 0 && apiBaseUrl.value.trim()) {
+      await loadApiModels();
+    }
+
+    if (!serviceRunning) {
+      return;
+    }
+
+    if (!apiKey.value.trim()) {
+      const keyResult = await callBackend("fetchApiKey", JSON.stringify({ baseUrl: apiBaseUrl.value.trim(), adminKey: "admin" }));
+      if (keyResult && keyResult.ok && keyResult.key) {
+        apiKey.value = keyResult.key;
+      }
+    }
+
+    if (apiStepProgress.value < apiSteps.length) {
+      apiStepProgress.value = apiSteps.length;
+      apiStepMessage.value = "✓ API 服务已就绪，可以开始编程";
+    }
+
+    await saveSettings();
+  } catch (e) {
+    console.warn("[autoActivateApiService] error:", e);
+  }
+}
+
 function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 const userName = ref("你");
 const assistantName = ref("助手");
-const autoApprove = ref(false);
+const autoApprove = ref(true); // 默认启用自动授权
 const pendingQueue = ref<string[]>([]);
 
 const projects = ref<any[]>([]);
@@ -465,6 +529,7 @@ async function doSend(text: string, addUserMsg: boolean = false) {
     addMessage("user", text);
   }
   currentAssistantId.value = addMessage("assistant", "", displayName(currentModel));
+  messageStartTime.value = Date.now();
   isBusy.value = true;
 
   if (busyTimeoutId) clearTimeout(busyTimeoutId);
@@ -701,6 +766,10 @@ async function loadConversationHistory(sessionId: string) {
         text: m.text || "",
         time: m.time || new Date().toLocaleTimeString(),
         model: m.model,
+        completedAt: m.completedAt,
+        durationMs: m.durationMs,
+        tokens: m.tokens,
+        rating: m.rating,
       }));
     }
   } catch (e) {
@@ -727,6 +796,10 @@ async function saveCurrentConversation() {
       text: m.text,
       time: m.time,
       model: m.model,
+      completedAt: m.completedAt,
+      durationMs: m.durationMs,
+      tokens: m.tokens,
+      rating: m.rating,
     }));
     await callBackend("saveConversation", activeProject.value.id, sessionId.value, JSON.stringify(msgs));
   } catch (e) {
@@ -737,6 +810,27 @@ async function saveCurrentConversation() {
 async function clearMessages() {
   messages.value = [];
   await createSession();
+}
+
+function rateMessage(id: string, rating: number) {
+  const target = messages.value.find((m) => m.id === id);
+  if (target) {
+    target.rating = target.rating === rating ? 0 : rating;
+    saveCurrentConversation();
+  }
+}
+
+function deleteMessage(id: string) {
+  messages.value = messages.value.filter((m) => m.id !== id);
+  saveCurrentConversation();
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const min = Math.floor(ms / 60000);
+  const sec = Math.floor((ms % 60000) / 1000);
+  return `${min}m${sec}s`;
 }
 
 async function saveSettings() {
@@ -1036,6 +1130,7 @@ async function checkQwenAccounts() {
         activation_pending: !!a.activation_pending,
       }));
       stickyEmail.value = result.sticky_email || "";
+      saveLocalSettings();
     }
   } catch { /* ignore */ }
 }
@@ -1397,7 +1492,118 @@ const categorizedModels = computed(() => {
   return { local, cloud };
 });
 
+// 从 localStorage 加载设置
+function loadLocalSettings() {
+  try {
+    const saved = localStorage.getItem("claude-desktop-settings");
+    if (saved) {
+      const data = JSON.parse(saved);
+      if (typeof data.autoApprove === "boolean") {
+        autoApprove.value = data.autoApprove;
+      }
+      if (typeof data.runMode === "string") {
+        runMode.value = data.runMode;
+      }
+      if (typeof data.apiHost === "string") {
+        apiHost.value = data.apiHost;
+      }
+      if (typeof data.apiPort === "string") {
+        apiPort.value = data.apiPort;
+      }
+      if (typeof data.apiModel === "string") {
+        apiModel.value = data.apiModel;
+      }
+      if (typeof data.apiKey === "string") {
+        apiKey.value = data.apiKey;
+      }
+      if (typeof data.ollamaBaseUrl === "string") {
+        ollamaBaseUrl.value = data.ollamaBaseUrl;
+      }
+      if (typeof data.ollamaModel === "string") {
+        ollamaModel.value = data.ollamaModel;
+      }
+      if (typeof data.apiStepProgress === "number") {
+        apiStepProgress.value = data.apiStepProgress;
+      }
+      if (Array.isArray(data.qwenAccounts)) {
+        qwenAccounts.value = data.qwenAccounts;
+        qwenAccountCount.value = data.qwenAccounts.length;
+      }
+      if (typeof data.stickyEmail === "string") {
+        stickyEmail.value = data.stickyEmail;
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load local settings:", e);
+  }
+}
+
+function saveLocalSettings() {
+  try {
+    const data = {
+      autoApprove: autoApprove.value,
+      runMode: runMode.value,
+      apiHost: apiHost.value,
+      apiPort: apiPort.value,
+      apiModel: apiModel.value,
+      apiKey: apiKey.value,
+      ollamaBaseUrl: ollamaBaseUrl.value,
+      ollamaModel: ollamaModel.value,
+      apiStepProgress: apiStepProgress.value,
+      qwenAccounts: qwenAccounts.value,
+      stickyEmail: stickyEmail.value,
+    };
+    localStorage.setItem("claude-desktop-settings", JSON.stringify(data));
+  } catch (e) {
+    console.error("Failed to save local settings:", e);
+  }
+}
+
+// 监听设置变化，实时保存
+watch(
+  [
+    autoApprove,
+    runMode,
+    apiHost,
+    apiPort,
+    apiModel,
+    apiKey,
+    ollamaBaseUrl,
+    ollamaModel,
+    apiStepProgress,
+  ],
+  () => {
+    saveLocalSettings();
+  },
+  { deep: true }
+);
+
+// 同时自动调用 saveSettings 保存到后端
+watch(
+  [
+    runMode,
+    apiHost,
+    apiPort,
+    apiModel,
+    apiKey,
+    ollamaBaseUrl,
+    ollamaModel,
+  ],
+  () => {
+    // 避免在加载时触发，设置一个小延迟
+    setTimeout(() => {
+      // 这里可以直接调用 saveSettings，但需要检查是否已经完成初始化
+      // 暂时只使用 localStorage，用户可以手动点击保存按钮
+    }, 100);
+  },
+  { deep: true }
+);
+
 onMounted(async () => {
+  document.addEventListener("click", () => { modelDropdownOpen.value = false; });
+
+  loadLocalSettings();
+
   await loadProjects();
   const appState = await callBackend("getState");
   if (appState) {
@@ -1414,7 +1620,8 @@ onMounted(async () => {
   if (runMode.value === "ollama") {
     loadCloudModels("ollama");
   } else if (runMode.value === "api") {
-    checkApiServiceStatus();
+    await checkApiServiceStatus();
+    await autoActivateApiService();
   }
 
   addMessage("assistant", "选择模型并配置参数，打开项目目录后即可下达编码任务。");
@@ -1427,7 +1634,24 @@ onMounted(async () => {
         if (!payload?.text) return;
         const target = messages.value.find((m) => m.id === currentAssistantId.value);
         if (target) {
-          const newText = payload.text;
+          let newText = payload.text;
+          // 过滤 "Not logged in" 提示
+          const isLoginPrompt = 
+            newText.trim() === "Not logged in · Please run /login" ||
+            newText.trim() === "Not logged in · Run /login";
+          if (isLoginPrompt) {
+            return;
+          }
+          // 清理登录提示文本
+          if (newText.includes("Not logged in")) {
+            newText = newText
+              .replace(/Not logged in · Please run \/login/g, "")
+              .replace(/Not logged in · Run \/login/g, "")
+              .trim();
+            if (!newText) {
+              return;
+            }
+          }
           if (newText.startsWith("\x00TOOL\x00")) {
             const statusLine = newText.slice(5);
             target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
@@ -1455,6 +1679,14 @@ onMounted(async () => {
                   target.text = "[模型未返回文本]";
                 }
               }, 500);
+              const target = messages.value.find((m) => m.id === currentAssistantId.value);
+              if (target && messageStartTime.value > 0) {
+                target.completedAt = new Date().toLocaleString("zh-CN");
+                target.durationMs = Date.now() - messageStartTime.value;
+                const textLen = target.text.length;
+                target.tokens = Math.max(1, Math.round(textLen / 2));
+              }
+              messageStartTime.value = 0;
             }
             saveCurrentConversation();
             processQueue();
@@ -1535,10 +1767,28 @@ onMounted(async () => {
               <label>{{ roleLabel(m.role) }}</label>
               <span class="msg-time">{{ m.time }}</span>
               <span v-if="m.model" class="msg-model">{{ m.model }}</span>
+              <div class="msg-actions">
+                <button class="btn-msg-del" @click="deleteMessage(m.id)" title="删除">✕</button>
+              </div>
             </div>
             <pre v-if="m.text">{{ m.text }}</pre>
             <pre v-else-if="m.toolStatus?.trim()" class="tool-status">{{ m.toolStatus }}</pre>
             <pre v-else class="thinking">思考中<span class="dots">...</span></pre>
+            <div v-if="m.role === 'assistant' && m.completedAt" class="msg-footer">
+              <div class="msg-meta">
+                <span>{{ m.completedAt }}</span>
+                <span v-if="m.durationMs">· {{ formatDuration(m.durationMs) }}</span>
+                <span v-if="m.tokens">· ~{{ m.tokens }} tokens</span>
+              </div>
+              <div class="msg-rating">
+                <span
+                  v-for="s in 5" :key="s"
+                  :class="['star', { active: m.rating && m.rating >= s }]"
+                  @click="rateMessage(m.id, s)"
+                  title="评分"
+                >★</span>
+              </div>
+            </div>
           </article>
         </div>
 
@@ -1642,6 +1892,35 @@ onMounted(async () => {
             </div>
           </div>
 
+          <div class="field-group-title">模型选择</div>
+          <div v-if="apiModels.length > 0" class="model-quick-select">
+            <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
+              <div class="custom-select-value">
+                <span>{{ apiModel ? displayName(apiModels.find(m => m.id === apiModel)?.name || apiModel) : '选择模型...' }}</span>
+                <span class="custom-select-arrow">▼</span>
+              </div>
+              <div v-if="modelDropdownOpen" class="custom-select-options">
+                <div
+                  v-for="m in apiModels" :key="m.id"
+                  :class="['custom-select-option', { selected: apiModel === m.id }]"
+                  @click.stop="apiModel = m.id; modelDropdownOpen = false"
+                >
+                  <span>{{ displayName(m.name || m.id) }}</span>
+                  <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
+                  <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
+                </div>
+              </div>
+            </div>
+            <button class="btn-icon" :class="{ active: expandedModelId === apiModel }" @click="toggleModelSettings(apiModel)" title="模型参数">⚙</button>
+          </div>
+          <label class="field">
+            <span>模型名称</span>
+            <input v-model="apiModel" placeholder="qwen3.6-plus" />
+          </label>
+          <div v-if="expandedModelId && apiModels.find(m => m.id === expandedModelId)" class="model-settings">
+            <ModelSettingsPanel :config="getModelConfig(expandedModelId)" :hint="getAutoConfigHint(expandedModelId)" @auto-configure="autoConfigure(expandedModelId)" />
+          </div>
+
           <label class="field">
             <span>API Key</span>
             <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" />
@@ -1649,10 +1928,11 @@ onMounted(async () => {
 
           <div class="qwen-account-section">
             <div class="qwen-account-header">
-              <span>上游账户</span>
+              <span>🔑 上游账户</span>
               <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">
                 {{ qwenAccountCount }} 个
               </span>
+              <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 10px; margin-left: 4px;">{{ qwenValidCount }} 可用</span>
               <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto;">刷新</button>
             </div>
             <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 4px 0;">
@@ -1723,34 +2003,6 @@ onMounted(async () => {
               </p>
             </details>
           </div>
-
-          <div v-if="apiModels.length > 0" class="model-list">
-            <div v-for="m in apiModels" :key="m.id" class="model-row-wrapper">
-              <div
-                :class="['model-row', { selected: apiModel === m.id }]"
-                @click="apiModel = m.id"
-              >
-                <div class="model-row-info">
-                  <span class="model-name">{{ displayName(m.name || m.id) }}</span>
-                  <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
-                  <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
-                </div>
-                <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
-              </div>
-              <div v-if="expandedModelId === m.id" class="model-settings">
-                <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
-              </div>
-            </div>
-          </div>
-
-          <label v-if="apiModels.length > 0" class="field" style="margin-top: 8px;">
-            <span>模型名称（可手动修改）</span>
-            <input v-model="apiModel" placeholder="qwen3.6-plus" />
-          </label>
-
-          <p v-if="apiModel" class="hint ok">
-            ★ API 模式支持工具调用，可使用全功能编程。
-          </p>
         </template>
 
         <template v-else>
@@ -2199,6 +2451,71 @@ export default { name: "App" };
   border-radius: 3px;
 }
 
+.msg .msg-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.msg:hover .msg-actions {
+  opacity: 1;
+}
+
+.btn-msg-del {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+  border-radius: 3px;
+  line-height: 1;
+}
+
+.btn-msg-del:hover {
+  color: #f44;
+  background: rgba(255, 68, 68, 0.1);
+}
+
+.msg .msg-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid #222;
+}
+
+.msg .msg-meta {
+  font-size: 10px;
+  color: #555;
+  display: flex;
+  gap: 4px;
+}
+
+.msg .msg-rating {
+  display: flex;
+  gap: 1px;
+}
+
+.msg .msg-rating .star {
+  font-size: 14px;
+  color: #333;
+  cursor: pointer;
+  transition: color 0.1s;
+  line-height: 1;
+}
+
+.msg .msg-rating .star:hover {
+  color: #888;
+}
+
+.msg .msg-rating .star.active {
+  color: #f5a623;
+}
+
 .msg .thinking {
   color: #666;
   font-style: italic;
@@ -2632,6 +2949,115 @@ export default { name: "App" };
   max-height: 400px;
   overflow-y: auto;
   padding: 2px;
+}
+
+.model-quick-select {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.custom-select {
+  flex: 1;
+  position: relative;
+  cursor: pointer;
+  user-select: none;
+}
+
+.custom-select-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #f0f0f0;
+  font-size: 13px;
+  min-height: 28px;
+}
+
+.custom-select.open .custom-select-value {
+  border-color: #4a90d9;
+  border-radius: 6px 6px 0 0;
+}
+
+.custom-select-arrow {
+  font-size: 10px;
+  color: #888;
+  transition: transform 0.15s;
+}
+
+.custom-select.open .custom-select-arrow {
+  transform: rotate(180deg);
+}
+
+.custom-select-options {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #1a1a1a;
+  border: 1px solid #4a90d9;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  z-index: 100;
+}
+
+.custom-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  color: #ccc;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.custom-select-option:hover {
+  background: #2a2a2a;
+  color: #fff;
+}
+
+.custom-select-option.selected {
+  background: #333;
+  color: #fff;
+}
+
+.account-details-section {
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  padding: 0;
+  margin: 4px 0;
+}
+
+.account-details-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #ccc;
+  font-weight: 500;
+  list-style: none;
+}
+
+.account-details-summary::-webkit-details-marker {
+  display: none;
+}
+
+.account-details-summary::before {
+  content: '▶';
+  font-size: 9px;
+  color: #666;
+  transition: transform 0.15s;
+}
+
+.account-details-section[open] .account-details-summary::before {
+  transform: rotate(90deg);
 }
 
 .model-row-wrapper {

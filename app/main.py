@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 云集智能编程工作站 - 统一启动器 v3.0
 所有功能内嵌在一个 EXE 中，不再依赖 Electron
@@ -66,6 +66,30 @@ def get_version_from_filename():
 
 
 VERSION = get_version_from_filename()
+
+# ── 单实例控制：新实例杀掉旧实例 ──
+def _ensure_single_instance():
+    my_pid = os.getpid()
+    try:
+        my_exe = os.path.normcase(os.path.abspath(sys.executable))
+    except Exception:
+        return
+    for proc in psutil.process_iter(["pid", "exe", "cmdline"]):
+        try:
+            if proc.info["pid"] == my_pid:
+                continue
+            if not proc.info["exe"]:
+                continue
+            if os.path.normcase(proc.info["exe"]) != my_exe:
+                continue
+            cmdline = proc.info.get("cmdline") or []
+            if getattr(sys, "frozen", False):
+                proc.kill()
+            else:
+                if any("main.py" in arg for arg in cmdline):
+                    proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
 
 # ── 环境路径常量 ──
 NODE_VERSION = "v24.11.1"
@@ -1230,6 +1254,8 @@ class BackendBridge(QObject):
                 env_overrides["API_MODEL"] = api_model
                 if api_key:
                     env_overrides["API_KEY"] = api_key
+                    env_overrides["ANTHROPIC_API_KEY"] = api_key
+                env_overrides["ANTHROPIC_BASE_URL"] = api_base
             else:
                 env_overrides["MODEL_PROVIDER"] = "anthropic"
                 env_overrides.pop("OLLAMA_BASE_URL", None)
@@ -1253,7 +1279,7 @@ class BackendBridge(QObject):
 
             is_resuming = main.active_session_id in main.started_sessions
 
-            system_prompt = self._build_system_prompt(settings)
+            system_prompt = self._build_system_prompt(settings, main.current_workspace)
 
             def _on_delta(text):
                 self.deltaReceived.emit(json.dumps({"text": text}))
@@ -1308,13 +1334,18 @@ class BackendBridge(QObject):
 
 
     @staticmethod
-    def _build_system_prompt(settings: dict) -> str:
+    def _build_system_prompt(settings: dict, workspace: str = "") -> str:
         custom_prompt = (settings.get("SYSTEM_PROMPT") or "").strip()
         if custom_prompt:
             return custom_prompt
 
         language = (settings.get("AI_LANGUAGE") or "zh").strip().lower()
         parts = []
+
+        if workspace:
+            parts.append(f"当前项目工作目录: {workspace}")
+            parts.append(f"所有文件操作（创建、读取、编辑）都应在此目录下进行。创建文件时请使用相对于此目录的路径。")
+            parts.append("")
 
         if language == "zh":
             parts.append("你是一个专业的AI编程助手，请始终使用中文回答。")
@@ -1535,12 +1566,48 @@ class EnvInstaller:
                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if r.returncode == 0:
                 self.log("✓ 依赖安装完成")
+                self._fix_jsonc_parser_esm()
                 return True
             self.log(f"[警告] bun install 返回码: {r.returncode}", "#FF9800")
             return False
         except Exception as e:
             self.log(f"[错误] 依赖安装失败: {e}", "#F44336")
             return False
+
+    def _fix_jsonc_parser_esm(self):
+        esm_dir = os.path.join(self.base_dir, "node_modules", "jsonc-parser", "lib", "esm")
+        if not os.path.isdir(esm_dir):
+            return
+        pkg_path = os.path.join(esm_dir, "package.json")
+        if not os.path.exists(pkg_path):
+            try:
+                with open(pkg_path, 'w', encoding='utf-8') as f:
+                    f.write('{"type":"module"}')
+                self.log("  修复 jsonc-parser ESM 类型声明")
+            except Exception:
+                pass
+        targets = ['scanner', 'parser', 'format', 'edit', 'string-intern']
+        count = 0
+        for root, dirs, files in os.walk(esm_dir):
+            for fname in files:
+                if not fname.endswith('.js'):
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    original = content
+                    for t in targets:
+                        content = content.replace(f"from './{t}'", f"from './{t}.js'")
+                        content = content.replace(f"from '../{t}'", f"from '../{t}.js'")
+                    if content != original:
+                        with open(fpath, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                        count += 1
+                except Exception:
+                    pass
+        if count:
+            self.log(f"  修复 jsonc-parser ESM 导入 ({count} 文件)")
 
     def build_frontend(self):
         dist = os.path.join(self.base_dir, "desktop", "dist")
@@ -1650,6 +1717,10 @@ try {{
         env = os.environ.copy()
         env["UV_PYTHON_INSTALL_DIR"] = self.uv_python_dir
         env["UV_PYTHON_DOWNLOADS"] = "auto"
+        # 设置 UV 缓存目录设置到我们的 app 目录下，避免权限问题
+        uv_cache_dir = os.path.join(self.base_dir, ".uv_cache")
+        os.makedirs(uv_cache_dir, exist_ok=True)
+        env["UV_CACHE_DIR"] = uv_cache_dir
         python_mirror = self.mirror.get("uv_python_mirror", "")
         if python_mirror:
             env["UV_PYTHON_INSTALL_MIRROR"] = python_mirror
@@ -1677,45 +1748,117 @@ try {{
         try:
             env = self._uv_env()
 
-            if not os.path.isfile(self.venv_python):
-                self.log("正在创建虚拟环境 (uv + Python 3.12)...")
-                r = subprocess.run(
-                    [self.uv_exe, "venv", self.venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
-                    env=env, capture_output=True, text=True, timeout=300,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-                if r.returncode != 0:
-                    mirror = self.mirror
-                    python_mirror = mirror.get("uv_python_mirror", "")
-                    if python_mirror and "UV_PYTHON_INSTALL_MIRROR" in env:
-                        self.log("镜像下载 Python 失败，尝试直连下载...", "#FF9800")
-                        env_fallback = env.copy()
-                        del env_fallback["UV_PYTHON_INSTALL_MIRROR"]
-                        r = subprocess.run(
-                            [self.uv_exe, "venv", self.venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
-                            env=env_fallback, capture_output=True, text=True, timeout=300,
-                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                        )
-                if r.returncode != 0:
-                    self.log(f"[错误] 创建虚拟环境失败: {r.stderr[:500]}", "#F44336")
+            # 获取绝对路径
+            uv_exe_abs = os.path.abspath(self.uv_exe)
+            venv_dir_abs = os.path.abspath(self.venv_dir)
+            venv_python_abs = os.path.abspath(self.venv_python)
+            req_file_abs = os.path.abspath(req_file)
+            base_dir_abs = os.path.abspath(self.base_dir)
+
+            # 确保脚本目录存在
+            scripts_dir = os.path.dirname(venv_dir_abs)
+            os.makedirs(scripts_dir, exist_ok=True)
+
+            # 检查虚拟环境是否完整
+            venv_valid = False
+            if os.path.isfile(venv_python_abs):
+                # 检查是否有 pip
+                pip_exe = os.path.join(venv_dir_abs, "Scripts", "pip.exe")
+                if not os.path.exists(pip_exe):
+                    pip_exe = os.path.join(venv_dir_abs, "bin", "pip")
+                if os.path.exists(pip_exe):
+                    venv_valid = True
+                    self.log(f"✓ 虚拟环境已存在且有效: {venv_python_abs}")
+                else:
+                    self.log(f"  警告: 虚拟环境已存在但缺少 pip.exe，需要重建", "#FF9800")
+            
+            if not venv_valid:
+                self.log("正在创建虚拟环境...")
+                self.log(f"  虚拟环境目录: {venv_dir_abs}")
+                # 先删除旧的虚拟环境（如果存在）
+                if os.path.exists(venv_dir_abs):
+                    import shutil
+                    try:
+                        shutil.rmtree(venv_dir_abs)
+                        self.log(f"  已清理旧的虚拟环境目录")
+                    except Exception as e:
+                        self.log(f"  警告：无法清理旧的虚拟环境目录: {e}")
+                # 直接用 Python 自带的 venv 来创建虚拟环境，更可靠
+                try:
+                    import venv
+                    self.log("  使用 Python venv 创建虚拟环境...")
+                    venv.create(venv_dir_abs, with_pip=True)
+                    self.log("  ✓ venv 创建成功")
+                except Exception as e:
+                    self.log(f"  警告: venv 创建失败: {e}, 尝试用 uv...", "#FF9800")
+                    # 如果 venv 失败，再试 uv
+                    r = subprocess.run(
+                        [uv_exe_abs, "venv", self.venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                        env=env, capture_output=True, text=True, timeout=600,
+                        cwd=base_dir_abs,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                    if r.returncode != 0:
+                        self.log(f"  uv 创建也失败 (返回码: {r.returncode})", "#FF9800")
+                        if r.stdout:
+                            self.log(f"  stdout: {r.stdout[:500]}")
+                        if r.stderr:
+                            self.log(f"  stderr: {r.stderr[:500]}", "#FF9800")
+                # 验证虚拟环境是否创建成功
+                if not os.path.exists(venv_python_abs):
+                    self.log(f"[错误] 找不到 python.exe: {venv_python_abs}", "#F44336")
+                    # 列出目录内容以调试
+                    if os.path.exists(venv_dir_abs):
+                        contents = os.listdir(venv_dir_abs)
+                        self.log(f"  虚拟环境目录内容: {contents}")
                     return False
                 self.log("✓ 虚拟环境已创建")
 
-            self.log("正在安装 API 服务依赖 (uv pip)...")
-            r = subprocess.run(
-                [self.uv_exe, "pip", "install", "-r", req_file, "--python", self.venv_python],
-                env=env, capture_output=True, text=True, timeout=600,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
+            self.log("正在安装 API 服务依赖...")
+            # 先确保 pip 是最新的
+            pip_exe = os.path.join(venv_dir_abs, "Scripts", "pip.exe")
+            if not os.path.exists(pip_exe):
+                pip_exe = os.path.join(venv_dir_abs, "bin", "pip")
+            if os.path.exists(pip_exe):
+                self.log(f"  使用 pip: {pip_exe}")
+                # 升级 pip
+                self.log("  升级 pip...")
+                subprocess.run(
+                    [pip_exe, "install", "--upgrade", "pip"],
+                    env=env, capture_output=True, text=True, timeout=300,
+                    cwd=base_dir_abs,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                # 安装依赖
+                self.log("  安装依赖包...")
+                r = subprocess.run(
+                    [pip_exe, "install", "-r", req_file_abs],
+                    env=env, capture_output=True, text=True, timeout=600,
+                    cwd=base_dir_abs,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            else:
+                self.log(f"  警告: pip.exe 不存在，尝试用 uv pip")
+                # 备选：用 venv 的目录作为 cwd 来运行 uv pip
+                r = subprocess.run(
+                    [uv_exe_abs, "pip", "install", "-r", req_file],
+                    env=env, capture_output=True, text=True, timeout=600,
+                    cwd=venv_dir_abs,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
             if r.returncode == 0:
                 self.log("✓ API 服务依赖安装完成")
                 return True
             self.log(f"[警告] API 服务依赖安装返回码: {r.returncode}", "#FF9800")
+            if r.stdout:
+                self.log(f"  stdout: {r.stdout[:500]}")
             if r.stderr:
                 self.log(f"  stderr: {r.stderr[:500]}", "#FF9800")
             return False
         except Exception as e:
             self.log(f"[错误] API 服务依赖安装失败: {e}", "#F44336")
+            import traceback
+            self.log(f"  堆栈: {traceback.format_exc()[:500]}", "#F44336")
             return False
 
 
@@ -1858,25 +2001,25 @@ class MainWindow(QMainWindow):
             pass
 
         # 基础目录
-        # 架构（对齐参考项目）:
-        #   dev/*.exe          = 开发测试 EXE（gitignore）
-        #   dev/_internal/     = PyInstaller 运行时（gitignore）
-        #   dev/app/           = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
-        #   dev/ver/*.exe      = 稳定版 EXE（git 跟踪）
-        #   dev/               = Git 仓库根目录
+        # 架构（对齐参考项目）：
+        #   dev/*.exe      = 开发测试 EXE（gitignore，不推送）
+        #   dev/_internal/ = PyInstaller 运行时（gitignore，不推送）
+        #   dev/app/       = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
+        #   dev/ver/*.exe  = 稳定版 EXE（git 跟踪，推送）
+        #   dev/           = Git 仓库根目录
         #
-        # --onedir 打包后: EXE 在 dev/ 下，_internal/ 也在 dev/ 下
+        # --onedir 打包后：EXE 在 dev/ 下，_internal/ 也在 dev/ 下
         #   desktop/、nodejs/ 等资源在 dev/app/ 下
-        # 开发模式: main.py 在 dev/app/ 下
+        # 开发模式：main.py 在 dev/app/ 下
         if hasattr(sys, 'frozen'):
             # PyInstaller 打包模式：EXE 在 dev/ 下
             exe_dir = os.path.abspath(os.path.dirname(sys.executable))
-            self.base_dir = exe_dir       # dev/ (EXE 所在目录)
-            self.app_dir = os.path.join(exe_dir, "app")  # dev/app/ (资源目录)
+            self.base_dir = exe_dir       # dev/（EXE 所在目录）
+            self.app_dir = os.path.join(exe_dir, "app")  # dev/app/（资源目录）
             self.dev_dir = exe_dir        # dev/ = Git 仓库根
         else:
-            self.base_dir = os.path.dirname(os.path.abspath(__file__))  # dev/app/ (脚本所在)
-            self.app_dir = self.base_dir  # 开发模式: main.py 在 dev/app/ 下
+            self.base_dir = os.path.dirname(os.path.abspath(__file__))  # dev/app/（脚本所在）
+            self.app_dir = self.base_dir  # 开发模式：main.py 在 dev/app/ 下
             self.dev_dir = os.path.dirname(self.base_dir)  # dev/
 
         # 初始化后端（desktop/、nodejs/ 等资源在 app_dir 下）
@@ -1886,6 +2029,7 @@ class MainWindow(QMainWindow):
             os.path.join(self.app_dir, "nodejs", NODE_DIR_NAME),
             os.path.join(self.app_dir, "bun", BUN_DIR_NAME),
         )
+        # 恢复原始设计：EnvInstaller 的 base_dir 是 app_dir，所有资源都在 app/ 目录里
         self.installer = EnvInstaller(self.app_dir)
         self.updater = SoftwareUpdater(self.dev_dir)
         self.project_mgr = ProjectManager(self.app_dir, self.base_dir)
@@ -3009,6 +3153,8 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    _ensure_single_instance()
+
     try:
         import ctypes
         app_id = "YunJi.SmartIDE.Workstation"

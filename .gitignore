@@ -6,6 +6,7 @@
 # 目录架构（对齐参考项目）：
 #   dev/*.exe      = 开发测试 EXE（gitignore，不推送）
 #   dev/_internal/ = PyInstaller 运行时（gitignore，不推送）
+#   dev/projects/  = 用户项目工作区（gitignore，不推送）
 #   dev/app/       = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
 #   dev/ver/*.exe  = 稳定版 EXE（git 跟踪，推送）
 #   dev/           = Git 仓库根目录
@@ -34,6 +35,9 @@
 
 # ── build/ 目录（PyInstaller 工作目录，不推送）──
 /build/
+
+# ── 用户项目目录（用户工作区，不推送）──
+projects/
 
 # ── 运行时环境（由部署维护功能自动安装，不推送）──
 app/nodejs/

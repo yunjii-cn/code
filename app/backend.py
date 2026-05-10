@@ -1911,6 +1911,12 @@ class ClaudeCliRunner:
             return local
         return "node"
 
+    def _find_bun(self) -> str:
+        local = os.path.join(self.bun_dir, "bun.exe")
+        if os.path.exists(local):
+            return local
+        return None
+
     @staticmethod
     def _tool_display_name(name: str) -> str:
         _names = {
@@ -1931,12 +1937,11 @@ class ClaudeCliRunner:
         return _names.get(name, name)
 
     def _build_args(self, session_id: str, model: str, is_resuming: bool,
-                    system_prompt: str = None, auto_approve: bool = False) -> list:
+                    system_prompt: str = None, auto_approve: bool = False,
+                    workspace_path: str = None) -> list:
         env_file = os.path.join(self.project_root, ".env")
         args = [
             f"--env-file-if-exists={env_file}",
-            "--no-warnings",
-            "--import", "tsx",
             self.cli_entry,
             "-p",
             "--output-format", "stream-json",
@@ -1962,16 +1967,28 @@ class ClaudeCliRunner:
             on_log: Callable = None, on_proc: Callable = None,
             system_prompt: str = None, auto_approve: bool = False) -> dict:
         """运行 CLI，返回结果"""
+        bun_path = self._find_bun()
         node_path = self._find_node()
-        args = self._build_args(session_id, model, is_resuming, system_prompt, auto_approve)
+        use_bun = bun_path is not None
+        runner_path = bun_path if use_bun else node_path
+        args = self._build_args(session_id, model, is_resuming, system_prompt, auto_approve, workspace_path)
 
         env = dict(os.environ)
         if os.path.exists(self.node_dir):
             env["PATH"] = self.node_dir + ";" + env.get("PATH", "")
         if os.path.exists(self.bun_dir):
             env["PATH"] = self.bun_dir + ";" + env.get("PATH", "")
+        node_modules_dir = os.path.join(self.project_root, "node_modules")
+        if os.path.isdir(node_modules_dir):
+            existing_node_path = env.get("NODE_PATH", "")
+            if existing_node_path:
+                env["NODE_PATH"] = node_modules_dir + ";" + existing_node_path
+            else:
+                env["NODE_PATH"] = node_modules_dir
         if env_overrides:
             env.update(env_overrides)
+        if workspace_path and os.path.isdir(workspace_path):
+            env["CLAUDE_CODE_WORKSPACE"] = workspace_path
 
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -1980,27 +1997,31 @@ class ClaudeCliRunner:
             if on_log:
                 on_log(msg, color)
 
-        _log(f"[CLI] 启动: node_path={node_path} entry_exists={os.path.exists(self.cli_entry)}")
+        _log(f"[CLI] 启动: runner={runner_path} bun={use_bun} entry_exists={os.path.exists(self.cli_entry)}")
         _log(f"[CLI] MODEL_PROVIDER={env.get('MODEL_PROVIDER')} API_BASE_URL={env.get('API_BASE_URL')} OLLAMA_BASE_URL={env.get('OLLAMA_BASE_URL')} API_MODEL={env.get('API_MODEL')} OLLAMA_MODEL={env.get('OLLAMA_MODEL')}")
 
         _log_path = os.path.join(self.project_root, "cli_debug.log")
         _log_file = open(_log_path, "a", encoding="utf-8")
         _log_file.write(f"=== CLI Debug Log {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        _log_file.write(f"node_path={node_path}\n")
-        _log_file.write(f"args={[node_path] + args}\n")
-        _log_file.write(f"cwd={workspace_path or self.project_root}\n")
+        _log_file.write(f"runner={runner_path}\n")
+        _log_file.write(f"use_bun={use_bun}\n")
+        _log_file.write(f"args={[runner_path] + args}\n")
+        _log_file.write(f"cwd={self.project_root}\n")
+        _log_file.write(f"workspace_path={workspace_path}\n")
+        _log_file.write(f"project_root={self.project_root}\n")
         _log_file.write(f"env_overrides={env_overrides}\n")
         _log_file.write(f"MODEL_PROVIDER={env.get('MODEL_PROVIDER')}\n")
-        _log_file.write(f"ANTHROPIC_BASE_URL={env.get('ANTHROPIC_BASE_URL')}\n")
-        _log_file.write(f"ANTHROPIC_MODEL={env.get('ANTHROPIC_MODEL')}\n")
-        _log_file.write(f"node_exists={os.path.exists(node_path)}\n")
+        _log_file.write(f"API_BASE_URL={env.get('API_BASE_URL')}\n")
+        _log_file.write(f"API_MODEL={env.get('API_MODEL')}\n")
+        _log_file.write(f"NODE_PATH={env.get('NODE_PATH')}\n")
+        _log_file.write(f"runner_exists={os.path.exists(runner_path)}\n")
         _log_file.write(f"cli_entry_exists={os.path.exists(self.cli_entry)}\n")
         _log_file.flush()
 
         try:
             proc = subprocess.Popen(
-                [node_path] + args,
-                cwd=workspace_path or self.project_root,
+                [runner_path] + args,
+                cwd=self.project_root,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
