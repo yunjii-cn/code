@@ -47,6 +47,7 @@ import backend
 from backend import (
     EnvFileManager, ClaudeCliRunner,
     list_openrouter_models, list_anthropic_models, list_ollama_models, list_api_models,
+    list_zhipu_models, check_zhipu_api, ZHIPU_DEFAULT_BASE_URL,
     SETTINGS_KEYS,
 )
 
@@ -1851,6 +1852,10 @@ class BackendBridge(QObject):
                 api_base = payload.get("baseUrl", "") or settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777"
                 api_key = payload.get("apiKey", "") or settings.get("API_KEY", "")
                 result = list_api_models(api_base, api_key, timeout)
+            elif source == "zhipu":
+                zhipu_key = payload.get("apiKey", "") or settings.get("ZHIPU_API_KEY", "")
+                zhipu_base = payload.get("baseUrl", "") or settings.get("ZHIPU_BASE_URL", "") or ZHIPU_DEFAULT_BASE_URL
+                result = list_zhipu_models(zhipu_key, zhipu_base, timeout)
             else:
                 result = {"ok": False, "error": "Unsupported source."}
             self.modelsLoaded.emit(json.dumps(result))
@@ -2162,6 +2167,28 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollQwenRegister异常: {e}"})
 
+    @pyqtSlot(str, result=str)
+    def checkZhipuApi(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            api_key = payload.get("apiKey", "").strip()
+            base_url = payload.get("baseUrl", "").strip()
+            result = check_zhipu_api(api_key, base_url)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"checkZhipuApi异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def listZhipuModels(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            api_key = payload.get("apiKey", "").strip()
+            base_url = payload.get("baseUrl", "").strip()
+            result = list_zhipu_models(api_key, base_url)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"listZhipuModels异常: {e}"})
+
     # ── 内部方法 ──
 
     def _run_cli(self, prompt: str, model: str, provider: str, settings: dict):
@@ -2192,6 +2219,18 @@ class BackendBridge(QObject):
                     env_overrides["API_KEY"] = api_key
                     env_overrides["ANTHROPIC_API_KEY"] = api_key
                 env_overrides["ANTHROPIC_BASE_URL"] = api_base
+            elif provider == "zhipu":
+                zhipu_base = (settings.get("ZHIPU_BASE_URL", "") or ZHIPU_DEFAULT_BASE_URL).strip()
+                zhipu_model = (settings.get("ZHIPU_MODEL", "") or "glm-4-flash").strip()
+                zhipu_key = (settings.get("ZHIPU_API_KEY", "") or "").strip()
+                main.log_signal.emit(f"[代理] 智谱API模式 模型={zhipu_model} 目标={zhipu_base}", "#2196F3")
+                env_overrides["MODEL_PROVIDER"] = "api"
+                env_overrides["API_BASE_URL"] = zhipu_base
+                env_overrides["API_MODEL"] = zhipu_model
+                if zhipu_key:
+                    env_overrides["API_KEY"] = zhipu_key
+                    env_overrides["ANTHROPIC_API_KEY"] = zhipu_key
+                env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
             else:
                 env_overrides["MODEL_PROVIDER"] = "anthropic"
                 env_overrides.pop("OLLAMA_BASE_URL", None)

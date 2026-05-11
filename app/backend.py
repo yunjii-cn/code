@@ -38,6 +38,7 @@ MODEL_KEYS = [
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "OLLAMA_MODEL",
+    "ZHIPU_MODEL",
 ]
 
 SETTINGS_KEYS = [
@@ -55,6 +56,9 @@ SETTINGS_KEYS = [
     "API_MODEL",
     "API_KEY",
     "API_TIMEOUT_MS",
+    "ZHIPU_API_KEY",
+    "ZHIPU_MODEL",
+    "ZHIPU_BASE_URL",
     "DISABLE_TELEMETRY",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
     "AI_LANGUAGE",
@@ -233,6 +237,90 @@ def list_openrouter_models(timeout_ms: int = 15000) -> dict:
         return {"ok": False, "error": f"OpenRouter API failed ({result['status']})"}
     models = normalize_model_entries((result.get("data") or {}).get("data", []), "openrouter")
     return {"ok": True, "models": models}
+
+
+ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+
+ZHIPU_STATIC_MODELS = [
+    {"id": "glm-4-plus", "name": "GLM-4-Plus", "desc": "旗舰模型，最强推理能力", "toolSupport": True},
+    {"id": "glm-4-flash", "name": "GLM-4-Flash", "desc": "免费模型，快速响应", "toolSupport": True},
+    {"id": "glm-4-flash-250414", "name": "GLM-4-Flash-250414", "desc": "免费模型，最新版本", "toolSupport": True},
+    {"id": "glm-4-air", "name": "GLM-4-Air", "desc": "均衡模型，性价比高", "toolSupport": True},
+    {"id": "glm-4-air-0111", "name": "GLM-4-Air-0111", "desc": "均衡模型，优化版本", "toolSupport": True},
+    {"id": "glm-4-long", "name": "GLM-4-Long", "desc": "长文本模型，128K上下文", "toolSupport": True},
+    {"id": "glm-4v", "name": "GLM-4V", "desc": "视觉模型，支持图片理解", "toolSupport": False},
+    {"id": "glm-4v-plus", "name": "GLM-4V-Plus", "desc": "增强视觉模型", "toolSupport": False},
+    {"id": "glm-4", "name": "GLM-4", "desc": "标准模型", "toolSupport": True},
+    {"id": "glm-3-turbo", "name": "GLM-3-Turbo", "desc": "轻量快速模型", "toolSupport": True},
+]
+
+
+def list_zhipu_models(api_key: str = "", base_url: str = "", timeout_ms: int = 15000) -> dict:
+    base = (base_url or "").strip() or ZHIPU_DEFAULT_BASE_URL
+    models = []
+
+    if api_key and api_key.strip():
+        try:
+            url = f"{base.rstrip('/')}/models"
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key.strip()}",
+            }
+            result = fetch_json_with_timeout(url, headers=headers, timeout_ms=timeout_ms)
+            if result["ok"]:
+                raw_models = ((result.get("data") or {}).get("data", []))[:120]
+                for m in raw_models:
+                    model_id = m.get("id", m.get("name", ""))
+                    if model_id:
+                        models.append({
+                            "id": model_id,
+                            "name": m.get("name", model_id),
+                            "provider": "zhipu",
+                            "toolSupport": True,
+                            "size": "",
+                            "family": m.get("owned_by", "zhipu"),
+                            "paramCount": "",
+                            "loadable": True,
+                            "healthError": "",
+                        })
+        except Exception:
+            pass
+
+    if not models:
+        for m in ZHIPU_STATIC_MODELS:
+            models.append({
+                "id": m["id"],
+                "name": m["name"],
+                "provider": "zhipu",
+                "toolSupport": m.get("toolSupport", True),
+                "size": "",
+                "family": "zhipu",
+                "paramCount": "",
+                "loadable": True,
+                "healthError": "",
+                "desc": m.get("desc", ""),
+            })
+
+    return {"ok": True, "models": models}
+
+
+def check_zhipu_api(api_key: str = "", base_url: str = "", timeout_ms: int = 10000) -> dict:
+    base = (base_url or "").strip() or ZHIPU_DEFAULT_BASE_URL
+    if not api_key or not api_key.strip():
+        return {"ok": False, "error": "请输入智谱 API Key"}
+    try:
+        url = f"{base.rstrip('/')}/models"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key.strip()}",
+        }
+        result = fetch_json_with_timeout(url, headers=headers, timeout_ms=timeout_ms)
+        if result["ok"]:
+            return {"ok": True, "running": True, "message": "智谱 API 连接成功"}
+        err = (result.get("text", "") or "")[:200]
+        return {"ok": False, "error": f"连接失败({result.get('status', '?')}): {err}".strip()}
+    except Exception as e:
+        return {"ok": False, "error": f"连接异常: {str(e)[:200]}"}
 
 
 def list_anthropic_models(api_key: str, timeout_ms: int = 15000) -> dict:
