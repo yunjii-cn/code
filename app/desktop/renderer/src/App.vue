@@ -130,7 +130,7 @@ const apiBaseUrl = computed(() => {
 const apiModel = ref("qwen3.6-plus");
 const apiModels = ref<ModelInfo[]>([]);
 const zhipuApiKey = ref("");
-const zhipuModel = ref("glm-4-flash");
+const zhipuModel = ref("glm-5.1");
 const zhipuBaseUrl = ref("https://open.bigmodel.cn/api/paas/v4");
 const zhipuModels = ref<ModelInfo[]>([]);
 const zhipuApiChecked = ref(false);
@@ -557,7 +557,7 @@ function applySettings(data?: DesktopSettings) {
   }
 
   zhipuApiKey.value = settings.ZHIPU_API_KEY || "";
-  zhipuModel.value = settings.ZHIPU_MODEL || "glm-4-flash";
+  zhipuModel.value = settings.ZHIPU_MODEL || "glm-5.1";
   zhipuBaseUrl.value = settings.ZHIPU_BASE_URL || "https://open.bigmodel.cn/api/paas/v4";
 
   if (settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL) {
