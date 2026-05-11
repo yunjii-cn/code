@@ -1569,8 +1569,12 @@ async function saveSettings() {
       }
       const useProxy = zhipuStepProgress.value >= zhipuSteps.length;
       const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}/v1`;
-      const effectiveBaseUrl = useProxy ? proxyBaseUrl : zhipuBaseUrl.value.trim();
-      const effectiveApiKey = useProxy ? zhipuApiKey.value.trim() : zhipuApiKey.value.trim();
+      const effectiveBaseUrl = useProxy ? proxyBaseUrl : "https://open.bigmodel.cn/api/paas/v4";
+      const effectiveApiKey = zhipuApiKey.value.trim() || (zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "");
+      if (!effectiveApiKey) {
+        showNotice("请先添加智谱 API Key", "warn");
+        return;
+      }
       const payload: Record<string, string> = {
         MODEL_PROVIDER: "api",
         API_BASE_URL: effectiveBaseUrl,
