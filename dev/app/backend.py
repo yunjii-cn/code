@@ -242,6 +242,12 @@ def list_openrouter_models(timeout_ms: int = 15000) -> dict:
 ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
 
 ZHIPU_STATIC_MODELS = [
+    {"id": "glm-5.1", "name": "GLM-5.1", "desc": "新一代旗舰推理模型，754B参数/200K上下文，长程任务支持8小时", "toolSupport": True},
+    {"id": "glm-5", "name": "GLM-5", "desc": "旗舰基座模型，面向Agentic Engineering，对标Claude Opus 4.5", "toolSupport": True},
+    {"id": "glm-5-turbo", "name": "GLM-5-Turbo", "desc": "面向OpenClaw场景优化的基座模型，智能体调用能力强", "toolSupport": True},
+    {"id": "glm-4.7", "name": "GLM-4.7", "desc": "GLM-4.7稳定版本，通用能力强", "toolSupport": True},
+    {"id": "glm-4.6", "name": "GLM-4.6", "desc": "GLM-4.6稳定版，高效推理", "toolSupport": True},
+    {"id": "glm-4.7-flash", "name": "GLM-4.7-Flash", "desc": "免费模型，轻量快速，免费无限", "toolSupport": True},
     {"id": "glm-4-plus", "name": "GLM-4-Plus", "desc": "旗舰模型，最强推理能力", "toolSupport": True},
     {"id": "glm-4-flash", "name": "GLM-4-Flash", "desc": "免费模型，快速响应", "toolSupport": True},
     {"id": "glm-4-flash-250414", "name": "GLM-4-Flash-250414", "desc": "免费模型，最新版本", "toolSupport": True},
