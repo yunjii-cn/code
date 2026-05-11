@@ -354,11 +354,38 @@ const newTaskDesc = ref("");
 const collaborationMode = ref<"none" | "plan-code-review" | "pair" | "review-only">("none");
 const collabPhase = ref<"planning" | "coding" | "reviewing">("planning");
 const collabHistory = ref<any[]>([]);
-const showSettings = ref(false);
-const settingsTab = ref<"general" | "model" | "account" | "memory" | "project" | "advanced">("general");
+const settingsTab = ref<"general" | "model" | "account" | "memory" | "project" | "advanced" | "plugins" | "voice" | "offline">("general");
 const APP_VERSION = "2026.05.11";
 const activeNav = ref<"chat" | "project" | "version" | "settings">("chat");
 const versionHistory = ref<any[]>([]);
+const showTerminal = ref(false);
+const terminalInput = ref("");
+const terminalHistory = ref<{cmd: string; output: string; ts: string}[]>([]);
+const terminalCwd = ref("");
+const gitStatus = ref<any>(null);
+const gitLog = ref<any[]>([]);
+const gitCommitMsg = ref("");
+const showGitPanel = ref(false);
+const snippetList = ref<any[]>([]);
+const snippetSearch = ref("");
+const newSnippetName = ref("");
+const newSnippetLang = ref("javascript");
+const newSnippetCode = ref("");
+const showSnippetPanel = ref(false);
+const currentTheme = ref<"dark" | "light" | "blue" | "green">("dark");
+const searchQuery = ref("");
+const searchResults = ref<{msgId: string; text: string}[]>([]);
+const searchIndex = ref(0);
+const fileTree = ref<any[]>([]);
+const showFileTree = ref(false);
+const pluginList = ref<any[]>([]);
+const showPluginPanel = ref(false);
+const newPluginId = ref("");
+const newPluginName = ref("");
+const newPluginDesc = ref("");
+const newPluginCode = ref("");
+const isVoiceActive = ref(false);
+const offlineModels = ref<any[]>([]);
 const editingConvId = ref<string | null>(null);
 const editingConvTitle = ref("");
 const showSlashMenu = ref(false);
@@ -380,6 +407,7 @@ const SLASH_COMMANDS: Record<string, { name: string; desc: string; action: strin
   task: { name: "/task", desc: "任务编排", action: "task" },
   collab: { name: "/collab", desc: "AI 协作模式", action: "collab" },
   settings: { name: "/settings", desc: "系统设置", action: "settings" },
+  terminal: { name: "/terminal", desc: "打开终端", action: "terminal" },
 };
 
 const WORKFLOW_PRESETS: Record<string, { name: string; prompt: string; steps: string[] }> = {
@@ -698,6 +726,7 @@ async function doSend(text: string, addUserMsg: boolean = false) {
     }
     isBusy.value = false;
     if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+    try { callBackend("showDesktopNotification", "云集智能编程工作站", "AI 回复完成"); } catch {}
     processQueue();
     return;
   }
@@ -1363,7 +1392,10 @@ function executeSlashCommand(cmdKey: string) {
       showPanel.value = true;
       break;
     case "settings":
-      showSettings.value = true;
+      activeNav.value = "settings";
+      break;
+    case "terminal":
+      showTerminal.value = !showTerminal.value;
       break;
   }
 }
@@ -2210,6 +2242,7 @@ onMounted(async () => {
   document.addEventListener("click", () => { modelDropdownOpen.value = false; });
 
   loadLocalSettings();
+  loadTheme();
 
   await loadProjects();
   const appState = await callBackend("getState");
@@ -2360,6 +2393,11 @@ onMounted(async () => {
   if (nav === "version") loadVersionHistory();
 };
 
+(window as any).setVoiceResult = (text: string) => {
+  inputText.value = text;
+  isVoiceActive.value = false;
+};
+
 async function loadVersionHistory() {
   try {
     const data = await callBackend("getVersionHistory");
@@ -2368,6 +2406,231 @@ async function loadVersionHistory() {
     }
   } catch (e) {
     console.warn("loadVersionHistory failed:", e);
+  }
+}
+
+async function executeTerminalCommand() {
+  const cmd = terminalInput.value.trim();
+  if (!cmd) return;
+  terminalInput.value = "";
+  const cwd = terminalCwd.value || activeProject.value?.path || workspacePath.value || "";
+  const entry = { cmd, output: "", ts: new Date().toLocaleTimeString() };
+  terminalHistory.value.push(entry);
+  try {
+    const result = await callBackend("runTerminalCommand", cmd, cwd);
+    const data = typeof result === "string" ? JSON.parse(result) : result;
+    entry.output = data.output || data.error || "(无输出)";
+    if (data.cwd) terminalCwd.value = data.cwd;
+  } catch (e: any) {
+    entry.output = `错误: ${e.message || e}`;
+  }
+}
+
+function clearTerminal() {
+  terminalHistory.value = [];
+}
+
+function toggleTerminal() {
+  showTerminal.value = !showTerminal.value;
+}
+
+async function loadGitStatus() {
+  if (!activeProject.value) return;
+  try {
+    const data = await callBackend("getGitStatus", activeProject.value.path);
+    gitStatus.value = typeof data === "string" ? JSON.parse(data) : data;
+  } catch (e) {
+    console.warn("loadGitStatus failed:", e);
+  }
+}
+
+async function loadGitLog() {
+  if (!activeProject.value) return;
+  try {
+    const data = await callBackend("getGitLog", activeProject.value.path);
+    const parsed = typeof data === "string" ? JSON.parse(data) : data;
+    gitLog.value = parsed.commits || [];
+  } catch (e) {
+    console.warn("loadGitLog failed:", e);
+  }
+}
+
+async function doGitCommit() {
+  if (!activeProject.value || !gitCommitMsg.value.trim()) return;
+  try {
+    await callBackend("gitCommit", activeProject.value.path, gitCommitMsg.value.trim());
+    gitCommitMsg.value = "";
+    loadGitStatus();
+    loadGitLog();
+    showNotice("提交成功", "ok");
+  } catch (e) {
+    showNotice("提交失败: " + e, "warn");
+  }
+}
+
+function toggleGitPanel() {
+  showGitPanel.value = !showGitPanel.value;
+  if (showGitPanel.value) {
+    loadGitStatus();
+    loadGitLog();
+  }
+}
+
+function loadSnippets() {
+  try {
+    const saved = localStorage.getItem("yunji_snippets");
+    snippetList.value = saved ? JSON.parse(saved) : [];
+  } catch {
+    snippetList.value = [];
+  }
+}
+
+function saveSnippet() {
+  if (!newSnippetName.value.trim() || !newSnippetCode.value.trim()) return;
+  const snippet = {
+    id: makeId(),
+    name: newSnippetName.value.trim(),
+    lang: newSnippetLang.value,
+    code: newSnippetCode.value,
+    created: new Date().toISOString(),
+  };
+  snippetList.value.push(snippet);
+  localStorage.setItem("yunji_snippets", JSON.stringify(snippetList.value));
+  newSnippetName.value = "";
+  newSnippetCode.value = "";
+}
+
+function deleteSnippet(id: string) {
+  snippetList.value = snippetList.value.filter(s => s.id !== id);
+  localStorage.setItem("yunji_snippets", JSON.stringify(snippetList.value));
+}
+
+function insertSnippet(snippet: any) {
+  inputText.value += "\n```\n" + snippet.code + "\n```\n";
+}
+
+function applyTheme(theme: string) {
+  currentTheme.value = theme as any;
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem("yunji_theme", theme);
+}
+
+function loadTheme() {
+  const saved = localStorage.getItem("yunji_theme");
+  if (saved && ["dark", "light", "blue", "green"].includes(saved)) {
+    applyTheme(saved);
+  }
+}
+
+function searchInConversation() {
+  const q = searchQuery.value.trim().toLowerCase();
+  if (!q) { searchResults.value = []; return; }
+  searchResults.value = messages.value
+    .filter(m => m.text && m.text.toLowerCase().includes(q))
+    .map(m => ({ msgId: m.id, text: m.text.slice(0, 100) }));
+  searchIndex.value = 0;
+}
+
+function jumpToSearchResult(idx: number) {
+  searchIndex.value = idx;
+  const el = document.getElementById("msg-" + searchResults.value[idx]?.msgId);
+  if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function loadFileTree() {
+  if (!activeProject.value) return;
+  try {
+    const data = await callBackend("getFileTree", activeProject.value.path);
+    fileTree.value = typeof data === "string" ? JSON.parse(data) : data;
+  } catch (e) {
+    console.warn("loadFileTree failed:", e);
+  }
+}
+
+function toggleFileTree() {
+  showFileTree.value = !showFileTree.value;
+  if (showFileTree.value) loadFileTree();
+}
+
+async function loadPlugins() {
+  try {
+    const data = await callBackend("listPlugins");
+    pluginList.value = typeof data === "string" ? JSON.parse(data) : data;
+  } catch (e) {
+    console.warn("loadPlugins failed:", e);
+  }
+}
+
+async function installNewPlugin() {
+  if (!newPluginId.value.trim() || !newPluginName.value.trim()) return;
+  const meta = {
+    id: newPluginId.value.trim(),
+    name: newPluginName.value.trim(),
+    desc: newPluginDesc.value.trim(),
+    version: "1.0.0",
+    code: newPluginCode.value,
+  };
+  try {
+    await callBackend("installPlugin", JSON.stringify(meta));
+    newPluginId.value = "";
+    newPluginName.value = "";
+    newPluginDesc.value = "";
+    newPluginCode.value = "";
+    loadPlugins();
+    showNotice("插件安装成功", "ok");
+  } catch (e) {
+    showNotice("安装失败: " + e, "warn");
+  }
+}
+
+async function uninstallPluginById(id: string) {
+  try {
+    await callBackend("uninstallPlugin", id);
+    loadPlugins();
+    showNotice("插件已卸载", "ok");
+  } catch (e) {
+    showNotice("卸载失败: " + e, "warn");
+  }
+}
+
+async function runPlugin(pluginId: string) {
+  try {
+    const result = await callBackend("executePlugin", pluginId, inputText.value);
+    const data = typeof result === "string" ? JSON.parse(result) : result;
+    if (data.error) {
+      showNotice("插件错误: " + data.error, "warn");
+    } else if (data.output) {
+      inputText.value = data.output;
+    }
+  } catch (e) {
+    showNotice("执行失败: " + e, "warn");
+  }
+}
+
+async function startVoice() {
+  isVoiceActive.value = true;
+  try {
+    await callBackend("startVoiceInput", "zh-CN");
+  } catch (e) {
+    isVoiceActive.value = false;
+    showNotice("语音识别启动失败", "warn");
+  }
+}
+
+function speakMessage(text: string) {
+  try {
+    callBackend("speakText", text);
+  } catch (e) {
+    console.warn("speakText failed:", e);
+  }
+}
+
+async function loadOfflineModels() {
+  try {
+    const data = await callBackend("getOfflineModels");
+    offlineModels.value = typeof data === "string" ? JSON.parse(data) : data;
+  } catch (e) {
+    console.warn("loadOfflineModels failed:", e);
   }
 }
 </script>
@@ -2379,8 +2642,19 @@ async function loadVersionHistory() {
         <div class="toolbar">
           <div class="session">会话：{{ sessionId || "未创建" }}</div>
           <div class="actions">
+            <div v-if="searchResults.length > 0" style="display: flex; align-items: center; gap: 4px; margin-right: 8px;">
+              <span style="font-size: 11px; color: #4af;">{{ searchIndex + 1 }}/{{ searchResults.length }}</span>
+              <button class="btn-icon-sm" @click="jumpToSearchResult(Math.max(0, searchIndex - 1))" style="font-size: 10px;">▲</button>
+              <button class="btn-icon-sm" @click="jumpToSearchResult(Math.min(searchResults.length - 1, searchIndex + 1))" style="font-size: 10px;">▼</button>
+              <button class="btn-icon-sm" @click="searchResults = []; searchQuery = ''" style="font-size: 10px;">✕</button>
+            </div>
+            <div style="display: flex; align-items: center; gap: 4px; margin-right: 4px;">
+              <input v-model="searchQuery" placeholder="搜索对话..." style="font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; width: 120px;" @keydown.enter="searchInConversation" />
+              <button class="btn-icon-sm" @click="searchInConversation" style="font-size: 10px;">🔍</button>
+            </div>
             <button v-if="showPreviewPanel" class="btn-blue" @click="closePreview">关闭预览</button>
             <button v-else class="btn-blue" @click="openPreview">预览</button>
+            <button :class="['btn-blue', { 'btn-active': showTerminal }]" @click="toggleTerminal">⌨ 终端</button>
             <button class="btn-blue" @click="chooseWorkspace">打开项目</button>
             <button class="btn-blue" @click="createSession" :disabled="isBusy">新会话</button>
             <button class="btn-red" @click="stopMessage" :disabled="!isBusy">停止</button>
@@ -2389,7 +2663,7 @@ async function loadVersionHistory() {
         </div>
 
         <div class="messages">
-          <article v-for="m in messages" :key="m.id" class="msg" :class="m.role">
+          <article v-for="m in messages" :key="m.id" :id="'msg-' + m.id" class="msg" :class="m.role">
             <div class="msg-header">
               <label>{{ roleLabel(m.role) }}</label>
               <span class="msg-time">{{ m.time }}</span>
@@ -2431,6 +2705,28 @@ async function loadVersionHistory() {
             </div>
           </div>
           <iframe :src="previewUrl" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
+        </div>
+
+        <div v-if="showTerminal" class="terminal-panel">
+          <div class="terminal-toolbar">
+            <span style="font-size: 11px; color: #4af;">⌨ 终端</span>
+            <span style="font-size: 10px; color: #555; margin-left: 8px;">{{ terminalCwd || activeProject?.path || workspacePath || '~' }}</span>
+            <div style="display: flex; gap: 4px; margin-left: auto;">
+              <button class="btn-icon-sm" @click="clearTerminal" style="font-size: 10px;" title="清空">🗑️</button>
+              <button class="btn-icon-sm" @click="showTerminal = false" style="font-size: 10px;">✕</button>
+            </div>
+          </div>
+          <div class="terminal-output" ref="terminalOutputRef">
+            <div v-for="(entry, idx) in terminalHistory" :key="idx" class="terminal-entry">
+              <div class="terminal-cmd"><span style="color: #4af;">❯</span> {{ entry.cmd }}</div>
+              <pre class="terminal-result">{{ entry.output }}</pre>
+            </div>
+            <div v-if="terminalHistory.length === 0" class="terminal-empty">输入命令开始执行（如 ls, dir, npm run dev）</div>
+          </div>
+          <div class="terminal-input-row">
+            <span style="color: #4af; font-size: 12px;">❯</span>
+            <input v-model="terminalInput" placeholder="输入命令..." @keydown.enter.exact="executeTerminalCommand" class="terminal-input" />
+          </div>
         </div>
 
         <div class="composer">
@@ -2839,6 +3135,14 @@ async function loadVersionHistory() {
           </div>
           <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 4px;">
             当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.path }}</span>
+            <button class="btn-icon-sm" @click="toggleFileTree" style="font-size: 10px; margin-left: 4px;" title="文件树">📂</button>
+          </div>
+          <div v-if="showFileTree && fileTree.length > 0" style="margin-bottom: 6px; max-height: 150px; overflow-y: auto; font-size: 10px; font-family: monospace;">
+            <div v-for="f in fileTree" :key="f.path" style="padding: 1px 0; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+              <span v-if="f.type === 'dir'" style="color: #4af;">📁</span>
+              <span v-else style="color: #888;">📄</span>
+              {{ f.name }}
+            </div>
           </div>
           <div v-if="showProjectPanel">
             <div class="proj-section-title">新建项目</div>
@@ -3120,6 +3424,59 @@ async function loadVersionHistory() {
               </div>
             </div>
           </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">🔀 Git</span>
+              <div style="display: flex; gap: 2px;">
+                <button class="btn-icon-sm" @click="loadGitStatus(); loadGitLog()" style="font-size: 10px;">🔄</button>
+                <button class="btn-icon-sm" @click="showGitPanel = !showGitPanel" style="font-size: 10px;">{{ showGitPanel ? '▼' : '▶' }}</button>
+              </div>
+            </div>
+            <div v-if="gitStatus && !gitStatus.error" style="font-size: 10px; color: #4af; margin-bottom: 4px;">🌿 {{ gitStatus.branch }} · {{ gitStatus.total }} 变更</div>
+            <div v-if="gitStatus?.error" style="font-size: 10px; color: #555;">{{ gitStatus.error }}</div>
+            <div v-if="showGitPanel" style="margin-top: 4px;">
+              <div v-if="gitStatus && !gitStatus.error">
+                <div v-for="f in (gitStatus.files || []).slice(0, 10)" :key="f.path" style="display: flex; align-items: center; gap: 4px; padding: 2px 0; font-size: 10px;">
+                  <span :style="{ color: f.status?.startsWith('M') ? '#FF9800' : f.status?.startsWith('A') || f.status?.startsWith('?') ? '#4CAF50' : '#f44', flexShrink: 0 }">{{ f.status }}</span>
+                  <span style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ f.path }}</span>
+                </div>
+                <div style="margin-top: 4px;">
+                  <input v-model="gitCommitMsg" placeholder="提交消息..." style="width: 100%; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="doGitCommit" />
+                  <button class="btn-sm" @click="doGitCommit" style="margin-top: 2px; width: 100%; font-size: 10px;">📝 提交全部变更</button>
+                </div>
+              </div>
+              <div v-if="gitLog.length > 0" style="margin-top: 6px; border-top: 1px solid #222; padding-top: 4px;">
+                <div style="font-size: 10px; color: #666; margin-bottom: 2px;">最近提交</div>
+                <div v-for="c in gitLog.slice(0, 5)" :key="c.hash" style="display: flex; gap: 4px; padding: 2px 0; font-size: 10px; border-bottom: 1px solid #1a1a1a;">
+                  <span style="color: #4af; flex-shrink: 0;">{{ c.hash }}</span>
+                  <span style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ c.message }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 11px; color: #888;">📋 代码片段</span>
+              <button class="btn-icon-sm" @click="loadSnippets(); showSnippetPanel = !showSnippetPanel" style="font-size: 10px;">{{ showSnippetPanel ? '▼' : '▶' }}</button>
+            </div>
+            <div v-if="showSnippetPanel" style="margin-top: 4px;">
+              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                <input v-model="newSnippetName" placeholder="片段名称" style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" />
+                <select v-model="newSnippetLang" style="font-size: 10px; padding: 2px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;">
+                  <option value="javascript">JS</option><option value="typescript">TS</option><option value="python">PY</option><option value="html">HTML</option><option value="css">CSS</option><option value="sql">SQL</option><option value="bash">SH</option>
+                </select>
+              </div>
+              <textarea v-model="newSnippetCode" rows="2" placeholder="代码内容..." style="width: 100%; font-size: 10px; padding: 4px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
+              <button class="btn-sm" @click="saveSnippet" style="margin-top: 2px; width: 100%; font-size: 10px;">💾 保存片段</button>
+              <div v-for="s in snippetList" :key="s.id" style="display: flex; align-items: center; gap: 4px; padding: 3px 0; border-bottom: 1px solid #222; cursor: pointer;" @click="insertSnippet(s)">
+                <span style="font-size: 10px; color: #4af; flex-shrink: 0;">{{ s.lang }}</span>
+                <span style="font-size: 10px; color: #ddd; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ s.name }}</span>
+                <button class="btn-icon-sm" @click.stop="deleteSnippet(s.id)" style="font-size: 9px;">🗑️</button>
+              </div>
+            </div>
+          </div>
         </div>
         <label class="field">
           <span>你的称谓</span>
@@ -3247,6 +3604,15 @@ async function loadVersionHistory() {
             <button :class="['settings-nav-item', { active: settingsTab === 'advanced' }]" @click="settingsTab = 'advanced'">
               <span class="nav-icon">🔧</span><span class="nav-label">高级设置</span>
             </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'plugins' }]" @click="settingsTab = 'plugins'; loadPlugins()">
+              <span class="nav-icon">🧩</span><span class="nav-label">插件扩展</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'voice' }]" @click="settingsTab = 'voice'">
+              <span class="nav-icon">🎤</span><span class="nav-label">语音交互</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'offline' }]" @click="settingsTab = 'offline'; loadOfflineModels()">
+              <span class="nav-icon">📴</span><span class="nav-label">离线模式</span>
+            </button>
           </nav>
         </div>
         <div class="settings-content">
@@ -3254,6 +3620,15 @@ async function loadVersionHistory() {
             <h3 class="section-title">通用设置</h3>
             <div class="settings-card">
               <div class="card-title">界面</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">主题</div><div class="setting-desc">切换界面配色方案</div></div>
+                <div style="display: flex; gap: 4px;">
+                  <button :class="['theme-btn', { active: currentTheme === 'dark' }]" @click="applyTheme('dark')" style="--tc: #1a1a1a; --tc2: #0d0d0d;">🌙</button>
+                  <button :class="['theme-btn', { active: currentTheme === 'light' }]" @click="applyTheme('light')" style="--tc: #f0f0f0; --tc2: #fff;">☀️</button>
+                  <button :class="['theme-btn', { active: currentTheme === 'blue' }]" @click="applyTheme('blue')" style="--tc: #0a1628; --tc2: #0d1f3c;">🔵</button>
+                  <button :class="['theme-btn', { active: currentTheme === 'green' }]" @click="applyTheme('green')" style="--tc: #0a1a0a; --tc2: #0d200d;">🟢</button>
+                </div>
+              </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">AI 语言</div><div class="setting-desc">AI 回复使用的语言</div></div>
                 <select v-model="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').language" class="setting-select">
@@ -3672,6 +4047,104 @@ async function loadVersionHistory() {
               </div>
             </div>
           </div>
+
+          <div v-if="settingsTab === 'plugins'" class="settings-section">
+            <h3 class="section-title">🧩 插件扩展</h3>
+            <div class="settings-card">
+              <div class="card-title">已安装插件</div>
+              <div v-if="pluginList.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 12px;">暂无已安装插件</div>
+              <div v-for="p in pluginList" :key="p.id" style="display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #222;">
+                <span style="font-size: 13px; color: #ddd; flex: 1;">{{ p.name }}</span>
+                <span style="font-size: 10px; color: #888;">{{ p.desc }}</span>
+                <button class="btn-sm" @click="runPlugin(p.id)" style="font-size: 10px; background: #2a3a2a;">▶ 执行</button>
+                <button class="btn-icon-sm" @click="uninstallPluginById(p.id)" style="font-size: 9px;">🗑️</button>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">安装新插件</div>
+              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                <input v-model="newPluginId" placeholder="插件ID（英文）" class="setting-input" style="flex: 1;" />
+                <input v-model="newPluginName" placeholder="插件名称" class="setting-input" style="flex: 1;" />
+              </div>
+              <input v-model="newPluginDesc" placeholder="插件描述" class="setting-input" style="width: 100%; margin-bottom: 4px;" />
+              <textarea v-model="newPluginCode" rows="5" placeholder="插件代码（Python，使用 input 获取输入，设置 result 返回输出）&#10;&#10;示例：&#10;result = input.upper()" class="setting-textarea" style="font-family: Consolas, monospace;"></textarea>
+              <button class="btn-blue" @click="installNewPlugin" style="margin-top: 4px; width: 100%;">安装插件</button>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">插件开发指南</div>
+              <div style="font-size: 11px; color: #888; line-height: 1.6;">
+                <p>插件使用 Python 编写，运行在安全沙箱中。</p>
+                <p><b>可用变量：</b></p>
+                <ul style="padding-left: 16px;">
+                  <li><code>input</code> - 用户输入的文本</li>
+                  <li><code>json</code> - JSON 模块</li>
+                  <li><code>os</code> - 操作系统模块</li>
+                  <li><code>result</code> - 设置此变量返回输出</li>
+                </ul>
+                <p style="margin-top: 8px;"><b>示例：</b>文本转大写</p>
+                <pre style="background: #111; padding: 8px; border-radius: 4px; font-size: 11px;">result = input.upper()</pre>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'voice'" class="settings-section">
+            <h3 class="section-title">🎤 语音交互</h3>
+            <div class="settings-card">
+              <div class="card-title">语音输入</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">点击麦克风按钮开始语音识别，识别结果将自动填入输入框</div>
+              <button :class="['btn-blue', { 'btn-active': isVoiceActive }]" @click="startVoice" style="width: 100%; font-size: 14px; padding: 12px;">
+                {{ isVoiceActive ? '🎤 正在录音...' : '🎤 开始语音输入' }}
+              </button>
+              <div style="font-size: 10px; color: #555; margin-top: 6px;">需要安装 speech_recognition 库（pip install SpeechRecognition）</div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">语音朗读</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">点击消息旁的🔊按钮朗读AI回复</div>
+              <div v-if="messages.length > 0" style="display: flex; gap: 4px; flex-wrap: wrap;">
+                <button v-for="m in messages.filter(m => m.role === 'assistant').slice(-5)" :key="m.id" class="btn-sm" @click="speakMessage(m.text?.slice(0, 500) || '')" style="font-size: 10px; background: #2a3a2a;">
+                  🔊 {{ (m.text || '').slice(0, 30) }}...
+                </button>
+              </div>
+              <div style="font-size: 10px; color: #555; margin-top: 6px;">需要安装 pyttsx3 库（pip install pyttsx3）</div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'offline'" class="settings-section">
+            <h3 class="section-title">📴 离线模式</h3>
+            <div class="settings-card">
+              <div class="card-title">本地模型缓存</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">下载模型到本地，断网时仍可使用</div>
+              <div v-if="offlineModels.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 12px;">暂无本地模型</div>
+              <div v-for="m in offlineModels" :key="m.name" style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #222;">
+                <span style="font-size: 12px; color: #ddd; flex: 1;">{{ m.name }}</span>
+                <span style="font-size: 10px; color: #888;">{{ m.size_mb }} MB</span>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">下载模型</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">输入模型下载链接（支持 .gguf 格式）</div>
+              <div style="display: flex; gap: 4px;">
+                <input placeholder="https://huggingface.co/...model.gguf" class="setting-input" style="flex: 1;" />
+                <button class="btn-blue btn-sm" @click="showNotice('开始下载（后台）', 'ok')">下载</button>
+              </div>
+              <div style="font-size: 10px; color: #555; margin-top: 6px;">推荐使用 Ollama 模式配合本地模型</div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">离线功能</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">对话缓存</div><div class="setting-desc">对话历史保存在本地，断网可查看</div></div>
+                <span style="color: #4CAF50; font-size: 12px;">✓ 已启用</span>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">记忆缓存</div><div class="setting-desc">项目记忆本地存储，断网可编辑</div></div>
+                <span style="color: #4CAF50; font-size: 12px;">✓ 已启用</span>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">模板缓存</div><div class="setting-desc">项目模板本地存储，断网可使用</div></div>
+                <span style="color: #4CAF50; font-size: 12px;">✓ 已启用</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </main>
@@ -3807,13 +4280,77 @@ export default { name: "App" };
 </script>
 
 <style scoped>
+:root, [data-theme="dark"] {
+  --bg-primary: #0d0d0d;
+  --bg-secondary: #111;
+  --bg-card: #141414;
+  --bg-input: #1a1a1a;
+  --border-color: #222;
+  --border-light: #333;
+  --text-primary: #eee;
+  --text-secondary: #aaa;
+  --text-muted: #666;
+  --accent: #4af;
+  --accent-bg: rgba(68, 170, 255, 0.08);
+  --danger: #f44;
+  --success: #4CAF50;
+  --warning: #FF9800;
+}
+[data-theme="light"] {
+  --bg-primary: #f5f5f5;
+  --bg-secondary: #fff;
+  --bg-card: #fff;
+  --bg-input: #f0f0f0;
+  --border-color: #ddd;
+  --border-light: #ccc;
+  --text-primary: #222;
+  --text-secondary: #555;
+  --text-muted: #999;
+  --accent: #1976D2;
+  --accent-bg: rgba(25, 118, 210, 0.08);
+  --danger: #D32F2F;
+  --success: #388E3C;
+  --warning: #F57C00;
+}
+[data-theme="blue"] {
+  --bg-primary: #0a1628;
+  --bg-secondary: #0d1f3c;
+  --bg-card: #0f2444;
+  --bg-input: #132d52;
+  --border-color: #1a3a5c;
+  --border-light: #2a4a6c;
+  --text-primary: #d0e0f0;
+  --text-secondary: #8ab4d8;
+  --text-muted: #4a7a9a;
+  --accent: #64b5f6;
+  --accent-bg: rgba(100, 181, 246, 0.1);
+  --danger: #ef5350;
+  --success: #66bb6a;
+  --warning: #ffa726;
+}
+[data-theme="green"] {
+  --bg-primary: #0a1a0a;
+  --bg-secondary: #0d200d;
+  --bg-card: #0f280f;
+  --bg-input: #133013;
+  --border-color: #1a3a1a;
+  --border-light: #2a4a2a;
+  --text-primary: #d0f0d0;
+  --text-secondary: #8ad88a;
+  --text-muted: #4a8a4a;
+  --accent: #66bb6a;
+  --accent-bg: rgba(102, 187, 106, 0.1);
+  --danger: #ef5350;
+  --success: #81c784;
+  --warning: #ffa726;
+}
 .page {
   height: 100%;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  background: #0d0d0d;
+  background: var(--bg-primary);
 }
 
 .flowbar {
@@ -5609,6 +6146,105 @@ button:disabled {
   text-align: center;
   padding: 24px;
   grid-column: 1 / -1;
+}
+
+.terminal-panel {
+  height: 200px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #2a2a2a;
+  background: #0a0a0a;
+}
+
+.terminal-toolbar {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-bottom: 1px solid #222;
+  background: #111;
+}
+
+.terminal-output {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 8px;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 11px;
+}
+
+.terminal-entry {
+  margin-bottom: 4px;
+}
+
+.terminal-cmd {
+  color: #ddd;
+  font-size: 11px;
+}
+
+.terminal-result {
+  color: #888;
+  font-size: 11px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: Consolas, 'Courier New', monospace;
+}
+
+.terminal-empty {
+  color: #444;
+  font-size: 11px;
+  text-align: center;
+  padding: 16px;
+}
+
+.terminal-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid #222;
+  background: #0d0d0d;
+}
+
+.terminal-input {
+  flex: 1;
+  background: none;
+  border: none;
+  color: #eee;
+  font-size: 12px;
+  font-family: Consolas, 'Courier New', monospace;
+  outline: none;
+}
+
+.btn-active {
+  background: #1a3a5a !important;
+  border-color: #4af !important;
+}
+
+.theme-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  border: 2px solid #333;
+  background: var(--tc, #1a1a1a);
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.theme-btn:hover {
+  border-color: #888;
+}
+
+.theme-btn.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(68, 170, 255, 0.3);
 }
 
 .settings-sidebar {

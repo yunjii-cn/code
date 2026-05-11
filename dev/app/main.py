@@ -1358,6 +1358,292 @@ class BackendBridge(QObject):
         except Exception:
             return json.dumps([])
 
+    @pyqtSlot(str, str, result=str)
+    def runTerminalCommand(self, cmd: str, cwd: str):
+        try:
+            if not cwd or not os.path.isdir(cwd):
+                cwd = os.path.expanduser("~")
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                cwd=cwd, timeout=30, encoding="utf-8", errors="replace"
+            )
+            output = result.stdout or ""
+            if result.stderr:
+                output += ("\n" if output else "") + result.stderr
+            new_cwd = cwd
+            if cmd.strip().startswith("cd "):
+                target = cmd.strip()[3:].strip()
+                if os.path.isabs(target):
+                    new_cwd = target
+                else:
+                    new_cwd = os.path.normpath(os.path.join(cwd, target))
+                if os.path.isdir(new_cwd):
+                    pass
+                else:
+                    new_cwd = cwd
+            return json.dumps({"output": output.rstrip(), "cwd": new_cwd, "returncode": result.returncode})
+        except subprocess.TimeoutExpired:
+            return json.dumps({"output": "命令超时（30秒）", "error": "timeout", "cwd": cwd})
+        except Exception as e:
+            return json.dumps({"output": str(e), "error": str(e), "cwd": cwd})
+
+    @pyqtSlot(str, result=str)
+    def getGitStatus(self, project_path: str):
+        try:
+            if not project_path or not os.path.isdir(project_path):
+                return json.dumps({"error": "无效路径"})
+            result = subprocess.run(
+                ["git", "status", "--porcelain=v1", "--branch"],
+                capture_output=True, text=True, cwd=project_path,
+                timeout=10, encoding="utf-8", errors="replace"
+            )
+            if result.returncode != 0:
+                return json.dumps({"error": result.stderr.strip() or "不是 Git 仓库"})
+            lines = result.stdout.strip().split("\n") if result.stdout.strip() else []
+            branch = ""
+            files = []
+            for line in lines:
+                if line.startswith("## "):
+                    branch = line[3:].strip()
+                    if "..." in branch:
+                        branch = branch.split("...")[0]
+                elif len(line) >= 3:
+                    status = line[:2].strip()
+                    filepath = line[3:].strip()
+                    if filepath.startswith('"') and filepath.endswith('"'):
+                        filepath = filepath[1:-1]
+                    files.append({"status": status, "path": filepath})
+            return json.dumps({"branch": branch, "files": files, "total": len(files)})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    @pyqtSlot(str, str, result=str)
+    def gitCommit(self, project_path: str, message: str):
+        try:
+            if not project_path or not message.strip():
+                return json.dumps({"error": "路径或消息无效"})
+            subprocess.run(["git", "add", "-A"], capture_output=True, text=True, cwd=project_path, timeout=10)
+            result = subprocess.run(
+                ["git", "commit", "-m", message.strip()],
+                capture_output=True, text=True, cwd=project_path, timeout=10,
+                encoding="utf-8", errors="replace"
+            )
+            if result.returncode != 0:
+                return json.dumps({"error": result.stderr.strip() or "提交失败"})
+            return json.dumps({"success": True, "output": result.stdout.strip()})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    @pyqtSlot(str, result=str)
+    def getGitLog(self, project_path: str):
+        try:
+            if not project_path or not os.path.isdir(project_path):
+                return json.dumps({"error": "无效路径"})
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-20", "--format=%h|%s|%an|%ar"],
+                capture_output=True, text=True, cwd=project_path,
+                timeout=10, encoding="utf-8", errors="replace"
+            )
+            if result.returncode != 0:
+                return json.dumps({"error": result.stderr.strip()})
+            commits = []
+            for line in result.stdout.strip().split("\n"):
+                if "|" in line:
+                    parts = line.split("|", 3)
+                    commits.append({
+                        "hash": parts[0] if len(parts) > 0 else "",
+                        "message": parts[1] if len(parts) > 1 else "",
+                        "author": parts[2] if len(parts) > 2 else "",
+                        "date": parts[3] if len(parts) > 3 else "",
+                    })
+            return json.dumps({"commits": commits})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    @pyqtSlot(str, result=str)
+    def getFileTree(self, project_path: str):
+        try:
+            if not project_path or not os.path.isdir(project_path):
+                return json.dumps([])
+            skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".next", ".nuxt", ".cache", ".tox", "target"}
+            result = []
+            for root, dirs, files in os.walk(project_path):
+                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                rel = os.path.relpath(root, project_path)
+                depth = rel.count(os.sep) if rel != "." else 0
+                if depth > 3:
+                    dirs.clear()
+                    continue
+                for d in sorted(dirs):
+                    result.append({"name": d, "path": os.path.join(rel, d) if rel != "." else d, "type": "dir"})
+                for f in sorted(files)[:50]:
+                    result.append({"name": f, "path": os.path.join(rel, f) if rel != "." else f, "type": "file"})
+                if len(result) > 200:
+                    break
+            return json.dumps(result[:200])
+        except Exception as e:
+            return json.dumps([])
+
+    @pyqtSlot(str, str, result=bool)
+    def showDesktopNotification(self, title: str, body: str):
+        try:
+            from PyQt6.QtWidgets import QSystemTrayIcon
+            main = self._get_main()
+            if main and hasattr(main, 'tray_icon') and main.tray_icon:
+                main.tray_icon.showMessage(title, body, QSystemTrayIcon.MessageIcon.Information, 3000)
+                return True
+            return False
+        except Exception:
+            return False
+
+    @pyqtSlot(result=str)
+    def listPlugins(self):
+        plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+        os.makedirs(plugin_dir, exist_ok=True)
+        result = []
+        for fname in os.listdir(plugin_dir):
+            if not fname.endswith(".json"):
+                continue
+            fpath = os.path.join(plugin_dir, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta["id"] = fname[:-5]
+                plugin_file = os.path.join(plugin_dir, meta.get("id", ""), "index.js")
+                if os.path.exists(plugin_file):
+                    meta["installed"] = True
+                else:
+                    meta["installed"] = False
+                result.append(meta)
+            except Exception:
+                pass
+        return json.dumps(result)
+
+    @pyqtSlot(str, result=bool)
+    def installPlugin(self, plugin_json: str):
+        try:
+            meta = json.loads(plugin_json)
+            plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+            os.makedirs(plugin_dir, exist_ok=True)
+            meta_path = os.path.join(plugin_dir, f"{meta.get('id', 'unknown')}.json")
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            plugin_subdir = os.path.join(plugin_dir, meta.get("id", "unknown"))
+            os.makedirs(plugin_subdir, exist_ok=True)
+            if meta.get("code"):
+                code_path = os.path.join(plugin_subdir, "index.js")
+                with open(code_path, "w", encoding="utf-8") as f:
+                    f.write(meta["code"])
+            return True
+        except Exception:
+            return False
+
+    @pyqtSlot(str, result=bool)
+    def uninstallPlugin(self, plugin_id: str):
+        try:
+            plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+            meta_path = os.path.join(plugin_dir, f"{plugin_id}.json")
+            if os.path.exists(meta_path):
+                os.remove(meta_path)
+            plugin_subdir = os.path.join(plugin_dir, plugin_id)
+            if os.path.exists(plugin_subdir):
+                shutil.rmtree(plugin_subdir, ignore_errors=True)
+            return True
+        except Exception:
+            return False
+
+    @pyqtSlot(str, str, result=str)
+    def executePlugin(self, plugin_id: str, input_data: str):
+        plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+        code_path = os.path.join(plugin_dir, plugin_id, "index.js")
+        if not os.path.exists(code_path):
+            return json.dumps({"error": "插件未安装"})
+        try:
+            with open(code_path, "r", encoding="utf-8") as f:
+                code = f.read()
+            local_vars = {"input": input_data, "json": json, "os": os, "result": None}
+            exec(compile(code, code_path, "exec"), local_vars)
+            output = local_vars.get("result", "")
+            return json.dumps({"output": str(output) if output is not None else ""})
+        except Exception as e:
+            return json.dumps({"error": str(e)})
+
+    @pyqtSlot(str, result=bool)
+    def startVoiceInput(self, language: str):
+        try:
+            main = self._get_main()
+            if not main:
+                return False
+            if not hasattr(main, '_voice_thread') or main._voice_thread is None:
+                def record_voice():
+                    try:
+                        import speech_recognition as sr
+                        r = sr.Recognizer()
+                        with sr.Microphone() as source:
+                            r.adjust_for_ambient_noise(source, duration=0.5)
+                            audio = r.listen(source, timeout=10, phrase_time_limit=30)
+                        text = r.recognize_google(audio, language=language or "zh-CN")
+                        main.voice_result_signal.emit(text)
+                    except Exception as e:
+                        main.voice_result_signal.emit(f"[语音识别失败: {e}]")
+                    main._voice_thread = None
+                main._voice_thread = threading.Thread(target=record_voice, daemon=True)
+                main._voice_thread.start()
+                return True
+            return False
+        except Exception:
+            return False
+
+    @pyqtSlot(str, result=bool)
+    def speakText(self, text: str):
+        try:
+            def _speak():
+                try:
+                    import pyttsx3
+                    engine = pyttsx3.init()
+                    engine.setProperty('rate', 180)
+                    engine.setProperty('volume', 0.9)
+                    engine.say(text)
+                    engine.runAndWait()
+                except Exception:
+                    pass
+            threading.Thread(target=_speak, daemon=True).start()
+            return True
+        except Exception:
+            return False
+
+    @pyqtSlot(result=str)
+    def getOfflineModels(self):
+        models_dir = os.path.join(os.path.expanduser("~"), ".yunji", "models")
+        os.makedirs(models_dir, exist_ok=True)
+        models = []
+        for fname in os.listdir(models_dir):
+            if fname.endswith(".gguf") or fname.endswith(".bin"):
+                fpath = os.path.join(models_dir, fname)
+                size_mb = os.path.getsize(fpath) / (1024 * 1024)
+                models.append({"name": fname, "path": fpath, "size_mb": round(size_mb, 1)})
+        return json.dumps(models)
+
+    @pyqtSlot(str, result=bool)
+    def downloadModel(self, url: str):
+        try:
+            models_dir = os.path.join(os.path.expanduser("~"), ".yunji", "models")
+            os.makedirs(models_dir, exist_ok=True)
+            fname = url.split("/")[-1] or "model.gguf"
+            fpath = os.path.join(models_dir, fname)
+            if os.path.exists(fpath):
+                return True
+
+            def _download():
+                try:
+                    urllib.request.urlretrieve(url, fpath)
+                except Exception:
+                    pass
+            threading.Thread(target=_download, daemon=True).start()
+            return True
+        except Exception:
+            return False
+
     # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
     @pyqtSlot(result=str)
@@ -2046,6 +2332,18 @@ class EnvInstaller:
         except Exception:
             pass
 
+        self.tray_icon = None
+        try:
+            from PyQt6.QtWidgets import QSystemTrayIcon
+            tray_icon = QSystemTrayIcon(self)
+            if os.path.exists(icon_path):
+                tray_icon.setIcon(QIcon(icon_path))
+            tray_icon.setToolTip(f"云集智能编程工作站 v{VERSION}")
+            tray_icon.show()
+            self.tray_icon = tray_icon
+        except Exception:
+            pass
+
     def _save_mirror(self, key: str):
         self._mirror_key = key
         try:
@@ -2620,6 +2918,7 @@ class MainWindow(QMainWindow):
     update_info_signal = pyqtSignal(str)
     _remote_ver_signal = pyqtSignal(object)
     deploy_step_signal = pyqtSignal(str, str, int)
+    voice_result_signal = pyqtSignal(str)
 
     def __init__(self, splash=None):
         super().__init__()
@@ -2715,6 +3014,7 @@ class MainWindow(QMainWindow):
         self.result_ready_signal.connect(self._on_result_ready)
         self.workspace_choose_requested.connect(self._choose_workspace_dialog)
         self._remote_ver_signal.connect(self._on_remote_ver_fetched)
+        self.voice_result_signal.connect(self._on_voice_result)
 
         if self._splash:
             self._splash.set_progress(0.9, "即将就绪...")
@@ -3404,6 +3704,15 @@ class MainWindow(QMainWindow):
             else:
                 self.update_info_label.setText("✅ 已是最新版本")
             self._refresh_ver_list(remote_versions=remote_versions)
+
+    def _on_voice_result(self, text: str):
+        """语音识别结果回调"""
+        self._pending_voice_result = text
+        try:
+            escaped = json.dumps(text)
+            self.web_view.page().runJavaScript(f"if(window.setVoiceResult) window.setVoiceResult({escaped});")
+        except Exception:
+            pass
 
     def _create_version_card(self, version_info, is_current):
         """创建版本卡片"""
