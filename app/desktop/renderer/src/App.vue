@@ -354,6 +354,11 @@ const newTaskDesc = ref("");
 const collaborationMode = ref<"none" | "plan-code-review" | "pair" | "review-only">("none");
 const collabPhase = ref<"planning" | "coding" | "reviewing">("planning");
 const collabHistory = ref<any[]>([]);
+const showSettings = ref(false);
+const settingsTab = ref<"general" | "model" | "account" | "memory" | "project" | "advanced">("general");
+const APP_VERSION = "2026.05.11";
+const activeNav = ref<"chat" | "project" | "version" | "settings">("chat");
+const versionHistory = ref<any[]>([]);
 const editingConvId = ref<string | null>(null);
 const editingConvTitle = ref("");
 const showSlashMenu = ref(false);
@@ -374,6 +379,7 @@ const SLASH_COMMANDS: Record<string, { name: string; desc: string; action: strin
   preview: { name: "/preview", desc: "预览 Web 项目", action: "preview" },
   task: { name: "/task", desc: "任务编排", action: "task" },
   collab: { name: "/collab", desc: "AI 协作模式", action: "collab" },
+  settings: { name: "/settings", desc: "系统设置", action: "settings" },
 };
 
 const WORKFLOW_PRESETS: Record<string, { name: string; prompt: string; steps: string[] }> = {
@@ -1355,6 +1361,9 @@ function executeSlashCommand(cmdKey: string) {
       break;
     case "collab":
       showPanel.value = true;
+      break;
+    case "settings":
+      showSettings.value = true;
       break;
   }
 }
@@ -2345,20 +2354,30 @@ onMounted(async () => {
     }
   } catch {}
 });
+
+(window as any).switchNav = (nav: string) => {
+  activeNav.value = nav as any;
+  if (nav === "version") loadVersionHistory();
+};
+
+async function loadVersionHistory() {
+  try {
+    const data = await callBackend("getVersionHistory");
+    if (data) {
+      versionHistory.value = typeof data === "string" ? JSON.parse(data) : data;
+    }
+  } catch (e) {
+    console.warn("loadVersionHistory failed:", e);
+  }
+}
 </script>
 
 <template>
   <div class="page">
-    <section class="flowbar">
-      <span>1. 选择模型</span>
-      <span>2. 配置参数</span>
-      <span>3. 打开项目并执行编码任务</span>
-    </section>
-
-    <main class="workbench" :class="{ single: !showPanel }">
+    <main v-if="activeNav === 'chat'" class="workbench" :class="{ single: !showPanel }">
       <section class="chat card">
         <div class="toolbar">
-          <div class="session">会话：{{ sessionId || "未创建" }}<span v-if="collaborationMode !== 'none'" style="margin-left: 8px; color: #4af; font-size: 11px;">🤝 {{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}<span v-if="collaborationMode === 'plan-code-review'"> ({{ collabPhase === 'planning' ? '规划' : collabPhase === 'coding' ? '编码' : '审查' }})</span></span></div>
+          <div class="session">会话：{{ sessionId || "未创建" }}</div>
           <div class="actions">
             <button v-if="showPreviewPanel" class="btn-blue" @click="closePreview">关闭预览</button>
             <button v-else class="btn-blue" @click="openPreview">预览</button>
@@ -3118,6 +3137,543 @@ onMounted(async () => {
 
         <p class="notice" :class="noticeType">{{ noticeText }}</p>
       </aside>
+    </main>
+
+    <main v-if="activeNav === 'project'" class="page-view">
+      <div class="page-view-inner">
+        <div class="page-view-header">
+          <h2>📁 项目管理</h2>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <input v-model="newProjectName" placeholder="新项目名称" class="setting-input" style="width: 200px;" @input="updateDefaultPath" />
+            <button class="btn-blue" @click="createProject" :disabled="!newProjectName.trim()">创建项目</button>
+            <button class="btn-blue" @click="chooseWorkspace">打开目录</button>
+          </div>
+        </div>
+        <div v-if="newProjectDefaultPath" style="font-size: 11px; color: #666; padding: 0 24px 8px;">{{ newProjectDefaultPath }}</div>
+        <div class="project-grid">
+          <div v-for="p in projects" :key="p.id" :class="['project-card', { active: p.id === activeProject?.id }]" @click="switchProject(p.id)">
+            <div class="project-card-header">
+              <span class="project-card-name">{{ p.name }}</span>
+              <span v-if="p.id === activeProject?.id" class="project-active-badge">当前</span>
+            </div>
+            <div class="project-card-path">{{ p.path }}</div>
+            <div class="project-card-actions">
+              <button class="btn-sm" @click.stop="openInExplorer(p.path)" style="font-size: 10px;">📁 打开目录</button>
+              <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" style="font-size: 10px; color: #f44;">🗑️</button>
+            </div>
+          </div>
+          <div v-if="projects.length === 0" class="empty-hint">暂无项目，创建或打开一个项目开始开发</div>
+        </div>
+        <div style="padding: 16px 24px;">
+          <h3 style="font-size: 14px; color: #ccc; margin-bottom: 8px;">📦 项目模板</h3>
+          <div style="display: flex; gap: 3px; margin-bottom: 8px; flex-wrap: wrap;">
+            <button v-for="cat in ['all', 'frontend', 'backend', 'fullstack', 'desktop', 'datascience']" :key="cat" :class="['tab-btn', { active: templateCategory === cat }]" @click="templateCategory = cat; loadProjectTemplates()" style="font-size: 10px;">{{ cat === 'all' ? '全部' : cat === 'frontend' ? '前端' : cat === 'backend' ? '后端' : cat === 'fullstack' ? '全栈' : cat === 'desktop' ? '桌面' : '数据' }}</button>
+          </div>
+          <div class="template-grid">
+            <div v-for="t in projectTemplates" :key="t.id" class="template-card" @click="useTemplate(t)">
+              <div style="font-size: 12px; font-weight: 500; color: #ddd;">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
+              <div style="font-size: 10px; color: #888; margin-top: 2px;">{{ t.desc }}</div>
+              <div style="display: flex; gap: 4px; margin-top: 4px;">
+                <button v-if="t.scaffold" class="btn-sm" @click.stop="scaffoldFromTemplate(t)" style="font-size: 9px; background: #2a3a2a;">🏗️ 脚手架</button>
+                <button v-if="t.custom" class="btn-icon-sm" @click.stop="deleteCustomTemplate(t.id)" style="font-size: 9px;">🗑️</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <main v-if="activeNav === 'version'" class="page-view">
+      <div class="page-view-inner">
+        <div class="page-view-header">
+          <h2>📦 版本管理</h2>
+        </div>
+        <div class="version-content">
+          <div class="settings-card">
+            <div class="card-title">当前版本</div>
+            <div style="font-size: 24px; font-weight: 700; color: #4af; margin-bottom: 4px;">v{{ APP_VERSION }}</div>
+            <div style="font-size: 11px; color: #888;">云集智能编程工作站</div>
+          </div>
+          <div class="settings-card">
+            <div class="card-title">版本历史</div>
+            <div v-if="versionHistory.length === 0" style="font-size: 11px; color: #555; padding: 8px;">暂无版本记录</div>
+            <div v-for="(ver, idx) in versionHistory" :key="idx" class="version-item">
+              <div class="version-dot"></div>
+              <div class="version-info">
+                <div class="version-name">v{{ ver.version }}</div>
+                <div class="version-date">{{ ver.date || ver.built_at || '' }}</div>
+                <div v-if="ver.desc" class="version-desc">{{ ver.desc }}</div>
+              </div>
+            </div>
+          </div>
+          <div class="settings-card">
+            <div class="card-title">构建信息</div>
+            <div class="setting-row">
+              <div class="setting-info"><div class="setting-name">运行模式</div></div>
+              <span style="font-size: 12px; color: #4af;">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : '🦙 Ollama' }}</span>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info"><div class="setting-name">当前模型</div></div>
+              <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? apiModel : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
+            </div>
+            <div class="setting-row">
+              <div class="setting-info"><div class="setting-name">项目路径</div></div>
+              <span style="font-size: 11px; color: #888;">{{ activeProject?.path || workspacePath || '未选择' }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <main v-if="activeNav === 'settings'" class="page-view">
+      <div class="settings-page-inline">
+        <div class="settings-sidebar">
+          <nav class="settings-nav">
+            <button :class="['settings-nav-item', { active: settingsTab === 'general' }]" @click="settingsTab = 'general'">
+              <span class="nav-icon">🏠</span><span class="nav-label">通用</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'model' }]" @click="settingsTab = 'model'">
+              <span class="nav-icon">🤖</span><span class="nav-label">模型配置</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'account' }]" @click="settingsTab = 'account'">
+              <span class="nav-icon">🔑</span><span class="nav-label">账户管理</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'memory' }]" @click="settingsTab = 'memory'">
+              <span class="nav-icon">🧠</span><span class="nav-label">记忆与知识</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'project' }]" @click="settingsTab = 'project'">
+              <span class="nav-icon">📁</span><span class="nav-label">项目与模板</span>
+            </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'advanced' }]" @click="settingsTab = 'advanced'">
+              <span class="nav-icon">🔧</span><span class="nav-label">高级设置</span>
+            </button>
+          </nav>
+        </div>
+        <div class="settings-content">
+          <div v-if="settingsTab === 'general'" class="settings-section">
+            <h3 class="section-title">通用设置</h3>
+            <div class="settings-card">
+              <div class="card-title">界面</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">AI 语言</div><div class="setting-desc">AI 回复使用的语言</div></div>
+                <select v-model="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').language" class="setting-select">
+                  <option value="zh">🇨🇳 中文</option>
+                  <option value="en">🇺🇸 English</option>
+                  <option value="ja">🇯🇵 日本語</option>
+                  <option value="ko">🇰🇷 한국어</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">你的称谓</div><div class="setting-desc">对话中显示的用户名称</div></div>
+                <input v-model="userName" placeholder="你" class="setting-input" style="width: 120px;" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">AI 称谓</div><div class="setting-desc">对话中显示的助手名称</div></div>
+                <input v-model="assistantName" placeholder="助手" class="setting-input" style="width: 120px;" />
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">开发角色</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">选择预设角色可快速配置系统提示词和温度参数</div>
+              <div class="role-grid">
+                <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-card', { active: activeRole === key }]" @click="applyRole(key)">
+                  <span class="role-icon">{{ preset.icon }}</span>
+                  <span class="role-name">{{ preset.name }}</span>
+                  <span class="role-desc">{{ preset.desc }}</span>
+                </button>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">快捷键</div>
+              <div class="shortcut-list">
+                <div class="shortcut-row"><span>发送消息</span><kbd>Enter</kbd></div>
+                <div class="shortcut-row"><span>换行</span><kbd>Shift + Enter</kbd></div>
+                <div class="shortcut-row"><span>快捷指令</span><kbd>/</kbd></div>
+                <div class="shortcut-row"><span>打开设置</span><kbd>/settings</kbd></div>
+                <div class="shortcut-row"><span>压缩上下文</span><kbd>/compact</kbd></div>
+                <div class="shortcut-row"><span>导出对话</span><kbd>/export</kbd></div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'model'" class="settings-section">
+            <h3 class="section-title">模型配置</h3>
+            <div class="settings-card">
+              <div class="card-title">运行模式</div>
+              <div class="mode-switch-large">
+                <button :class="['mode-card', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">
+                  <span class="mode-icon">☁️</span><span class="mode-name">云端</span><span class="mode-desc">OpenRouter 云端推理</span>
+                </button>
+                <button :class="['mode-card', { active: runMode === 'api' }]" @click="runMode = 'api'">
+                  <span class="mode-icon">🔗</span><span class="mode-name">API</span><span class="mode-desc">本地 API 代理服务</span>
+                </button>
+                <button :class="['mode-card', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">
+                  <span class="mode-icon">🦙</span><span class="mode-name">Ollama</span><span class="mode-desc">本地模型推理</span>
+                </button>
+              </div>
+            </div>
+
+            <div v-if="runMode === 'cloud'" class="settings-card">
+              <div class="card-title">云端配置</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">API Key</div><div class="setting-desc">OpenRouter API 密钥</div></div>
+                <input v-model="apiKey" type="text" placeholder="输入你的 API Key" class="setting-input" style="width: 240px;" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">模型</div><div class="setting-desc">固定使用 openrouter/auto</div></div>
+                <input value="openrouter/auto" readonly class="setting-input" style="width: 240px; opacity: 0.6;" />
+              </div>
+            </div>
+
+            <div v-if="runMode === 'api'" class="settings-card">
+              <div class="card-title">API 服务</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">服务地址</div><div class="setting-desc">API 代理服务地址和端口</div></div>
+                <div style="display: flex; align-items: center; gap: 0;">
+                  <span style="padding: 0 8px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
+                  <input v-model="apiHost" placeholder="127.0.0.1" style="width: 120px; border-radius: 0; height: 32px;" />
+                  <span style="padding: 0 6px; font-size: 14px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
+                  <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 80px; text-align: center; border-radius: 0 4px 4px 0; height: 32px;" />
+                </div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">API Key</div><div class="setting-desc">自动获取或手动输入</div></div>
+                <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" class="setting-input" style="width: 240px;" />
+              </div>
+              <div class="api-progress-section" style="margin-top: 8px;">
+                <div class="api-progress-bar">
+                  <div v-for="(step, idx) in apiSteps" :key="idx" :class="['api-step', { done: apiStepProgress > idx, active: apiStepProgress === idx, pending: apiStepProgress < idx }]">
+                    <div class="step-dot"><span v-if="apiStepProgress > idx">✓</span><span v-else>{{ idx + 1 }}</span></div>
+                    <div class="step-label">{{ step.label }}</div>
+                  </div>
+                </div>
+                <div class="api-progress-track"><div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div></div>
+                <p class="api-progress-msg">{{ apiStepMessage }}</p>
+                <div style="display: flex; gap: 6px; margin-top: 6px;">
+                  <button class="btn-blue" style="flex: 1;" @click="apiStepAutoRun" :disabled="apiStepBusy || apiStepProgress >= apiSteps.length">{{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键启动') }}</button>
+                  <button class="btn-red" style="flex: 0 0 auto; min-width: 80px;" @click="stopApiService" :disabled="apiStepBusy || apiStepProgress < apiSteps.length" v-if="apiStepProgress >= apiSteps.length">■ 停止</button>
+                </div>
+              </div>
+            </div>
+
+            <div v-if="runMode === 'api'" class="settings-card">
+              <div class="card-title">模型选择</div>
+              <div v-if="apiModels.length > 0" class="model-quick-select">
+                <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
+                  <div class="custom-select-value">
+                    <span>{{ apiModel ? displayName(apiModels.find(m => m.id === apiModel)?.name || apiModel) : '选择模型...' }}</span>
+                    <span class="custom-select-arrow">▼</span>
+                  </div>
+                  <div v-if="modelDropdownOpen" class="custom-select-options">
+                    <div v-for="m in apiModels" :key="m.id" :class="['custom-select-option', { selected: apiModel === m.id }]" @click.stop="apiModel = m.id; modelDropdownOpen = false">
+                      <span>{{ displayName(m.name || m.id) }}</span>
+                      <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
+                      <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="setting-row" style="margin-top: 8px;">
+                <div class="setting-info"><div class="setting-name">模型名称</div><div class="setting-desc">手动输入或从列表选择</div></div>
+                <input v-model="apiModel" placeholder="qwen3.6-plus" class="setting-input" style="width: 240px;" />
+              </div>
+            </div>
+
+            <div v-if="runMode === 'ollama'" class="settings-card">
+              <div class="card-title">Ollama 配置</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">Ollama 地址</div><div class="setting-desc">本地 Ollama 服务地址</div></div>
+                <div class="model-loader">
+                  <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" class="setting-input" style="width: 200px;" />
+                  <button class="btn-blue btn-sm" @click="detectModels" :disabled="loadingModels">{{ loadingModels ? "检测中..." : "🔍 检测" }}</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="card-title">模型参数</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">Temperature</div><div class="setting-desc">创造性程度，0=精确 2=创造</div></div>
+                <div class="range-row"><input type="number" min="0" max="2" step="0.1" placeholder="0.3" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').temperature" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').temperature = e.target.value; }" /></div>
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">Max Tokens</div><div class="setting-desc">最大输出长度</div></div>
+                <input type="number" min="256" max="65536" step="256" placeholder="4096" class="setting-input" style="width: 120px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').maxTokens" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').maxTokens = e.target.value; }" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">Top P</div><div class="setting-desc">核采样，0.1=聚焦 1.0=开放</div></div>
+                <input type="number" min="0" max="1" step="0.05" placeholder="1.0" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').topP" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').topP = e.target.value; }" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">频率惩罚</div><div class="setting-desc">降低重复词</div></div>
+                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').frequencyPenalty" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').frequencyPenalty = e.target.value; }" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">存在惩罚</div><div class="setting-desc">鼓励新话题</div></div>
+                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').presencePenalty" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').presencePenalty = e.target.value; }" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">系统提示词</div><div class="setting-desc">自定义 AI 行为指令</div></div>
+              </div>
+              <textarea :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').systemPrompt" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').systemPrompt = e.target.value; }" rows="3" placeholder="留空则根据语言自动生成" class="setting-textarea"></textarea>
+            </div>
+
+            <div style="display: flex; gap: 8px; margin-top: 12px;">
+              <button class="btn-blue" @click="saveSettings" :disabled="isBusy" style="flex: 1;">💾 保存配置</button>
+              <button class="btn-sm" @click="clearModelFields" :disabled="isBusy" style="background: #333;">清空模型</button>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'account'" class="settings-section">
+            <h3 class="section-title">账户管理</h3>
+            <div class="settings-card">
+              <div class="card-title">上游账户池</div>
+              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">{{ qwenAccountCount }} 个账户</span>
+                <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 11px;">{{ qwenValidCount }} 可用</span>
+                <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto;">刷新</button>
+              </div>
+              <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 4px 0;">未添加上游账户，AI 对话将返回 500 错误。</p>
+              <div v-if="qwenAccounts.length > 0" class="account-list">
+                <div v-for="acc in qwenAccounts" :key="acc.email" :class="['account-row', { sticky: stickyEmail === acc.email }]">
+                  <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
+                  <span class="account-email">{{ acc.email }}</span>
+                  <span v-if="stickyEmail === acc.email" class="sticky-badge">★ 优先</span>
+                  <span v-if="!acc.valid" class="account-err">{{ acc.status_code || '不可用' }}</span>
+                  <button v-if="stickyEmail !== acc.email && acc.valid" class="btn-icon btn-sticky" @click="setStickyAccount(acc.email)" title="设为优先">★</button>
+                  <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除">✕</button>
+                </div>
+                <button v-if="stickyEmail" class="btn-blue btn-sm" @click="clearStickyAccount" style="margin-top: 4px; width: 100%;">取消优先，恢复自动轮换</button>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">添加账户</div>
+              <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                <button class="btn-blue" @click="autoRegisterQwenAccount" :disabled="qwenRegisterBusy" style="flex: 1;">{{ qwenRegisterBusy ? '⏳ 注册中...' : '🤖 自动注册' }}</button>
+              </div>
+              <details style="margin-top: 6px;">
+                <summary style="font-size: 11px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+                <div class="reg-form" style="margin-top: 4px;">
+                  <input v-model="loginEmail" type="text" placeholder="邮箱" />
+                  <input v-model="loginPassword" type="password" placeholder="密码" />
+                  <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%;">{{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
+                </div>
+                <p v-if="qwenLoginError" class="hint warn" style="margin: 4px 0;">{{ qwenLoginError }}</p>
+              </details>
+              <details style="margin-top: 6px;">
+                <summary style="font-size: 11px; color: #888; cursor: pointer;">手动添加 Token</summary>
+                <div class="qwen-token-input" style="margin-top: 4px;">
+                  <input v-model="qwenToken" type="text" placeholder="粘贴 Token" />
+                  <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()">添加</button>
+                </div>
+              </details>
+              <details style="margin-top: 6px;">
+                <summary style="font-size: 11px; color: #888; cursor: pointer;">自定义注册信息</summary>
+                <div class="reg-form" style="margin-top: 4px;">
+                  <input v-model="regEmail" type="text" placeholder="邮箱（留空自动生成）" />
+                  <input v-model="regPassword" type="password" placeholder="密码（留空自动生成）" />
+                  <input v-model="regUsername" type="text" placeholder="用户名（留空自动生成）" />
+                </div>
+              </details>
+              <div v-if="qwenRegisterLogs.length > 0" class="register-log-box" style="margin-top: 6px;">
+                <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">{{ log }}</div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'memory'" class="settings-section">
+            <h3 class="section-title">记忆与知识</h3>
+            <div class="settings-card">
+              <div class="card-title">项目记忆 (CLAUDE.md)</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">AI 每次对话都会读取此内容，用于存储项目级指令和规范</div>
+              <div v-if="activeProject">
+                <div style="font-size: 11px; color: #888; margin-bottom: 4px;">项目级记忆</div>
+                <textarea v-model="memoryContent" rows="5" placeholder="在此编辑项目记忆..." class="setting-textarea"></textarea>
+                <div style="display: flex; gap: 4px; margin-top: 4px;">
+                  <button class="btn-sm" @click="saveMemoryContent" style="flex: 1;">保存项目记忆</button>
+                  <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: #2a3a2a;">+ 技术栈</button>
+                  <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: #2a3a2a;">+ 规范</button>
+                </div>
+                <div style="font-size: 11px; color: #888; margin-top: 8px; margin-bottom: 4px;">全局记忆</div>
+                <textarea v-model="globalMemoryContent" rows="3" placeholder="全局记忆，适用于所有项目..." class="setting-textarea"></textarea>
+                <button class="btn-sm" @click="saveGlobalMemory" style="margin-top: 4px;">保存全局记忆</button>
+              </div>
+              <div v-else style="font-size: 11px; color: #555; padding: 8px;">请先选择项目</div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">智能记忆</div>
+              <div style="display: flex; gap: 4px; margin-bottom: 8px; align-items: center;">
+                <input v-model="memorySearchQuery" placeholder="搜索记忆..." class="setting-input" style="flex: 1;" @keydown.enter="searchSmartMemories" />
+                <button class="btn-sm" @click="searchSmartMemories" style="background: #2a3a2a;">🔍</button>
+                <button class="btn-sm" @click="extractMemoriesFromConversation" style="background: #2a3a2a;">📥 从对话提取</button>
+              </div>
+              <div style="font-size: 10px; color: #666; margin-bottom: 8px;">四类记忆：👤 用户偏好 | 🔄 反馈纠正 | 📋 项目上下文 | 🔗 外部引用</div>
+              <div v-if="activeProject">
+                <div v-if="smartMemories.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 12px;">暂无智能记忆，点击"从对话提取"自动生成</div>
+                <div v-for="mem in smartMemories" :key="mem.filename" class="memory-item">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span :class="['mem-type-badge', mem.type]">{{ mem.type === 'user' ? '👤' : mem.type === 'feedback' ? '🔄' : mem.type === 'reference' ? '🔗' : '📋' }} {{ mem.title }}</span>
+                    <button class="btn-icon-sm" @click="deleteSmartMemory(mem.filename)" style="font-size: 9px;">🗑️</button>
+                  </div>
+                  <div v-if="mem.match_snippet" style="font-size: 10px; color: #4af; margin-top: 2px; padding: 2px 4px; background: #1a2a3a; border-radius: 2px;">匹配: {{ mem.match_snippet }}</div>
+                  <div style="font-size: 10px; color: #888; margin-top: 2px; white-space: pre-wrap; max-height: 60px; overflow-y: auto;">{{ mem.content.replace(/^---[\s\S]*?---\n*/, '').slice(0, 200) }}</div>
+                </div>
+                <div style="margin-top: 8px; border-top: 1px solid #222; padding-top: 8px;">
+                  <div style="font-size: 11px; color: #888; margin-bottom: 4px;">添加新记忆</div>
+                  <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                    <input v-model="newMemoryTitle" placeholder="标题" class="setting-input" style="flex: 1;" />
+                    <select v-model="newMemoryType" class="setting-select" style="width: 100px;">
+                      <option value="user">👤 用户</option>
+                      <option value="feedback">🔄 反馈</option>
+                      <option value="project">📋 项目</option>
+                      <option value="reference">🔗 引用</option>
+                    </select>
+                  </div>
+                  <textarea v-model="newMemoryContent" rows="2" placeholder="记忆内容..." class="setting-textarea"></textarea>
+                  <button class="btn-sm" @click="addSmartMemory" style="margin-top: 4px; width: 100%;">添加记忆</button>
+                </div>
+              </div>
+              <div v-else style="font-size: 11px; color: #555; padding: 8px;">请先选择项目</div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'project'" class="settings-section">
+            <h3 class="section-title">项目与模板</h3>
+            <div class="settings-card">
+              <div class="card-title">项目管理</div>
+              <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 8px;">当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.path }}</span></div>
+              <div style="margin-bottom: 8px;">
+                <div style="font-size: 11px; color: #888; margin-bottom: 4px;">新建项目</div>
+                <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                  <input v-model="newProjectName" placeholder="项目名称" class="setting-input" style="flex: 1;" @input="updateDefaultPath" />
+                  <button class="btn-blue btn-sm" @click="createProject" :disabled="!newProjectName.trim()">创建</button>
+                </div>
+                <div v-if="newProjectDefaultPath" style="font-size: 10px; color: #666;">{{ newProjectDefaultPath }}</div>
+              </div>
+              <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]" style="margin-bottom: 4px;">
+                <div style="display: flex; align-items: center; justify-content: space-between;" @click="switchProject(p.id)">
+                  <span style="font-size: 12px;">{{ p.name }}</span>
+                  <div style="display: flex; gap: 2px;">
+                    <button class="btn-icon-sm" @click.stop="openInExplorer(p.path)" title="打开目录">📁</button>
+                    <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
+                  </div>
+                </div>
+                <div style="font-size: 10px; color: #666;">{{ p.path }}</div>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">项目模板</div>
+              <div style="display: flex; gap: 3px; margin-bottom: 8px; flex-wrap: wrap;">
+                <button v-for="cat in ['all', 'frontend', 'backend', 'fullstack', 'desktop', 'datascience']" :key="cat" :class="['tab-btn', { active: templateCategory === cat }]" @click="templateCategory = cat; loadProjectTemplates()" style="font-size: 10px;">{{ cat === 'all' ? '全部' : cat === 'frontend' ? '前端' : cat === 'backend' ? '后端' : cat === 'fullstack' ? '全栈' : cat === 'desktop' ? '桌面' : '数据' }}</button>
+              </div>
+              <div class="template-grid">
+                <div v-for="t in projectTemplates" :key="t.id" class="template-card" @click="useTemplate(t)">
+                  <div style="font-size: 12px; font-weight: 500; color: #ddd;">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
+                  <div style="font-size: 10px; color: #888; margin-top: 2px;">{{ t.desc }}</div>
+                  <div style="display: flex; gap: 4px; margin-top: 4px;">
+                    <button v-if="t.scaffold" class="btn-sm" @click.stop="scaffoldFromTemplate(t)" style="font-size: 9px; background: #2a3a2a;">🏗️ 脚手架</button>
+                    <button v-if="t.custom" class="btn-icon-sm" @click.stop="deleteCustomTemplate(t.id)" style="font-size: 9px;">🗑️</button>
+                  </div>
+                </div>
+              </div>
+              <div style="margin-top: 8px; border-top: 1px solid #222; padding-top: 8px;">
+                <button class="btn-sm" @click="showAddTemplate = !showAddTemplate" style="width: 100%;">{{ showAddTemplate ? '取消' : '➕ 添加自定义模板' }}</button>
+                <div v-if="showAddTemplate" style="margin-top: 6px; padding: 8px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
+                  <input v-model="newTplName" placeholder="模板名称" class="setting-input" style="width: 100%; margin-bottom: 4px;" />
+                  <div style="display: flex; gap: 4px; margin-bottom: 4px;">
+                    <select v-model="newTplCategory" class="setting-select" style="flex: 1;">
+                      <option value="frontend">前端</option><option value="backend">后端</option><option value="fullstack">全栈</option><option value="desktop">桌面</option><option value="datascience">数据科学</option>
+                    </select>
+                    <input v-model="newTplDesc" placeholder="描述" class="setting-input" style="flex: 2;" />
+                  </div>
+                  <textarea v-model="newTplPrompt" rows="2" placeholder="模板提示词" class="setting-textarea"></textarea>
+                  <button class="btn-sm" @click="addCustomTemplate" style="margin-top: 4px; width: 100%;">保存模板</button>
+                </div>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">开发工作流</div>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                <button v-for="(wf, key) in WORKFLOW_PRESETS" :key="key" class="workflow-card" @click="applyWorkflow(key)">
+                  <span style="font-size: 13px;">{{ wf.name }}</span>
+                  <span style="font-size: 10px; color: #888;">{{ wf.steps.join(' → ') }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'advanced'" class="settings-section">
+            <h3 class="section-title">高级设置</h3>
+            <div class="settings-card">
+              <div class="card-title">工具调用审批</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">审批模式</div><div class="setting-desc">控制 AI 执行工具操作的权限</div></div>
+                <select v-model="toolApprovalMode" class="setting-select" style="width: 240px;">
+                  <option value="auto">🟢 全部自动 — AI 直接执行</option>
+                  <option value="smart">🟡 智能审批 — 安全自动，风险确认</option>
+                  <option value="manual">🔴 全部手动 — 每次确认</option>
+                </select>
+              </div>
+              <p v-if="toolApprovalMode === 'auto'" style="font-size: 11px; color: #FF9800; margin: 4px 0;">⚠ AI 可直接读写文件和执行命令</p>
+              <p v-else-if="toolApprovalMode === 'smart'" style="font-size: 11px; color: #4af; margin: 4px 0;">读取/搜索自动通过，写入/编辑/命令需确认</p>
+              <p v-else style="font-size: 11px; color: #888; margin: 4px 0;">所有工具调用都需要手动确认</p>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">AI 协作模式</div>
+              <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                <button :class="['workflow-card', { active: collaborationMode === 'plan-code-review' }]" @click="setCollaborationMode('plan-code-review')">
+                  <span style="font-size: 13px;">📋 规划→编码→审查</span>
+                  <span style="font-size: 10px; color: #888;">三阶段协作流程</span>
+                </button>
+                <button :class="['workflow-card', { active: collaborationMode === 'pair' }]" @click="setCollaborationMode('pair')">
+                  <span style="font-size: 13px;">👥 结对编程</span>
+                  <span style="font-size: 10px; color: #888;">交替工作模式</span>
+                </button>
+                <button :class="['workflow-card', { active: collaborationMode === 'review-only' }]" @click="setCollaborationMode('review-only')">
+                  <span style="font-size: 13px;">🔍 纯审查</span>
+                  <span style="font-size: 10px; color: #888;">只审查不修改</span>
+                </button>
+              </div>
+              <div v-if="collaborationMode !== 'none'" style="margin-top: 8px; padding: 8px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
+                <div style="font-size: 11px; color: #888;">当前模式：{{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}
+                  <span v-if="collaborationMode === 'plan-code-review'" style="color: #4af;"> | 阶段：{{ collabPhase === 'planning' ? '📋 规划中' : collabPhase === 'coding' ? '💻 编码中' : '🔍 审查中' }}</span>
+                </div>
+                <div v-if="collaborationMode === 'plan-code-review'" style="display: flex; gap: 4px; margin-top: 4px;">
+                  <button class="btn-sm" @click="advanceCollabPhase" style="flex: 1;">⏭ 进入下一阶段</button>
+                  <button class="btn-sm" @click="setCollaborationMode('none')" style="background: #3a2222;">退出协作</button>
+                </div>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">任务编排</div>
+              <div style="display: flex; gap: 4px; margin-bottom: 8px;">
+                <input v-model="newTaskName" placeholder="任务名称" class="setting-input" style="flex: 1;" @keydown.enter="addTask" />
+                <button class="btn-blue btn-sm" @click="addTask">添加</button>
+              </div>
+              <textarea v-model="newTaskDesc" rows="1" placeholder="任务描述（可选）" class="setting-textarea" style="margin-bottom: 8px;"></textarea>
+              <div v-if="taskList.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 8px;">暂无任务</div>
+              <div v-for="task in taskList" :key="task.id" style="display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #222;">
+                <span :style="{ color: task.status === 'done' ? '#4CAF50' : task.status === 'in_progress' ? '#FF9800' : '#888', fontSize: '12px', cursor: 'pointer' }" @click="updateTaskStatus(task.id, task.status === 'pending' ? 'in_progress' : task.status === 'in_progress' ? 'done' : 'pending')">
+                  {{ task.status === 'done' ? '✅' : task.status === 'in_progress' ? '🔄' : '⬜' }}
+                </span>
+                <span style="flex: 1; font-size: 11px; color: #ddd;" :style="{ textDecoration: task.status === 'done' ? 'line-through' : 'none' }">{{ task.name }}</span>
+                <button class="btn-icon-sm" @click="executeTaskAsPrompt(task)" title="执行" style="font-size: 9px;">▶</button>
+                <button class="btn-icon-sm" @click="removeTask(task.id)" title="删除" style="font-size: 9px;">✕</button>
+              </div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">数据管理</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">导出对话</div><div class="setting-desc">将当前对话导出为文件</div></div>
+                <div style="display: flex; gap: 4px;">
+                  <button class="btn-sm" @click="exportConversation('markdown')" :disabled="messages.length === 0" style="background: #2a3a2a;">📄 Markdown</button>
+                  <button class="btn-sm" @click="exportConversation('json')" :disabled="messages.length === 0" style="background: #2a3a2a;">📋 JSON</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 </template>
@@ -4837,6 +5393,12 @@ button:disabled {
   outline: none;
 }
 
+.select-input option {
+  background: #1a1a1a;
+  color: #f0f0f0;
+  padding: 6px;
+}
+
 .select-input:focus {
   border-color: #4a90d9;
 }
@@ -4905,4 +5467,468 @@ button:disabled {
     align-items: flex-start;
   }
 }
-</style>
+
+.page-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0d0d0d;
+}
+
+.page-view-inner {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.page-view-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 24px;
+  border-bottom: 1px solid #222;
+  background: #111;
+}
+
+.page-view-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #eee;
+  margin: 0;
+}
+
+.settings-page-inline {
+  display: flex;
+  height: 100%;
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  padding: 16px 24px;
+}
+
+.project-card {
+  padding: 12px;
+  border: 1px solid #222;
+  border-radius: 8px;
+  background: #141414;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.project-card:hover {
+  border-color: #4af;
+}
+
+.project-card.active {
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.05);
+}
+
+.project-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.project-card-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #ddd;
+}
+
+.project-active-badge {
+  font-size: 10px;
+  color: #4af;
+  background: rgba(68, 170, 255, 0.1);
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.project-card-path {
+  font-size: 10px;
+  color: #666;
+  margin-bottom: 6px;
+  word-break: break-all;
+}
+
+.project-card-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.version-content {
+  padding: 16px 24px;
+}
+
+.version-item {
+  display: flex;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.version-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #4af;
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+
+.version-info {
+  flex: 1;
+}
+
+.version-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: #ddd;
+}
+
+.version-date {
+  font-size: 10px;
+  color: #666;
+}
+
+.version-desc {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+}
+
+.empty-hint {
+  font-size: 12px;
+  color: #555;
+  text-align: center;
+  padding: 24px;
+  grid-column: 1 / -1;
+}
+
+.settings-sidebar {
+  width: 200px;
+  flex-shrink: 0;
+  background: #111;
+  border-right: 1px solid #222;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-nav {
+  flex: 1;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: none;
+  background: none;
+  color: #888;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s;
+  text-align: left;
+}
+
+.settings-nav-item:hover {
+  background: #1a1a1a;
+  color: #ccc;
+}
+
+.settings-nav-item.active {
+  background: rgba(68, 170, 255, 0.1);
+  color: #4af;
+}
+
+.settings-nav-item .nav-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+}
+
+.settings-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.settings-section {
+  max-width: 700px;
+}
+
+.section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #eee;
+  margin: 0 0 16px 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #222;
+}
+
+.settings-card {
+  background: #141414;
+  border: 1px solid #222;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ccc;
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.setting-row:last-child {
+  border-bottom: none;
+}
+
+.setting-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.setting-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: #ddd;
+}
+
+.setting-desc {
+  font-size: 10px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.setting-input {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #ddd;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.setting-input:focus {
+  border-color: #4af;
+}
+
+.setting-select {
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #ddd;
+  outline: none;
+  cursor: pointer;
+}
+
+.setting-select option {
+  background: #1a1a1a;
+  color: #ddd;
+  padding: 4px;
+}
+
+.setting-textarea {
+  width: 100%;
+  font-size: 12px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #ddd;
+  resize: vertical;
+  font-family: monospace;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.setting-textarea:focus {
+  border-color: #4af;
+}
+
+.mode-switch-large {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 16px 12px;
+  border: 1px solid #333;
+  border-radius: 8px;
+  background: #1a1a1a;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.mode-card:hover {
+  border-color: #555;
+  color: #ccc;
+}
+
+.mode-card.active {
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.08);
+  color: #4af;
+}
+
+.mode-card .mode-icon {
+  font-size: 24px;
+}
+
+.mode-card .mode-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.mode-card .mode-desc {
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.role-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.role-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 8px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.role-card:hover {
+  border-color: #555;
+  color: #ccc;
+}
+
+.role-card.active {
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.08);
+  color: #4af;
+}
+
+.role-card .role-icon {
+  font-size: 20px;
+}
+
+.role-card .role-name {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.role-card .role-desc {
+  font-size: 9px;
+  opacity: 0.7;
+}
+
+.shortcut-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-size: 11px;
+  color: #aaa;
+}
+
+.shortcut-row kbd {
+  background: #222;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 10px;
+  color: #ccc;
+  font-family: monospace;
+}
+
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+}
+
+.template-card {
+  padding: 10px;
+  border: 1px solid #222;
+  border-radius: 6px;
+  background: #111;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.template-card:hover {
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.05);
+}
+
+.workflow-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 14px;
+  border: 1px solid #333;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.workflow-card:hover {
+  border-color: #555;
+  color: #ccc;
+}
+
+.workflow-card.active {
+  border-color: #4af;
+  background: rgba(68, 170, 255, 0.08);
+  color: #4af;
+}</style>
