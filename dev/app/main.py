@@ -1346,6 +1346,18 @@ class BackendBridge(QObject):
             return json.dumps({"success": False, "error": "main not available"})
         return json.dumps(main.project_mgr.create_project_from_template(project_path, template_id))
 
+    @pyqtSlot(result=str)
+    def getVersionHistory(self):
+        vh_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version_history.json")
+        if not os.path.exists(vh_path):
+            return json.dumps([])
+        try:
+            with open(vh_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return json.dumps(data)
+        except Exception:
+            return json.dumps([])
+
     # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
     @pyqtSlot(result=str)
@@ -2771,6 +2783,22 @@ class MainWindow(QMainWindow):
         self.btn_update_nav.clicked.connect(lambda: self._switch_page(2))
         nav_layout.addWidget(self.btn_update_nav)
 
+        # 项目管理按钮
+        self.btn_project_nav = QPushButton("📁 项目管理")
+        self.btn_project_nav.setCheckable(True)
+        self.btn_project_nav.setStyleSheet(menu_button_style)
+        self.btn_project_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.btn_project_nav.clicked.connect(lambda: self._switch_page(3))
+        nav_layout.addWidget(self.btn_project_nav)
+
+        # 系统设置按钮
+        self.btn_settings_nav = QPushButton("⚙️ 系统设置")
+        self.btn_settings_nav.setCheckable(True)
+        self.btn_settings_nav.setStyleSheet(menu_button_style)
+        self.btn_settings_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.btn_settings_nav.clicked.connect(lambda: self._switch_page(4))
+        nav_layout.addWidget(self.btn_settings_nav)
+
         layout.addWidget(nav_bar)
 
         # ── 页面堆叠窗口 ──
@@ -2787,6 +2815,10 @@ class MainWindow(QMainWindow):
         # 页面2：软件更新
         self.update_page = self._create_update_page()
         self.page_stack.addWidget(self.update_page)
+
+        # 页面3：项目管理（复用首页 WebEngineView）
+        # 页面4：系统设置（复用首页 WebEngineView）
+        # 这两个页面不创建独立页面，而是切换到首页并通过JS切换前端视图
 
         layout.addWidget(self.page_stack, 1)
 
@@ -3145,10 +3177,13 @@ class MainWindow(QMainWindow):
 
     def _switch_page(self, index):
         """切换页面"""
+        actual_page = 0 if index in (3, 4) else index
         self.btn_home.setChecked(index == 0)
         self.btn_deploy_nav.setChecked(index == 1)
         self.btn_update_nav.setChecked(index == 2)
-        self.page_stack.setCurrentIndex(index)
+        self.btn_project_nav.setChecked(index == 3)
+        self.btn_settings_nav.setChecked(index == 4)
+        self.page_stack.setCurrentIndex(actual_page)
 
         # 切换到部署维护页面时刷新环境状态
         if index == 1:
@@ -3156,6 +3191,13 @@ class MainWindow(QMainWindow):
         # 切换到软件更新页面时刷新稳定版列表
         if index == 2:
             self._fetch_and_refresh_ver_list()
+        # 切换到项目管理或系统设置时，通过JS切换前端视图
+        if index in (0, 3, 4):
+            nav_name = {0: "chat", 3: "project", 4: "settings"}.get(index, "chat")
+            try:
+                self.web_view.page().runJavaScript(f"if(window.switchNav) window.switchNav('{nav_name}');")
+            except Exception:
+                pass
 
     # ── 环境检查与自动加载 ──
     def _auto_check_and_load(self):
