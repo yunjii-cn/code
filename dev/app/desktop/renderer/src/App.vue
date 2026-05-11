@@ -136,6 +136,23 @@ const zhipuBaseUrl = ref("https://open.bigmodel.cn/api/paas/v4");
 const zhipuModels = ref<ModelInfo[]>([]);
 const zhipuApiChecked = ref(false);
 const zhipuApiChecking = ref(false);
+const zhipuApiHost = ref("127.0.0.1");
+const zhipuApiPort = ref(7780);
+const zhipuStepProgress = ref(0);
+const zhipuStepBusy = ref(false);
+const zhipuStepMessage = ref("点击「一键启动」自动配置智谱 API 服务");
+const zhipuAccounts = ref<any[]>([]);
+const zhipuAccountCount = ref(-1);
+const zhipuValidCount = ref(0);
+const zhipuLocalKeys = ref<any[]>([]);
+const zhipuNewKey = ref("");
+const zhipuNewLabel = ref("");
+const zhipuRegisterBusy = ref(false);
+const zhipuRegisterLogs = ref<string[]>([]);
+const zhipuLoginEmail = ref("");
+const zhipuLoginPassword = ref("");
+const zhipuLoginBusy = ref(false);
+const zhipuLoginError = ref("");
 const cloudModels = ref<ModelInfo[]>([]);
 const loadingModels = ref(false);
 const expandedModelId = ref("");
@@ -1546,22 +1563,22 @@ async function saveSettings() {
 
   if (runMode.value === "api") {
     if (apiSource.value === "zhipu") {
-      if (!zhipuApiKey.value.trim()) {
-        showNotice("请填写智谱 API Key", "warn");
-        return;
-      }
       if (!zhipuModel.value.trim()) {
-        showNotice("请选择或填写模型名称", "warn");
+        showNotice("请选择模型名称", "warn");
         return;
       }
+      const useProxy = zhipuStepProgress.value >= zhipuSteps.length;
+      const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}/v1`;
+      const effectiveBaseUrl = useProxy ? proxyBaseUrl : zhipuBaseUrl.value.trim();
+      const effectiveApiKey = useProxy ? zhipuApiKey.value.trim() : zhipuApiKey.value.trim();
       const payload: Record<string, string> = {
         MODEL_PROVIDER: "api",
-        API_BASE_URL: zhipuBaseUrl.value.trim(),
+        API_BASE_URL: effectiveBaseUrl,
         API_MODEL: zhipuModel.value.trim(),
-        API_KEY: zhipuApiKey.value.trim(),
-        ZHIPU_API_KEY: zhipuApiKey.value.trim(),
+        API_KEY: effectiveApiKey,
+        ZHIPU_API_KEY: effectiveApiKey,
         ZHIPU_MODEL: zhipuModel.value.trim(),
-        ZHIPU_BASE_URL: zhipuBaseUrl.value.trim() || "https://open.bigmodel.cn/api/paas/v4",
+        ZHIPU_BASE_URL: effectiveBaseUrl,
         API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
         DISABLE_TELEMETRY: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -1675,7 +1692,7 @@ async function fetchApiKey() {
       showNotice("API Key 已自动获取", "ok");
     } else {
       if (result?.adminUrl) {
-        window.open(result.adminUrl, "_blank");
+        callBackend("openExternalUrl", result.adminUrl);
         showNotice("已打开 API 服务管理界面，请手动创建 API Key", "warn");
       } else {
         showNotice(result?.error || "未能自动获取 API Key", "warn");
@@ -1735,6 +1752,271 @@ async function checkZhipuApiConnect() {
     zhipuApiChecked.value = false;
     showNotice("智谱 API 连接异常", "warn");
   }
+}
+
+const zhipuSteps = [
+  { label: "检测服务", action: "check" },
+  { label: "启动服务", action: "start" },
+  { label: "获取 Key", action: "key" },
+  { label: "加载模型", action: "models" },
+];
+const zhipuProgressPercent = computed(() => {
+  if (zhipuStepProgress.value >= zhipuSteps.length) return 100;
+  return Math.round((zhipuStepProgress.value / zhipuSteps.length) * 100);
+});
+
+async function zhipuStepAutoRun() {
+  if (zhipuStepBusy.value) return;
+  zhipuStepBusy.value = true;
+
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+
+  try {
+    while (zhipuStepProgress.value < zhipuSteps.length) {
+      const step = zhipuSteps[zhipuStepProgress.value];
+      zhipuStepMessage.value = `${step.label}中...`;
+
+      if (step.action === "check") {
+        const r = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+        if (r && r.running) { zhipuStepProgress.value = zhipuSteps.length; break; }
+        zhipuStepProgress.value = 1;
+      } else if (step.action === "start") {
+        const r = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
+        if (!r || !r.ok) { zhipuStepMessage.value = r?.error || "启动失败"; zhipuStepBusy.value = false; return; }
+        for (let i = 0; i < 15; i++) {
+          await new Promise(ok => setTimeout(ok, 1000));
+          const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+          if (chk && chk.running) break;
+        }
+        zhipuStepProgress.value = 2;
+      } else if (step.action === "key") {
+        let r = await callBackend("fetchZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
+        if (r && r.keys && r.keys.length > 0) {
+          zhipuApiKey.value = r.keys[r.keys.length - 1].key;
+        } else {
+          r = await callBackend("createZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
+          if (r && r.key) { zhipuApiKey.value = r.key; }
+          else { zhipuStepMessage.value = "获取 API Key 失败"; zhipuStepBusy.value = false; return; }
+        }
+        zhipuStepProgress.value = 3;
+      } else if (step.action === "models") {
+        const r = await callBackend("listModels", JSON.stringify({ source: "zhipu", baseUrl, apiKey: zhipuApiKey.value }));
+        if (r && r.ok) { zhipuModels.value = r.models || []; }
+        zhipuStepProgress.value = 4;
+      }
+    }
+    zhipuStepMessage.value = "智谱 API 服务已就绪";
+    await checkZhipuAccounts();
+  } catch (e) {
+    zhipuStepMessage.value = "启动异常: " + String(e);
+  }
+  zhipuStepBusy.value = false;
+}
+
+async function stopZhipuService() {
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  await callBackend("stopZhipu2Api", JSON.stringify({ baseUrl }));
+  zhipuStepProgress.value = 0;
+  zhipuStepMessage.value = "智谱 API 服务已停止";
+}
+
+async function addZhipuAccount() {
+  if (!zhipuNewKey.value.trim()) return;
+  const key = zhipuNewKey.value.trim();
+  const label = zhipuNewLabel.value.trim() || key.slice(0, 8) + "...";
+
+  if (zhipuLocalKeys.value.some(k => k.key === key)) {
+    showNotice("该 Key 已存在", "warn");
+    return;
+  }
+
+  zhipuLocalKeys.value.push({ key, label, valid: true });
+  zhipuNewKey.value = "";
+  zhipuNewLabel.value = "";
+  saveZhipuLocalKeys();
+
+  if (!zhipuApiKey.value) {
+    zhipuApiKey.value = key;
+  }
+
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+  if (checkR && checkR.running) {
+    await callBackend("addZhipuAccount", JSON.stringify({ baseUrl, apiKey: key, label, adminKey: "admin" }));
+  }
+
+  showNotice("API Key 已添加", "ok");
+  refreshZhipuAccountDisplay();
+}
+
+async function deleteZhipuAccount(apiKey: string) {
+  zhipuLocalKeys.value = zhipuLocalKeys.value.filter(k => k.key !== apiKey);
+  saveZhipuLocalKeys();
+
+  if (zhipuApiKey.value === apiKey) {
+    zhipuApiKey.value = zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "";
+  }
+
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+  if (checkR && checkR.running) {
+    await callBackend("deleteZhipuAccount", JSON.stringify({ baseUrl, apiKey, adminKey: "admin" }));
+  }
+
+  showNotice("已删除", "ok");
+  refreshZhipuAccountDisplay();
+}
+
+async function checkZhipuAccounts() {
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+  if (checkR && checkR.running) {
+    try {
+      const r = await callBackend("listZhipuAccounts", JSON.stringify({ baseUrl, adminKey: "admin" }));
+      if (r && r.accounts) {
+        for (const acc of r.accounts) {
+          const existing = zhipuLocalKeys.value.find(k => k.key === acc.full_key);
+          if (existing) {
+            existing.valid = acc.valid;
+          }
+        }
+        saveZhipuLocalKeys();
+      }
+    } catch {}
+  }
+  refreshZhipuAccountDisplay();
+}
+
+function refreshZhipuAccountDisplay() {
+  zhipuAccountCount.value = zhipuLocalKeys.value.length;
+  zhipuValidCount.value = zhipuLocalKeys.value.filter(k => k.valid).length;
+  zhipuAccounts.value = zhipuLocalKeys.value.map(k => ({
+    full_key: k.key,
+    api_key: k.key.slice(0, 6) + "..." + k.key.slice(-4),
+    label: k.label,
+    valid: k.valid,
+  }));
+}
+
+function saveZhipuLocalKeys() {
+  try {
+    localStorage.setItem("zhipu_local_keys", JSON.stringify(zhipuLocalKeys.value));
+  } catch {}
+}
+
+function loadZhipuLocalKeys() {
+  try {
+    const saved = localStorage.getItem("zhipu_local_keys");
+    if (saved) {
+      zhipuLocalKeys.value = JSON.parse(saved);
+      refreshZhipuAccountDisplay();
+    }
+  } catch {}
+}
+
+async function loginZhipuAccount() {
+  if (zhipuLoginBusy.value || !zhipuLoginEmail.value.trim() || !zhipuLoginPassword.value.trim()) return;
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  zhipuLoginBusy.value = true;
+  zhipuLoginError.value = "";
+
+  const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+  if (!checkR || !checkR.running) {
+    zhipuLoginError.value = "智谱 API 服务未启动，请先点击一键启动";
+    zhipuLoginBusy.value = false;
+    return;
+  }
+
+  try {
+    const r = await callBackend("loginZhipuAccount", JSON.stringify({
+      baseUrl,
+      email: zhipuLoginEmail.value.trim(),
+      password: zhipuLoginPassword.value.trim(),
+      region: "international",
+    }));
+    if (r && r.ok && r.api_key) {
+      showNotice("登录成功！API Key 已自动添加", "ok");
+      zhipuLoginEmail.value = "";
+      zhipuLoginPassword.value = "";
+      await checkZhipuAccounts();
+    } else if (r && r.ok && r.manual_key_needed) {
+      showNotice("登录成功但需手动创建 API Key，请在 Z.ai 网站创建后粘贴添加", "warn");
+    } else {
+      zhipuLoginError.value = r?.error || "登录失败";
+    }
+  } catch (e) {
+    zhipuLoginError.value = "登录异常: " + String(e);
+  }
+  zhipuLoginBusy.value = false;
+}
+
+async function autoRegisterZhipuAccount() {
+  if (zhipuRegisterBusy.value) return;
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  zhipuRegisterBusy.value = true;
+  zhipuRegisterLogs.value = ["🚀 启动自动注册..."];
+
+  try {
+    const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+    if (!checkR || !checkR.running) {
+      zhipuRegisterLogs.value.push("⚠ 智谱 API 服务未启动，正在自动启动...");
+      const startR = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
+      if (!startR || !startR.ok) {
+        zhipuRegisterLogs.value.push("❌ 自动启动服务失败: " + (startR?.error || "未知错误"));
+        zhipuRegisterBusy.value = false;
+        return;
+      }
+      for (let i = 0; i < 15; i++) {
+        await new Promise(ok => setTimeout(ok, 1000));
+        const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+        if (chk && chk.running) break;
+      }
+      const chk2 = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+      if (!chk2 || !chk2.running) {
+        zhipuRegisterLogs.value.push("❌ 服务启动超时，请手动点击「一键启动」");
+        zhipuRegisterBusy.value = false;
+        return;
+      }
+      zhipuRegisterLogs.value.push("✓ 服务已启动");
+      zhipuStepProgress.value = zhipuSteps.length;
+      const keyR = await callBackend("fetchZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
+      if (keyR && keyR.keys && keyR.keys.length > 0) {
+        zhipuApiKey.value = keyR.keys[keyR.keys.length - 1].key;
+      } else {
+        const newKeyR = await callBackend("createZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
+        if (newKeyR && newKeyR.key) zhipuApiKey.value = newKeyR.key;
+      }
+    }
+
+    const startR = await callBackend("startZhipuRegister", JSON.stringify({ baseUrl, adminKey: "admin" }));
+    if (!startR || !startR.ok) {
+      zhipuRegisterLogs.value.push("❌ 启动注册失败: " + (startR?.error || "服务连接失败，请确认智谱 API 服务已启动"));
+      zhipuRegisterBusy.value = false;
+      return;
+    }
+
+    for (let i = 0; i < 60; i++) {
+      await new Promise(ok => setTimeout(ok, 2000));
+      const pollR = await callBackend("pollZhipuRegister", JSON.stringify({ baseUrl, adminKey: "admin" }));
+      if (pollR && pollR.logs) {
+        zhipuRegisterLogs.value = pollR.logs;
+      }
+      if (pollR && !pollR.busy) {
+        if (pollR.result && pollR.result.ok && pollR.result.api_key) {
+          showNotice("智谱自动注册成功！", "ok");
+          await checkZhipuAccounts();
+        } else if (pollR.result && pollR.result.manual_key_needed) {
+          showNotice("注册成功但需手动获取 Key，请登录 Z.ai", "warn");
+        } else if (pollR.status === "failed" || pollR.status === "error") {
+          showNotice("自动注册失败，请手动添加 API Key", "warn");
+        }
+        break;
+      }
+    }
+  } catch (e) {
+    zhipuRegisterLogs.value.push("❌ 注册异常: " + String(e));
+  }
+  zhipuRegisterBusy.value = false;
 }
 
 async function addQwenAccount() {
@@ -2367,6 +2649,7 @@ onMounted(async () => {
 
   loadLocalSettings();
   loadTheme();
+  loadZhipuLocalKeys();
 
   await loadProjects();
   const appState = await callBackend("getState");
@@ -2911,7 +3194,9 @@ async function loadOfflineModels() {
         </div>
 
         <div v-if="runMode === 'cloud'" class="sidebar-section">
-          <div class="sidebar-section-title">☁️ 云端配置</div>
+          <div class="sidebar-section-title">☁️ 云端配置
+            <span class="help-bubble">?<span class="help-bubble-content">使用 OpenRouter 云端服务<br/><br/>1. 前往 openrouter.ai 注册获取 API Key<br/>2. 粘贴 Key 后即可使用<br/>3. 模型固定为 openrouter/auto（自动选择最优模型）</span></span>
+          </div>
           <div class="sidebar-field">
             <label>API Key</label>
             <input v-model="apiKey" type="text" placeholder="OpenRouter API Key" class="setting-input" style="width: 100%;" />
@@ -2923,7 +3208,9 @@ async function loadOfflineModels() {
         </div>
 
         <div v-if="runMode === 'api' && apiSource === 'qwen'" class="sidebar-section">
-          <div class="sidebar-section-title">🔗 千问 API</div>
+          <div class="sidebar-section-title">🔗 千问 API
+            <span class="help-bubble">?<span class="help-bubble-content">本地代理服务，将千问网页版转为 OpenAI 兼容 API<br/><br/>1. 点击「一键启动」自动配置<br/>2. 启动后自动获取 API Key 和模型列表<br/>3. 无需手动配置，全程自动化</span></span>
+          </div>
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; align-items: center; gap: 0;">
@@ -2972,24 +3259,33 @@ async function loadOfflineModels() {
         </div>
 
         <div v-if="runMode === 'api' && apiSource === 'zhipu'" class="sidebar-section">
-          <div class="sidebar-section-title">🧠 智谱 AI</div>
+          <div class="sidebar-section-title">🧠 智谱 API
+            <span class="help-bubble">?<span class="help-bubble-content">本地代理服务，支持多 Key 轮换<br/><br/>1. 点击「一键启动」启动代理<br/>2. 或不启动代理，直接添加 Key 直连官方 API<br/><br/>💡 启动代理后可多 Key 轮换 = 无限算力</span></span>
+          </div>
           <div class="sidebar-field">
-            <label>API Key</label>
-            <div style="display: flex; gap: 4px; align-items: center;">
-              <input v-model="zhipuApiKey" type="password" placeholder="智谱 API Key" class="setting-input" style="flex: 1;" />
-              <button class="btn-blue btn-sm" @click="checkZhipuApiConnect" :disabled="zhipuApiChecking" style="white-space: nowrap; font-size: 10px;">
-                {{ zhipuApiChecking ? "验证中" : (zhipuApiChecked ? "✓" : "🔗 验证") }}
-              </button>
+            <label>服务地址</label>
+            <div style="display: flex; align-items: center; gap: 0;">
+              <span style="padding: 0 6px; font-size: 11px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;">http://</span>
+              <input v-model="zhipuApiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 28px; font-size: 11px;" />
+              <span style="padding: 0 4px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;">:</span>
+              <input v-model="zhipuApiPort" type="number" min="1" max="65535" placeholder="7780" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 28px; font-size: 11px;" />
             </div>
           </div>
-          <div v-if="zhipuApiChecked" style="padding: 3px 8px; background: #1a2a1a; border-radius: 4px; font-size: 10px; color: #4CAF50; margin: 2px 0;">
-            ✓ 连接成功
+          <div class="api-progress-section" style="margin-top: 6px;">
+            <div class="api-progress-bar">
+              <div v-for="(step, idx) in zhipuSteps" :key="idx" :class="['api-step', { done: zhipuStepProgress > idx, active: zhipuStepProgress === idx, pending: zhipuStepProgress < idx }]">
+                <div class="step-dot"><span v-if="zhipuStepProgress > idx">✓</span><span v-else>{{ idx + 1 }}</span></div>
+                <div class="step-label">{{ step.label }}</div>
+              </div>
+            </div>
+            <div class="api-progress-track"><div class="api-progress-fill" :style="{ width: zhipuProgressPercent + '%' }"></div></div>
+            <p class="api-progress-msg">{{ zhipuStepMessage }}</p>
+            <div style="display: flex; gap: 4px; margin-top: 4px;">
+              <button class="btn-blue" style="flex: 1; font-size: 11px; padding: 4px 8px;" @click="zhipuStepAutoRun" :disabled="zhipuStepBusy || zhipuStepProgress >= zhipuSteps.length">{{ zhipuStepBusy ? zhipuStepMessage : (zhipuStepProgress >= zhipuSteps.length ? '✓ 已就绪' : '▶ 一键启动') }}</button>
+              <button class="btn-red" style="flex: 0 0 auto; min-width: 60px; font-size: 11px; padding: 4px 8px;" @click="stopZhipuService" :disabled="zhipuStepBusy || zhipuStepProgress < zhipuSteps.length" v-if="zhipuStepProgress >= zhipuSteps.length">■ 停止</button>
+            </div>
           </div>
-          <div class="sidebar-field">
-            <label>API 地址</label>
-            <input v-model="zhipuBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" class="setting-input" style="width: 100%;" />
-          </div>
-          <div class="sidebar-field">
+          <div class="sidebar-field" style="margin-top: 6px;">
             <label>模型选择</label>
             <div v-if="zhipuModels.length > 0" class="model-quick-select">
               <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
@@ -3007,13 +3303,53 @@ async function loadOfflineModels() {
               </div>
             </div>
           </div>
-          <div style="padding: 4px 8px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.4; margin-top: 2px;">
-            💡 GLM-4-Flash 免费无限 · <a href="#" @click.prevent="window.open('https://open.bigmodel.cn', '_blank')" style="color: #4af;">注册获取Key</a>
+        </div>
+
+        <div v-if="runMode === 'api' && apiSource === 'zhipu'" class="sidebar-section">
+          <div class="sidebar-section-title">🔑 智谱账户
+            <span class="help-bubble">?<span class="help-bubble-content">1. 点击「Z.ai 注册」用 Email 注册（无需手机号）<br/>2. 登录后进入 Profile → API Keys → Create Key<br/>3. 将 Key 粘贴到「添加 API Key」中<br/><br/>💡 启动代理服务后可添加多个 Key 实现轮换，等同无限算力<br/>💡 未启动代理时，Key 将直连智谱官方 API</span></span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+            <span v-if="zhipuAccountCount >= 0" :class="['account-badge', zhipuAccountCount > 0 ? 'ok' : 'warn']">{{ zhipuAccountCount }} 个</span>
+            <span v-if="zhipuValidCount > 0" style="color: #4CAF50; font-size: 10px;">{{ zhipuValidCount }} 可用</span>
+            <button class="btn-blue btn-sm" @click="checkZhipuAccounts" style="margin-left: auto; font-size: 10px;">刷新</button>
+          </div>
+          <p v-if="zhipuAccountCount === 0" class="hint warn" style="margin: 2px 0; font-size: 10px;">未添加 API Key，请先添加</p>
+          <div v-if="zhipuAccounts.length > 0" class="account-list" style="max-height: 120px; overflow-y: auto;">
+            <div v-for="acc in zhipuAccounts" :key="acc.full_key || acc.api_key" :class="['account-row']">
+              <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
+              <span class="account-email">{{ acc.label || acc.api_key }}</span>
+              <button class="btn-icon btn-sticky" @click="validateZhipuAccount(acc.full_key || acc.api_key)" title="验证" style="color: #4af;">✓</button>
+              <button class="btn-icon btn-del" @click="deleteZhipuAccount(acc.full_key || acc.api_key)" title="删除">✕</button>
+            </div>
+          </div>
+          <details style="margin-top: 4px;">
+            <summary style="font-size: 10px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+            <div class="reg-form" style="margin-top: 2px;">
+              <input v-model="zhipuLoginEmail" type="text" placeholder="邮箱" style="font-size: 11px;" />
+              <input v-model="zhipuLoginPassword" type="password" placeholder="密码" style="font-size: 11px;" />
+              <button class="btn-blue btn-sm" @click="loginZhipuAccount" :disabled="zhipuLoginBusy || !zhipuLoginEmail.trim() || !zhipuLoginPassword.trim()" style="width: 100%; font-size: 10px;">{{ zhipuLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
+            </div>
+            <p v-if="zhipuLoginError" class="hint warn" style="margin: 2px 0; font-size: 10px;">{{ zhipuLoginError }}</p>
+          </details>
+          <details style="margin-top: 4px;">
+            <summary style="font-size: 10px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <div class="reg-form" style="margin-top: 2px;">
+              <input v-model="zhipuNewLabel" type="text" placeholder="标签（可选）" style="font-size: 11px;" />
+              <input v-model="zhipuNewKey" type="text" placeholder="粘贴智谱 API Key" style="font-size: 11px;" />
+              <button class="btn-blue btn-sm" @click="addZhipuAccount" :disabled="!zhipuNewKey.trim()" style="width: 100%; font-size: 10px;">添加</button>
+            </div>
+          </details>
+          <div style="display: flex; gap: 4px; margin-top: 4px;">
+            <button class="btn-blue" @click="callBackend('openExternalUrl', 'https://z.ai/chat')" style="flex: 1; font-size: 11px; padding: 4px 8px;">🌐 Z.ai 注册(海外)</button>
+            <button class="btn-blue" @click="callBackend('openExternalUrl', 'https://open.bigmodel.cn/user/login')" style="flex: 1; font-size: 11px; padding: 4px 8px;">🇨🇳 国内版注册</button>
           </div>
         </div>
 
         <div v-if="runMode === 'ollama'" class="sidebar-section">
-          <div class="sidebar-section-title">🦙 Ollama</div>
+          <div class="sidebar-section-title">🦙 Ollama
+            <span class="help-bubble">?<span class="help-bubble-content">本地模型推理，无需联网<br/><br/>1. 安装 Ollama: ollama.com<br/>2. 启动 Ollama 服务<br/>3. 点击「检测」自动发现可用模型<br/><br/>💡 数据完全本地处理，隐私安全</span></span>
+          </div>
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; gap: 4px; align-items: center;">
@@ -3024,7 +3360,9 @@ async function loadOfflineModels() {
         </div>
 
         <div v-if="runMode === 'api' && apiSource === 'qwen'" class="sidebar-section">
-          <div class="sidebar-section-title">🔑 千问账户</div>
+          <div class="sidebar-section-title">🔑 千问账户
+            <span class="help-bubble">?<span class="help-bubble-content">1. 点击「🤖 自动注册」一键生成账号<br/>2. 或手动登录已有账户 / 添加 Token<br/><br/>💡 多账户自动轮换，等同无限算力<br/>💡 被限流的账户会自动冷却恢复</span></span>
+          </div>
           <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
             <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">{{ qwenAccountCount }} 个</span>
             <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 10px;">{{ qwenValidCount }} 可用</span>
@@ -4344,6 +4682,57 @@ export default { name: "App" };
   margin-bottom: 6px;
   padding-bottom: 4px;
   border-bottom: 1px solid #1a1a1a;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.help-bubble {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #2a2a3a;
+  color: #888;
+  font-size: 9px;
+  font-weight: 700;
+  cursor: help;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.help-bubble:hover .help-bubble-content {
+  display: block;
+}
+.help-bubble-content {
+  display: none;
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(100% + 6px);
+  background: #1a1a2a;
+  border: 1px solid #3a3a5a;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 10px;
+  font-weight: 400;
+  color: #bbb;
+  line-height: 1.5;
+  white-space: normal;
+  width: 220px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  pointer-events: none;
+}
+.help-bubble-content::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #3a3a5a;
 }
 .sidebar-field {
   margin-bottom: 6px;

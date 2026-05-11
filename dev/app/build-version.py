@@ -346,6 +346,14 @@ def post_build(release_dir: Path):
         shutil.copytree(str(qwen_src), str(qwen_dst))
         print("  ✓ 复制 qwen2api/ (API 服务)")
 
+    zhipu_src = DEV_APP_DIR / "zhipu2api"
+    zhipu_dst = release_dir / "zhipu2api"
+    if zhipu_src.exists():
+        if zhipu_dst.exists():
+            shutil.rmtree(str(zhipu_dst))
+        shutil.copytree(str(zhipu_src), str(zhipu_dst))
+        print("  ✓ 复制 zhipu2api/ (智谱 API 服务)")
+
     # 8. 复制整个 src/ (CLI 代码和工具) - 这是关键！
     src_src = DEV_APP_DIR / "src"
     src_dst = release_dir / "src"

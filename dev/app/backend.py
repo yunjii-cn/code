@@ -1200,6 +1200,313 @@ def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "ad
     return {"ok": True, "message": "API 服务正在启动，请稍候检查状态", "baseUrl": base, "pid": proc.pid, "logPath": str(log_path)}
 
 
+# ── 智谱 API 代理服务 ──
+_zhipu2api_proc = None
+
+def _zhipu2api_venv_python():
+    venv_dir = os.path.join(_app_dir(), "scripts", ".zhipu_venv")
+    if os.name == "nt":
+        return os.path.join(venv_dir, "Scripts", "python.exe")
+    return os.path.join(venv_dir, "bin", "python")
+
+def _check_zhipu2api_deps():
+    vp = _zhipu2api_venv_python()
+    if not os.path.isfile(vp):
+        return False
+    try:
+        import subprocess
+        r = subprocess.run(
+            [vp, "-c", "import fastapi; import uvicorn; import httpx; import pydantic_settings"],
+            capture_output=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "admin") -> dict:
+    global _zhipu2api_proc
+
+    base = f"http://127.0.0.1:{port}"
+    status = check_api_service(base)
+    if status.get("running"):
+        return {"ok": True, "message": "智谱 API 服务已在运行", "baseUrl": base}
+
+    if _zhipu2api_proc and _zhipu2api_proc.poll() is None:
+        return {"ok": True, "message": "智谱 API 服务正在启动中", "baseUrl": base}
+
+    zhipu_dir = project_dir.strip()
+    if not zhipu_dir:
+        app_zhipu_dir = Path(_app_dir()) / "zhipu2api"
+        if app_zhipu_dir.exists():
+            zhipu_dir = str(app_zhipu_dir)
+        else:
+            return {"ok": False, "error": f"未找到 zhipu2api 目录: {app_zhipu_dir}"}
+
+    if not Path(zhipu_dir).exists():
+        return {"ok": False, "error": f"zhipu2api 目录不存在: {zhipu_dir}"}
+
+    venv_python = _zhipu2api_venv_python()
+    venv_dir = os.path.join(_app_dir(), "scripts", ".zhipu_venv")
+    uv = _uv_exe()
+    env = _uv_env()
+
+    if not _check_zhipu2api_deps():
+        if not os.path.isfile(venv_python):
+            if not os.path.isfile(uv):
+                return {"ok": False, "error": "uv 未安装，请先在部署维护中安装 uv"}
+            try:
+                subprocess.check_call(
+                    [uv, "venv", venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                    env=env, timeout=300,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
+
+        req_file = Path(zhipu_dir) / "requirements.txt"
+        if req_file.exists():
+            try:
+                subprocess.check_call(
+                    [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
+                    env=env, timeout=300,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+            except Exception as e:
+                return {"ok": False, "error": f"安装智谱 API 服务依赖失败: {e}"}
+
+    data_dir = Path(zhipu_dir) / "data"
+    data_dir.mkdir(exist_ok=True)
+
+    env.update({
+        "PYTHONPATH": str(zhipu_dir),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PORT": str(port),
+        "ADMIN_KEY": admin_key,
+        "ZHIPU_DATA_DIR": str(data_dir),
+        "ZHIPU_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+        "VIRTUAL_ENV": venv_dir,
+    })
+
+    log_path = Path(zhipu_dir) / "data" / "zhipu2api.log"
+    try:
+        log_file = open(log_path, "a", encoding="utf-8")
+    except Exception:
+        log_file = subprocess.PIPE
+
+    try:
+        proc = subprocess.Popen(
+            [venv_python, "-m", "uvicorn", "main:app",
+             "--host", "0.0.0.0", "--port", str(port), "--workers", "1"],
+            cwd=zhipu_dir,
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        _zhipu2api_proc = proc
+    except Exception as e:
+        if log_file != subprocess.PIPE:
+            try: log_file.close()
+            except: pass
+        return {"ok": False, "error": f"启动智谱 API 服务失败: {e}"}
+
+    import time as _time
+    _time.sleep(2)
+    if proc.poll() is not None:
+        err_msg = "进程意外退出"
+        if log_file != subprocess.PIPE:
+            try:
+                log_file.close()
+                with open(log_path, "r", encoding="utf-8", errors="replace") as lf:
+                    tail = lf.read()[-2000:]
+                if tail.strip():
+                    err_msg = tail.strip().split("\n")[-1][:200]
+            except:
+                pass
+        return {"ok": False, "error": f"智谱 API 服务启动失败: {err_msg}", "logPath": str(log_path)}
+
+    return {"ok": True, "message": "智谱 API 服务正在启动", "baseUrl": base, "pid": proc.pid, "logPath": str(log_path)}
+
+def stop_zhipu2api(base_url: str = "") -> dict:
+    global _zhipu2api_proc
+    stopped = False
+    if _zhipu2api_proc is not None and _zhipu2api_proc.poll() is None:
+        try:
+            _zhipu2api_proc.terminate()
+            try: _zhipu2api_proc.wait(timeout=10)
+            except Exception:
+                _zhipu2api_proc.kill()
+            stopped = True
+        except Exception:
+            pass
+        _zhipu2api_proc = None
+
+    port = _extract_port(base_url, 7780)
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["netstat", "-ano"], capture_output=True, text=True, timeout=10,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        for line in r.stdout.splitlines():
+            if f":{port}" in line and "LISTENING" in line:
+                parts = line.split()
+                pid = int(parts[-1])
+                if pid and pid != os.getpid():
+                    try:
+                        import signal
+                        os.kill(pid, signal.SIGTERM)
+                        stopped = True
+                    except Exception:
+                        try:
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", str(pid)],
+                                capture_output=True, timeout=10,
+                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                            )
+                            stopped = True
+                        except Exception:
+                            pass
+                break
+    except Exception:
+        pass
+
+    if stopped:
+        return {"ok": True, "message": "智谱 API 服务已停止"}
+    return {"ok": True, "message": "智谱 API 服务未在运行"}
+
+def add_zhipu_account(base_url: str, api_key: str, admin_key: str = "", label: str = "", timeout_ms: int = 15000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/accounts",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {admin_key or 'admin'}",
+            },
+            body={"api_key": api_key.strip(), "label": label.strip()},
+            timeout_ms=timeout_ms,
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def start_zhipu_register(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/register",
+            method="POST",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}", "Content-Type": "application/json"},
+            body=json.dumps({}).encode("utf-8"),
+            timeout_ms=timeout_ms,
+        )
+        if result.get("ok"):
+            data = result.get("data", {})
+            if isinstance(data, dict):
+                return data
+            return {"ok": True, "message": "注册已启动"}
+        error_msg = result.get("text", "") or f"HTTP {result.get('status', 0)}"
+        return {"ok": False, "error": error_msg}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def poll_zhipu_register(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/register/status",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
+            timeout_ms=timeout_ms,
+        )
+        if result.get("ok"):
+            data = result.get("data", {})
+            if isinstance(data, dict):
+                return data
+            return {"ok": True, "busy": False, "status": "unknown"}
+        error_msg = result.get("text", "") or f"HTTP {result.get('status', 0)}"
+        return {"ok": False, "error": error_msg, "busy": False}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "busy": False}
+
+def login_zhipu_account(base_url: str, email: str, password: str, region: str = "international", admin_key: str = "", timeout_ms: int = 20000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/login",
+            method="POST",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}", "Content-Type": "application/json"},
+            body=json.dumps({"email": email, "password": password, "region": region}).encode("utf-8"),
+            timeout_ms=timeout_ms,
+        )
+        if result.get("ok"):
+            data = result.get("data", {})
+            if isinstance(data, dict):
+                return data
+            return {"ok": True}
+        error_msg = result.get("text", "") or f"HTTP {result.get('status', 0)}"
+        return {"ok": False, "error": error_msg}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def list_zhipu_accounts(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/accounts",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
+            timeout_ms=timeout_ms,
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def delete_zhipu_account(base_url: str, api_key: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/accounts/{api_key}",
+            method="DELETE",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
+            timeout_ms=timeout_ms,
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def validate_zhipu_account(base_url: str, api_key: str, admin_key: str = "", timeout_ms: int = 15000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/accounts/{api_key}/validate",
+            method="POST",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
+            timeout_ms=timeout_ms,
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def fetch_zhipu_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/keys",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
+            timeout_ms=timeout_ms,
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def create_zhipu_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    try:
+        result = fetch_json_with_timeout(
+            f"{base_url.rstrip('/')}/api/admin/keys",
+            method="POST",
+            headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
+            timeout_ms=timeout_ms,
+        )
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 # ── Ollama 代理服务器 ──
 class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
     """将 Anthropic Messages API 转换为 Ollama /api/chat API（原生 NDJSON 格式）
