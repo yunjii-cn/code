@@ -2341,8 +2341,24 @@ class ClaudeCliRunner:
                     system_prompt: str = None, auto_approve: bool = False,
                     workspace_path: str = None) -> list:
         env_file = os.path.join(self.project_root, ".env")
+        version = "1.0.0"
+        try:
+            pkg_path = os.path.join(self.project_root, "package.json")
+            if os.path.exists(pkg_path):
+                with open(pkg_path, "r", encoding="utf-8") as f:
+                    pkg = json.load(f)
+                version = pkg.get("version", version)
+        except Exception:
+            pass
         args = [
             f"--env-file-if-exists={env_file}",
+            "--define", f"MACRO.VERSION=\"{version}\"",
+            "--define", "MACRO.BUILD_TIME=\"\"",
+            "--define", "MACRO.PACKAGE_URL=\"@anthropic-ai/claude-code\"",
+            "--define", "MACRO.NATIVE_PACKAGE_URL=\"@anthropic-ai/claude-code-native\"",
+            "--define", "MACRO.ISSUES_EXPLAINER=\"https://github.com/anthropics/claude-code/issues\"",
+            "--define", "MACRO.FEEDBACK_CHANNEL=\"https://github.com/anthropics/claude-code/discussions\"",
+            "--define", "MACRO.VERSION_CHANGELOG=\"\"",
             self.cli_entry,
             "-p",
             "--output-format", "stream-json",
