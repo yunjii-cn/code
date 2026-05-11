@@ -1527,6 +1527,21 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
+    @pyqtSlot(str, result=bool)
+    def openExternalUrl(self, url: str):
+        try:
+            import webbrowser
+            webbrowser.open(url)
+            return True
+        except Exception:
+            try:
+                from PyQt6.QtGui import QDesktopServices
+                from PyQt6.QtCore import QUrl
+                QDesktopServices.openUrl(QUrl(url))
+                return True
+            except Exception:
+                return False
+
     @pyqtSlot(result=str)
     def listPlugins(self):
         plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
@@ -2130,6 +2145,138 @@ class BackendBridge(QObject):
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"ok": False, "error": f"deleteQwenAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def startZhipu2Api(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            project_dir = payload.get("projectDir", "").strip()
+            port = int(payload.get("port", 7780) or 7780)
+            admin_key = payload.get("adminKey", "admin").strip() or "admin"
+            result = backend.start_zhipu2api(project_dir, port, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"startZhipu2Api异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def stopZhipu2Api(self, payload: str = ""):
+        try:
+            base_url = ""
+            if payload:
+                try:
+                    data = json.loads(payload)
+                    base_url = data.get("baseUrl", "")
+                except Exception:
+                    pass
+            result = backend.stop_zhipu2api(base_url)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"stopZhipu2Api异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def addZhipuAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            api_key = payload.get("apiKey", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            label = payload.get("label", "").strip()
+            result = backend.add_zhipu_account(base_url, api_key, admin_key, label)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"addZhipuAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def listZhipuAccounts(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.list_zhipu_accounts(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"listZhipuAccounts异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def deleteZhipuAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            api_key = payload.get("apiKey", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.delete_zhipu_account(base_url, api_key, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"deleteZhipuAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def validateZhipuAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            api_key = payload.get("apiKey", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.validate_zhipu_account(base_url, api_key, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"validateZhipuAccount异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def fetchZhipuApiKey(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.fetch_zhipu_api_key(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"fetchZhipuApiKey异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def createZhipuApiKey(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.create_zhipu_api_key(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"createZhipuApiKey异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def startZhipuRegister(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.start_zhipu_register(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"startZhipuRegister异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def pollZhipuRegister(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            admin_key = payload.get("adminKey", "").strip()
+            result = backend.poll_zhipu_register(base_url, admin_key)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"pollZhipuRegister异常: {e}"})
+
+    @pyqtSlot(str, result=str)
+    def loginZhipuAccount(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            base_url = payload.get("baseUrl", "").strip()
+            email = payload.get("email", "").strip()
+            password = payload.get("password", "").strip()
+            region = payload.get("region", "international").strip()
+            result = backend.login_zhipu_account(base_url, email, password, region)
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": f"loginZhipuAccount异常: {e}"})
 
     @pyqtSlot(str, result=str)
     def setStickyAccount(self, payload_json: str = "{}"):
