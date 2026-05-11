@@ -2910,17 +2910,6 @@ async function loadOfflineModels() {
           <button :class="['api-source-btn', { active: apiSource === 'zhipu' }]" @click="apiSource = 'zhipu'">🧠 智谱</button>
         </div>
 
-        <div class="current-model-info">
-          <div class="info-row">
-            <span class="info-label">运行模式</span>
-            <span class="info-value">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? (apiSource === 'qwen' ? '🔗 千问' : '🧠 智谱') : '🦙 Ollama' }}</span>
-          </div>
-          <div class="info-row">
-            <span class="info-label">当前模型</span>
-            <span class="info-value model-name-tag">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
-          </div>
-        </div>
-
         <div v-if="runMode === 'cloud'" class="sidebar-section">
           <div class="sidebar-section-title">☁️ 云端配置</div>
           <div class="sidebar-field">
@@ -2979,7 +2968,6 @@ async function loadOfflineModels() {
                 </div>
               </div>
             </div>
-            <input v-model="apiModel" placeholder="qwen3.6-plus" class="setting-input" style="width: 100%; margin-top: 4px;" />
           </div>
         </div>
 
@@ -3018,7 +3006,6 @@ async function loadOfflineModels() {
                 </div>
               </div>
             </div>
-            <input v-model="zhipuModel" placeholder="glm-4.7-flash" class="setting-input" style="width: 100%; margin-top: 4px;" />
           </div>
           <div style="padding: 4px 8px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.4; margin-top: 2px;">
             💡 GLM-4-Flash 免费无限 · <a href="#" @click.prevent="window.open('https://open.bigmodel.cn', '_blank')" style="color: #4af;">注册获取Key</a>
@@ -3089,17 +3076,7 @@ async function loadOfflineModels() {
 
       <template v-else>
         <div class="panel card" style="padding: 12px;">
-          <div class="current-model-info">
-            <div class="info-row">
-              <span class="info-label">运行模式</span>
-              <span class="info-value">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? (apiSource === 'qwen' ? '🔗 千问' : '🧠 智谱') : '🦙 Ollama' }}</span>
-            </div>
-            <div class="info-row">
-              <span class="info-label">当前模型</span>
-              <span class="info-value model-name-tag">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
-            </div>
-          </div>
-          <button class="btn-blue" style="width: 100%; margin-top: 8px;" @click="showPanel = true">📂 展开面板</button>
+          <button class="btn-blue" style="width: 100%;" @click="showPanel = true">📂 展开面板</button>
         </div>
       </template>
     </main>

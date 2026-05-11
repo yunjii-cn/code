@@ -38,9 +38,39 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl, QPropertyAnimation, pyqtProperty, QRectF
 from PyQt6.QtGui import QFont, QIcon, QColor, QPixmap, QPainter, QLinearGradient, QPalette
 from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtWebChannel import QWebChannel
 
 from PyQt6.QtCore import QObject
+
+
+class ChineseWebPage(QWebEnginePage):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu()
+        for action in menu.actions():
+            text = action.text()
+            text = text.replace("Back", "后退")
+            text = text.replace("Forward", "前进")
+            text = text.replace("Reload", "重新加载")
+            text = text.replace("Cut", "剪切")
+            text = text.replace("Copy", "复制")
+            text = text.replace("Paste", "粘贴")
+            text = text.replace("Undo", "撤销")
+            text = text.replace("Redo", "重做")
+            text = text.replace("Select All", "全选")
+            text = text.replace("Inspect", "检查")
+            text = text.replace("Save Image", "保存图片")
+            text = text.replace("Copy Image", "复制图片")
+            text = text.replace("Copy Link", "复制链接")
+            text = text.replace("Copy Image Address", "复制图片地址")
+            text = text.replace("Save Link", "保存链接")
+            text = text.replace("Open Link in New Tab", "在新标签页中打开链接")
+            text = text.replace("View Source", "查看源代码")
+            action.setText(text)
+        menu.exec(event.globalPos())
 
 # 导入后端模块
 import backend
@@ -3187,6 +3217,7 @@ class MainWindow(QMainWindow):
 
         # QWebEngineView 加载 Vue 前端
         self.web_view = QWebEngineView()
+        self.web_view.setPage(ChineseWebPage(self.web_view))
         self.web_view.setStyleSheet("background-color: #0d0d0d;")
 
         self.web_view.page().setBackgroundColor(QColor("#0d0d0d"))
