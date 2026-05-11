@@ -39,6 +39,9 @@ type DesktopSettings = {
   API_MODEL?: string;
   API_KEY?: string;
   API_TIMEOUT_MS?: string;
+  ZHIPU_API_KEY?: string;
+  ZHIPU_MODEL?: string;
+  ZHIPU_BASE_URL?: string;
   AI_LANGUAGE?: string;
   AI_TEMPERATURE?: string;
   AI_MAX_TOKENS?: string;
@@ -113,7 +116,7 @@ const noticeType = ref<"ok" | "warn">("ok");
 const messages = ref<ChatMessage[]>([]);
 const currentAssistantId = ref("");
 
-const runMode = ref<"cloud" | "ollama" | "api">("ollama");
+const runMode = ref<"cloud" | "ollama" | "api" | "zhipu">("ollama");
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
@@ -126,6 +129,12 @@ const apiBaseUrl = computed(() => {
 });
 const apiModel = ref("qwen3.6-plus");
 const apiModels = ref<ModelInfo[]>([]);
+const zhipuApiKey = ref("");
+const zhipuModel = ref("glm-4-flash");
+const zhipuBaseUrl = ref("https://open.bigmodel.cn/api/paas/v4");
+const zhipuModels = ref<ModelInfo[]>([]);
+const zhipuApiChecked = ref(false);
+const zhipuApiChecking = ref(false);
 const cloudModels = ref<ModelInfo[]>([]);
 const loadingModels = ref(false);
 const expandedModelId = ref("");
@@ -182,6 +191,9 @@ const settings = reactive<Required<DesktopSettings>>({
   API_MODEL: "",
   API_KEY: "",
   API_TIMEOUT_MS: "3000000",
+  ZHIPU_API_KEY: "",
+  ZHIPU_MODEL: "",
+  ZHIPU_BASE_URL: "",
   AI_LANGUAGE: "zh",
   AI_TEMPERATURE: "",
   AI_MAX_TOKENS: "",
@@ -201,9 +213,13 @@ function getModelConfig(modelId: string): ModelConfig {
 }
 
 function getActiveModelConfig(): ModelConfig {
-  const activeModel = runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : settings.ANTHROPIC_MODEL;
+  const activeModel = runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : runMode.value === "zhipu" ? zhipuModel.value : settings.ANTHROPIC_MODEL;
   return getModelConfig(activeModel || "__default__");
 }
+
+const activeModelId = computed(() => {
+  return runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : runMode.value === "zhipu" ? zhipuModel.value : "openrouter/auto";
+});
 
 const selectedOllamaModelToolSupport = computed<boolean | undefined>(() => {
   if (!ollamaModel.value) return undefined;
@@ -217,6 +233,8 @@ watch(runMode, (newMode) => {
     loadCloudModels("ollama");
   } else if (newMode === "api") {
     checkApiServiceStatus();
+  } else if (newMode === "zhipu") {
+    loadZhipuModels();
   }
 });
 
@@ -513,12 +531,15 @@ function applySettings(data?: DesktopSettings) {
   settings.API_MODEL = data.API_MODEL ?? "";
   settings.API_KEY = data.API_KEY ?? "";
   settings.API_TIMEOUT_MS = data.API_TIMEOUT_MS ?? "3000000";
+  settings.ZHIPU_API_KEY = data.ZHIPU_API_KEY ?? "";
+  settings.ZHIPU_MODEL = data.ZHIPU_MODEL ?? "";
+  settings.ZHIPU_BASE_URL = data.ZHIPU_BASE_URL ?? "";
   settings.AI_LANGUAGE = data.AI_LANGUAGE ?? "zh";
   settings.AI_TEMPERATURE = data.AI_TEMPERATURE ?? "";
   settings.AI_MAX_TOKENS = data.AI_MAX_TOKENS ?? "";
   settings.SYSTEM_PROMPT = data.SYSTEM_PROMPT ?? "";
 
-  runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : settings.MODEL_PROVIDER === "api" ? "api" : "cloud";
+  runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : settings.MODEL_PROVIDER === "api" ? "api" : settings.MODEL_PROVIDER === "zhipu" ? "zhipu" : "cloud";
   const cloudKey = settings.ANTHROPIC_API_KEY || settings.ANTHROPIC_AUTH_TOKEN || "";
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
   ollamaBaseUrl.value = settings.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
@@ -534,6 +555,10 @@ function applySettings(data?: DesktopSettings) {
       apiKey.value = ak;
     }
   }
+
+  zhipuApiKey.value = settings.ZHIPU_API_KEY || "";
+  zhipuModel.value = settings.ZHIPU_MODEL || "glm-4-flash";
+  zhipuBaseUrl.value = settings.ZHIPU_BASE_URL || "https://open.bigmodel.cn/api/paas/v4";
 
   if (settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL) {
     const modelId = settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL;
@@ -679,7 +704,7 @@ async function sendMessage() {
 }
 
 async function doSend(text: string, addUserMsg: boolean = false) {
-  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : runMode.value === "api" ? apiModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
+  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : runMode.value === "api" ? apiModel.value.trim() : runMode.value === "zhipu" ? zhipuModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
   if (addUserMsg) {
     addMessage("user", text);
   }
@@ -701,7 +726,7 @@ async function doSend(text: string, addUserMsg: boolean = false) {
 
   const result = await callBackend("sendMessage", JSON.stringify({
     prompt: text,
-    provider: runMode.value === "ollama" ? "ollama" : runMode.value === "api" ? "api" : "anthropic",
+    provider: runMode.value === "ollama" ? "ollama" : runMode.value === "api" ? "api" : runMode.value === "zhipu" ? "zhipu" : "anthropic",
     model: currentModel,
     ai_language: activeConfig.language,
     ai_temperature: activeConfig.temperature,
@@ -1528,6 +1553,36 @@ async function saveSettings() {
     return;
   }
 
+  if (runMode.value === "zhipu") {
+    if (!zhipuApiKey.value.trim()) {
+      showNotice("请填写智谱 API Key", "warn");
+      return;
+    }
+    if (!zhipuModel.value.trim()) {
+      showNotice("请选择或填写模型名称", "warn");
+      return;
+    }
+
+    const payload: Record<string, string> = {
+      MODEL_PROVIDER: "zhipu",
+      ZHIPU_API_KEY: zhipuApiKey.value.trim(),
+      ZHIPU_MODEL: zhipuModel.value.trim(),
+      ZHIPU_BASE_URL: zhipuBaseUrl.value.trim() || "https://open.bigmodel.cn/api/paas/v4",
+      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+      DISABLE_TELEMETRY: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      AI_LANGUAGE: activeConfig.language || "zh",
+      AI_TEMPERATURE: activeConfig.temperature || "",
+      AI_MAX_TOKENS: activeConfig.maxTokens || "",
+      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+    };
+
+    const saved = await callBackend("saveSettings", JSON.stringify(payload));
+    applySettings(saved);
+    showNotice("配置已保存。智谱 API 模式已启用。", "ok");
+    return;
+  }
+
   if (!apiKey.value.trim()) {
     showNotice("请先填写 API Key", "warn");
     return;
@@ -1610,6 +1665,56 @@ async function fetchApiKey() {
   } catch (e) {
     console.error("[fetchApiKey] error:", e);
     showNotice("获取 API Key 异常", "warn");
+  }
+}
+
+async function loadZhipuModels() {
+  loadingModels.value = true;
+  try {
+    const payload = { source: "zhipu", apiKey: zhipuApiKey.value, baseUrl: zhipuBaseUrl.value };
+    const result = await callBackend("listModels", JSON.stringify(payload));
+    if (result && result.loading) {
+      return;
+    }
+    if (!result || !result.ok) {
+      showNotice(result?.error || "智谱模型列表加载失败", "warn");
+      loadingModels.value = false;
+      return;
+    }
+    zhipuModels.value = result.models || [];
+    loadingModels.value = false;
+    showNotice(`已加载 ${zhipuModels.value.length} 个智谱模型`, "ok");
+  } catch (e) {
+    console.error("[loadZhipuModels] error:", e);
+    showNotice("智谱模型列表加载异常", "warn");
+    loadingModels.value = false;
+  }
+}
+
+async function checkZhipuApiConnect() {
+  if (!zhipuApiKey.value.trim()) {
+    showNotice("请先填写智谱 API Key", "warn");
+    return;
+  }
+  zhipuApiChecking.value = true;
+  try {
+    const result = await callBackend("checkZhipuApi", JSON.stringify({
+      apiKey: zhipuApiKey.value.trim(),
+      baseUrl: zhipuBaseUrl.value.trim(),
+    }));
+    zhipuApiChecking.value = false;
+    if (result && result.ok) {
+      zhipuApiChecked.value = true;
+      showNotice("智谱 API 连接成功！", "ok");
+      await loadZhipuModels();
+    } else {
+      zhipuApiChecked.value = false;
+      showNotice(result?.error || "智谱 API 连接失败", "warn");
+    }
+  } catch (e) {
+    zhipuApiChecking.value = false;
+    zhipuApiChecked.value = false;
+    showNotice("智谱 API 连接异常", "warn");
   }
 }
 
@@ -2367,8 +2472,10 @@ onMounted(async () => {
         const source = (payload.models?.[0]?.provider) || "ollama";
         if (source === "api") {
           apiModels.value = payload.models || [];
+        } else if (source === "zhipu") {
+          zhipuModels.value = payload.models || [];
         }
-        const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : source === "api" ? " API" : " Ollama";
+        const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : source === "api" ? " API" : source === "zhipu" ? " 智谱" : " Ollama";
         let msg = `已加载 ${cloudModels.value.length} 个${label}模型`;
         if (broken.length > 0) msg += `，${broken.length}个损坏`;
         showNotice(msg, broken.length > 0 ? "warn" : "ok");
@@ -2776,6 +2883,7 @@ async function loadOfflineModels() {
           <div class="mode-switch">
             <button :class="['mode-btn', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">☁️ 云端</button>
             <button :class="['mode-btn', { active: runMode === 'api' }]" @click="runMode = 'api'">🔗 API</button>
+            <button :class="['mode-btn', { active: runMode === 'zhipu' }]" @click="runMode = 'zhipu'">🧠 智谱</button>
             <button :class="['mode-btn', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">🦙 Ollama</button>
           </div>
         </div>
@@ -2976,6 +3084,69 @@ async function loadOfflineModels() {
                 获取方式：登录 chat.qwen.ai → F12 开发者工具 → Application → Local Storage → 复制 token 值
               </p>
             </details>
+          </div>
+        </template>
+
+        <template v-else-if="runMode === 'zhipu'">
+          <label class="field">
+            <span>智谱 API Key</span>
+            <div style="display: flex; gap: 4px;">
+              <input v-model="zhipuApiKey" type="password" placeholder="输入智谱 API Key" style="flex: 1;" />
+              <button class="btn-blue btn-sm" @click="checkZhipuApiConnect" :disabled="zhipuApiChecking">
+                {{ zhipuApiChecking ? "验证中..." : (zhipuApiChecked ? "✓ 已连接" : "🔗 验证") }}
+              </button>
+            </div>
+          </label>
+
+          <div v-if="zhipuApiChecked" style="padding: 4px 8px; background: #1a2a1a; border-radius: 4px; font-size: 11px; color: #4CAF50; margin-bottom: 4px;">
+            ✓ 智谱 API 已连接
+          </div>
+
+          <label class="field">
+            <span>API 地址</span>
+            <input v-model="zhipuBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" />
+          </label>
+
+          <div class="field-group-title">模型选择</div>
+          <div v-if="zhipuModels.length > 0" class="model-quick-select">
+            <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
+              <div class="custom-select-value">
+                <span>{{ zhipuModel ? displayName(zhipuModels.find(m => m.id === zhipuModel)?.name || zhipuModel) : '选择模型...' }}</span>
+                <span class="custom-select-arrow">▼</span>
+              </div>
+              <div v-if="modelDropdownOpen" class="custom-select-options">
+                <div
+                  v-for="m in zhipuModels" :key="m.id"
+                  :class="['custom-select-option', { selected: zhipuModel === m.id }]"
+                  @click.stop="zhipuModel = m.id; modelDropdownOpen = false"
+                >
+                  <span>{{ displayName(m.name || m.id) }}</span>
+                  <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
+                  <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
+                  <span v-if="m.desc" style="font-size: 10px; color: #888; margin-left: 4px;">{{ m.desc }}</span>
+                </div>
+              </div>
+            </div>
+            <button class="btn-icon" :class="{ active: expandedModelId === zhipuModel }" @click="toggleModelSettings(zhipuModel)" title="模型参数">⚙</button>
+          </div>
+          <label class="field">
+            <span>模型名称</span>
+            <input v-model="zhipuModel" placeholder="glm-4-flash" />
+          </label>
+
+          <div class="role-presets">
+            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
+            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
+              {{ preset.icon }} {{ preset.name }}
+            </button>
+          </div>
+          <div v-if="expandedModelId && zhipuModels.find(m => m.id === expandedModelId)" class="model-settings">
+            <ModelSettingsPanel :config="getModelConfig(expandedModelId)" :hint="getAutoConfigHint(expandedModelId)" @auto-configure="autoConfigure(expandedModelId)" />
+          </div>
+
+          <div style="padding: 6px 8px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.5;">
+            💡 智谱AI提供免费模型额度，GLM-4-Flash 可免费使用。<br>
+            获取 API Key：open.bigmodel.cn → 注册/登录 → API Keys
           </div>
         </template>
 
@@ -3567,11 +3738,11 @@ async function loadOfflineModels() {
             <div class="card-title">构建信息</div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">运行模式</div></div>
-              <span style="font-size: 12px; color: #4af;">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : '🦙 Ollama' }}</span>
+              <span style="font-size: 12px; color: #4af;">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : runMode === 'zhipu' ? '🧠 智谱' : '🦙 Ollama' }}</span>
             </div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">当前模型</div></div>
-              <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? apiModel : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
+              <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? apiModel : runMode === 'zhipu' ? zhipuModel : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
             </div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">项目路径</div></div>
@@ -3631,7 +3802,7 @@ async function loadOfflineModels() {
               </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">AI 语言</div><div class="setting-desc">AI 回复使用的语言</div></div>
-                <select v-model="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').language" class="setting-select">
+                <select v-model="getModelConfig(activeModelId).language" class="setting-select">
                   <option value="zh">🇨🇳 中文</option>
                   <option value="en">🇺🇸 English</option>
                   <option value="ja">🇯🇵 日本語</option>
@@ -3681,6 +3852,9 @@ async function loadOfflineModels() {
                 </button>
                 <button :class="['mode-card', { active: runMode === 'api' }]" @click="runMode = 'api'">
                   <span class="mode-icon">🔗</span><span class="mode-name">API</span><span class="mode-desc">本地 API 代理服务</span>
+                </button>
+                <button :class="['mode-card', { active: runMode === 'zhipu' }]" @click="runMode = 'zhipu'">
+                  <span class="mode-icon">🧠</span><span class="mode-name">智谱</span><span class="mode-desc">智谱GLM官方API</span>
                 </button>
                 <button :class="['mode-card', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">
                   <span class="mode-icon">🦙</span><span class="mode-name">Ollama</span><span class="mode-desc">本地模型推理</span>
@@ -3754,6 +3928,57 @@ async function loadOfflineModels() {
               </div>
             </div>
 
+            <div v-if="runMode === 'zhipu'" class="settings-card">
+              <div class="card-title">智谱 AI 配置</div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">API Key</div><div class="setting-desc">智谱开放平台 API 密钥</div></div>
+                <div style="display: flex; gap: 4px; align-items: center;">
+                  <input v-model="zhipuApiKey" type="password" placeholder="输入智谱 API Key" class="setting-input" style="width: 200px;" />
+                  <button class="btn-blue btn-sm" @click="checkZhipuApiConnect" :disabled="zhipuApiChecking">
+                    {{ zhipuApiChecking ? "验证中..." : (zhipuApiChecked ? "✓ 已连接" : "🔗 验证") }}
+                  </button>
+                </div>
+              </div>
+              <div v-if="zhipuApiChecked" style="padding: 4px 12px; background: #1a2a1a; border-radius: 4px; font-size: 11px; color: #4CAF50; margin: 4px 0;">
+                ✓ 智谱 API 连接成功
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">API 地址</div><div class="setting-desc">智谱开放平台 API 端点</div></div>
+                <input v-model="zhipuBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" class="setting-input" style="width: 280px;" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-info"><div class="setting-name">获取 API Key</div><div class="setting-desc">注册智谱开放平台获取免费额度</div></div>
+                <button class="btn-blue btn-sm" @click="window.open('https://open.bigmodel.cn', '_blank')">🌐 打开智谱开放平台</button>
+              </div>
+            </div>
+
+            <div v-if="runMode === 'zhipu'" class="settings-card">
+              <div class="card-title">模型选择</div>
+              <div v-if="zhipuModels.length > 0" class="model-quick-select">
+                <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
+                  <div class="custom-select-value">
+                    <span>{{ zhipuModel ? displayName(zhipuModels.find(m => m.id === zhipuModel)?.name || zhipuModel) : '选择模型...' }}</span>
+                    <span class="custom-select-arrow">▼</span>
+                  </div>
+                  <div v-if="modelDropdownOpen" class="custom-select-options">
+                    <div v-for="m in zhipuModels" :key="m.id" :class="['custom-select-option', { selected: zhipuModel === m.id }]" @click.stop="zhipuModel = m.id; modelDropdownOpen = false">
+                      <span>{{ displayName(m.name || m.id) }}</span>
+                      <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
+                      <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
+                      <span v-if="m.desc" style="font-size: 10px; color: #888; margin-left: 4px;">{{ m.desc }}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="setting-row" style="margin-top: 8px;">
+                <div class="setting-info"><div class="setting-name">模型名称</div><div class="setting-desc">手动输入或从列表选择</div></div>
+                <input v-model="zhipuModel" placeholder="glm-4-flash" class="setting-input" style="width: 240px;" />
+              </div>
+              <div style="padding: 6px 12px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.5; margin-top: 4px;">
+                💡 GLM-4-Flash 可免费使用，GLM-4-Plus 为旗舰付费模型。智谱新用户赠送免费额度。
+              </div>
+            </div>
+
             <div v-if="runMode === 'ollama'" class="settings-card">
               <div class="card-title">Ollama 配置</div>
               <div class="setting-row">
@@ -3769,28 +3994,28 @@ async function loadOfflineModels() {
               <div class="card-title">模型参数</div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">Temperature</div><div class="setting-desc">创造性程度，0=精确 2=创造</div></div>
-                <div class="range-row"><input type="number" min="0" max="2" step="0.1" placeholder="0.3" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').temperature" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').temperature = e.target.value; }" /></div>
+                <div class="range-row"><input type="number" min="0" max="2" step="0.1" placeholder="0.3" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).temperature" @input="(e: any) => { getModelConfig(activeModelId).temperature = e.target.value; }" /></div>
               </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">Max Tokens</div><div class="setting-desc">最大输出长度</div></div>
-                <input type="number" min="256" max="65536" step="256" placeholder="4096" class="setting-input" style="width: 120px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').maxTokens" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').maxTokens = e.target.value; }" />
+                <input type="number" min="256" max="65536" step="256" placeholder="4096" class="setting-input" style="width: 120px;" :value="getModelConfig(activeModelId).maxTokens" @input="(e: any) => { getModelConfig(activeModelId).maxTokens = e.target.value; }" />
               </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">Top P</div><div class="setting-desc">核采样，0.1=聚焦 1.0=开放</div></div>
-                <input type="number" min="0" max="1" step="0.05" placeholder="1.0" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').topP" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').topP = e.target.value; }" />
+                <input type="number" min="0" max="1" step="0.05" placeholder="1.0" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).topP" @input="(e: any) => { getModelConfig(activeModelId).topP = e.target.value; }" />
               </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">频率惩罚</div><div class="setting-desc">降低重复词</div></div>
-                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').frequencyPenalty" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').frequencyPenalty = e.target.value; }" />
+                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).frequencyPenalty" @input="(e: any) => { getModelConfig(activeModelId).frequencyPenalty = e.target.value; }" />
               </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">存在惩罚</div><div class="setting-desc">鼓励新话题</div></div>
-                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').presencePenalty" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').presencePenalty = e.target.value; }" />
+                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).presencePenalty" @input="(e: any) => { getModelConfig(activeModelId).presencePenalty = e.target.value; }" />
               </div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">系统提示词</div><div class="setting-desc">自定义 AI 行为指令</div></div>
               </div>
-              <textarea :value="getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').systemPrompt" @input="(e: any) => { getModelConfig(runMode === 'ollama' ? ollamaModel : runMode === 'api' ? apiModel : 'openrouter/auto').systemPrompt = e.target.value; }" rows="3" placeholder="留空则根据语言自动生成" class="setting-textarea"></textarea>
+              <textarea :value="getModelConfig(activeModelId).systemPrompt" @input="(e: any) => { getModelConfig(activeModelId).systemPrompt = e.target.value; }" rows="3" placeholder="留空则根据语言自动生成" class="setting-textarea"></textarea>
             </div>
 
             <div style="display: flex; gap: 8px; margin-top: 12px;">
