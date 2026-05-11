@@ -116,7 +116,8 @@ const noticeType = ref<"ok" | "warn">("ok");
 const messages = ref<ChatMessage[]>([]);
 const currentAssistantId = ref("");
 
-const runMode = ref<"cloud" | "ollama" | "api" | "zhipu">("ollama");
+const runMode = ref<"cloud" | "ollama" | "api">("ollama");
+const apiSource = ref<"qwen" | "zhipu">("qwen");
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
@@ -130,7 +131,7 @@ const apiBaseUrl = computed(() => {
 const apiModel = ref("qwen3.6-plus");
 const apiModels = ref<ModelInfo[]>([]);
 const zhipuApiKey = ref("");
-const zhipuModel = ref("glm-5.1");
+const zhipuModel = ref("glm-4.7-flash");
 const zhipuBaseUrl = ref("https://open.bigmodel.cn/api/paas/v4");
 const zhipuModels = ref<ModelInfo[]>([]);
 const zhipuApiChecked = ref(false);
@@ -213,12 +214,15 @@ function getModelConfig(modelId: string): ModelConfig {
 }
 
 function getActiveModelConfig(): ModelConfig {
-  const activeModel = runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : runMode.value === "zhipu" ? zhipuModel.value : settings.ANTHROPIC_MODEL;
-  return getModelConfig(activeModel || "__default__");
+  if (runMode.value === "ollama") return getModelConfig(ollamaModel.value || "__default__");
+  if (runMode.value === "api") return getModelConfig(apiSource.value === "zhipu" ? zhipuModel.value : apiModel.value || "__default__");
+  return getModelConfig(settings.ANTHROPIC_MODEL || "__default__");
 }
 
 const activeModelId = computed(() => {
-  return runMode.value === "ollama" ? ollamaModel.value : runMode.value === "api" ? apiModel.value : runMode.value === "zhipu" ? zhipuModel.value : "openrouter/auto";
+  if (runMode.value === "ollama") return ollamaModel.value;
+  if (runMode.value === "api") return apiSource.value === "zhipu" ? zhipuModel.value : apiModel.value;
+  return "openrouter/auto";
 });
 
 const selectedOllamaModelToolSupport = computed<boolean | undefined>(() => {
@@ -232,9 +236,21 @@ watch(runMode, (newMode) => {
     cloudModels.value = [];
     loadCloudModels("ollama");
   } else if (newMode === "api") {
-    checkApiServiceStatus();
-  } else if (newMode === "zhipu") {
-    loadZhipuModels();
+    if (apiSource.value === "zhipu") {
+      loadZhipuModels();
+    } else {
+      checkApiServiceStatus();
+    }
+  }
+});
+
+watch(apiSource, (source) => {
+  if (runMode.value === "api") {
+    if (source === "zhipu") {
+      loadZhipuModels();
+    } else {
+      checkApiServiceStatus();
+    }
   }
 });
 
@@ -539,7 +555,12 @@ function applySettings(data?: DesktopSettings) {
   settings.AI_MAX_TOKENS = data.AI_MAX_TOKENS ?? "";
   settings.SYSTEM_PROMPT = data.SYSTEM_PROMPT ?? "";
 
-  runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : settings.MODEL_PROVIDER === "api" ? "api" : settings.MODEL_PROVIDER === "zhipu" ? "zhipu" : "cloud";
+  runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : settings.MODEL_PROVIDER === "api" ? "api" : "cloud";
+  if (settings.MODEL_PROVIDER === "api" && settings.ZHIPU_API_KEY && settings.ZHIPU_MODEL) {
+    apiSource.value = "zhipu";
+  } else {
+    apiSource.value = "qwen";
+  }
   const cloudKey = settings.ANTHROPIC_API_KEY || settings.ANTHROPIC_AUTH_TOKEN || "";
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
   ollamaBaseUrl.value = settings.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
@@ -704,7 +725,7 @@ async function sendMessage() {
 }
 
 async function doSend(text: string, addUserMsg: boolean = false) {
-  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : runMode.value === "api" ? apiModel.value.trim() : runMode.value === "zhipu" ? zhipuModel.value.trim() : (settings.ANTHROPIC_MODEL || "").trim();
+  const currentModel = runMode.value === "ollama" ? ollamaModel.value.trim() : runMode.value === "api" ? (apiSource.value === "zhipu" ? zhipuModel.value : apiModel.value).trim() : (settings.ANTHROPIC_MODEL || "").trim();
   if (addUserMsg) {
     addMessage("user", text);
   }
@@ -726,7 +747,7 @@ async function doSend(text: string, addUserMsg: boolean = false) {
 
   const result = await callBackend("sendMessage", JSON.stringify({
     prompt: text,
-    provider: runMode.value === "ollama" ? "ollama" : runMode.value === "api" ? "api" : runMode.value === "zhipu" ? "zhipu" : "anthropic",
+    provider: runMode.value === "ollama" ? "ollama" : runMode.value === "api" ? "api" : "anthropic",
     model: currentModel,
     ai_language: activeConfig.language,
     ai_temperature: activeConfig.temperature,
@@ -1524,62 +1545,60 @@ async function saveSettings() {
   }
 
   if (runMode.value === "api") {
-    if (!apiBaseUrl.value.trim()) {
-      showNotice("请填写 API 服务地址", "warn");
-      return;
+    if (apiSource.value === "zhipu") {
+      if (!zhipuApiKey.value.trim()) {
+        showNotice("请填写智谱 API Key", "warn");
+        return;
+      }
+      if (!zhipuModel.value.trim()) {
+        showNotice("请选择或填写模型名称", "warn");
+        return;
+      }
+      const payload: Record<string, string> = {
+        MODEL_PROVIDER: "api",
+        API_BASE_URL: zhipuBaseUrl.value.trim(),
+        API_MODEL: zhipuModel.value.trim(),
+        API_KEY: zhipuApiKey.value.trim(),
+        ZHIPU_API_KEY: zhipuApiKey.value.trim(),
+        ZHIPU_MODEL: zhipuModel.value.trim(),
+        ZHIPU_BASE_URL: zhipuBaseUrl.value.trim() || "https://open.bigmodel.cn/api/paas/v4",
+        API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+        DISABLE_TELEMETRY: "1",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        AI_LANGUAGE: activeConfig.language || "zh",
+        AI_TEMPERATURE: activeConfig.temperature || "",
+        AI_MAX_TOKENS: activeConfig.maxTokens || "",
+        SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+      };
+      const saved = await callBackend("saveSettings", JSON.stringify(payload));
+      applySettings(saved);
+      showNotice("配置已保存。智谱 API 已启用。", "ok");
+    } else {
+      if (!apiBaseUrl.value.trim()) {
+        showNotice("请填写 API 服务地址", "warn");
+        return;
+      }
+      if (!apiModel.value.trim()) {
+        showNotice("请填写或选择模型名称", "warn");
+        return;
+      }
+      const payload: Record<string, string> = {
+        MODEL_PROVIDER: "api",
+        API_BASE_URL: apiBaseUrl.value.trim(),
+        API_MODEL: apiModel.value.trim(),
+        API_KEY: apiKey.value.trim(),
+        API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+        DISABLE_TELEMETRY: "1",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        AI_LANGUAGE: activeConfig.language || "zh",
+        AI_TEMPERATURE: activeConfig.temperature || "",
+        AI_MAX_TOKENS: activeConfig.maxTokens || "",
+        SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+      };
+      const saved = await callBackend("saveSettings", JSON.stringify(payload));
+      applySettings(saved);
+      showNotice("配置已保存。Qwen API 模式已启用。", "ok");
     }
-    if (!apiModel.value.trim()) {
-      showNotice("请填写或选择模型名称", "warn");
-      return;
-    }
-
-    const payload: Record<string, string> = {
-      MODEL_PROVIDER: "api",
-      API_BASE_URL: apiBaseUrl.value.trim(),
-      API_MODEL: apiModel.value.trim(),
-      API_KEY: apiKey.value.trim(),
-      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
-      DISABLE_TELEMETRY: "1",
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-      AI_LANGUAGE: activeConfig.language || "zh",
-      AI_TEMPERATURE: activeConfig.temperature || "",
-      AI_MAX_TOKENS: activeConfig.maxTokens || "",
-      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
-    };
-
-    const saved = await callBackend("saveSettings", JSON.stringify(payload));
-    applySettings(saved);
-    showNotice("配置已保存。API 模式已启用。", "ok");
-    return;
-  }
-
-  if (runMode.value === "zhipu") {
-    if (!zhipuApiKey.value.trim()) {
-      showNotice("请填写智谱 API Key", "warn");
-      return;
-    }
-    if (!zhipuModel.value.trim()) {
-      showNotice("请选择或填写模型名称", "warn");
-      return;
-    }
-
-    const payload: Record<string, string> = {
-      MODEL_PROVIDER: "zhipu",
-      ZHIPU_API_KEY: zhipuApiKey.value.trim(),
-      ZHIPU_MODEL: zhipuModel.value.trim(),
-      ZHIPU_BASE_URL: zhipuBaseUrl.value.trim() || "https://open.bigmodel.cn/api/paas/v4",
-      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
-      DISABLE_TELEMETRY: "1",
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-      AI_LANGUAGE: activeConfig.language || "zh",
-      AI_TEMPERATURE: activeConfig.temperature || "",
-      AI_MAX_TOKENS: activeConfig.maxTokens || "",
-      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
-    };
-
-    const saved = await callBackend("saveSettings", JSON.stringify(payload));
-    applySettings(saved);
-    showNotice("配置已保存。智谱 API 模式已启用。", "ok");
     return;
   }
 
@@ -2763,8 +2782,6 @@ async function loadOfflineModels() {
             <button v-else class="btn-blue" @click="openPreview">预览</button>
             <button :class="['btn-blue', { 'btn-active': showTerminal }]" @click="toggleTerminal">⌨ 终端</button>
             <button class="btn-blue" @click="chooseWorkspace">打开项目</button>
-            <button class="btn-blue" @click="createSession" :disabled="isBusy">新会话</button>
-            <button class="btn-red" @click="stopMessage" :disabled="!isBusy">停止</button>
             <button class="btn-blue" @click="showPanel = !showPanel">{{ showPanel ? "隐藏面板" : "显示面板" }}</button>
           </div>
         </div>
@@ -2860,10 +2877,11 @@ async function loadOfflineModels() {
               <span style="font-size: 10px; color: #666;">~{{ totalTokens }}tk</span>
               <button v-if="sessionFileChanges.length > 0" class="btn-icon-sm" @click="showFileChanges = !showFileChanges" :title="`${sessionFileChanges.length} 个文件变更`" style="font-size: 10px;">📁{{ sessionFileChanges.length }}</button>
             </div>
-            <div>
+            <div style="display: flex; align-items: center; gap: 4px;">
               <button class="btn-sm" @click="exportConversation('markdown')" :disabled="messages.length === 0" title="导出 Markdown" style="background: #2a3a2a;">📤</button>
-              <button class="btn-blue" @click="clearMessages" :disabled="isBusy">新会话</button>
-              <button class="btn-red" @click="sendMessage">发送任务</button>
+              <button class="btn-sm" @click="createSession" :disabled="isBusy" title="新会话" style="background: #2a3a2a;">＋ 新</button>
+              <button class="btn-red" @click="stopMessage" :disabled="!isBusy" title="停止当前任务" v-if="isBusy">■ 停止</button>
+              <button class="btn-red" @click="sendMessage">▶ 发送</button>
             </div>
           </div>
           <div v-if="showFileChanges && sessionFileChanges.length > 0" class="file-changes-panel">
@@ -2883,788 +2901,207 @@ async function loadOfflineModels() {
           <div class="mode-switch">
             <button :class="['mode-btn', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">☁️ 云端</button>
             <button :class="['mode-btn', { active: runMode === 'api' }]" @click="runMode = 'api'">🔗 API</button>
-            <button :class="['mode-btn', { active: runMode === 'zhipu' }]" @click="runMode = 'zhipu'">🧠 智谱</button>
             <button :class="['mode-btn', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">🦙 Ollama</button>
           </div>
         </div>
 
-        <template v-if="runMode === 'cloud'">
-          <label class="field">
-            <span>API Key</span>
-            <input v-model="apiKey" type="text" placeholder="输入你的 API Key" />
-          </label>
-          <label class="field">
-            <span>云端模型（固定）</span>
-            <input value="openrouter/auto" readonly />
-          </label>
+        <div v-if="runMode === 'api'" class="api-source-bar">
+          <button :class="['api-source-btn', { active: apiSource === 'qwen' }]" @click="apiSource = 'qwen'">🔗 千问</button>
+          <button :class="['api-source-btn', { active: apiSource === 'zhipu' }]" @click="apiSource = 'zhipu'">🧠 智谱</button>
+        </div>
 
-          <div class="cloud-model-item model-row selected">
-            <div class="model-row-info">
-              <span class="model-name">openrouter/auto</span>
-              <span class="tool-badge ok">★ 工具</span>
-            </div>
-            <button class="btn-icon" :class="{ active: expandedModelId === 'openrouter/auto' }" @click="toggleModelSettings('openrouter/auto')">⚙</button>
+        <div class="current-model-info">
+          <div class="info-row">
+            <span class="info-label">运行模式</span>
+            <span class="info-value">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? (apiSource === 'qwen' ? '🔗 千问' : '🧠 智谱') : '🦙 Ollama' }}</span>
           </div>
+          <div class="info-row">
+            <span class="info-label">当前模型</span>
+            <span class="info-value model-name-tag">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
+          </div>
+        </div>
 
-          <div v-if="expandedModelId === 'openrouter/auto'" class="model-settings">
-            <ModelSettingsPanel :config="getModelConfig('openrouter/auto')" :hint="getAutoConfigHint('openrouter/auto')" @auto-configure="autoConfigure('openrouter/auto')" />
+        <div v-if="runMode === 'cloud'" class="sidebar-section">
+          <div class="sidebar-section-title">☁️ 云端配置</div>
+          <div class="sidebar-field">
+            <label>API Key</label>
+            <input v-model="apiKey" type="text" placeholder="OpenRouter API Key" class="setting-input" style="width: 100%;" />
           </div>
-          <div class="role-presets">
-            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
-            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
-              {{ preset.icon }} {{ preset.name }}
-            </button>
+          <div class="sidebar-field">
+            <label>模型</label>
+            <input value="openrouter/auto" readonly class="setting-input" style="width: 100%; opacity: 0.6;" />
           </div>
-        </template>
+        </div>
 
-        <template v-else-if="runMode === 'api'">
-          <label class="field">
-            <span>API 服务地址</span>
+        <div v-if="runMode === 'api' && apiSource === 'qwen'" class="sidebar-section">
+          <div class="sidebar-section-title">🔗 千问 API</div>
+          <div class="sidebar-field">
+            <label>服务地址</label>
             <div style="display: flex; align-items: center; gap: 0;">
-              <span style="padding: 0 6px; font-size: 12px; color: #888; white-space: nowrap; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;">http://</span>
-              <input v-model="apiHost" placeholder="127.0.0.1" style="flex: 1; border-radius: 0;" />
-              <span style="padding: 0 6px; font-size: 14px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;">:</span>
-              <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 80px; text-align: center; border-radius: 0 4px 4px 0;" />
+              <span style="padding: 0 6px; font-size: 11px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;">http://</span>
+              <input v-model="apiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 28px; font-size: 11px;" />
+              <span style="padding: 0 4px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;">:</span>
+              <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 28px; font-size: 11px;" />
             </div>
-          </label>
-
-          <div class="api-progress-section">
+          </div>
+          <div class="sidebar-field">
+            <label>API Key</label>
+            <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" class="setting-input" style="width: 100%;" />
+          </div>
+          <div class="api-progress-section" style="margin-top: 6px;">
             <div class="api-progress-bar">
-              <div
-                v-for="(step, idx) in apiSteps"
-                :key="idx"
-                :class="['api-step', { done: apiStepProgress > idx, active: apiStepProgress === idx, pending: apiStepProgress < idx }]"
-              >
-                <div class="step-dot">
-                  <span v-if="apiStepProgress > idx">✓</span>
-                  <span v-else-if="apiStepProgress === idx && apiStepBusy">{{ idx + 1 }}</span>
-                  <span v-else>{{ idx + 1 }}</span>
-                </div>
+              <div v-for="(step, idx) in apiSteps" :key="idx" :class="['api-step', { done: apiStepProgress > idx, active: apiStepProgress === idx, pending: apiStepProgress < idx }]">
+                <div class="step-dot"><span v-if="apiStepProgress > idx">✓</span><span v-else>{{ idx + 1 }}</span></div>
                 <div class="step-label">{{ step.label }}</div>
               </div>
             </div>
-            <div class="api-progress-track">
-              <div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div>
-            </div>
+            <div class="api-progress-track"><div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div></div>
             <p class="api-progress-msg">{{ apiStepMessage }}</p>
-            <div style="display: flex; gap: 6px; margin-top: 6px;">
-              <button
-                class="btn-blue"
-                style="flex: 1;"
-                @click="apiStepAutoRun"
-                :disabled="apiStepBusy || apiStepProgress >= apiSteps.length"
-              >
-                {{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键启动') }}
-              </button>
-              <button
-                class="btn-red"
-                style="flex: 0 0 auto; min-width: 80px;"
-                @click="stopApiService"
-                :disabled="apiStepBusy || apiStepProgress < apiSteps.length"
-                v-if="apiStepProgress >= apiSteps.length"
-              >
-                ■ 停止服务
-              </button>
+            <div style="display: flex; gap: 4px; margin-top: 4px;">
+              <button class="btn-blue" style="flex: 1; font-size: 11px; padding: 4px 8px;" @click="apiStepAutoRun" :disabled="apiStepBusy || apiStepProgress >= apiSteps.length">{{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ 已就绪' : '▶ 一键启动') }}</button>
+              <button class="btn-red" style="flex: 0 0 auto; min-width: 60px; font-size: 11px; padding: 4px 8px;" @click="stopApiService" :disabled="apiStepBusy || apiStepProgress < apiSteps.length" v-if="apiStepProgress >= apiSteps.length">■ 停止</button>
             </div>
           </div>
-
-          <div class="field-group-title">模型选择</div>
-          <div v-if="apiModels.length > 0" class="model-quick-select">
-            <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
-              <div class="custom-select-value">
-                <span>{{ apiModel ? displayName(apiModels.find(m => m.id === apiModel)?.name || apiModel) : '选择模型...' }}</span>
-                <span class="custom-select-arrow">▼</span>
-              </div>
-              <div v-if="modelDropdownOpen" class="custom-select-options">
-                <div
-                  v-for="m in apiModels" :key="m.id"
-                  :class="['custom-select-option', { selected: apiModel === m.id }]"
-                  @click.stop="apiModel = m.id; modelDropdownOpen = false"
-                >
-                  <span>{{ displayName(m.name || m.id) }}</span>
-                  <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
-                  <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
+          <div class="sidebar-field" style="margin-top: 6px;">
+            <label>模型选择</label>
+            <div v-if="apiModels.length > 0" class="model-quick-select">
+              <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
+                <div class="custom-select-value">
+                  <span>{{ apiModel ? displayName(apiModels.find(m => m.id === apiModel)?.name || apiModel) : '选择模型...' }}</span>
+                  <span class="custom-select-arrow">▼</span>
                 </div>
-              </div>
-            </div>
-            <button class="btn-icon" :class="{ active: expandedModelId === apiModel }" @click="toggleModelSettings(apiModel)" title="模型参数">⚙</button>
-          </div>
-          <label class="field">
-            <span>模型名称</span>
-            <input v-model="apiModel" placeholder="qwen3.6-plus" />
-          </label>
-          <div class="role-presets">
-            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
-            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
-              {{ preset.icon }} {{ preset.name }}
-            </button>
-          </div>
-          <div v-if="expandedModelId && apiModels.find(m => m.id === expandedModelId)" class="model-settings">
-            <ModelSettingsPanel :config="getModelConfig(expandedModelId)" :hint="getAutoConfigHint(expandedModelId)" @auto-configure="autoConfigure(expandedModelId)" />
-          </div>
-
-          <label class="field">
-            <span>API Key</span>
-            <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" />
-          </label>
-
-          <div class="qwen-account-section">
-            <div class="qwen-account-header">
-              <span>🔑 上游账户</span>
-              <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">
-                {{ qwenAccountCount }} 个
-              </span>
-              <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 10px; margin-left: 4px;">{{ qwenValidCount }} 可用</span>
-              <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto;">刷新</button>
-            </div>
-            <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 4px 0;">
-              未添加上游账户，AI 对话将返回 500 错误。请点击下方按钮自动注册。
-            </p>
-            <div v-if="qwenAccounts.length > 0" class="account-list">
-              <div v-for="acc in qwenAccounts" :key="acc.email" :class="['account-row', { sticky: stickyEmail === acc.email }]">
-                <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
-                <span class="account-email">{{ acc.email }}</span>
-                <span v-if="stickyEmail === acc.email" class="sticky-badge">★ 优先</span>
-                <span v-if="!acc.valid" class="account-err">{{ acc.status_code || '不可用' }}</span>
-                <button v-if="stickyEmail !== acc.email && acc.valid" class="btn-icon btn-sticky" @click="setStickyAccount(acc.email)" title="设为优先使用账户">★</button>
-                <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除此账户">✕</button>
-              </div>
-              <button v-if="stickyEmail" class="btn-blue btn-sm" @click="clearStickyAccount" style="margin-top: 4px; width: 100%;">
-                取消优先，恢复自动轮换
-              </button>
-            </div>
-            <p v-if="qwenAccountCount > 0 && qwenValidCount === 0" class="hint warn" style="margin: 4px 0;">
-              所有账户均不可用，请注册新账户或手动添加有效 Token。
-            </p>
-            <p v-if="qwenValidCount > 0" class="hint ok" style="margin: 4px 0;">
-              {{ qwenValidCount }} 个账户可用，可进行 AI 对话。
-            </p>
-            <details style="margin-top: 6px;">
-              <summary style="font-size: 11px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
-              <div class="reg-form" style="margin-top: 4px;">
-                <input v-model="loginEmail" type="text" placeholder="邮箱" />
-                <input v-model="loginPassword" type="password" placeholder="密码" />
-                <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%;">
-                  {{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}
-                </button>
-              </div>
-              <p v-if="qwenLoginError" class="hint warn" style="margin: 4px 0;">{{ qwenLoginError }}</p>
-              <p class="hint" style="margin: 4px 0; font-size: 10px;">
-                使用已注册的 chat.qwen.ai 账户邮箱和密码登录
-              </p>
-            </details>
-            <details style="margin-top: 6px;">
-              <summary style="font-size: 11px; color: #888; cursor: pointer;">自定义注册信息（可选）</summary>
-              <div class="reg-form" style="margin-top: 4px;">
-                <input v-model="regEmail" type="text" placeholder="邮箱（留空自动生成）" />
-                <input v-model="regPassword" type="password" placeholder="密码（留空自动生成）" />
-                <input v-model="regUsername" type="text" placeholder="用户名（留空自动生成）" />
-              </div>
-            </details>
-            <button
-              class="btn-blue"
-              style="width: 100%; margin: 6px 0;"
-              @click="autoRegisterQwenAccount"
-              :disabled="qwenRegisterBusy"
-            >
-              {{ qwenRegisterBusy ? '⏳ 自动注册中...' : '🤖 自动注册上游账户' }}
-            </button>
-            <div v-if="qwenRegisterLogs.length > 0" class="register-log-box">
-              <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">
-                {{ log }}
-              </div>
-            </div>
-            <details style="margin-top: 6px;">
-              <summary style="font-size: 11px; color: #888; cursor: pointer;">手动添加 Token</summary>
-              <div class="qwen-token-input" style="margin-top: 4px;">
-                <input v-model="qwenToken" type="text" placeholder="粘贴 chat.qwen.ai 的 Token" />
-                <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()">添加</button>
-              </div>
-              <p class="hint" style="margin: 4px 0; font-size: 10px;">
-                获取方式：登录 chat.qwen.ai → F12 开发者工具 → Application → Local Storage → 复制 token 值
-              </p>
-            </details>
-          </div>
-        </template>
-
-        <template v-else-if="runMode === 'zhipu'">
-          <label class="field">
-            <span>智谱 API Key</span>
-            <div style="display: flex; gap: 4px;">
-              <input v-model="zhipuApiKey" type="password" placeholder="输入智谱 API Key" style="flex: 1;" />
-              <button class="btn-blue btn-sm" @click="checkZhipuApiConnect" :disabled="zhipuApiChecking">
-                {{ zhipuApiChecking ? "验证中..." : (zhipuApiChecked ? "✓ 已连接" : "🔗 验证") }}
-              </button>
-            </div>
-          </label>
-
-          <div v-if="zhipuApiChecked" style="padding: 4px 8px; background: #1a2a1a; border-radius: 4px; font-size: 11px; color: #4CAF50; margin-bottom: 4px;">
-            ✓ 智谱 API 已连接
-          </div>
-
-          <label class="field">
-            <span>API 地址</span>
-            <input v-model="zhipuBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" />
-          </label>
-
-          <div class="field-group-title">模型选择</div>
-          <div v-if="zhipuModels.length > 0" class="model-quick-select">
-            <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
-              <div class="custom-select-value">
-                <span>{{ zhipuModel ? displayName(zhipuModels.find(m => m.id === zhipuModel)?.name || zhipuModel) : '选择模型...' }}</span>
-                <span class="custom-select-arrow">▼</span>
-              </div>
-              <div v-if="modelDropdownOpen" class="custom-select-options">
-                <div
-                  v-for="m in zhipuModels" :key="m.id"
-                  :class="['custom-select-option', { selected: zhipuModel === m.id }]"
-                  @click.stop="zhipuModel = m.id; modelDropdownOpen = false"
-                >
-                  <span>{{ displayName(m.name || m.id) }}</span>
-                  <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
-                  <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
-                  <span v-if="m.desc" style="font-size: 10px; color: #888; margin-left: 4px;">{{ m.desc }}</span>
-                </div>
-              </div>
-            </div>
-            <button class="btn-icon" :class="{ active: expandedModelId === zhipuModel }" @click="toggleModelSettings(zhipuModel)" title="模型参数">⚙</button>
-          </div>
-          <label class="field">
-            <span>模型名称</span>
-            <input v-model="zhipuModel" placeholder="glm-4-flash" />
-          </label>
-
-          <div class="role-presets">
-            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
-            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
-              {{ preset.icon }} {{ preset.name }}
-            </button>
-          </div>
-          <div v-if="expandedModelId && zhipuModels.find(m => m.id === expandedModelId)" class="model-settings">
-            <ModelSettingsPanel :config="getModelConfig(expandedModelId)" :hint="getAutoConfigHint(expandedModelId)" @auto-configure="autoConfigure(expandedModelId)" />
-          </div>
-
-          <div style="padding: 6px 8px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.5;">
-            💡 智谱AI提供免费模型额度，GLM-4-Flash 可免费使用。<br>
-            获取 API Key：open.bigmodel.cn → 注册/登录 → API Keys
-          </div>
-        </template>
-
-        <template v-else>
-          <label class="field">
-            <span>Ollama 地址</span>
-            <div class="model-loader">
-              <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" />
-              <button class="btn-blue btn-sm" @click="detectModels" :disabled="loadingModels">
-                {{ loadingModels ? "检测中..." : "🔍 检测" }}
-              </button>
-            </div>
-          </label>
-
-          <div class="model-manager-toggle" @click="showModelManager = !showModelManager">
-            <span style="font-weight: bold; font-size: 12px;">🧠 模型管理</span>
-            <span style="font-size: 11px; color: #888;">{{ showModelManager ? '收起' : '展开' }}</span>
-          </div>
-
-          <div v-if="showModelManager" class="model-manager-panel">
-            <div class="model-search-bar">
-              <input v-model="librarySearchQuery" placeholder="搜索 Ollama 模型库（如 qwen、llama）" @keydown.enter="searchOllamaLibrary" style="flex: 1;" />
-              <button class="btn-blue btn-sm" @click="searchOllamaLibrary" :disabled="librarySearching">
-                {{ librarySearching ? "搜索中..." : "🔍 搜索" }}
-              </button>
-              <button class="btn-auto btn-sm" @click="loadRecommendations" :disabled="loadingModels">
-                💡 推荐
-              </button>
-            </div>
-
-            <div v-if="showRecommendations && recommendedModels.length > 0" class="recommend-section">
-              <div class="recommend-header">
-                <span>根据硬件推荐</span>
-                <button class="btn-icon-sm" @click="showRecommendations = false">✕</button>
-              </div>
-              <div v-for="r in recommendedModels" :key="r.name" class="recommend-item">
-                <div class="recommend-info">
-                  <span class="recommend-name">{{ displayName(r.name) }}</span>
-                  <span v-if="r.toolSupport" class="tool-badge ok">★ 工具</span>
-                  <span v-else class="tool-badge no">无工具</span>
-                  <span class="model-size">{{ r.size }}</span>
-                </div>
-                <div class="recommend-reason">{{ r.reason }}</div>
-                <button class="btn-blue btn-sm" style="margin-top: 4px;" @click="pullModel(r.name)" :disabled="pullingModel === r.name">
-                  {{ pullingModel === r.name ? '⏳ 下载中...' : '⬇ 下载安装' }}
-                </button>
-              </div>
-            </div>
-
-            <div v-if="libraryResults.length > 0" class="recommend-section">
-              <div class="recommend-header">
-                <span>搜索结果</span>
-                <button class="btn-icon-sm" @click="libraryResults = []">✕</button>
-              </div>
-              <div v-for="r in libraryResults" :key="r.name" class="recommend-item">
-                <div class="recommend-info">
-                  <span class="recommend-name">{{ r.name }}</span>
-                  <span v-if="r.toolSupport" class="tool-badge ok">★ 工具</span>
-                  <span v-if="r.sizeStr" class="model-size">{{ r.sizeStr }}</span>
-                </div>
-                <div v-if="r.description" class="recommend-reason">{{ r.description }}</div>
-                <button class="btn-blue btn-sm" style="margin-top: 4px;" @click="pullModel(r.name)" :disabled="pullingModel === r.name">
-                  {{ pullingModel === r.name ? '⏳ 下载中...' : '⬇ 下载安装' }}
-                </button>
-              </div>
-            </div>
-
-            <div v-if="pullingModel" class="pulling-indicator">
-              ⏳ 正在下载: {{ displayName(pullingModel) }}...（这可能需要几分钟）
-            </div>
-          </div>
-
-          <div v-if="categorizedModels.local.length > 0" class="model-list">
-            <div class="model-category-title">本地模型 (Ollama)</div>
-            <div v-for="m in categorizedModels.local" :key="m.id" class="model-row-wrapper">
-              <div
-                :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false, 'broken': m.loadable === false }]"
-                @click="m.loadable !== false && selectModel(m.id)"
-              >
-                <div class="model-row-info">
-                  <span class="model-name">{{ displayName(m.name) }}</span>
-                  <span v-if="m.loadable === false" class="tool-badge broken">⚠ 损坏</span>
-                  <span v-else-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
-                  <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
-                  <span v-if="m.size" class="model-size">{{ m.size }}</span>
-                </div>
-                <div class="model-row-actions">
-                  <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
-                  <button class="btn-icon btn-delete" @click.stop="deleteModel(m.id)" title="卸载模型">🗑</button>
-                </div>
-              </div>
-              <div v-if="m.loadable === false && m.healthError" class="model-error-hint">
-                ⚠ {{ m.healthError }}
-              </div>
-              <div v-if="expandedModelId === m.id" class="model-settings">
-                <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
-              </div>
-            </div>
-          </div>
-
-          <div v-if="categorizedModels.cloud.length > 0" class="model-list" style="margin-top: 8px;">
-            <div class="model-category-title cloud">云端模型</div>
-            <div v-for="m in categorizedModels.cloud" :key="m.id" class="model-row-wrapper">
-              <div
-                :class="['model-row', { selected: ollamaModel === m.id, 'no-tool': m.toolSupport === false }]"
-                @click="selectModel(m.id)"
-              >
-                <div class="model-row-info">
-                  <span class="model-name">{{ displayName(m.name) }}</span>
-                  <span v-if="m.toolSupport === true" class="tool-badge ok">★ 工具</span>
-                  <span v-else-if="m.toolSupport === false" class="tool-badge no">无工具</span>
-                  <span v-if="m.size" class="model-size">{{ m.size }}</span>
-                </div>
-                <button class="btn-icon" :class="{ active: expandedModelId === m.id }" @click.stop="toggleModelSettings(m.id)">⚙</button>
-              </div>
-              <div v-if="expandedModelId === m.id" class="model-settings">
-                <ModelSettingsPanel :config="getModelConfig(m.id)" :hint="getAutoConfigHint(m.id)" @auto-configure="autoConfigure(m.id)" />
-              </div>
-            </div>
-          </div>
-
-          <div v-if="cloudModels.length === 0 && !loadingModels" class="empty-hint">
-            <p>点击"检测"加载并检测可用模型</p>
-          </div>
-
-          <p v-if="ollamaModel && selectedOllamaModelToolSupport === false" class="hint warn">
-            ⚠ 该模型不支持工具调用，编程功能将受限。建议选择带 ★ 标记的模型。
-          </p>
-          <p v-else-if="ollamaModel && selectedOllamaModelToolSupport === true" class="hint ok">
-            ★ 该模型支持工具调用，可使用全功能编程。
-          </p>
-          <div class="role-presets">
-            <span style="font-size: 11px; color: #888; margin-right: 4px;">角色</span>
-            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
-              {{ preset.icon }} {{ preset.name }}
-            </button>
-          </div>
-        </template>
-
-        <div class="field-group-title">对话设置</div>
-        <label class="field">
-          <span>工具调用审批</span>
-          <select v-model="toolApprovalMode" class="select-input" style="width: 100%;">
-            <option value="auto">🟢 全部自动 — AI 直接执行所有操作</option>
-            <option value="smart">🟡 智能审批 — 安全操作自动，风险操作需确认</option>
-            <option value="manual">🔴 全部手动 — 每次操作都需确认</option>
-          </select>
-        </label>
-        <p v-if="toolApprovalMode === 'auto'" style="font-size: 11px; color: #FF9800; margin: -4px 0 4px 0;">⚠ AI 可直接读写文件和执行命令，无需审批</p>
-        <p v-else-if="toolApprovalMode === 'smart'" style="font-size: 11px; color: #4af; margin: -4px 0 4px 0;">读取/搜索自动通过，写入/编辑/命令需确认</p>
-        <p v-else style="font-size: 11px; color: #888; margin: -4px 0 4px 0;">所有工具调用都需要手动确认</p>
-
-        <div class="field" style="border: 1px solid #2a2a2a; border-radius: 6px; padding: 8px;">
-          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
-            <span style="font-weight: bold; font-size: 12px;">📁 项目管理</span>
-            <button class="btn-sm" @click="showProjectPanel = !showProjectPanel">{{ showProjectPanel ? '收起' : '展开' }}</button>
-          </div>
-          <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 4px;">
-            当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.path }}</span>
-            <button class="btn-icon-sm" @click="toggleFileTree" style="font-size: 10px; margin-left: 4px;" title="文件树">📂</button>
-          </div>
-          <div v-if="showFileTree && fileTree.length > 0" style="margin-bottom: 6px; max-height: 150px; overflow-y: auto; font-size: 10px; font-family: monospace;">
-            <div v-for="f in fileTree" :key="f.path" style="padding: 1px 0; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
-              <span v-if="f.type === 'dir'" style="color: #4af;">📁</span>
-              <span v-else style="color: #888;">📄</span>
-              {{ f.name }}
-            </div>
-          </div>
-          <div v-if="showProjectPanel">
-            <div class="proj-section-title">新建项目</div>
-            <div style="margin-bottom: 4px;">
-              <input v-model="newProjectName" placeholder="项目名称" style="width: 100%; font-size: 11px;" @input="updateDefaultPath" />
-            </div>
-            <div class="proj-path-row">
-              <div class="proj-default-path" style="flex: 1; min-width: 0;">
-                {{ newProjectDefaultPath || '（输入项目名称后显示默认目录）' }}
-              </div>
-              <button v-if="newProjectDefaultPath" class="btn-icon-sm" @click="openInExplorer(newProjectDefaultPath)" title="打开目录">📁</button>
-              <label class="proj-checkbox" @click="newProjectCustomPath = !newProjectCustomPath">
-                <span :class="['proj-check-box', { checked: newProjectCustomPath }]">
-                  <span v-if="newProjectCustomPath" style="font-size: 10px;">✓</span>
-                </span>
-                <span style="font-size: 11px;">自定义</span>
-              </label>
-            </div>
-            <div v-if="newProjectCustomPath" style="display: flex; gap: 4px; margin: 4px 0;">
-              <input v-model="newProjectPath" placeholder="选择或输入自定义路径" style="flex: 1; font-size: 11px;" />
-              <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录" style="font-size: 11px;">📂</button>
-            </div>
-            <button class="btn-sm" style="width: 100%; margin-top: 4px;" @click="createProject" :disabled="!newProjectName.trim()">创建项目</button>
-
-            <div v-if="projects.length === 0" style="font-size: 11px; color: #666; padding: 8px 0;">暂无项目，请创建一个</div>
-
-            <div v-if="projects.length > 0" class="proj-section-title" style="margin-top: 8px;">项目列表</div>
-            <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]">
-              <template v-if="editingProjectId === p.id">
-                <div style="margin-bottom: 4px;">
-                  <input v-model="editProjectName" placeholder="项目名称" style="width: 100%; font-size: 11px;" />
-                </div>
-                <div class="proj-path-row">
-                  <div class="proj-default-path" style="flex: 1; min-width: 0;">
-                    {{ p.path }}
-                  </div>
-                  <button class="btn-icon-sm" @click="openInExplorer(p.path)" title="打开目录">📁</button>
-                  <label class="proj-checkbox" @click="editProjectCustomPath = !editProjectCustomPath">
-                    <span :class="['proj-check-box', { checked: editProjectCustomPath }]">
-                      <span v-if="editProjectCustomPath" style="font-size: 10px;">✓</span>
-                    </span>
-                    <span style="font-size: 11px;">修改</span>
-                  </label>
-                </div>
-                <div v-if="editProjectCustomPath" style="display: flex; gap: 4px; margin: 4px 0;">
-                  <input v-model="editProjectPath" placeholder="新的项目目录" style="flex: 1; font-size: 11px;" />
-                  <button class="btn-icon" @click="selectWorkspaceDir" title="选择目录" style="font-size: 11px;">📂</button>
-                </div>
-                <div style="display: flex; gap: 4px; margin-top: 4px;">
-                  <button class="btn-sm" style="flex: 1;" @click="saveEditProject">保存</button>
-                  <button class="btn-sm" style="flex: 1; background: #333;" @click="cancelEditProject">取消</button>
-                </div>
-              </template>
-              <template v-else>
-                <div style="display: flex; align-items: center; justify-content: space-between;" @click="switchProject(p.id)">
-                  <span style="font-size: 12px; font-weight: 500;">{{ p.name }}</span>
-                  <div style="display: flex; gap: 2px;">
-                    <button class="btn-icon-sm" @click.stop="openInExplorer(p.path)" title="打开目录">📁</button>
-                    <button class="btn-icon-sm" @click.stop="startEditProject(p.id)" title="编辑">✏️</button>
-                    <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
-                  </div>
-                </div>
-                <div style="font-size: 11px; color: #888; margin-top: 2px;">{{ p.path }}</div>
-              </template>
-            </div>
-
-            <div v-if="projectConversations.length > 0" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-              <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 4px;">
-                <span style="font-size: 11px; color: #888;">对话历史</span>
-                <div style="flex: 1; display: flex; gap: 2px;">
-                  <input v-model="convSearchQuery" placeholder="搜索对话..." style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="searchConversations" />
-                  <button v-if="convSearchQuery" class="btn-icon-sm" @click="clearConvSearch" title="清除搜索" style="font-size: 10px;">✕</button>
-                  <button class="btn-icon-sm" @click="searchConversations" title="搜索" style="font-size: 10px;">🔍</button>
-                </div>
-              </div>
-              <div v-for="c in projectConversations" :key="c.session_id" class="conv-item">
-                <div style="flex: 1; min-width: 0;" @click="loadConversationHistory(c.session_id)">
-                  <template v-if="editingConvId === c.session_id">
-                    <div style="display: flex; gap: 2px;">
-                      <input v-model="editingConvTitle" style="flex: 1; font-size: 10px; padding: 1px 4px; border-radius: 2px; border: 1px solid #555; background: #1a1a1a; color: #ddd;" @keydown.enter="saveRenameConversation(c.session_id)" @keydown.escape="cancelRenameConversation" />
-                      <button class="btn-icon-sm" @click="saveRenameConversation(c.session_id)" style="font-size: 9px;">✓</button>
-                      <button class="btn-icon-sm" @click="cancelRenameConversation" style="font-size: 9px;">✕</button>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <div style="font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" :title="c.title || c.session_id">{{ c.title || c.session_id.slice(0, 8) + '...' }}</div>
-                    <div style="font-size: 10px; color: #666;">{{ c.message_count }}条 · {{ c.updated_at ? c.updated_at.slice(0, 10) : '' }}</div>
-                    <div v-if="c.snippet" style="font-size: 10px; color: #888; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" v-html="c.snippet"></div>
-                  </template>
-                </div>
-                <div style="display: flex; gap: 1px; flex-shrink: 0;">
-                  <button class="btn-icon-sm" @click.stop="startRenameConversation(c.session_id, c.title || '')" title="重命名" style="font-size: 9px;">✏️</button>
-                  <button class="btn-icon-sm" @click.stop="deleteConversation(c.session_id)" title="删除" style="font-size: 9px;">🗑️</button>
-                  <select v-if="projects.length > 1" class="copy-select" style="font-size: 9px;" @change="(e: any) => { copyConversationToProject(c.session_id, e.target.value); e.target.value = ''; }">
-                    <option value="">复制</option>
-                    <option v-for="tp in projects.filter((x: any) => x.id !== activeProject?.id)" :key="tp.id" :value="tp.id">{{ tp.name }}</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">开发工作流</span>
-            </div>
-            <div style="display: flex; flex-wrap: wrap; gap: 3px;">
-              <button class="workflow-btn" @click="applyWorkflow('new-project')">🏗️ 新项目</button>
-              <button class="workflow-btn" @click="applyWorkflow('bugfix')">🐛 Bug修复</button>
-              <button class="workflow-btn" @click="applyWorkflow('refactor')">🔧 重构</button>
-              <button class="workflow-btn" @click="applyWorkflow('docs')">📚 文档化</button>
-              <button class="workflow-btn" @click="applyWorkflow('deploy')">🚀 部署</button>
-            </div>
-          </div>
-
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">🧠 项目记忆</span>
-              <button class="btn-icon-sm" @click="showMemoryPanel = !showMemoryPanel; if (showMemoryPanel) { loadMemoryContent(); loadSmartMemories(); }" :title="showMemoryPanel ? '收起' : '展开'" style="font-size: 10px;">{{ showMemoryPanel ? '▼' : '▶' }}</button>
-            </div>
-            <div v-if="showMemoryPanel" style="margin-top: 4px;">
-              <div style="display: flex; gap: 2px; margin-bottom: 6px;">
-                <button :class="['tab-btn', { active: memoryTab === 'claude-md' }]" @click="memoryTab = 'claude-md'">CLAUDE.md</button>
-                <button :class="['tab-btn', { active: memoryTab === 'smart' }]" @click="memoryTab = 'smart'; loadSmartMemories()">智能记忆</button>
-              </div>
-              <template v-if="memoryTab === 'claude-md'">
-                <div style="font-size: 10px; color: #666; margin-bottom: 4px;">项目级记忆（当前项目目录下的 CLAUDE.md）</div>
-                <textarea v-model="memoryContent" rows="5" placeholder="在此编辑项目记忆，AI 每次对话都会读取此内容..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-                <div style="display: flex; gap: 4px; margin-top: 4px;">
-                  <button class="btn-sm" @click="saveMemoryContent" style="flex: 1;">保存项目记忆</button>
-                  <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: #2a3a2a;">+ 技术栈</button>
-                  <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: #2a3a2a;">+ 规范</button>
-                </div>
-                <div style="font-size: 10px; color: #666; margin-top: 6px; margin-bottom: 4px;">全局记忆（~/.claude/CLAUDE.md）</div>
-                <textarea v-model="globalMemoryContent" rows="2" placeholder="全局记忆，适用于所有项目..." style="width: 100%; font-size: 11px; padding: 6px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-                <button class="btn-sm" @click="saveGlobalMemory" style="margin-top: 4px;">保存全局记忆</button>
-              </template>
-              <template v-if="memoryTab === 'smart'">
-                <div style="display: flex; gap: 4px; margin-bottom: 6px; align-items: center;">
-                  <input v-model="memorySearchQuery" placeholder="搜索记忆..." style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="searchSmartMemories" />
-                  <button class="btn-sm" @click="searchSmartMemories" style="background: #2a3a2a; font-size: 10px;">🔍</button>
-                  <button class="btn-sm" @click="extractMemoriesFromConversation" style="background: #2a3a2a; font-size: 10px;">📥 提取</button>
-                </div>
-                <div style="font-size: 10px; color: #666; margin-bottom: 4px;">四类记忆：👤 用户偏好 | 🔄 反馈纠正 | 📋 项目上下文 | 🔗 外部引用</div>
-                <div v-if="smartMemories.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 8px;">暂无智能记忆<br>点击"提取"从对话中自动提取</div>
-                <div v-for="mem in smartMemories" :key="mem.filename" class="memory-item">
-                  <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <span :class="['mem-type-badge', mem.type]">{{ mem.type === 'user' ? '👤' : mem.type === 'feedback' ? '🔄' : mem.type === 'reference' ? '🔗' : '📋' }} {{ mem.title }}</span>
-                    <div style="display: flex; gap: 2px;">
-                      <button v-if="mem.relevance" style="font-size: 9px; color: #4af; background: none; border: none; cursor: default;">相关度: {{ mem.relevance }}</button>
-                      <button class="btn-icon-sm" @click="deleteSmartMemory(mem.filename)" style="font-size: 9px;">🗑️</button>
-                    </div>
-                  </div>
-                  <div v-if="mem.match_snippet" style="font-size: 10px; color: #4af; margin-top: 2px; padding: 2px 4px; background: #1a2a3a; border-radius: 2px;">匹配: {{ mem.match_snippet }}</div>
-                  <div style="font-size: 10px; color: #888; margin-top: 2px; white-space: pre-wrap; max-height: 60px; overflow-y: auto;">{{ mem.content.replace(/^---[\s\S]*?---\n*/, '').slice(0, 200) }}</div>
-                </div>
-                <div style="margin-top: 6px; border-top: 1px solid #222; padding-top: 6px;">
-                  <div style="font-size: 10px; color: #666; margin-bottom: 4px;">添加新记忆</div>
-                  <div style="display: flex; gap: 4px; margin-bottom: 4px;">
-                    <input v-model="newMemoryTitle" placeholder="标题" style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" />
-                    <select v-model="newMemoryType" style="font-size: 10px; padding: 2px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;">
-                      <option value="user">👤 用户</option>
-                      <option value="feedback">🔄 反馈</option>
-                      <option value="project">📋 项目</option>
-                      <option value="reference">🔗 引用</option>
-                    </select>
-                  </div>
-                  <textarea v-model="newMemoryContent" rows="2" placeholder="记忆内容..." style="width: 100%; font-size: 10px; padding: 4px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-                  <button class="btn-sm" @click="addSmartMemory" style="margin-top: 3px; width: 100%;">添加记忆</button>
-                </div>
-              </template>
-            </div>
-          </div>
-
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">📦 项目模板</span>
-              <div style="display: flex; gap: 2px;">
-                <button class="btn-icon-sm" @click="showAddTemplate = !showAddTemplate" style="font-size: 10px;" title="添加自定义模板">➕</button>
-                <button class="btn-icon-sm" @click="showTemplatePanel = !showTemplatePanel; if (showTemplatePanel) loadProjectTemplates()" style="font-size: 10px;">{{ showTemplatePanel ? '▼' : '▶' }}</button>
-              </div>
-            </div>
-            <div v-if="showAddTemplate" style="margin-bottom: 6px; padding: 6px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
-              <div style="font-size: 10px; color: #888; margin-bottom: 4px;">添加自定义模板</div>
-              <input v-model="newTplName" placeholder="模板名称" style="width: 100%; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd; margin-bottom: 3px;" />
-              <div style="display: flex; gap: 4px; margin-bottom: 3px;">
-                <select v-model="newTplCategory" style="flex: 1; font-size: 10px; padding: 2px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd;">
-                  <option value="frontend">前端</option>
-                  <option value="backend">后端</option>
-                  <option value="fullstack">全栈</option>
-                  <option value="desktop">桌面</option>
-                  <option value="datascience">数据科学</option>
-                </select>
-                <input v-model="newTplDesc" placeholder="描述" style="flex: 2; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd;" />
-              </div>
-              <textarea v-model="newTplPrompt" rows="2" placeholder="模板提示词（发送给AI的指令）" style="width: 100%; font-size: 10px; padding: 4px; border-radius: 3px; border: 1px solid #333; background: #111; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-              <div style="display: flex; gap: 4px; margin-top: 3px;">
-                <button class="btn-sm" @click="addCustomTemplate" style="flex: 1;">保存模板</button>
-                <button class="btn-sm" @click="showAddTemplate = false" style="flex: 1; background: #333;">取消</button>
-              </div>
-            </div>
-            <div v-if="showTemplatePanel" style="margin-top: 4px;">
-              <div style="display: flex; gap: 3px; margin-bottom: 6px; flex-wrap: wrap;">
-                <button v-for="cat in ['all', 'frontend', 'backend', 'fullstack', 'desktop', 'datascience']" :key="cat" :class="['tab-btn', { active: templateCategory === cat }]" @click="templateCategory = cat; loadProjectTemplates()" style="font-size: 10px;">{{ cat === 'all' ? '全部' : cat === 'frontend' ? '前端' : cat === 'backend' ? '后端' : cat === 'fullstack' ? '全栈' : cat === 'desktop' ? '桌面' : '数据' }}</button>
-              </div>
-              <div v-for="t in projectTemplates" :key="t.id" class="template-item" style="cursor: pointer;">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                  <div @click="useTemplate(t)" style="flex: 1; min-width: 0;">
-                    <div style="font-size: 11px; color: #ddd;">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
-                    <div style="font-size: 10px; color: #888;">{{ t.desc }}</div>
-                  </div>
-                  <div style="display: flex; gap: 2px; flex-shrink: 0;">
-                    <button v-if="t.scaffold" class="btn-icon-sm" @click.stop="scaffoldFromTemplate(t)" title="创建脚手架" style="font-size: 9px;">🏗️</button>
-                    <button v-if="t.custom" class="btn-icon-sm" @click.stop="deleteCustomTemplate(t.id)" title="删除" style="font-size: 9px;">🗑️</button>
+                <div v-if="modelDropdownOpen" class="custom-select-options">
+                  <div v-for="m in apiModels" :key="m.id" :class="['custom-select-option', { selected: apiModel === m.id }]" @click.stop="apiModel = m.id; modelDropdownOpen = false">
+                    <span>{{ displayName(m.name || m.id) }}</span>
+                    <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
+                    <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
                   </div>
                 </div>
               </div>
             </div>
+            <input v-model="apiModel" placeholder="qwen3.6-plus" class="setting-input" style="width: 100%; margin-top: 4px;" />
           </div>
+        </div>
 
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">🖥️ 实时预览</span>
-              <button class="btn-icon-sm" @click="showPreviewPanel = !showPreviewPanel" style="font-size: 10px;">{{ showPreviewPanel ? '▼' : '▶' }}</button>
-            </div>
-            <div v-if="showPreviewPanel" style="margin-top: 4px;">
-              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
-                <button class="btn-sm" @click="openPreview" style="flex: 1; font-size: 10px;">📂 打开预览</button>
-                <button class="btn-sm" @click="refreshPreview" style="font-size: 10px;">🔄 刷新</button>
-                <button class="btn-sm" @click="closePreview" style="font-size: 10px; background: #333;">✕</button>
-              </div>
-              <div v-if="previewUrl" style="border: 1px solid #333; border-radius: 4px; overflow: hidden; background: #fff; height: 200px;">
-                <iframe :src="previewUrl" style="width: 100%; height: 100%; border: none;"></iframe>
-              </div>
-              <div v-else style="font-size: 10px; color: #555; text-align: center; padding: 12px;">点击"打开预览"查看项目网页</div>
+        <div v-if="runMode === 'api' && apiSource === 'zhipu'" class="sidebar-section">
+          <div class="sidebar-section-title">🧠 智谱 AI</div>
+          <div class="sidebar-field">
+            <label>API Key</label>
+            <div style="display: flex; gap: 4px; align-items: center;">
+              <input v-model="zhipuApiKey" type="password" placeholder="智谱 API Key" class="setting-input" style="flex: 1;" />
+              <button class="btn-blue btn-sm" @click="checkZhipuApiConnect" :disabled="zhipuApiChecking" style="white-space: nowrap; font-size: 10px;">
+                {{ zhipuApiChecking ? "验证中" : (zhipuApiChecked ? "✓" : "🔗 验证") }}
+              </button>
             </div>
           </div>
-
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">📋 任务编排</span>
-              <button class="btn-icon-sm" @click="showTaskPanel = !showTaskPanel" style="font-size: 10px;">{{ showTaskPanel ? '▼' : '▶' }}</button>
-            </div>
-            <div v-if="showTaskPanel" style="margin-top: 4px;">
-              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
-                <input v-model="newTaskName" placeholder="任务名称" style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="addTask" />
-                <button class="btn-sm" @click="addTask" style="font-size: 10px;">添加</button>
-              </div>
-              <textarea v-model="newTaskDesc" rows="1" placeholder="任务描述（可选）" style="width: 100%; font-size: 10px; padding: 2px 4px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; margin-bottom: 4px;"></textarea>
-              <div v-if="taskList.length === 0" style="font-size: 10px; color: #555; text-align: center; padding: 6px;">暂无任务，添加任务来编排开发流程</div>
-              <div v-for="task in taskList" :key="task.id" style="display: flex; align-items: center; gap: 4px; padding: 3px 0; border-bottom: 1px solid #222;">
-                <span :style="{ color: task.status === 'done' ? '#4CAF50' : task.status === 'in_progress' ? '#FF9800' : '#888', fontSize: '10px', cursor: 'pointer' }" @click="updateTaskStatus(task.id, task.status === 'pending' ? 'in_progress' : task.status === 'in_progress' ? 'done' : 'pending')">
-                  {{ task.status === 'done' ? '✅' : task.status === 'in_progress' ? '🔄' : '⬜' }}
-                </span>
-                <span style="flex: 1; font-size: 10px; color: #ddd; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" :style="{ textDecoration: task.status === 'done' ? 'line-through' : 'none' }">{{ task.name }}</span>
-                <button class="btn-icon-sm" @click="executeTaskAsPrompt(task)" title="执行此任务" style="font-size: 9px;">▶</button>
-                <button class="btn-icon-sm" @click="removeTask(task.id)" title="删除" style="font-size: 9px;">✕</button>
-              </div>
-            </div>
+          <div v-if="zhipuApiChecked" style="padding: 3px 8px; background: #1a2a1a; border-radius: 4px; font-size: 10px; color: #4CAF50; margin: 2px 0;">
+            ✓ 连接成功
           </div>
-
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">🤝 AI 协作</span>
-            </div>
-            <div style="display: flex; flex-wrap: wrap; gap: 3px;">
-              <button :class="['workflow-btn', { active: collaborationMode === 'plan-code-review' }]" @click="setCollaborationMode('plan-code-review')">📋 规划→编码→审查</button>
-              <button :class="['workflow-btn', { active: collaborationMode === 'pair' }]" @click="setCollaborationMode('pair')">👥 结对编程</button>
-              <button :class="['workflow-btn', { active: collaborationMode === 'review-only' }]" @click="setCollaborationMode('review-only')">🔍 纯审查</button>
-              <button v-if="collaborationMode !== 'none'" class="workflow-btn" @click="setCollaborationMode('none')" style="background: #3a2222;">✕ 退出协作</button>
-            </div>
-            <div v-if="collaborationMode !== 'none'" style="margin-top: 4px; padding: 4px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
-              <div style="font-size: 10px; color: #888;">
-                模式：{{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}
-                <span v-if="collaborationMode === 'plan-code-review'" style="color: #4af;"> | 阶段：{{ collabPhase === 'planning' ? '📋 规划中' : collabPhase === 'coding' ? '💻 编码中' : '🔍 审查中' }}</span>
-              </div>
-              <div v-if="collaborationMode === 'plan-code-review'" style="display: flex; gap: 4px; margin-top: 4px;">
-                <button class="btn-sm" @click="advanceCollabPhase" style="flex: 1; font-size: 10px;">⏭ 进入下一阶段</button>
-              </div>
-            </div>
+          <div class="sidebar-field">
+            <label>API 地址</label>
+            <input v-model="zhipuBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" class="setting-input" style="width: 100%;" />
           </div>
-
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">🔀 Git</span>
-              <div style="display: flex; gap: 2px;">
-                <button class="btn-icon-sm" @click="loadGitStatus(); loadGitLog()" style="font-size: 10px;">🔄</button>
-                <button class="btn-icon-sm" @click="showGitPanel = !showGitPanel" style="font-size: 10px;">{{ showGitPanel ? '▼' : '▶' }}</button>
-              </div>
-            </div>
-            <div v-if="gitStatus && !gitStatus.error" style="font-size: 10px; color: #4af; margin-bottom: 4px;">🌿 {{ gitStatus.branch }} · {{ gitStatus.total }} 变更</div>
-            <div v-if="gitStatus?.error" style="font-size: 10px; color: #555;">{{ gitStatus.error }}</div>
-            <div v-if="showGitPanel" style="margin-top: 4px;">
-              <div v-if="gitStatus && !gitStatus.error">
-                <div v-for="f in (gitStatus.files || []).slice(0, 10)" :key="f.path" style="display: flex; align-items: center; gap: 4px; padding: 2px 0; font-size: 10px;">
-                  <span :style="{ color: f.status?.startsWith('M') ? '#FF9800' : f.status?.startsWith('A') || f.status?.startsWith('?') ? '#4CAF50' : '#f44', flexShrink: 0 }">{{ f.status }}</span>
-                  <span style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ f.path }}</span>
+          <div class="sidebar-field">
+            <label>模型选择</label>
+            <div v-if="zhipuModels.length > 0" class="model-quick-select">
+              <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
+                <div class="custom-select-value">
+                  <span>{{ zhipuModel ? displayName(zhipuModels.find(m => m.id === zhipuModel)?.name || zhipuModel) : '选择模型...' }}</span>
+                  <span class="custom-select-arrow">▼</span>
                 </div>
-                <div style="margin-top: 4px;">
-                  <input v-model="gitCommitMsg" placeholder="提交消息..." style="width: 100%; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" @keydown.enter="doGitCommit" />
-                  <button class="btn-sm" @click="doGitCommit" style="margin-top: 2px; width: 100%; font-size: 10px;">📝 提交全部变更</button>
-                </div>
-              </div>
-              <div v-if="gitLog.length > 0" style="margin-top: 6px; border-top: 1px solid #222; padding-top: 4px;">
-                <div style="font-size: 10px; color: #666; margin-bottom: 2px;">最近提交</div>
-                <div v-for="c in gitLog.slice(0, 5)" :key="c.hash" style="display: flex; gap: 4px; padding: 2px 0; font-size: 10px; border-bottom: 1px solid #1a1a1a;">
-                  <span style="color: #4af; flex-shrink: 0;">{{ c.hash }}</span>
-                  <span style="color: #888; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ c.message }}</span>
+                <div v-if="modelDropdownOpen" class="custom-select-options">
+                  <div v-for="m in zhipuModels" :key="m.id" :class="['custom-select-option', { selected: zhipuModel === m.id }]" @click.stop="zhipuModel = m.id; modelDropdownOpen = false">
+                    <span>{{ displayName(m.name || m.id) }}</span>
+                    <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
+                    <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
+                  </div>
                 </div>
               </div>
             </div>
+            <input v-model="zhipuModel" placeholder="glm-4.7-flash" class="setting-input" style="width: 100%; margin-top: 4px;" />
           </div>
+          <div style="padding: 4px 8px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.4; margin-top: 2px;">
+            💡 GLM-4-Flash 免费无限 · <a href="#" @click.prevent="window.open('https://open.bigmodel.cn', '_blank')" style="color: #4af;">注册获取Key</a>
+          </div>
+        </div>
 
-          <div v-if="activeProject" style="margin-top: 8px; border-top: 1px solid #2a2a2a; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
-              <span style="font-size: 11px; color: #888;">📋 代码片段</span>
-              <button class="btn-icon-sm" @click="loadSnippets(); showSnippetPanel = !showSnippetPanel" style="font-size: 10px;">{{ showSnippetPanel ? '▼' : '▶' }}</button>
-            </div>
-            <div v-if="showSnippetPanel" style="margin-top: 4px;">
-              <div style="display: flex; gap: 4px; margin-bottom: 4px;">
-                <input v-model="newSnippetName" placeholder="片段名称" style="flex: 1; font-size: 10px; padding: 2px 6px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;" />
-                <select v-model="newSnippetLang" style="font-size: 10px; padding: 2px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd;">
-                  <option value="javascript">JS</option><option value="typescript">TS</option><option value="python">PY</option><option value="html">HTML</option><option value="css">CSS</option><option value="sql">SQL</option><option value="bash">SH</option>
-                </select>
-              </div>
-              <textarea v-model="newSnippetCode" rows="2" placeholder="代码内容..." style="width: 100%; font-size: 10px; padding: 4px; border-radius: 3px; border: 1px solid #333; background: #1a1a1a; color: #ddd; resize: vertical; font-family: monospace;"></textarea>
-              <button class="btn-sm" @click="saveSnippet" style="margin-top: 2px; width: 100%; font-size: 10px;">💾 保存片段</button>
-              <div v-for="s in snippetList" :key="s.id" style="display: flex; align-items: center; gap: 4px; padding: 3px 0; border-bottom: 1px solid #222; cursor: pointer;" @click="insertSnippet(s)">
-                <span style="font-size: 10px; color: #4af; flex-shrink: 0;">{{ s.lang }}</span>
-                <span style="font-size: 10px; color: #ddd; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ s.name }}</span>
-                <button class="btn-icon-sm" @click.stop="deleteSnippet(s.id)" style="font-size: 9px;">🗑️</button>
-              </div>
+        <div v-if="runMode === 'ollama'" class="sidebar-section">
+          <div class="sidebar-section-title">🦙 Ollama</div>
+          <div class="sidebar-field">
+            <label>服务地址</label>
+            <div style="display: flex; gap: 4px; align-items: center;">
+              <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" class="setting-input" style="flex: 1;" />
+              <button class="btn-blue btn-sm" @click="detectModels" :disabled="loadingModels" style="white-space: nowrap; font-size: 10px;">{{ loadingModels ? "检测中" : "🔍 检测" }}</button>
             </div>
           </div>
         </div>
-        <label class="field">
-          <span>你的称谓</span>
-          <input v-model="userName" placeholder="你" class="short-input" />
-        </label>
-        <label class="field">
-          <span>AI 称谓</span>
-          <input v-model="assistantName" placeholder="助手" class="short-input" />
-        </label>
 
-        <div class="setting-actions">
-          <button class="btn-blue" @click="clearModelFields" :disabled="isBusy">清空模型</button>
-          <button class="btn-red" @click="saveSettings" :disabled="isBusy">保存并启用</button>
+        <div v-if="runMode === 'api' && apiSource === 'qwen'" class="sidebar-section">
+          <div class="sidebar-section-title">🔑 千问账户</div>
+          <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+            <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">{{ qwenAccountCount }} 个</span>
+            <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 10px;">{{ qwenValidCount }} 可用</span>
+            <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto; font-size: 10px;">刷新</button>
+          </div>
+          <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 2px 0; font-size: 10px;">未添加账户，对话将返回 500</p>
+          <div v-if="qwenAccounts.length > 0" class="account-list" style="max-height: 120px; overflow-y: auto;">
+            <div v-for="acc in qwenAccounts" :key="acc.email" :class="['account-row', { sticky: stickyEmail === acc.email }]">
+              <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
+              <span class="account-email">{{ acc.email }}</span>
+              <span v-if="stickyEmail === acc.email" class="sticky-badge">★</span>
+              <button v-if="stickyEmail !== acc.email && acc.valid" class="btn-icon btn-sticky" @click="setStickyAccount(acc.email)" title="设为优先">★</button>
+              <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除">✕</button>
+            </div>
+          </div>
+          <div style="display: flex; gap: 4px; margin-top: 4px;">
+            <button class="btn-blue" @click="autoRegisterQwenAccount" :disabled="qwenRegisterBusy" style="flex: 1; font-size: 11px; padding: 4px 8px;">{{ qwenRegisterBusy ? '⏳ 注册中...' : '🤖 自动注册' }}</button>
+          </div>
+          <details style="margin-top: 4px;">
+            <summary style="font-size: 10px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+            <div class="reg-form" style="margin-top: 2px;">
+              <input v-model="loginEmail" type="text" placeholder="邮箱" style="font-size: 11px;" />
+              <input v-model="loginPassword" type="password" placeholder="密码" style="font-size: 11px;" />
+              <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%; font-size: 10px;">{{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
+            </div>
+            <p v-if="qwenLoginError" class="hint warn" style="margin: 2px 0; font-size: 10px;">{{ qwenLoginError }}</p>
+          </details>
+          <details style="margin-top: 4px;">
+            <summary style="font-size: 10px; color: #888; cursor: pointer;">手动添加 Token</summary>
+            <div class="qwen-token-input" style="margin-top: 2px;">
+              <input v-model="qwenToken" type="text" placeholder="粘贴 Token" style="font-size: 11px;" />
+              <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()" style="font-size: 10px;">添加</button>
+            </div>
+          </details>
+          <div v-if="qwenRegisterLogs.length > 0" class="register-log-box" style="margin-top: 4px; max-height: 60px; overflow-y: auto;">
+            <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">{{ log }}</div>
+          </div>
         </div>
 
-        <p class="notice" :class="noticeType">{{ noticeText }}</p>
+        <div class="sidebar-section">
+          <div class="sidebar-section-title">🎯 快速角色</div>
+          <div class="role-presets">
+            <button v-for="(preset, key) in ROLE_PRESETS" :key="key" :class="['role-btn', { active: activeRole === key }]" @click="applyRole(key)" :title="preset.desc">
+              {{ preset.icon }} {{ preset.name }}
+            </button>
+          </div>
+        </div>
       </aside>
+
+      <template v-else>
+        <div class="panel card" style="padding: 12px;">
+          <div class="current-model-info">
+            <div class="info-row">
+              <span class="info-label">运行模式</span>
+              <span class="info-value">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? (apiSource === 'qwen' ? '🔗 千问' : '🧠 智谱') : '🦙 Ollama' }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">当前模型</span>
+              <span class="info-value model-name-tag">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
+            </div>
+          </div>
+          <button class="btn-blue" style="width: 100%; margin-top: 8px;" @click="showPanel = true">📂 展开面板</button>
+        </div>
+      </template>
     </main>
 
     <main v-if="activeNav === 'project'" class="page-view">
@@ -3738,11 +3175,11 @@ async function loadOfflineModels() {
             <div class="card-title">构建信息</div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">运行模式</div></div>
-              <span style="font-size: 12px; color: #4af;">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : runMode === 'zhipu' ? '🧠 智谱' : '🦙 Ollama' }}</span>
+              <span style="font-size: 12px; color: #4af;">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : '🦙 Ollama' }}</span>
             </div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">当前模型</div></div>
-              <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? apiModel : runMode === 'zhipu' ? zhipuModel : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
+              <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
             </div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">项目路径</div></div>
@@ -3759,12 +3196,6 @@ async function loadOfflineModels() {
           <nav class="settings-nav">
             <button :class="['settings-nav-item', { active: settingsTab === 'general' }]" @click="settingsTab = 'general'">
               <span class="nav-icon">🏠</span><span class="nav-label">通用</span>
-            </button>
-            <button :class="['settings-nav-item', { active: settingsTab === 'model' }]" @click="settingsTab = 'model'">
-              <span class="nav-icon">🤖</span><span class="nav-label">模型配置</span>
-            </button>
-            <button :class="['settings-nav-item', { active: settingsTab === 'account' }]" @click="settingsTab = 'account'">
-              <span class="nav-icon">🔑</span><span class="nav-label">账户管理</span>
             </button>
             <button :class="['settings-nav-item', { active: settingsTab === 'memory' }]" @click="settingsTab = 'memory'">
               <span class="nav-icon">🧠</span><span class="nav-label">记忆与知识</span>
@@ -3838,245 +3269,6 @@ async function loadOfflineModels() {
                 <div class="shortcut-row"><span>打开设置</span><kbd>/settings</kbd></div>
                 <div class="shortcut-row"><span>压缩上下文</span><kbd>/compact</kbd></div>
                 <div class="shortcut-row"><span>导出对话</span><kbd>/export</kbd></div>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="settingsTab === 'model'" class="settings-section">
-            <h3 class="section-title">模型配置</h3>
-            <div class="settings-card">
-              <div class="card-title">运行模式</div>
-              <div class="mode-switch-large">
-                <button :class="['mode-card', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">
-                  <span class="mode-icon">☁️</span><span class="mode-name">云端</span><span class="mode-desc">OpenRouter 云端推理</span>
-                </button>
-                <button :class="['mode-card', { active: runMode === 'api' }]" @click="runMode = 'api'">
-                  <span class="mode-icon">🔗</span><span class="mode-name">API</span><span class="mode-desc">本地 API 代理服务</span>
-                </button>
-                <button :class="['mode-card', { active: runMode === 'zhipu' }]" @click="runMode = 'zhipu'">
-                  <span class="mode-icon">🧠</span><span class="mode-name">智谱</span><span class="mode-desc">智谱GLM官方API</span>
-                </button>
-                <button :class="['mode-card', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">
-                  <span class="mode-icon">🦙</span><span class="mode-name">Ollama</span><span class="mode-desc">本地模型推理</span>
-                </button>
-              </div>
-            </div>
-
-            <div v-if="runMode === 'cloud'" class="settings-card">
-              <div class="card-title">云端配置</div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">API Key</div><div class="setting-desc">OpenRouter API 密钥</div></div>
-                <input v-model="apiKey" type="text" placeholder="输入你的 API Key" class="setting-input" style="width: 240px;" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">模型</div><div class="setting-desc">固定使用 openrouter/auto</div></div>
-                <input value="openrouter/auto" readonly class="setting-input" style="width: 240px; opacity: 0.6;" />
-              </div>
-            </div>
-
-            <div v-if="runMode === 'api'" class="settings-card">
-              <div class="card-title">API 服务</div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">服务地址</div><div class="setting-desc">API 代理服务地址和端口</div></div>
-                <div style="display: flex; align-items: center; gap: 0;">
-                  <span style="padding: 0 8px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
-                  <input v-model="apiHost" placeholder="127.0.0.1" style="width: 120px; border-radius: 0; height: 32px;" />
-                  <span style="padding: 0 6px; font-size: 14px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
-                  <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 80px; text-align: center; border-radius: 0 4px 4px 0; height: 32px;" />
-                </div>
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">API Key</div><div class="setting-desc">自动获取或手动输入</div></div>
-                <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" class="setting-input" style="width: 240px;" />
-              </div>
-              <div class="api-progress-section" style="margin-top: 8px;">
-                <div class="api-progress-bar">
-                  <div v-for="(step, idx) in apiSteps" :key="idx" :class="['api-step', { done: apiStepProgress > idx, active: apiStepProgress === idx, pending: apiStepProgress < idx }]">
-                    <div class="step-dot"><span v-if="apiStepProgress > idx">✓</span><span v-else>{{ idx + 1 }}</span></div>
-                    <div class="step-label">{{ step.label }}</div>
-                  </div>
-                </div>
-                <div class="api-progress-track"><div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div></div>
-                <p class="api-progress-msg">{{ apiStepMessage }}</p>
-                <div style="display: flex; gap: 6px; margin-top: 6px;">
-                  <button class="btn-blue" style="flex: 1;" @click="apiStepAutoRun" :disabled="apiStepBusy || apiStepProgress >= apiSteps.length">{{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ API 服务已就绪' : '▶ 一键启动') }}</button>
-                  <button class="btn-red" style="flex: 0 0 auto; min-width: 80px;" @click="stopApiService" :disabled="apiStepBusy || apiStepProgress < apiSteps.length" v-if="apiStepProgress >= apiSteps.length">■ 停止</button>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="runMode === 'api'" class="settings-card">
-              <div class="card-title">模型选择</div>
-              <div v-if="apiModels.length > 0" class="model-quick-select">
-                <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
-                  <div class="custom-select-value">
-                    <span>{{ apiModel ? displayName(apiModels.find(m => m.id === apiModel)?.name || apiModel) : '选择模型...' }}</span>
-                    <span class="custom-select-arrow">▼</span>
-                  </div>
-                  <div v-if="modelDropdownOpen" class="custom-select-options">
-                    <div v-for="m in apiModels" :key="m.id" :class="['custom-select-option', { selected: apiModel === m.id }]" @click.stop="apiModel = m.id; modelDropdownOpen = false">
-                      <span>{{ displayName(m.name || m.id) }}</span>
-                      <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
-                      <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row" style="margin-top: 8px;">
-                <div class="setting-info"><div class="setting-name">模型名称</div><div class="setting-desc">手动输入或从列表选择</div></div>
-                <input v-model="apiModel" placeholder="qwen3.6-plus" class="setting-input" style="width: 240px;" />
-              </div>
-            </div>
-
-            <div v-if="runMode === 'zhipu'" class="settings-card">
-              <div class="card-title">智谱 AI 配置</div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">API Key</div><div class="setting-desc">智谱开放平台 API 密钥</div></div>
-                <div style="display: flex; gap: 4px; align-items: center;">
-                  <input v-model="zhipuApiKey" type="password" placeholder="输入智谱 API Key" class="setting-input" style="width: 200px;" />
-                  <button class="btn-blue btn-sm" @click="checkZhipuApiConnect" :disabled="zhipuApiChecking">
-                    {{ zhipuApiChecking ? "验证中..." : (zhipuApiChecked ? "✓ 已连接" : "🔗 验证") }}
-                  </button>
-                </div>
-              </div>
-              <div v-if="zhipuApiChecked" style="padding: 4px 12px; background: #1a2a1a; border-radius: 4px; font-size: 11px; color: #4CAF50; margin: 4px 0;">
-                ✓ 智谱 API 连接成功
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">API 地址</div><div class="setting-desc">智谱开放平台 API 端点</div></div>
-                <input v-model="zhipuBaseUrl" placeholder="https://open.bigmodel.cn/api/paas/v4" class="setting-input" style="width: 280px;" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">获取 API Key</div><div class="setting-desc">注册智谱开放平台获取免费额度</div></div>
-                <button class="btn-blue btn-sm" @click="window.open('https://open.bigmodel.cn', '_blank')">🌐 打开智谱开放平台</button>
-              </div>
-            </div>
-
-            <div v-if="runMode === 'zhipu'" class="settings-card">
-              <div class="card-title">模型选择</div>
-              <div v-if="zhipuModels.length > 0" class="model-quick-select">
-                <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
-                  <div class="custom-select-value">
-                    <span>{{ zhipuModel ? displayName(zhipuModels.find(m => m.id === zhipuModel)?.name || zhipuModel) : '选择模型...' }}</span>
-                    <span class="custom-select-arrow">▼</span>
-                  </div>
-                  <div v-if="modelDropdownOpen" class="custom-select-options">
-                    <div v-for="m in zhipuModels" :key="m.id" :class="['custom-select-option', { selected: zhipuModel === m.id }]" @click.stop="zhipuModel = m.id; modelDropdownOpen = false">
-                      <span>{{ displayName(m.name || m.id) }}</span>
-                      <span v-if="m.toolSupport === true" class="tool-badge ok">★</span>
-                      <span v-else-if="m.toolSupport === false" class="tool-badge no">-</span>
-                      <span v-if="m.desc" style="font-size: 10px; color: #888; margin-left: 4px;">{{ m.desc }}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="setting-row" style="margin-top: 8px;">
-                <div class="setting-info"><div class="setting-name">模型名称</div><div class="setting-desc">手动输入或从列表选择</div></div>
-                <input v-model="zhipuModel" placeholder="glm-4-flash" class="setting-input" style="width: 240px;" />
-              </div>
-              <div style="padding: 6px 12px; background: #1a1a2a; border-radius: 4px; font-size: 10px; color: #888; line-height: 1.5; margin-top: 4px;">
-                💡 GLM-4-Flash 可免费使用，GLM-4-Plus 为旗舰付费模型。智谱新用户赠送免费额度。
-              </div>
-            </div>
-
-            <div v-if="runMode === 'ollama'" class="settings-card">
-              <div class="card-title">Ollama 配置</div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">Ollama 地址</div><div class="setting-desc">本地 Ollama 服务地址</div></div>
-                <div class="model-loader">
-                  <input v-model="ollamaBaseUrl" placeholder="http://127.0.0.1:11434" class="setting-input" style="width: 200px;" />
-                  <button class="btn-blue btn-sm" @click="detectModels" :disabled="loadingModels">{{ loadingModels ? "检测中..." : "🔍 检测" }}</button>
-                </div>
-              </div>
-            </div>
-
-            <div class="settings-card">
-              <div class="card-title">模型参数</div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">Temperature</div><div class="setting-desc">创造性程度，0=精确 2=创造</div></div>
-                <div class="range-row"><input type="number" min="0" max="2" step="0.1" placeholder="0.3" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).temperature" @input="(e: any) => { getModelConfig(activeModelId).temperature = e.target.value; }" /></div>
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">Max Tokens</div><div class="setting-desc">最大输出长度</div></div>
-                <input type="number" min="256" max="65536" step="256" placeholder="4096" class="setting-input" style="width: 120px;" :value="getModelConfig(activeModelId).maxTokens" @input="(e: any) => { getModelConfig(activeModelId).maxTokens = e.target.value; }" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">Top P</div><div class="setting-desc">核采样，0.1=聚焦 1.0=开放</div></div>
-                <input type="number" min="0" max="1" step="0.05" placeholder="1.0" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).topP" @input="(e: any) => { getModelConfig(activeModelId).topP = e.target.value; }" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">频率惩罚</div><div class="setting-desc">降低重复词</div></div>
-                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).frequencyPenalty" @input="(e: any) => { getModelConfig(activeModelId).frequencyPenalty = e.target.value; }" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">存在惩罚</div><div class="setting-desc">鼓励新话题</div></div>
-                <input type="number" min="-2" max="2" step="0.1" placeholder="0" class="setting-input" style="width: 80px;" :value="getModelConfig(activeModelId).presencePenalty" @input="(e: any) => { getModelConfig(activeModelId).presencePenalty = e.target.value; }" />
-              </div>
-              <div class="setting-row">
-                <div class="setting-info"><div class="setting-name">系统提示词</div><div class="setting-desc">自定义 AI 行为指令</div></div>
-              </div>
-              <textarea :value="getModelConfig(activeModelId).systemPrompt" @input="(e: any) => { getModelConfig(activeModelId).systemPrompt = e.target.value; }" rows="3" placeholder="留空则根据语言自动生成" class="setting-textarea"></textarea>
-            </div>
-
-            <div style="display: flex; gap: 8px; margin-top: 12px;">
-              <button class="btn-blue" @click="saveSettings" :disabled="isBusy" style="flex: 1;">💾 保存配置</button>
-              <button class="btn-sm" @click="clearModelFields" :disabled="isBusy" style="background: #333;">清空模型</button>
-            </div>
-          </div>
-
-          <div v-if="settingsTab === 'account'" class="settings-section">
-            <h3 class="section-title">账户管理</h3>
-            <div class="settings-card">
-              <div class="card-title">上游账户池</div>
-              <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">{{ qwenAccountCount }} 个账户</span>
-                <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 11px;">{{ qwenValidCount }} 可用</span>
-                <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto;">刷新</button>
-              </div>
-              <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 4px 0;">未添加上游账户，AI 对话将返回 500 错误。</p>
-              <div v-if="qwenAccounts.length > 0" class="account-list">
-                <div v-for="acc in qwenAccounts" :key="acc.email" :class="['account-row', { sticky: stickyEmail === acc.email }]">
-                  <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
-                  <span class="account-email">{{ acc.email }}</span>
-                  <span v-if="stickyEmail === acc.email" class="sticky-badge">★ 优先</span>
-                  <span v-if="!acc.valid" class="account-err">{{ acc.status_code || '不可用' }}</span>
-                  <button v-if="stickyEmail !== acc.email && acc.valid" class="btn-icon btn-sticky" @click="setStickyAccount(acc.email)" title="设为优先">★</button>
-                  <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除">✕</button>
-                </div>
-                <button v-if="stickyEmail" class="btn-blue btn-sm" @click="clearStickyAccount" style="margin-top: 4px; width: 100%;">取消优先，恢复自动轮换</button>
-              </div>
-            </div>
-            <div class="settings-card">
-              <div class="card-title">添加账户</div>
-              <div style="display: flex; gap: 8px; margin-bottom: 8px;">
-                <button class="btn-blue" @click="autoRegisterQwenAccount" :disabled="qwenRegisterBusy" style="flex: 1;">{{ qwenRegisterBusy ? '⏳ 注册中...' : '🤖 自动注册' }}</button>
-              </div>
-              <details style="margin-top: 6px;">
-                <summary style="font-size: 11px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
-                <div class="reg-form" style="margin-top: 4px;">
-                  <input v-model="loginEmail" type="text" placeholder="邮箱" />
-                  <input v-model="loginPassword" type="password" placeholder="密码" />
-                  <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%;">{{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
-                </div>
-                <p v-if="qwenLoginError" class="hint warn" style="margin: 4px 0;">{{ qwenLoginError }}</p>
-              </details>
-              <details style="margin-top: 6px;">
-                <summary style="font-size: 11px; color: #888; cursor: pointer;">手动添加 Token</summary>
-                <div class="qwen-token-input" style="margin-top: 4px;">
-                  <input v-model="qwenToken" type="text" placeholder="粘贴 Token" />
-                  <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()">添加</button>
-                </div>
-              </details>
-              <details style="margin-top: 6px;">
-                <summary style="font-size: 11px; color: #888; cursor: pointer;">自定义注册信息</summary>
-                <div class="reg-form" style="margin-top: 4px;">
-                  <input v-model="regEmail" type="text" placeholder="邮箱（留空自动生成）" />
-                  <input v-model="regPassword" type="password" placeholder="密码（留空自动生成）" />
-                  <input v-model="regUsername" type="text" placeholder="用户名（留空自动生成）" />
-                </div>
-              </details>
-              <div v-if="qwenRegisterLogs.length > 0" class="register-log-box" style="margin-top: 6px;">
-                <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">{{ log }}</div>
               </div>
             </div>
           </div>
@@ -5126,6 +4318,105 @@ export default { name: "App" };
   gap: 4px;
 }
 
+.api-source-bar {
+  display: flex;
+  gap: 0;
+  background: #111;
+  border-radius: 6px;
+  padding: 2px;
+  align-items: center;
+}
+.api-source-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: #777;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+.api-source-btn:hover {
+  color: #ccc;
+  background: #1a1a2a;
+}
+.api-source-btn.active {
+  background: #1a3a5a;
+  color: #4af;
+  font-weight: 600;
+}
+.api-source-hint {
+  font-size: 9px;
+  color: #555;
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+.sidebar-section {
+  background: #0d0d0d;
+  border: 1px solid #222;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.sidebar-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ccc;
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #1a1a1a;
+}
+.sidebar-field {
+  margin-bottom: 6px;
+}
+.sidebar-field:last-child {
+  margin-bottom: 0;
+}
+.sidebar-field label {
+  display: block;
+  font-size: 10px;
+  color: #888;
+  margin-bottom: 2px;
+}
+
+.api-source-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #333;
+}
+.api-tab {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  border: none;
+  background: #1a1a1a;
+  color: #888;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  transition: all 0.2s;
+}
+.api-tab:hover {
+  background: #2a2a2a;
+  color: #ccc;
+}
+.api-tab.active {
+  background: #1a3a5a;
+  color: #4af;
+  font-weight: 600;
+}
+.tab-icon {
+  font-size: 14px;
+}
+
 .mode-btn {
   padding: 5px 10px;
   font-size: 12px;
@@ -5155,6 +4446,31 @@ export default { name: "App" };
   border-radius: 8px;
   padding: 12px;
   margin: 4px 0;
+}
+
+.current-model-info {
+  background: #111;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 8px;
+}
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+.info-label {
+  font-size: 11px;
+  color: #666;
+}
+.info-value {
+  font-size: 11px;
+  color: #ccc;
+}
+.model-name-tag {
+  font-weight: 600;
+  color: #4af;
 }
 
 .qwen-account-section {

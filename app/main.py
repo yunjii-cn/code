@@ -2211,26 +2211,26 @@ class BackendBridge(QObject):
                 api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777").strip()
                 api_model = (settings.get("API_MODEL", "") or "qwen3.6-plus").strip()
                 api_key = (settings.get("API_KEY", "") or "").strip()
-                main.log_signal.emit(f"[代理] API模式 模型={api_model} 目标={api_base}", "#2196F3")
-                env_overrides["MODEL_PROVIDER"] = "api"
-                env_overrides["API_BASE_URL"] = api_base
-                env_overrides["API_MODEL"] = api_model
-                if api_key:
-                    env_overrides["API_KEY"] = api_key
-                    env_overrides["ANTHROPIC_API_KEY"] = api_key
-                env_overrides["ANTHROPIC_BASE_URL"] = api_base
-            elif provider == "zhipu":
-                zhipu_base = (settings.get("ZHIPU_BASE_URL", "") or ZHIPU_DEFAULT_BASE_URL).strip()
-                zhipu_model = (settings.get("ZHIPU_MODEL", "") or "glm-4-flash").strip()
-                zhipu_key = (settings.get("ZHIPU_API_KEY", "") or "").strip()
-                main.log_signal.emit(f"[代理] 智谱API模式 模型={zhipu_model} 目标={zhipu_base}", "#2196F3")
-                env_overrides["MODEL_PROVIDER"] = "api"
-                env_overrides["API_BASE_URL"] = zhipu_base
-                env_overrides["API_MODEL"] = zhipu_model
-                if zhipu_key:
+                zhipu_base = settings.get("ZHIPU_BASE_URL", "").strip()
+                zhipu_model = settings.get("ZHIPU_MODEL", "").strip()
+                zhipu_key = settings.get("ZHIPU_API_KEY", "").strip()
+                if zhipu_base and zhipu_model and zhipu_key:
+                    main.log_signal.emit(f"[代理] 智谱API模式 模型={zhipu_model} 目标={zhipu_base}", "#2196F3")
+                    env_overrides["MODEL_PROVIDER"] = "api"
+                    env_overrides["API_BASE_URL"] = zhipu_base
+                    env_overrides["API_MODEL"] = zhipu_model
                     env_overrides["API_KEY"] = zhipu_key
                     env_overrides["ANTHROPIC_API_KEY"] = zhipu_key
-                env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
+                    env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
+                else:
+                    main.log_signal.emit(f"[代理] Qwen API模式 模型={api_model} 目标={api_base}", "#2196F3")
+                    env_overrides["MODEL_PROVIDER"] = "api"
+                    env_overrides["API_BASE_URL"] = api_base
+                    env_overrides["API_MODEL"] = api_model
+                    if api_key:
+                        env_overrides["API_KEY"] = api_key
+                        env_overrides["ANTHROPIC_API_KEY"] = api_key
+                    env_overrides["ANTHROPIC_BASE_URL"] = api_base
             else:
                 env_overrides["MODEL_PROVIDER"] = "anthropic"
                 env_overrides.pop("OLLAMA_BASE_URL", None)
