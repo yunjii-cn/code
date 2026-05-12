@@ -50,6 +50,7 @@ app/env_install_status.json
 app/.env
 app/.env.*
 !app/.env.example
+app/zhipu2api/data/api_keys.json
 
 # ── Python 缓存 ──
 __pycache__/
