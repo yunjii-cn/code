@@ -825,7 +825,18 @@ async function chooseWorkspace() {
   const state = await callBackend("getState");
   if (state?.workspacePath) {
     workspacePath.value = state.workspacePath;
-    showNotice("项目目录已切换。", "ok");
+    if (activeProject.value) {
+      await callBackend("updateProject", activeProject.value.id, "", state.workspacePath);
+      await loadProjects();
+    } else {
+      const dirName = state.workspacePath.replace(/\\/g, "/").split("/").pop() || "项目";
+      const proj = await callBackend("createProject", dirName, state.workspacePath);
+      if (proj) {
+        activeProject.value = proj;
+        await loadProjects();
+      }
+    }
+    showNotice("工作区已切换。", "ok");
   }
 }
 
@@ -871,7 +882,7 @@ async function loadProjects() {
     const active = await callBackend("getActiveProject");
     activeProject.value = active || null;
     if (active) {
-      workspacePath.value = active.path || "";
+      workspacePath.value = active.workspace_path || "";
       const convs = await callBackend("listConversations", active.id);
       projectConversations.value = convs || [];
     }
@@ -900,7 +911,7 @@ async function createProject() {
     const proj = await callBackend("createProject", newProjectName.value.trim(), path);
     if (proj) {
       activeProject.value = proj;
-      workspacePath.value = proj.path || "";
+      workspacePath.value = proj.workspace_path || "";
       newProjectName.value = "";
       newProjectPath.value = "";
       newProjectCustomPath.value = false;
@@ -917,7 +928,7 @@ async function switchProject(projectId: string) {
     const proj = await callBackend("switchProject", projectId);
     if (proj) {
       activeProject.value = proj;
-      workspacePath.value = proj.path || "";
+      workspacePath.value = proj.workspace_path || "";
       messages.value = [];
       await createSession();
       await loadProjects();
@@ -932,7 +943,7 @@ function startEditProject(projectId: string) {
   if (!proj) return;
   editingProjectId.value = projectId;
   editProjectName.value = proj.name || "";
-  editProjectPath.value = proj.path || "";
+  editProjectPath.value = proj.workspace_path || "";
   editProjectCustomPath.value = false;
 }
 
@@ -952,7 +963,7 @@ async function saveEditProject() {
     if (proj && !proj.error) {
       if (activeProject.value?.id === editingProjectId.value) {
         activeProject.value = proj;
-        workspacePath.value = proj.path || "";
+        workspacePath.value = proj.workspace_path || "";
       }
       cancelEditProject();
       await loadProjects();
@@ -1149,7 +1160,7 @@ function applyWorkflow(workflowKey: string) {
 async function loadMemoryContent() {
   if (!activeProject.value) return;
   try {
-    const content = await callBackend("getClaudeMd", activeProject.value.path);
+    const content = await callBackend("getClaudeMd", activeProject.value.id);
     memoryContent.value = content || "";
     const global = await callBackend("getGlobalClaudeMd");
     globalMemoryContent.value = global || "";
@@ -1161,7 +1172,7 @@ async function loadMemoryContent() {
 async function saveMemoryContent() {
   if (!activeProject.value) return;
   try {
-    await callBackend("saveClaudeMd", activeProject.value.path, memoryContent.value);
+    await callBackend("saveClaudeMd", activeProject.value.id, memoryContent.value);
     showNotice("项目记忆已保存", "ok");
   } catch (e) {
     console.warn("saveMemoryContent failed:", e);
@@ -1189,7 +1200,7 @@ function appendMemory(text: string) {
 async function loadSmartMemories() {
   if (!activeProject.value) return;
   try {
-    const result = await callBackend("listMemories", activeProject.value.path);
+    const result = await callBackend("listMemories", activeProject.value.id);
     smartMemories.value = Array.isArray(result) ? result : [];
   } catch (e) {
     console.warn("loadSmartMemories failed:", e);
@@ -1199,7 +1210,7 @@ async function loadSmartMemories() {
 async function searchSmartMemories() {
   if (!activeProject.value) return;
   try {
-    const result = await callBackend("searchMemories", activeProject.value.path, memorySearchQuery.value);
+    const result = await callBackend("searchMemories", activeProject.value.id, memorySearchQuery.value);
     smartMemories.value = Array.isArray(result) ? result : [];
   } catch (e) {
     console.warn("searchSmartMemories failed:", e);
@@ -1210,7 +1221,7 @@ async function addSmartMemory() {
   if (!activeProject.value || !newMemoryTitle.value.trim() || !newMemoryContent.value.trim()) return;
   try {
     const filename = newMemoryTitle.value.trim().replace(/\s+/g, "-").toLowerCase();
-    await callBackend("saveMemory", activeProject.value.path, filename, newMemoryContent.value.trim(), newMemoryType.value);
+    await callBackend("saveMemory", activeProject.value.id, filename, newMemoryContent.value.trim(), newMemoryType.value);
     newMemoryTitle.value = "";
     newMemoryContent.value = "";
     loadSmartMemories();
@@ -1223,7 +1234,7 @@ async function addSmartMemory() {
 async function deleteSmartMemory(filename: string) {
   if (!activeProject.value) return;
   try {
-    await callBackend("deleteMemory", activeProject.value.path, filename);
+    await callBackend("deleteMemory", activeProject.value.id, filename);
     loadSmartMemories();
     showNotice("记忆已删除", "ok");
   } catch (e) {
@@ -1235,7 +1246,7 @@ async function extractMemoriesFromConversation() {
   if (!activeProject.value || messages.value.length === 0) return;
   try {
     const msgs = messages.value.map(m => ({ role: m.role, text: m.text }));
-    const result = await callBackend("autoExtractMemories", activeProject.value.path, JSON.stringify(msgs));
+    const result = await callBackend("autoExtractMemories", activeProject.value.id, JSON.stringify(msgs));
     if (Array.isArray(result) && result.length > 0) {
       const summary = result.map((r: any) => `${r.type}: ${r.count}条`).join(", ");
       showNotice(`已提取记忆: ${summary}`, "ok");
@@ -1267,7 +1278,7 @@ function useTemplate(template: any) {
 async function scaffoldFromTemplate(template: any) {
   if (!template || !activeProject.value) return;
   try {
-    const result = await callBackend("createProjectFromTemplate", activeProject.value.path, template.id);
+    const result = await callBackend("createProjectFromTemplate", activeProject.value.id, template.id);
     const data = typeof result === "string" ? JSON.parse(result) : result;
     if (data.success) {
       showNotice(`已创建项目脚手架：${data.files?.length || 0} 个文件`, "ok");
@@ -1312,7 +1323,7 @@ function openPreview() {
     showNotice("请先选择项目", "warn");
     return;
   }
-  const projPath = activeProject.value.path;
+  const projPath = activeProject.value.workspace_path || workspacePath.value;
   previewPath.value = projPath;
   const indexPath = projPath.replace(/\\/g, "/") + "/index.html";
   previewUrl.value = `file:///${indexPath}`;
@@ -2990,7 +3001,7 @@ async function executeTerminalCommand() {
   const cmd = terminalInput.value.trim();
   if (!cmd) return;
   terminalInput.value = "";
-  const cwd = terminalCwd.value || activeProject.value?.path || workspacePath.value || "";
+  const cwd = terminalCwd.value || activeProject.value?.workspace_path || workspacePath.value || "";
   const entry = { cmd, output: "", ts: new Date().toLocaleTimeString() };
   terminalHistory.value.push(entry);
   try {
@@ -3014,7 +3025,7 @@ function toggleTerminal() {
 async function loadGitStatus() {
   if (!activeProject.value) return;
   try {
-    const data = await callBackend("getGitStatus", activeProject.value.path);
+    const data = await callBackend("getGitStatus", activeProject.value.workspace_path || workspacePath.value);
     gitStatus.value = typeof data === "string" ? JSON.parse(data) : data;
   } catch (e) {
     console.warn("loadGitStatus failed:", e);
@@ -3024,7 +3035,7 @@ async function loadGitStatus() {
 async function loadGitLog() {
   if (!activeProject.value) return;
   try {
-    const data = await callBackend("getGitLog", activeProject.value.path);
+    const data = await callBackend("getGitLog", activeProject.value.workspace_path || workspacePath.value);
     const parsed = typeof data === "string" ? JSON.parse(data) : data;
     gitLog.value = parsed.commits || [];
   } catch (e) {
@@ -3035,7 +3046,7 @@ async function loadGitLog() {
 async function doGitCommit() {
   if (!activeProject.value || !gitCommitMsg.value.trim()) return;
   try {
-    await callBackend("gitCommit", activeProject.value.path, gitCommitMsg.value.trim());
+    await callBackend("gitCommit", activeProject.value.workspace_path || workspacePath.value, gitCommitMsg.value.trim());
     gitCommitMsg.value = "";
     loadGitStatus();
     loadGitLog();
@@ -3117,7 +3128,7 @@ function jumpToSearchResult(idx: number) {
 async function loadFileTree() {
   if (!activeProject.value) return;
   try {
-    const data = await callBackend("getFileTree", activeProject.value.path);
+    const data = await callBackend("getFileTree", activeProject.value.workspace_path || workspacePath.value);
     fileTree.value = typeof data === "string" ? JSON.parse(data) : data;
   } catch (e) {
     console.warn("loadFileTree failed:", e);
@@ -3232,7 +3243,7 @@ async function loadOfflineModels() {
             <button v-if="showPreviewPanel" class="btn-blue" @click="closePreview">关闭预览</button>
             <button v-else class="btn-blue" @click="openPreview">预览</button>
             <button :class="['btn-blue', { 'btn-active': showTerminal }]" @click="toggleTerminal">⌨ 终端</button>
-            <button class="btn-blue" @click="chooseWorkspace">打开项目</button>
+            <button class="btn-blue" @click="chooseWorkspace">打开工作区</button>
             <button class="btn-blue" @click="showPanel = !showPanel">{{ showPanel ? "隐藏面板" : "显示面板" }}</button>
           </div>
         </div>
@@ -3285,7 +3296,7 @@ async function loadOfflineModels() {
         <div v-if="showTerminal" class="terminal-panel">
           <div class="terminal-toolbar">
             <span style="font-size: 11px; color: #4af;">⌨ 终端</span>
-            <span style="font-size: 10px; color: #555; margin-left: 8px;">{{ terminalCwd || activeProject?.path || workspacePath || '~' }}</span>
+            <span style="font-size: 10px; color: #555; margin-left: 8px;">{{ terminalCwd || activeProject?.workspace_path || workspacePath || '~' }}</span>
             <div style="display: flex; gap: 4px; margin-left: auto;">
               <button class="btn-icon-sm" @click="clearTerminal" style="font-size: 10px;" title="清空">🗑️</button>
               <button class="btn-icon-sm" @click="showTerminal = false" style="font-size: 10px;">✕</button>
@@ -3595,19 +3606,18 @@ async function loadOfflineModels() {
           <div style="display: flex; gap: 8px; align-items: center;">
             <input v-model="newProjectName" placeholder="新项目名称" class="setting-input" style="width: 200px;" @input="updateDefaultPath" />
             <button class="btn-blue" @click="createProject" :disabled="!newProjectName.trim()">创建项目</button>
-            <button class="btn-blue" @click="chooseWorkspace">打开目录</button>
+            <button class="btn-blue" @click="chooseWorkspace">打开工作区</button>
           </div>
         </div>
-        <div v-if="newProjectDefaultPath" style="font-size: 11px; color: #666; padding: 0 24px 8px;">{{ newProjectDefaultPath }}</div>
         <div class="project-grid">
           <div v-for="p in projects" :key="p.id" :class="['project-card', { active: p.id === activeProject?.id }]" @click="switchProject(p.id)">
             <div class="project-card-header">
               <span class="project-card-name">{{ p.name }}</span>
               <span v-if="p.id === activeProject?.id" class="project-active-badge">当前</span>
             </div>
-            <div class="project-card-path">{{ p.path }}</div>
+            <div class="project-card-path">{{ p.workspace_path || '纯对话模式' }}</div>
             <div class="project-card-actions">
-              <button class="btn-sm" @click.stop="openInExplorer(p.path)" style="font-size: 10px;">📁 打开目录</button>
+              <button v-if="p.workspace_path" class="btn-sm" @click.stop="openInExplorer(p.workspace_path)" style="font-size: 10px;">📁 打开目录</button>
               <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" style="font-size: 10px; color: #f44;">🗑️</button>
             </div>
           </div>
@@ -3666,8 +3676,8 @@ async function loadOfflineModels() {
               <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
             </div>
             <div class="setting-row">
-              <div class="setting-info"><div class="setting-name">项目路径</div></div>
-              <span style="font-size: 11px; color: #888;">{{ activeProject?.path || workspacePath || '未选择' }}</span>
+              <div class="setting-info"><div class="setting-name">工作区路径</div></div>
+              <span style="font-size: 11px; color: #888;">{{ activeProject?.workspace_path || workspacePath || '未选择' }}</span>
             </div>
           </div>
         </div>
@@ -3817,24 +3827,31 @@ async function loadOfflineModels() {
             <h3 class="section-title">项目与模板</h3>
             <div class="settings-card">
               <div class="card-title">项目管理</div>
-              <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 8px;">当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.path }}</span></div>
+              <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 8px;">当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.workspace_path || '纯对话' }}</span></div>
               <div style="margin-bottom: 8px;">
                 <div style="font-size: 11px; color: #888; margin-bottom: 4px;">新建项目</div>
                 <div style="display: flex; gap: 4px; margin-bottom: 4px;">
                   <input v-model="newProjectName" placeholder="项目名称" class="setting-input" style="flex: 1;" @input="updateDefaultPath" />
                   <button class="btn-blue btn-sm" @click="createProject" :disabled="!newProjectName.trim()">创建</button>
                 </div>
-                <div v-if="newProjectDefaultPath" style="font-size: 10px; color: #666;">{{ newProjectDefaultPath }}</div>
+                <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 4px;">
+                  <label style="font-size: 10px; color: #888; cursor: pointer;">
+                    <input type="checkbox" v-model="newProjectCustomPath" style="margin-right: 4px;" />指定工作区
+                  </label>
+                  <button v-if="newProjectCustomPath" class="btn-sm" @click="selectWorkspaceDir" style="font-size: 10px;">📂 选择目录</button>
+                </div>
+                <div v-if="newProjectCustomPath && newProjectPath" style="font-size: 10px; color: #4af;">工作区: {{ newProjectPath }}</div>
+                <div v-if="!newProjectCustomPath" style="font-size: 10px; color: #666;">不指定工作区则为纯对话模式</div>
               </div>
               <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]" style="margin-bottom: 4px;">
                 <div style="display: flex; align-items: center; justify-content: space-between;" @click="switchProject(p.id)">
                   <span style="font-size: 12px;">{{ p.name }}</span>
                   <div style="display: flex; gap: 2px;">
-                    <button class="btn-icon-sm" @click.stop="openInExplorer(p.path)" title="打开目录">📁</button>
+                    <button v-if="p.workspace_path" class="btn-icon-sm" @click.stop="openInExplorer(p.workspace_path)" title="打开目录">📁</button>
                     <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
                   </div>
                 </div>
-                <div style="font-size: 10px; color: #666;">{{ p.path }}</div>
+                <div style="font-size: 10px; color: #666;">{{ p.workspace_path || '纯对话模式' }}</div>
               </div>
             </div>
             <div class="settings-card">
