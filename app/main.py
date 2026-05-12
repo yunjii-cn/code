@@ -98,50 +98,142 @@ def get_version_from_filename():
 
 VERSION = get_version_from_filename()
 
-# ── 单实例控制：命名互斥体 + 命名事件 ──
-# 方案：同一版本 → 提示已运行；不同版本 → 通知旧版本优雅退出
+# ── 单实例控制：命名互斥体 + 命名事件 + 命名共享内存 ──
+# 方案：
+#   同版本 + 同路径 → 激活已运行实例的窗口
+#   同版本 + 不同路径 → 通知旧实例退出
+#   不同版本 → 通知旧版本退出
 import ctypes
 from ctypes import wintypes
 
 _kernel32 = ctypes.windll.kernel32
+_user32 = ctypes.windll.user32
+
 ERROR_ALREADY_EXISTS = 183
+PAGE_READWRITE = 0x04
+FILE_MAP_ALL_ACCESS = 0xF001F
+WM_ACTIVATE_INSTANCE = 0x0400 + 0x1001  # 自定义消息：激活窗口
 
 # 全局句柄，MainWindow 关闭时需要释放
 _instance_mutex = None
 _shutdown_event = None
+_path_mapping = None  # 共享内存句柄
 
 MUTEX_NAME = f"YunJiCode_SingleInstance_v{VERSION}"
 SHUTDOWN_EVENT_NAME = "YunJiCode_ShutdownEvent"
+PATH_MAPPING_NAME = f"YunJiCode_Path_v{VERSION}"  # 存储当前 EXE 路径的共享内存
+PATH_MAPPING_SIZE = 1024  # 足够存放路径
+
+
+def _write_exe_path_to_shared_memory():
+    """将当前 EXE 路径写入命名共享内存"""
+    global _path_mapping
+    _path_mapping = _kernel32.CreateFileMappingW(
+        -1, None, PAGE_READWRITE, 0, PATH_MAPPING_SIZE, PATH_MAPPING_NAME
+    )
+    if not _path_mapping:
+        return
+    ptr = _kernel32.MapViewOfFile(_path_mapping, FILE_MAP_ALL_ACCESS, 0, 0, PATH_MAPPING_SIZE)
+    if ptr:
+        try:
+            exe_path = sys.executable  # PyInstaller 打包后为 EXE 路径
+            path_bytes = exe_path.encode("utf-16-le") + b"\x00\x00"
+            ctypes.memmove(ptr, path_bytes, min(len(path_bytes), PATH_MAPPING_SIZE))
+        finally:
+            _kernel32.UnmapViewOfFile(ptr)
+
+
+def _read_exe_path_from_shared_memory():
+    """从命名共享内存读取已运行实例的 EXE 路径"""
+    mapping = _kernel32.OpenFileMappingW(FILE_MAP_ALL_ACCESS, False, PATH_MAPPING_NAME)
+    if not mapping:
+        return ""
+    try:
+        ptr = _kernel32.MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, PATH_MAPPING_SIZE)
+        if not ptr:
+            return ""
+        try:
+            raw = ctypes.string_at(ptr, PATH_MAPPING_SIZE)
+            # utf-16-le 编码，找双零终止
+            end = raw.find(b"\x00\x00")
+            if end > 0:
+                raw = raw[:end + 2]
+            return raw.decode("utf-16-le", errors="ignore").rstrip("\x00")
+        finally:
+            _kernel32.UnmapViewOfFile(ptr)
+    finally:
+        _kernel32.CloseHandle(mapping)
+
+
+def _activate_running_instance():
+    """激活已运行的实例窗口"""
+    # 用窗口类名和标题查找
+    hwnd = _user32.FindWindowW(None, f"云集智能编程工作站 v{VERSION}")
+    if hwnd:
+        # 如果窗口最小化，先恢复
+        if _user32.IsIconic(hwnd):
+            _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        _user32.SetForegroundWindow(hwnd)
+        return True
+    return False
 
 
 def _ensure_single_instance():
     """单实例控制：
-    1. 同版本已运行 → 提示用户，退出
-    2. 不同版本已运行 → 通过命名事件通知旧版本优雅退出
+    1. 同版本 + 同路径 → 激活已运行实例窗口
+    2. 同版本 + 不同路径 → 通知旧实例退出
+    3. 不同版本 → 通知旧版本退出
     """
     global _instance_mutex, _shutdown_event
 
     # 1. 尝试创建版本互斥体（同版本检测）
     _instance_mutex = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
     if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
-        # 同版本已在运行，提示用户
-        _kernel32.CloseHandle(_instance_mutex)
-        _instance_mutex = None
-        # 用 MessageBox 而非 QMessageBox（此时 QApplication 还没创建）
-        ctypes.windll.user32.MessageBoxW(
-            0, "云集智能编程工作站已在运行中。", "提示", 0x40  # MB_ICONINFORMATION
+        # 同版本已在运行
+        existing_path = _read_exe_path_from_shared_memory()
+        my_path = sys.executable
+        same_path = existing_path and (
+            existing_path.lower() == my_path.lower()
         )
-        sys.exit(0)
+
+        if same_path:
+            # 同一 EXE，激活已运行窗口
+            _kernel32.CloseHandle(_instance_mutex)
+            _instance_mutex = None
+            _activate_running_instance()
+            sys.exit(0)
+        else:
+            # 不同路径的同版本，通知旧实例退出
+            _kernel32.CloseHandle(_instance_mutex)
+            _instance_mutex = None
+            _shutdown_event = _kernel32.CreateEventW(None, True, False, SHUTDOWN_EVENT_NAME)
+            _kernel32.SetEvent(_shutdown_event)
+            time.sleep(0.5)
+            # 旧实例退出后，重新创建互斥体
+            _kernel32.CloseHandle(_shutdown_event)
+            _shutdown_event = None
+            _instance_mutex = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
+            if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+                # 旧实例还没退出，弹出提示
+                _kernel32.CloseHandle(_instance_mutex)
+                _instance_mutex = None
+                ctypes.windll.user32.MessageBoxW(
+                    0, "云集智能编程工作站旧实例正在退出中，请稍后重试。", "提示", 0x40
+                )
+                sys.exit(0)
 
     # 2. 通知所有旧版本优雅退出（设置全局关闭事件）
     #    无论事件是否已存在，都 SetEvent 一次
     _shutdown_event = _kernel32.CreateEventW(None, True, False, SHUTDOWN_EVENT_NAME)
     _kernel32.SetEvent(_shutdown_event)
 
-    # 3. 短暂等待旧版本退出（最多 1.5 秒，不影响启动体验）
+    # 3. 短暂等待旧版本退出
     time.sleep(0.3)
     # 重置事件，新实例不会关闭自己
     _kernel32.ResetEvent(_shutdown_event)
+
+    # 4. 将自身路径写入共享内存
+    _write_exe_path_to_shared_memory()
 
 
 def _is_shutdown_signaled() -> bool:
@@ -153,7 +245,7 @@ def _is_shutdown_signaled() -> bool:
 
 def _cleanup_single_instance():
     """清理单实例资源（窗口关闭时调用）"""
-    global _instance_mutex, _shutdown_event
+    global _instance_mutex, _shutdown_event, _path_mapping
     if _instance_mutex:
         _kernel32.ReleaseMutex(_instance_mutex)
         _kernel32.CloseHandle(_instance_mutex)
@@ -161,6 +253,9 @@ def _cleanup_single_instance():
     if _shutdown_event:
         _kernel32.CloseHandle(_shutdown_event)
         _shutdown_event = None
+    if _path_mapping:
+        _kernel32.CloseHandle(_path_mapping)
+        _path_mapping = None
 
 # ── 环境路径常量 ──
 NODE_VERSION = "v24.11.1"
@@ -2453,12 +2548,14 @@ class BackendBridge(QObject):
                 is_zhipu = "bigmodel.cn" in api_base or "z.ai" in api_base or ":7780" in api_base
                 if is_zhipu:
                     zhipu_base = api_base.rstrip("/").removesuffix("/v1")
-                    main.log_signal.emit(f"[代理] 智谱API模式 模型={api_model} 代理目标={zhipu_base}", "#2196F3")
+                    main.log_signal.emit(f"[代理] 智谱API模式 模型={api_model} 直连={zhipu_base}", "#2196F3")
                     env_overrides["MODEL_PROVIDER"] = "api"
                     env_overrides["API_BASE_URL"] = zhipu_base
                     env_overrides["API_MODEL"] = api_model
                     env_overrides["API_KEY"] = api_key
                     env_overrides["ANTHROPIC_API_KEY"] = api_key
+                    env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
+                    env_overrides["ANTHROPIC_MODEL"] = api_model
                 else:
                     main.log_signal.emit(f"[代理] Qwen API模式 模型={api_model} 目标={api_base}", "#2196F3")
                     env_overrides["MODEL_PROVIDER"] = "api"

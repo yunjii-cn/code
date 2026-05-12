@@ -519,6 +519,33 @@ def list_api_models(base_url: str, api_key: str = "", timeout_ms: int = 15000) -
     return {"ok": True, "models": models}
 
 
+def _kill_zhipu2api(port: int = 7780):
+    global _zhipu2api_proc
+    try:
+        if _zhipu2api_proc and _zhipu2api_proc.poll() is None:
+            _zhipu2api_proc.terminate()
+            try:
+                _zhipu2api_proc.wait(timeout=5)
+            except Exception:
+                _zhipu2api_proc.kill()
+            _zhipu2api_proc = None
+    except Exception:
+        pass
+    try:
+        import subprocess
+        if os.name == "nt":
+            subprocess.run(
+                f'for /f "tokens=5" %a in (\'netstat -aon ^| findstr :{port} ^| findstr LISTENING\') do taskkill /F /PID %a',
+                shell=True, capture_output=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=10)
+    except Exception:
+        pass
+    import time
+    time.sleep(1)
+
 def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
     base = _default_base(base_url)
     try:
@@ -886,7 +913,9 @@ def poll_qwen_register() -> dict:
 def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
     base = _default_base(base_url)
     ak = (admin_key or "").strip() or "admin"
+    errors = []
 
+    # 先尝试 GET 获取已有 key
     try:
         result = fetch_json_with_timeout(
             f"{base.rstrip('/')}/api/admin/keys",
@@ -898,9 +927,12 @@ def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -
             keys = data.get("keys", [])
             if keys:
                 return {"ok": True, "key": keys[0]}
-    except:
-        pass
+        else:
+            errors.append(f"GET /api/admin/keys → HTTP {result.get('status', '?')}: {result.get('text', '')[:200]}")
+    except Exception as e:
+        errors.append(f"GET /api/admin/keys 异常: {e}")
 
+    # GET 没拿到 key，尝试 POST 创建新 key
     try:
         body = json.dumps({}).encode("utf-8")
         result = fetch_json_with_timeout(
@@ -915,11 +947,16 @@ def fetch_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -
             key = data.get("key", "")
             if key:
                 return {"ok": True, "key": key}
-    except:
-        pass
+            else:
+                errors.append(f"POST /api/admin/keys 返回无 key 字段: data={json.dumps(data)[:200]}")
+        else:
+            errors.append(f"POST /api/admin/keys → HTTP {result.get('status', '?')}: {result.get('text', '')[:200]}")
+    except Exception as e:
+        errors.append(f"POST /api/admin/keys 异常: {e}")
 
     admin_url = base.rstrip("/")
-    return {"ok": False, "error": "未能自动获取 API Key，请确认 API 服务已启动且 ADMIN_KEY 正确。", "adminUrl": admin_url}
+    error_detail = "; ".join(errors) if errors else "未知错误"
+    return {"ok": False, "error": f"获取 API Key 失败: {error_detail}", "adminUrl": admin_url}
 
 
 UV_PYTHON_VERSION = "3.12"
@@ -1230,7 +1267,14 @@ def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "a
     base = f"http://127.0.0.1:{port}"
     status = check_api_service(base)
     if status.get("running"):
-        return {"ok": True, "message": "智谱 API 服务已在运行", "baseUrl": base}
+        try:
+            import urllib.request
+            probe = urllib.request.urlopen(f"{base}/v1/models", timeout=3)
+            if probe.status == 200:
+                return {"ok": True, "message": "智谱 API 服务已在运行", "baseUrl": base}
+        except Exception:
+            pass
+        _kill_zhipu2api(port)
 
     if _zhipu2api_proc and _zhipu2api_proc.poll() is None:
         return {"ok": True, "message": "智谱 API 服务正在启动中", "baseUrl": base}
@@ -1484,17 +1528,32 @@ def validate_zhipu_account(base_url: str, api_key: str, admin_key: str = "", tim
         return {"ok": False, "error": str(e)}
 
 def fetch_zhipu_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    """获取智谱 API Key 列表，返回前端期望的格式: {ok, keys: [{key, label}]}"""
     try:
         result = fetch_json_with_timeout(
             f"{base_url.rstrip('/')}/api/admin/keys",
             headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
             timeout_ms=timeout_ms,
         )
-        return result
+        if result.get("ok"):
+            data = result.get("data") or {}
+            # zhipu2api 返回 {"keys": [{"key": "sk-xxx", "created": ...}, ...]}
+            raw_keys = data.get("keys", [])
+            if raw_keys:
+                keys = []
+                for k in raw_keys:
+                    if isinstance(k, dict):
+                        keys.append({"key": k.get("key", ""), "label": k.get("label", k.get("key", "")[:8] + "...")})
+                    elif isinstance(k, str):
+                        keys.append({"key": k, "label": k[:8] + "..."})
+                return {"ok": True, "keys": keys}
+            return {"ok": True, "keys": []}
+        return {"ok": False, "error": f"HTTP {result.get('status', '?')}: {result.get('text', '')[:200]}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 def create_zhipu_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 10000) -> dict:
+    """创建智谱 API Key，返回前端期望的格式: {ok, key}"""
     try:
         result = fetch_json_with_timeout(
             f"{base_url.rstrip('/')}/api/admin/keys",
@@ -1502,7 +1561,14 @@ def create_zhipu_api_key(base_url: str, admin_key: str = "", timeout_ms: int = 1
             headers={"Authorization": f"Bearer {admin_key or 'admin'}"},
             timeout_ms=timeout_ms,
         )
-        return result
+        if result.get("ok"):
+            data = result.get("data") or {}
+            # API 返回 {"ok": True, "key": "sk-xxx"}
+            key = data.get("key", "")
+            if key:
+                return {"ok": True, "key": key}
+            return {"ok": False, "error": f"创建成功但未返回 key: {json.dumps(data)[:200]}"}
+        return {"ok": False, "error": f"HTTP {result.get('status', '?')}: {result.get('text', '')[:200]}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

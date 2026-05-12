@@ -809,6 +809,8 @@ async function main() {
     process.env.ANTHROPIC_API_KEY = apiKey.trim() || "api-local";
     process.env.ANTHROPIC_AUTH_TOKEN = apiKey.trim() || "api-local";
     process.env.ANTHROPIC_MODEL = apiModel.trim();
+    process.stdout.write(`[API-PROXY] Started on port ${proxyPort}, forwarding to ${apiBaseUrl.trim()}/anthropic/v1/messages, model=${apiModel.trim()}\n`);
+    process.stdout.write(`[API-PROXY] ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL}\n`);
   }
 
   function findBun() {

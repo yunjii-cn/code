@@ -423,6 +423,9 @@ async def _anthropic_normal(payload, headers, model, upstream_key, msg_id, reque
             finish_reason = choice.get("finish_reason", "stop")
 
             content_blocks = []
+            reasoning = message.get("reasoning_content", "")
+            if reasoning:
+                content_blocks.append({"type": "text", "text": reasoning})
             if message.get("content"):
                 content_blocks.append({"type": "text", "text": message["content"]})
 
@@ -543,26 +546,27 @@ async def _anthropic_stream(payload, headers, model, upstream_key, msg_id, reque
                             })
                             sent_message_start = True
 
-                        if delta.get("content") is not None:
-                            text = delta["content"]
-                            if text:
-                                has_content = True
-                                if current_block_type != "text":
-                                    if current_block_type is not None:
-                                        yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
-                                    current_block_index += 1
-                                    current_block_type = "text"
-                                    yield _sse("content_block_start", {
-                                        "type": "content_block_start",
+                        for content_field in ["reasoning_content", "content"]:
+                            if delta.get(content_field) is not None:
+                                text = delta[content_field]
+                                if text:
+                                    has_content = True
+                                    if current_block_type != "text":
+                                        if current_block_type is not None:
+                                            yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
+                                        current_block_index += 1
+                                        current_block_type = "text"
+                                        yield _sse("content_block_start", {
+                                            "type": "content_block_start",
+                                            "index": current_block_index,
+                                            "content_block": {"type": "text", "text": ""},
+                                        })
+                                    total_output_tokens += 1
+                                    yield _sse("content_block_delta", {
+                                        "type": "content_block_delta",
                                         "index": current_block_index,
-                                        "content_block": {"type": "text", "text": ""},
+                                        "delta": {"type": "text_delta", "text": text},
                                     })
-                                total_output_tokens += 1
-                                yield _sse("content_block_delta", {
-                                    "type": "content_block_delta",
-                                    "index": current_block_index,
-                                    "delta": {"type": "text_delta", "text": text},
-                                })
 
                         if delta.get("tool_calls"):
                             has_content = True
