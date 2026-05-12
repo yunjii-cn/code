@@ -98,29 +98,69 @@ def get_version_from_filename():
 
 VERSION = get_version_from_filename()
 
-# ── 单实例控制：新实例杀掉旧实例 ──
+# ── 单实例控制：命名互斥体 + 命名事件 ──
+# 方案：同一版本 → 提示已运行；不同版本 → 通知旧版本优雅退出
+import ctypes
+from ctypes import wintypes
+
+_kernel32 = ctypes.windll.kernel32
+ERROR_ALREADY_EXISTS = 183
+
+# 全局句柄，MainWindow 关闭时需要释放
+_instance_mutex = None
+_shutdown_event = None
+
+MUTEX_NAME = f"YunJiCode_SingleInstance_v{VERSION}"
+SHUTDOWN_EVENT_NAME = "YunJiCode_ShutdownEvent"
+
+
 def _ensure_single_instance():
-    my_pid = os.getpid()
-    try:
-        my_exe = os.path.normcase(os.path.abspath(sys.executable))
-    except Exception:
-        return
-    for proc in psutil.process_iter(["pid", "exe", "cmdline"]):
-        try:
-            if proc.info["pid"] == my_pid:
-                continue
-            if not proc.info["exe"]:
-                continue
-            if os.path.normcase(proc.info["exe"]) != my_exe:
-                continue
-            cmdline = proc.info.get("cmdline") or []
-            if getattr(sys, "frozen", False):
-                proc.kill()
-            else:
-                if any("main.py" in arg for arg in cmdline):
-                    proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    """单实例控制：
+    1. 同版本已运行 → 提示用户，退出
+    2. 不同版本已运行 → 通过命名事件通知旧版本优雅退出
+    """
+    global _instance_mutex, _shutdown_event
+
+    # 1. 尝试创建版本互斥体（同版本检测）
+    _instance_mutex = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
+    if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+        # 同版本已在运行，提示用户
+        _kernel32.CloseHandle(_instance_mutex)
+        _instance_mutex = None
+        # 用 MessageBox 而非 QMessageBox（此时 QApplication 还没创建）
+        ctypes.windll.user32.MessageBoxW(
+            0, "云集智能编程工作站已在运行中。", "提示", 0x40  # MB_ICONINFORMATION
+        )
+        sys.exit(0)
+
+    # 2. 通知所有旧版本优雅退出（设置全局关闭事件）
+    #    无论事件是否已存在，都 SetEvent 一次
+    _shutdown_event = _kernel32.CreateEventW(None, True, False, SHUTDOWN_EVENT_NAME)
+    _kernel32.SetEvent(_shutdown_event)
+
+    # 3. 短暂等待旧版本退出（最多 1.5 秒，不影响启动体验）
+    time.sleep(0.3)
+    # 重置事件，新实例不会关闭自己
+    _kernel32.ResetEvent(_shutdown_event)
+
+
+def _is_shutdown_signaled() -> bool:
+    """检查是否收到关闭信号（由更新的实例发出）"""
+    if not _shutdown_event:
+        return False
+    return _kernel32.WaitForSingleObject(_shutdown_event, 0) == 0  # WAIT_OBJECT_0
+
+
+def _cleanup_single_instance():
+    """清理单实例资源（窗口关闭时调用）"""
+    global _instance_mutex, _shutdown_event
+    if _instance_mutex:
+        _kernel32.ReleaseMutex(_instance_mutex)
+        _kernel32.CloseHandle(_instance_mutex)
+        _instance_mutex = None
+    if _shutdown_event:
+        _kernel32.CloseHandle(_shutdown_event)
+        _shutdown_event = None
 
 # ── 环境路径常量 ──
 NODE_VERSION = "v24.11.1"
@@ -1370,6 +1410,28 @@ class BackendBridge(QObject):
             return False
         return main.project_mgr.delete_custom_template(template_id)
 
+    @pyqtSlot(str, result=bool)
+    def saveZhipuKeys(self, keys_json: str):
+        try:
+            keys_path = os.path.join(os.path.expanduser("~"), ".yunji", "zhipu_keys.json")
+            os.makedirs(os.path.dirname(keys_path), exist_ok=True)
+            with open(keys_path, "w", encoding="utf-8") as f:
+                f.write(keys_json)
+            return True
+        except Exception:
+            return False
+
+    @pyqtSlot(result=str)
+    def loadZhipuKeys(self):
+        try:
+            keys_path = os.path.join(os.path.expanduser("~"), ".yunji", "zhipu_keys.json")
+            if os.path.exists(keys_path):
+                with open(keys_path, "r", encoding="utf-8") as f:
+                    return f.read()
+            return "[]"
+        except Exception:
+            return "[]"
+
     @pyqtSlot(str, str, result=str)
     def createProjectFromTemplate(self, project_path: str, template_id: str):
         main = self._get_main()
@@ -2390,13 +2452,13 @@ class BackendBridge(QObject):
                 api_key = (settings.get("API_KEY", "") or "").strip()
                 is_zhipu = "bigmodel.cn" in api_base or "z.ai" in api_base or ":7780" in api_base
                 if is_zhipu:
-                    main.log_signal.emit(f"[代理] 智谱API模式 模型={api_model} 目标={api_base}", "#2196F3")
+                    zhipu_base = api_base.rstrip("/").removesuffix("/v1")
+                    main.log_signal.emit(f"[代理] 智谱API模式 模型={api_model} 代理目标={zhipu_base}", "#2196F3")
                     env_overrides["MODEL_PROVIDER"] = "api"
-                    env_overrides["API_BASE_URL"] = api_base
+                    env_overrides["API_BASE_URL"] = zhipu_base
                     env_overrides["API_MODEL"] = api_model
                     env_overrides["API_KEY"] = api_key
                     env_overrides["ANTHROPIC_API_KEY"] = api_key
-                    env_overrides["ANTHROPIC_BASE_URL"] = api_base
                 else:
                     main.log_signal.emit(f"[代理] Qwen API模式 模型={api_model} 目标={api_base}", "#2196F3")
                     env_overrides["MODEL_PROVIDER"] = "api"
@@ -3230,6 +3292,11 @@ class MainWindow(QMainWindow):
         self._remote_ver_signal.connect(self._on_remote_ver_fetched)
         self.voice_result_signal.connect(self._on_voice_result)
 
+        # 关闭信号检测：每 500ms 检查是否有更新版本要求本实例退出
+        self._shutdown_timer = QTimer(self)
+        self._shutdown_timer.timeout.connect(self._check_shutdown_signal)
+        self._shutdown_timer.start(500)
+
         if self._splash:
             self._splash.set_progress(0.9, "即将就绪...")
 
@@ -3363,6 +3430,11 @@ class MainWindow(QMainWindow):
         # QWebEngineView 加载 Vue 前端
         self.web_view = QWebEngineView()
         self.web_view.setPage(ChineseWebPage(self.web_view))
+        profile = self.web_view.page().profile()
+        storage_path = os.path.join(os.path.expanduser("~"), ".yunji", "webdata")
+        os.makedirs(storage_path, exist_ok=True)
+        profile.setPersistentStoragePath(storage_path)
+        profile.setHttpCacheMaximumSize(50 * 1024 * 1024)
         self.web_view.setStyleSheet("background-color: #0d0d0d;")
 
         self.web_view.page().setBackgroundColor(QColor("#0d0d0d"))
@@ -4360,7 +4432,14 @@ class MainWindow(QMainWindow):
         t.start()
 
     # ── 关闭 ──
+    def _check_shutdown_signal(self):
+        """检测是否有更新版本的实例要求本实例退出"""
+        if _is_shutdown_signaled():
+            print("[APP] 收到关闭信号，正在优雅退出...")
+            self.close()
+
     def closeEvent(self, event):
+        _cleanup_single_instance()
         event.accept()
 
 
