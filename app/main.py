@@ -286,13 +286,72 @@ MIRROR_SETTINGS_FILE = "mirror_source.json"
 
 
 class ProjectManager:
+    DATA_ROOT = os.path.join(os.path.expanduser("~"), ".yunji", "data")
+
     def __init__(self, app_dir: str, base_dir: str):
         self.app_dir = app_dir
         self.base_dir = base_dir
         self.projects_dir = os.path.join(base_dir, "projects")
         self.registry_path = os.path.join(self.projects_dir, "registry.json")
         os.makedirs(self.projects_dir, exist_ok=True)
+        os.makedirs(self.DATA_ROOT, exist_ok=True)
         self._registry = self._load_registry()
+        self._migrate_old_projects()
+
+    def _get_data_path(self, project_id: str) -> str:
+        dp = os.path.join(self.DATA_ROOT, project_id)
+        os.makedirs(dp, exist_ok=True)
+        return dp
+
+    def _migrate_old_projects(self):
+        old_data_root = os.path.join(os.path.expanduser("~"), ".yunji", "projects")
+        if os.path.exists(old_data_root) and not os.path.exists(self.DATA_ROOT):
+            try:
+                import shutil
+                shutil.copytree(old_data_root, self.DATA_ROOT)
+            except Exception:
+                pass
+        for pid, info in self._registry.get("projects", {}).items():
+            if "data_path" not in info:
+                dp = self._get_data_path(pid)
+                old_path = info.get("path", "")
+                for sub in ["conversations", "memories"]:
+                    old_sub = os.path.join(old_path, sub)
+                    new_sub = os.path.join(dp, sub)
+                    if os.path.exists(old_sub) and not os.path.exists(new_sub):
+                        try:
+                            import shutil
+                            shutil.copytree(old_sub, new_sub)
+                        except Exception:
+                            pass
+                old_claude = os.path.join(old_path, "CLAUDE.md")
+                new_claude = os.path.join(dp, "CLAUDE.md")
+                if os.path.exists(old_claude) and not os.path.exists(new_claude):
+                    try:
+                        import shutil
+                        shutil.copy2(old_claude, new_claude)
+                    except Exception:
+                        pass
+                old_mem_dir = os.path.join(old_path, ".claude", "memories")
+                new_mem_dir = os.path.join(dp, "memories")
+                if os.path.exists(old_mem_dir) and not os.path.exists(new_mem_dir):
+                    try:
+                        import shutil
+                        shutil.copytree(old_mem_dir, new_mem_dir)
+                    except Exception:
+                        pass
+                old_pj = os.path.join(old_path, "project.json")
+                new_pj = os.path.join(dp, "project.json")
+                if os.path.exists(old_pj) and not os.path.exists(new_pj):
+                    try:
+                        import shutil
+                        shutil.copy2(old_pj, new_pj)
+                    except Exception:
+                        pass
+                info["data_path"] = dp
+                if not info.get("workspace_path"):
+                    info["workspace_path"] = old_path
+        self._save_registry()
 
     def get_default_path(self, name: str) -> str:
         safe_name = "".join(c for c in name if c not in r'\/:*?"<>|').strip()
@@ -330,23 +389,27 @@ class ProjectManager:
             return {"id": pid, **self._registry["projects"][pid]}
         return None
 
-    def create_project(self, name: str, path: str = "") -> dict:
+    def create_project(self, name: str, workspace_path: str = "") -> dict:
         pid = _uuid()
-        if not path:
-            path = self.get_default_path(name)
-        os.makedirs(path, exist_ok=True)
-        conv_dir = os.path.join(path, "conversations")
+        data_path = self._get_data_path(pid)
+        conv_dir = os.path.join(data_path, "conversations")
         os.makedirs(conv_dir, exist_ok=True)
+        mem_dir = os.path.join(data_path, "memories")
+        os.makedirs(mem_dir, exist_ok=True)
+        ws = workspace_path.strip() if workspace_path else ""
+        if ws:
+            os.makedirs(ws, exist_ok=True)
         info = {
             "name": name,
-            "path": path,
+            "data_path": data_path,
+            "workspace_path": ws,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }
         self._registry["projects"][pid] = info
         self._registry["active_project"] = pid
         self._save_registry()
-        with open(os.path.join(path, "project.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(data_path, "project.json"), "w", encoding="utf-8") as f:
             json.dump({"id": pid, **info}, f, ensure_ascii=False, indent=2)
         return {"id": pid, **info}
 
@@ -364,38 +427,27 @@ class ProjectManager:
         self._registry["projects"][project_id]["name"] = new_name
         self._registry["projects"][project_id]["updated_at"] = datetime.now().isoformat()
         self._save_registry()
-        proj_path = self._registry["projects"][project_id]["path"]
-        meta_path = os.path.join(proj_path, "project.json")
-        if os.path.exists(meta_path):
-            with open(meta_path, "w", encoding="utf-8") as f:
-                json.dump({"id": project_id, **self._registry["projects"][project_id]}, f, ensure_ascii=False, indent=2)
+        dp = self._get_data_path(project_id)
+        meta_path = os.path.join(dp, "project.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({"id": project_id, **self._registry["projects"][project_id]}, f, ensure_ascii=False, indent=2)
         return True
 
-    def update_project(self, project_id: str, new_name: str = None, new_path: str = None) -> dict:
+    def update_project(self, project_id: str, new_name: str = None, new_workspace_path: str = None) -> dict:
         if project_id not in self._registry.get("projects", {}):
             return None
         info = self._registry["projects"][project_id]
         if new_name is not None and new_name.strip():
             info["name"] = new_name.strip()
-        if new_path is not None and new_path.strip():
-            new_dir = new_path.strip()
-            os.makedirs(new_dir, exist_ok=True)
-            conv_dir = os.path.join(new_dir, "conversations")
-            os.makedirs(conv_dir, exist_ok=True)
-            old_path = info.get("path", "")
-            info["path"] = new_dir
-            if old_path and os.path.exists(old_path):
-                old_conv = os.path.join(old_path, "conversations")
-                new_conv = os.path.join(new_dir, "conversations")
-                if os.path.exists(old_conv) and old_conv != new_conv:
-                    for fname in os.listdir(old_conv):
-                        if fname.endswith(".json"):
-                            import shutil
-                            shutil.copy2(os.path.join(old_conv, fname), os.path.join(new_conv, fname))
+        if new_workspace_path is not None:
+            ws = new_workspace_path.strip()
+            if ws:
+                os.makedirs(ws, exist_ok=True)
+            info["workspace_path"] = ws
         info["updated_at"] = datetime.now().isoformat()
         self._save_registry()
-        proj_path = info["path"]
-        meta_path = os.path.join(proj_path, "project.json")
+        dp = self._get_data_path(project_id)
+        meta_path = os.path.join(dp, "project.json")
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({"id": project_id, **info}, f, ensure_ascii=False, indent=2)
         return {"id": project_id, **info}
@@ -412,8 +464,8 @@ class ProjectManager:
     def save_conversation(self, project_id: str, session_id: str, messages: list, title: str = ""):
         if project_id not in self._registry.get("projects", {}):
             return False
-        proj_path = self._registry["projects"][project_id]["path"]
-        conv_dir = os.path.join(proj_path, "conversations")
+        dp = self._get_data_path(project_id)
+        conv_dir = os.path.join(dp, "conversations")
         os.makedirs(conv_dir, exist_ok=True)
         conv_path = os.path.join(conv_dir, f"{session_id}.json")
         existing_data = {}
@@ -445,8 +497,8 @@ class ProjectManager:
     def load_conversation(self, project_id: str, session_id: str) -> list:
         if project_id not in self._registry.get("projects", {}):
             return []
-        proj_path = self._registry["projects"][project_id]["path"]
-        conv_path = os.path.join(proj_path, "conversations", f"{session_id}.json")
+        dp = self._get_data_path(project_id)
+        conv_path = os.path.join(dp, "conversations", f"{session_id}.json")
         if not os.path.exists(conv_path):
             return []
         try:
@@ -459,8 +511,8 @@ class ProjectManager:
     def list_conversations(self, project_id: str) -> list:
         if project_id not in self._registry.get("projects", {}):
             return []
-        proj_path = self._registry["projects"][project_id]["path"]
-        conv_dir = os.path.join(proj_path, "conversations")
+        dp = self._get_data_path(project_id)
+        conv_dir = os.path.join(dp, "conversations")
         if not os.path.exists(conv_dir):
             return []
         result = []
@@ -493,12 +545,12 @@ class ProjectManager:
             return False
         if target_project_id not in self._registry.get("projects", {}):
             return False
-        src_path = self._registry["projects"][source_project_id]["path"]
-        dst_path = self._registry["projects"][target_project_id]["path"]
-        src_file = os.path.join(src_path, "conversations", f"{session_id}.json")
+        src_dp = self._get_data_path(source_project_id)
+        dst_dp = self._get_data_path(target_project_id)
+        src_file = os.path.join(src_dp, "conversations", f"{session_id}.json")
         if not os.path.exists(src_file):
             return False
-        dst_dir = os.path.join(dst_path, "conversations")
+        dst_dir = os.path.join(dst_dp, "conversations")
         os.makedirs(dst_dir, exist_ok=True)
         try:
             with open(src_file, "r", encoding="utf-8") as f:
@@ -527,8 +579,8 @@ class ProjectManager:
             return []
         if not keyword.strip():
             return self.list_conversations(project_id)
-        proj_path = self._registry["projects"][project_id]["path"]
-        conv_dir = os.path.join(proj_path, "conversations")
+        dp = self._get_data_path(project_id)
+        conv_dir = os.path.join(dp, "conversations")
         if not os.path.exists(conv_dir):
             return []
         kw = keyword.strip().lower()
@@ -571,8 +623,8 @@ class ProjectManager:
     def delete_conversation(self, project_id: str, session_id: str) -> bool:
         if project_id not in self._registry.get("projects", {}):
             return False
-        proj_path = self._registry["projects"][project_id]["path"]
-        conv_path = os.path.join(proj_path, "conversations", f"{session_id}.json")
+        dp = self._get_data_path(project_id)
+        conv_path = os.path.join(dp, "conversations", f"{session_id}.json")
         if os.path.exists(conv_path):
             try:
                 os.remove(conv_path)
@@ -584,8 +636,8 @@ class ProjectManager:
     def rename_conversation(self, project_id: str, session_id: str, new_title: str) -> bool:
         if project_id not in self._registry.get("projects", {}):
             return False
-        proj_path = self._registry["projects"][project_id]["path"]
-        conv_path = os.path.join(proj_path, "conversations", f"{session_id}.json")
+        dp = self._get_data_path(project_id)
+        conv_path = os.path.join(dp, "conversations", f"{session_id}.json")
         if not os.path.exists(conv_path):
             return False
         try:
@@ -599,22 +651,34 @@ class ProjectManager:
         except Exception:
             return False
 
-    def get_claude_md(self, project_path: str) -> str:
-        candidates = [
-            os.path.join(project_path, "CLAUDE.md"),
-            os.path.join(project_path, ".claude", "CLAUDE.md"),
-        ]
-        for p in candidates:
-            if os.path.exists(p):
-                try:
-                    with open(p, "r", encoding="utf-8") as f:
-                        return f.read()
-                except Exception:
-                    pass
-        return ""
+    def get_claude_md(self, project_id: str) -> str:
+        parts = []
+        dp = self._get_data_path(project_id)
+        data_claude = os.path.join(dp, "CLAUDE.md")
+        if os.path.exists(data_claude):
+            try:
+                with open(data_claude, "r", encoding="utf-8") as f:
+                    parts.append(f.read())
+            except Exception:
+                pass
+        info = self._registry.get("projects", {}).get(project_id, {})
+        ws = info.get("workspace_path", "")
+        if ws:
+            for candidate in [os.path.join(ws, "CLAUDE.md"), os.path.join(ws, ".claude", "CLAUDE.md")]:
+                if os.path.exists(candidate):
+                    try:
+                        with open(candidate, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        if content not in parts:
+                            parts.append(content)
+                    except Exception:
+                        pass
+                    break
+        return "\n\n".join(parts) if parts else ""
 
-    def save_claude_md(self, project_path: str, content: str) -> bool:
-        target = os.path.join(project_path, "CLAUDE.md")
+    def save_claude_md(self, project_id: str, content: str) -> bool:
+        dp = self._get_data_path(project_id)
+        target = os.path.join(dp, "CLAUDE.md")
         try:
             with open(target, "w", encoding="utf-8") as f:
                 f.write(content)
@@ -645,8 +709,9 @@ class ProjectManager:
         except Exception:
             return False
 
-    def list_memories(self, project_path: str) -> list:
-        mem_dir = os.path.join(project_path, ".claude", "memories")
+    def list_memories(self, project_id: str) -> list:
+        dp = self._get_data_path(project_id)
+        mem_dir = os.path.join(dp, "memories")
         if not os.path.exists(mem_dir):
             return []
         result = []
@@ -680,8 +745,9 @@ class ProjectManager:
         result.sort(key=lambda m: m.get("updated_at", 0), reverse=True)
         return result
 
-    def save_memory(self, project_path: str, filename: str, content: str, mem_type: str = "project") -> bool:
-        mem_dir = os.path.join(project_path, ".claude", "memories")
+    def save_memory(self, project_id: str, filename: str, content: str, mem_type: str = "project") -> bool:
+        dp = self._get_data_path(project_id)
+        mem_dir = os.path.join(dp, "memories")
         os.makedirs(mem_dir, exist_ok=True)
         if not filename.endswith(".md"):
             filename += ".md"
@@ -698,8 +764,9 @@ class ProjectManager:
         except Exception:
             return False
 
-    def delete_memory(self, project_path: str, filename: str) -> bool:
-        fpath = os.path.join(project_path, ".claude", "memories", filename)
+    def delete_memory(self, project_id: str, filename: str) -> bool:
+        dp = self._get_data_path(project_id)
+        fpath = os.path.join(dp, "memories", filename)
         if os.path.exists(fpath):
             try:
                 os.remove(fpath)
@@ -708,8 +775,8 @@ class ProjectManager:
                 return False
         return False
 
-    def search_memories(self, project_path: str, keyword: str) -> list:
-        all_mems = self.list_memories(project_path)
+    def search_memories(self, project_id: str, keyword: str) -> list:
+        all_mems = self.list_memories(project_id)
         if not keyword.strip():
             return all_mems
         kw = keyword.strip().lower()
@@ -730,7 +797,7 @@ class ProjectManager:
         scored.sort(key=lambda x: x.get("relevance", 0), reverse=True)
         return scored
 
-    def auto_extract_memories(self, project_path: str, messages: list) -> list:
+    def auto_extract_memories(self, project_id: str, messages: list) -> list:
         extracted = []
         user_prefs = []
         feedback_items = []
@@ -807,25 +874,26 @@ class ProjectManager:
                         reference_items.append(snippet)
                     break
         if user_prefs:
-            content = self._merge_memory_content(project_path, "user-preferences.md", user_prefs)
-            self.save_memory(project_path, "user-preferences.md", content, "user")
+            content = self._merge_memory_content(project_id, "user-preferences.md", user_prefs)
+            self.save_memory(project_id, "user-preferences.md", content, "user")
             extracted.append({"type": "user", "count": len(user_prefs)})
         if feedback_items:
-            content = self._merge_memory_content(project_path, "user-feedback.md", feedback_items)
-            self.save_memory(project_path, "user-feedback.md", content, "feedback")
+            content = self._merge_memory_content(project_id, "user-feedback.md", feedback_items)
+            self.save_memory(project_id, "user-feedback.md", content, "feedback")
             extracted.append({"type": "feedback", "count": len(feedback_items)})
         if project_facts:
-            content = self._merge_memory_content(project_path, "project-context.md", project_facts)
-            self.save_memory(project_path, "project-context.md", content, "project")
+            content = self._merge_memory_content(project_id, "project-context.md", project_facts)
+            self.save_memory(project_id, "project-context.md", content, "project")
             extracted.append({"type": "project", "count": len(project_facts)})
         if reference_items:
-            content = self._merge_memory_content(project_path, "external-references.md", reference_items)
-            self.save_memory(project_path, "external-references.md", content, "reference")
+            content = self._merge_memory_content(project_id, "external-references.md", reference_items)
+            self.save_memory(project_id, "external-references.md", content, "reference")
             extracted.append({"type": "reference", "count": len(reference_items)})
         return extracted
 
-    def _merge_memory_content(self, project_path: str, filename: str, new_items: list) -> str:
-        mem_dir = os.path.join(project_path, ".claude", "memories")
+    def _merge_memory_content(self, project_id: str, filename: str, new_items: list) -> str:
+        dp = self._get_data_path(project_id)
+        mem_dir = os.path.join(dp, "memories")
         fpath = os.path.join(mem_dir, filename)
         existing_lines = set()
         if os.path.exists(fpath):
@@ -876,8 +944,8 @@ class ProjectManager:
                 pass
         return "\n".join(content_lines)
 
-    def get_memory_stats(self, project_path: str) -> dict:
-        mems = self.list_memories(project_path)
+    def get_memory_stats(self, project_id: str) -> dict:
+        mems = self.list_memories(project_id)
         stats = {"total": len(mems), "by_type": {}, "total_size": 0}
         for m in mems:
             t = m.get("type", "project")
@@ -885,8 +953,8 @@ class ProjectManager:
             stats["total_size"] += len(m.get("content", ""))
         return stats
 
-    def get_relevant_memories(self, project_path: str, query: str, limit: int = 5) -> list:
-        results = self.search_memories(project_path, query)
+    def get_relevant_memories(self, project_id: str, query: str, limit: int = 5) -> list:
+        results = self.search_memories(project_id, query)
         return results[:limit]
 
     def save_custom_template(self, name: str, category: str, desc: str, prompt: str, files: str = "") -> bool:
@@ -940,7 +1008,7 @@ class ProjectManager:
                 return False
         return False
 
-    def create_project_from_template(self, project_path: str, template_id: str) -> dict:
+    def create_project_from_template(self, project_id: str, template_id: str) -> dict:
         builtin = {
             "react-app": {"files": {"package.json": '{"name": "react-app", "version": "0.1.0", "scripts": {"dev": "vite", "build": "vite build"}}', "src/App.tsx": 'export default function App() { return <div>Hello React</div>; }', "vite.config.ts": 'import { defineConfig } from "vite";\nimport react from "@vitejs/plugin-react";\nexport default defineConfig({ plugins: [react()] });'}, "init_cmd": "npm install"},
             "vue-app": {"files": {"package.json": '{"name": "vue-app", "version": "0.1.0", "scripts": {"dev": "vite", "build": "vite build"}}', "src/App.vue": '<template><div>Hello Vue</div></template>', "vite.config.ts": 'import { defineConfig } from "vite";\nimport vue from "@vitejs/plugin-vue";\nexport default defineConfig({ plugins: [vue()] });'}, "init_cmd": "npm install"},
@@ -962,7 +1030,12 @@ class ProjectManager:
             tpl_data = builtin[template_id]
         if not tpl_data:
             return {"success": False, "error": f"模板 {template_id} 不存在"}
-        os.makedirs(project_path, exist_ok=True)
+        info = self._registry.get("projects", {}).get(project_id, {})
+        ws = info.get("workspace_path", "")
+        if not ws:
+            dp = self._get_data_path(project_id)
+            ws = dp
+        os.makedirs(ws, exist_ok=True)
         files_created = []
         tpl_files = tpl_data.get("files", {})
         if isinstance(tpl_files, str):
@@ -971,7 +1044,7 @@ class ProjectManager:
             except Exception:
                 tpl_files = {}
         for rel_path, content in tpl_files.items():
-            fpath = os.path.join(project_path, rel_path)
+            fpath = os.path.join(ws, rel_path)
             os.makedirs(os.path.dirname(fpath), exist_ok=True)
             try:
                 with open(fpath, "w", encoding="utf-8") as f:
@@ -1263,13 +1336,13 @@ class BackendBridge(QObject):
         return json.dumps(proj)
 
     @pyqtSlot(str, str, result=str)
-    def createProject(self, name: str, path: str):
+    def createProject(self, name: str, workspace_path: str):
         main = self._get_main()
         if not main:
             return json.dumps({"error": "no main"})
-        proj = main.project_mgr.create_project(name, path)
+        proj = main.project_mgr.create_project(name, workspace_path)
         main.active_project_id = proj["id"]
-        main.current_workspace = proj["path"]
+        main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
     @pyqtSlot(str, result=str)
@@ -1280,7 +1353,7 @@ class BackendBridge(QObject):
         proj = main.project_mgr.switch_project(project_id)
         if proj:
             main.active_project_id = proj["id"]
-            main.current_workspace = proj["path"]
+            main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
     @pyqtSlot(str, str, result=bool)
@@ -1302,13 +1375,13 @@ class BackendBridge(QObject):
         return result
 
     @pyqtSlot(str, str, str, result=str)
-    def updateProject(self, project_id: str, new_name: str, new_path: str):
+    def updateProject(self, project_id: str, new_name: str, new_workspace_path: str):
         main = self._get_main()
         if not main:
             return json.dumps({"error": "no main"})
-        proj = main.project_mgr.update_project(project_id, new_name or None, new_path or None)
+        proj = main.project_mgr.update_project(project_id, new_name or None, new_workspace_path or None)
         if proj and main.active_project_id == project_id:
-            main.current_workspace = proj["path"]
+            main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
     @pyqtSlot(str, result=str)
@@ -1381,18 +1454,18 @@ class BackendBridge(QObject):
         return main.project_mgr.rename_conversation(project_id, session_id, new_title)
 
     @pyqtSlot(str, result=str)
-    def getClaudeMd(self, project_path: str):
+    def getClaudeMd(self, project_id: str):
         main = self._get_main()
         if not main:
             return ""
-        return main.project_mgr.get_claude_md(project_path)
+        return main.project_mgr.get_claude_md(project_id)
 
     @pyqtSlot(str, str, result=bool)
-    def saveClaudeMd(self, project_path: str, content: str):
+    def saveClaudeMd(self, project_id: str, content: str):
         main = self._get_main()
         if not main:
             return False
-        return main.project_mgr.save_claude_md(project_path, content)
+        return main.project_mgr.save_claude_md(project_id, content)
 
     @pyqtSlot(result=str)
     def getGlobalClaudeMd(self):
@@ -1409,35 +1482,35 @@ class BackendBridge(QObject):
         return main.project_mgr.save_global_claude_md(content)
 
     @pyqtSlot(str, result=str)
-    def listMemories(self, project_path: str):
+    def listMemories(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
-        return json.dumps(main.project_mgr.list_memories(project_path))
+        return json.dumps(main.project_mgr.list_memories(project_id))
 
     @pyqtSlot(str, str, str, str, result=bool)
-    def saveMemory(self, project_path: str, filename: str, content: str, mem_type: str):
+    def saveMemory(self, project_id: str, filename: str, content: str, mem_type: str):
         main = self._get_main()
         if not main:
             return False
-        return main.project_mgr.save_memory(project_path, filename, content, mem_type)
+        return main.project_mgr.save_memory(project_id, filename, content, mem_type)
 
     @pyqtSlot(str, str, result=bool)
-    def deleteMemory(self, project_path: str, filename: str):
+    def deleteMemory(self, project_id: str, filename: str):
         main = self._get_main()
         if not main:
             return False
-        return main.project_mgr.delete_memory(project_path, filename)
+        return main.project_mgr.delete_memory(project_id, filename)
 
     @pyqtSlot(str, str, result=str)
-    def searchMemories(self, project_path: str, keyword: str):
+    def searchMemories(self, project_id: str, keyword: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
-        return json.dumps(main.project_mgr.search_memories(project_path, keyword))
+        return json.dumps(main.project_mgr.search_memories(project_id, keyword))
 
     @pyqtSlot(str, str, result=str)
-    def autoExtractMemories(self, project_path: str, messages_json: str):
+    def autoExtractMemories(self, project_id: str, messages_json: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
@@ -1445,21 +1518,21 @@ class BackendBridge(QObject):
             msgs = json.loads(messages_json)
         except Exception:
             msgs = []
-        return json.dumps(main.project_mgr.auto_extract_memories(project_path, msgs))
+        return json.dumps(main.project_mgr.auto_extract_memories(project_id, msgs))
 
     @pyqtSlot(str, result=str)
-    def getMemoryStats(self, project_path: str):
+    def getMemoryStats(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps({"total": 0, "by_type": {}, "total_size": 0})
-        return json.dumps(main.project_mgr.get_memory_stats(project_path))
+        return json.dumps(main.project_mgr.get_memory_stats(project_id))
 
     @pyqtSlot(str, str, result=str)
-    def getRelevantMemories(self, project_path: str, query: str):
+    def getRelevantMemories(self, project_id: str, query: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
-        return json.dumps(main.project_mgr.get_relevant_memories(project_path, query))
+        return json.dumps(main.project_mgr.get_relevant_memories(project_id, query))
 
     @pyqtSlot(str, result=str)
     def listProjectTemplates(self, category: str):
@@ -1528,11 +1601,11 @@ class BackendBridge(QObject):
             return "[]"
 
     @pyqtSlot(str, str, result=str)
-    def createProjectFromTemplate(self, project_path: str, template_id: str):
+    def createProjectFromTemplate(self, project_id: str, template_id: str):
         main = self._get_main()
         if not main:
             return json.dumps({"success": False, "error": "main not available"})
-        return json.dumps(main.project_mgr.create_project_from_template(project_path, template_id))
+        return json.dumps(main.project_mgr.create_project_from_template(project_id, template_id))
 
     @pyqtSlot(result=str)
     def getVersionHistory(self):
@@ -3363,7 +3436,7 @@ class MainWindow(QMainWindow):
         active_proj = self.project_mgr.get_active_project()
         if active_proj:
             self.active_project_id = active_proj["id"]
-            self.current_workspace = active_proj["path"]
+            self.current_workspace = active_proj.get("workspace_path") or self.app_dir
         else:
             self.current_workspace = self.app_dir
         self.is_busy = False
