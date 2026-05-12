@@ -4,6 +4,7 @@ import time
 import asyncio
 import logging
 import secrets
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException, Header, Depends
@@ -44,6 +45,29 @@ def _check_api_key(authorization: str = Header(default="")):
         if k.get("key") == token:
             return token
     if token == ADMIN_KEY:
+        return token
+    raise HTTPException(401, "Invalid API key")
+
+
+async def _check_anthropic_key(x_api_key: str = Header(default="", alias="x-api-key"),
+                         authorization: str = Header(default="")):
+    token = x_api_key or authorization.replace("Bearer ", "").strip()
+    if not token:
+        raise HTTPException(401, "Missing API key")
+    keys_data = _load_json(API_KEYS_FILE, {"keys": []})
+    for k in keys_data.get("keys", []):
+        if k.get("key") == token:
+            return token
+    if token == ADMIN_KEY:
+        return token
+    try:
+        accounts = await key_pool.list_all()
+        for acc in accounts:
+            if acc.get("api_key") == token:
+                return token
+    except Exception:
+        pass
+    if len(token) > 20:
         return token
     raise HTTPException(401, "Invalid API key")
 
@@ -199,6 +223,419 @@ async def _stream_chat(payload, headers, model, upstream_key):
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+def _anthropic_to_openai_messages(req_data: dict) -> list:
+    messages = []
+    system_text = ""
+    sys = req_data.get("system")
+    if sys:
+        if isinstance(sys, str):
+            system_text = sys
+        elif isinstance(sys, list):
+            parts = []
+            for block in sys:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+            system_text = "\n".join(parts)
+
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+
+    for msg in req_data.get("messages", []):
+        role = msg.get("role", "user")
+        content = msg.get("content")
+
+        if role == "user":
+            if isinstance(content, str):
+                messages.append({"role": "user", "content": content})
+            elif isinstance(content, list):
+                text_parts = []
+                tool_results = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_result":
+                            tool_use_id = block.get("tool_use_id", "")
+                            result_content = block.get("content", "")
+                            if isinstance(result_content, list):
+                                result_text = "\n".join(
+                                    b.get("text", "") for b in result_content if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                            else:
+                                result_text = str(result_content)
+                            tool_results.append({"tool_use_id": tool_use_id, "content": result_text})
+                if tool_results:
+                    combined = "\n".join(text_parts) if text_parts else ""
+                    for tr in tool_results:
+                        combined += f"\n[Tool Result {tr['tool_use_id']}]: {tr['content']}"
+                    messages.append({"role": "user", "content": combined.strip()})
+                elif text_parts:
+                    messages.append({"role": "user", "content": "\n".join(text_parts)})
+
+        elif role == "assistant":
+            if isinstance(content, str):
+                messages.append({"role": "assistant", "content": content})
+            elif isinstance(content, list):
+                text_parts = []
+                tool_calls = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            tool_calls.append({
+                                "id": block.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                                "type": "function",
+                                "function": {
+                                    "name": block.get("name", ""),
+                                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
+                                },
+                            })
+                        elif block.get("type") == "thinking":
+                            pass
+                msg_dict = {"role": "assistant"}
+                if text_parts:
+                    msg_dict["content"] = "\n".join(text_parts)
+                else:
+                    msg_dict["content"] = None
+                if tool_calls:
+                    msg_dict["tool_calls"] = tool_calls
+                messages.append(msg_dict)
+
+        else:
+            if isinstance(content, str):
+                messages.append({"role": role, "content": content})
+            elif isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                messages.append({"role": role, "content": "\n".join(text_parts) if text_parts else ""})
+
+    return messages
+
+
+def _anthropic_tools_to_openai(tools: list) -> list:
+    if not tools:
+        return None
+    openai_tools = []
+    for tool in tools:
+        if tool.get("type") == "custom" or tool.get("name"):
+            openai_tools.append({
+                "type": "function",
+                "function": {
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", tool.get("parameters", {"type": "object", "properties": {}})),
+                },
+            })
+    return openai_tools if openai_tools else None
+
+
+def _sse(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/anthropic/v1/messages")
+@app.post("/v1/messages")
+async def anthropic_messages(request: Request, api_key: str = Depends(_check_anthropic_key)):
+    acc = await key_pool.acquire()
+    if acc:
+        upstream_key = acc["api_key"]
+    else:
+        upstream_key = api_key
+
+    try:
+        req_data = await request.json()
+    except Exception:
+        raise HTTPException(400, {"error": {"message": "Invalid JSON body", "type": "invalid_request_error"}})
+
+    requested_model = req_data.get("model", "claude-3-5-sonnet-20241022")
+    model = MODEL_MAP.get(requested_model, requested_model)
+
+    openai_messages = _anthropic_to_openai_messages(req_data)
+    openai_tools = _anthropic_tools_to_openai(req_data.get("tools", []))
+
+    payload = {
+        "model": model,
+        "messages": openai_messages,
+    }
+    if req_data.get("max_tokens"):
+        payload["max_tokens"] = req_data["max_tokens"]
+    if req_data.get("temperature") is not None:
+        payload["temperature"] = req_data["temperature"]
+    if req_data.get("top_p") is not None:
+        payload["top_p"] = req_data["top_p"]
+    if openai_tools:
+        payload["tools"] = openai_tools
+    if req_data.get("tool_choice"):
+        tc = req_data["tool_choice"]
+        if isinstance(tc, dict) and tc.get("type") == "auto":
+            payload["tool_choice"] = "auto"
+        elif isinstance(tc, dict) and tc.get("type") == "any":
+            payload["tool_choice"] = "auto"
+        elif isinstance(tc, str):
+            payload["tool_choice"] = tc
+
+    upstream_key = api_key
+    headers = {
+        "Authorization": f"Bearer {upstream_key}",
+        "Content-Type": "application/json",
+    }
+
+    msg_id = f"msg_{uuid.uuid4().hex[:24]}"
+    is_stream = req_data.get("stream", False)
+
+    if is_stream:
+        return await _anthropic_stream(payload, headers, model, upstream_key, msg_id, requested_model)
+    else:
+        return await _anthropic_normal(payload, headers, model, upstream_key, msg_id, requested_model)
+
+
+async def _anthropic_normal(payload, headers, model, upstream_key, msg_id, requested_model):
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
+            if resp.status_code == 429:
+                await key_pool.mark_rate_limited(upstream_key, cooldown=60)
+                return JSONResponse(
+                    status_code=429,
+                    content={"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}},
+                )
+            if resp.status_code == 401:
+                await key_pool.mark_invalid(upstream_key)
+                return JSONResponse(
+                    status_code=401,
+                    content={"type": "error", "error": {"type": "authentication_error", "message": "API key invalid"}},
+                )
+            if resp.status_code >= 400:
+                err_text = resp.text[:500]
+                return JSONResponse(
+                    status_code=resp.status_code,
+                    content={"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {err_text}"}},
+                )
+
+            data = resp.json()
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            finish_reason = choice.get("finish_reason", "stop")
+
+            content_blocks = []
+            if message.get("content"):
+                content_blocks.append({"type": "text", "text": message["content"]})
+
+            if message.get("tool_calls"):
+                for tc in message["tool_calls"]:
+                    func = tc.get("function", {})
+                    try:
+                        input_data = json.loads(func.get("arguments", "{}"))
+                    except Exception:
+                        input_data = {}
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                        "name": func.get("name", ""),
+                        "input": input_data,
+                    })
+
+            if not content_blocks:
+                content_blocks.append({"type": "text", "text": ""})
+
+            stop_reason = "end_turn"
+            if finish_reason == "tool_calls" or (message.get("tool_calls") and len(message["tool_calls"]) > 0):
+                stop_reason = "tool_use"
+            elif finish_reason == "length":
+                stop_reason = "max_tokens"
+
+            usage_data = data.get("usage", {})
+            return JSONResponse(content={
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "model": requested_model,
+                "content": content_blocks,
+                "stop_reason": stop_reason,
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": usage_data.get("prompt_tokens", 0),
+                    "output_tokens": usage_data.get("completion_tokens", 0),
+                },
+            })
+    except Exception as e:
+        logger.error(f"Anthropic normal error: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"type": "error", "error": {"type": "api_error", "message": str(e)}},
+        )
+
+
+async def _anthropic_stream(payload, headers, model, upstream_key, msg_id, requested_model):
+    payload["stream"] = True
+
+    async def generate():
+        sent_message_start = False
+        current_block_index = -1
+        current_block_type = None
+        open_tool_ids = set()
+        total_output_tokens = 0
+        has_content = False
+
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
+                    if resp.status_code == 429:
+                        await key_pool.mark_rate_limited(upstream_key, cooldown=60)
+                        yield _sse("error", {"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}})
+                        return
+                    if resp.status_code == 401:
+                        await key_pool.mark_invalid(upstream_key)
+                        yield _sse("error", {"type": "error", "error": {"type": "authentication_error", "message": "API key invalid"}})
+                        return
+                    if resp.status_code >= 400:
+                        body = await resp.aread()
+                        yield _sse("error", {"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {body.decode()[:200]}"}})
+                        return
+
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                        elif line.startswith("data:"):
+                            data_str = line[5:]
+                        else:
+                            continue
+
+                        data_str = data_str.strip()
+                        if data_str == "[DONE]":
+                            break
+
+                        try:
+                            chunk = json.loads(data_str)
+                        except Exception:
+                            continue
+
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+                        finish_reason = choices[0].get("finish_reason")
+
+                        if not sent_message_start:
+                            usage_data = chunk.get("usage", {})
+                            yield _sse("message_start", {
+                                "type": "message_start",
+                                "message": {
+                                    "id": msg_id,
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "model": requested_model,
+                                    "content": [],
+                                    "stop_reason": None,
+                                    "stop_sequence": None,
+                                    "usage": {
+                                        "input_tokens": usage_data.get("prompt_tokens", 0),
+                                        "output_tokens": 0,
+                                    },
+                                },
+                            })
+                            sent_message_start = True
+
+                        if delta.get("content") is not None:
+                            text = delta["content"]
+                            if text:
+                                has_content = True
+                                if current_block_type != "text":
+                                    if current_block_type is not None:
+                                        yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
+                                    current_block_index += 1
+                                    current_block_type = "text"
+                                    yield _sse("content_block_start", {
+                                        "type": "content_block_start",
+                                        "index": current_block_index,
+                                        "content_block": {"type": "text", "text": ""},
+                                    })
+                                total_output_tokens += 1
+                                yield _sse("content_block_delta", {
+                                    "type": "content_block_delta",
+                                    "index": current_block_index,
+                                    "delta": {"type": "text_delta", "text": text},
+                                })
+
+                        if delta.get("tool_calls"):
+                            has_content = True
+                            for tc in delta["tool_calls"]:
+                                tc_id = tc.get("id", "")
+                                tc_index = tc.get("index", 0)
+                                func = tc.get("function", {})
+                                tool_name = func.get("name", "")
+                                partial_args = func.get("arguments", "")
+
+                                if tc_id and tc_id not in open_tool_ids:
+                                    if current_block_type is not None:
+                                        yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
+                                    current_block_index += 1
+                                    current_block_type = "tool_use"
+                                    open_tool_ids.add(tc_id)
+                                    yield _sse("content_block_start", {
+                                        "type": "content_block_start",
+                                        "index": current_block_index,
+                                        "content_block": {
+                                            "type": "tool_use",
+                                            "id": tc_id,
+                                            "name": tool_name,
+                                            "input": {},
+                                        },
+                                    })
+
+                                if partial_args:
+                                    yield _sse("content_block_delta", {
+                                        "type": "content_block_delta",
+                                        "index": current_block_index,
+                                        "delta": {"type": "input_json_delta", "partial_json": partial_args},
+                                    })
+
+                        if finish_reason is not None:
+                            if current_block_type is not None:
+                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
+
+                            if not has_content:
+                                yield _sse("content_block_start", {
+                                    "type": "content_block_start",
+                                    "index": 0,
+                                    "content_block": {"type": "text", "text": ""},
+                                })
+                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+
+                            stop_reason = "end_turn"
+                            if finish_reason == "tool_calls":
+                                stop_reason = "tool_use"
+                            elif finish_reason == "length":
+                                stop_reason = "max_tokens"
+
+                            yield _sse("message_delta", {
+                                "type": "message_delta",
+                                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                                "usage": {"output_tokens": total_output_tokens},
+                            })
+                            yield _sse("message_stop", {"type": "message_stop"})
+
+        except Exception as e:
+            logger.error(f"Anthropic stream error: {e}")
+            if not sent_message_start:
+                yield _sse("message_start", {
+                    "type": "message_start",
+                    "message": {
+                        "id": msg_id, "type": "message", "role": "assistant",
+                        "model": requested_model, "content": [], "stop_reason": None,
+                        "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0},
+                    },
+                })
+            yield _sse("error", {"type": "error", "error": {"type": "api_error", "message": str(e)}})
+
+    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/admin/accounts")

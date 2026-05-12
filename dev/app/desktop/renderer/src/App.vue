@@ -731,6 +731,8 @@ async function sendMessage() {
   if (!text) return;
   inputText.value = "";
 
+  await saveSettingsQuiet();
+
   if (isBusy.value) {
     pendingQueue.value.push(text);
     addMessage("user", text);
@@ -1567,22 +1569,42 @@ async function saveSettings() {
         showNotice("请选择模型名称", "warn");
         return;
       }
-      const useProxy = zhipuStepProgress.value >= zhipuSteps.length;
-      const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}/v1`;
-      const effectiveBaseUrl = useProxy ? proxyBaseUrl : "https://open.bigmodel.cn/api/paas/v4";
       const effectiveApiKey = zhipuApiKey.value.trim() || (zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "");
       if (!effectiveApiKey) {
         showNotice("请先添加智谱 API Key", "warn");
         return;
       }
+      const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+      try {
+        const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
+        if (!chk || !chk.running) {
+          showNotice("智谱模式需要代理服务，正在自动启动...", "info");
+          const startR = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
+          if (startR && startR.ok) {
+            for (let i = 0; i < 10; i++) {
+              await new Promise(ok => setTimeout(ok, 1000));
+              const chk2 = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
+              if (chk2 && chk2.running) break;
+            }
+          }
+          const chk3 = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
+          if (!chk3 || !chk3.running) {
+            showNotice("代理服务启动失败，无法使用智谱", "warn");
+            return;
+          }
+        }
+      } catch {
+        showNotice("代理服务启动失败，无法使用智谱", "warn");
+        return;
+      }
       const payload: Record<string, string> = {
         MODEL_PROVIDER: "api",
-        API_BASE_URL: effectiveBaseUrl,
+        API_BASE_URL: proxyBaseUrl,
         API_MODEL: zhipuModel.value.trim(),
-        API_KEY: effectiveApiKey,
+        API_KEY: zhipuApiKey.value.trim() || effectiveApiKey,
         ZHIPU_API_KEY: effectiveApiKey,
         ZHIPU_MODEL: zhipuModel.value.trim(),
-        ZHIPU_BASE_URL: effectiveBaseUrl,
+        ZHIPU_BASE_URL: proxyBaseUrl,
         API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
         DISABLE_TELEMETRY: "1",
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -1651,6 +1673,98 @@ async function saveSettings() {
   const saved = await callBackend("saveSettings", JSON.stringify(payload));
   applySettings(saved);
   showNotice("已保存。云端模型已固定为 openrouter/auto。", "ok");
+}
+
+async function saveSettingsQuiet() {
+  const activeConfig = getActiveModelConfig();
+  let payload: Record<string, string> | null = null;
+
+  if (runMode.value === "ollama") {
+    const localBase = ollamaBaseUrl.value.trim() || "http://127.0.0.1:11434";
+    payload = {
+      MODEL_PROVIDER: "ollama",
+      OLLAMA_BASE_URL: localBase,
+      OLLAMA_MODEL: ollamaModel.value.trim() || "qwen3:8b",
+      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+      DISABLE_TELEMETRY: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      AI_LANGUAGE: activeConfig.language || "zh",
+      AI_TEMPERATURE: activeConfig.temperature || "",
+      AI_MAX_TOKENS: activeConfig.maxTokens || "",
+      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+    };
+  } else if (runMode.value === "api") {
+    if (apiSource.value === "zhipu") {
+      const effectiveApiKey = zhipuApiKey.value.trim() || (zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "");
+      const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+      try {
+        const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
+        if (!chk || !chk.running) {
+          const startR = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
+          if (startR && startR.ok) {
+            for (let i = 0; i < 10; i++) {
+              await new Promise(ok => setTimeout(ok, 1000));
+              const chk2 = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
+              if (chk2 && chk2.running) break;
+            }
+          }
+        }
+      } catch {}
+      payload = {
+        MODEL_PROVIDER: "api",
+        API_BASE_URL: proxyBaseUrl,
+        API_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
+        API_KEY: zhipuApiKey.value.trim() || effectiveApiKey,
+        ZHIPU_API_KEY: effectiveApiKey,
+        ZHIPU_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
+        ZHIPU_BASE_URL: proxyBaseUrl,
+        API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+        DISABLE_TELEMETRY: "1",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        AI_LANGUAGE: activeConfig.language || "zh",
+        AI_TEMPERATURE: activeConfig.temperature || "",
+        AI_MAX_TOKENS: activeConfig.maxTokens || "",
+        SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+      };
+    } else {
+      const qwenBase = apiBaseUrl.value.trim() || `http://${apiHost.value || "127.0.0.1"}:${apiPort.value || "7777"}`;
+      payload = {
+        MODEL_PROVIDER: "api",
+        API_BASE_URL: qwenBase,
+        API_MODEL: apiModel.value.trim() || "qwen3.6-plus",
+        API_KEY: apiKey.value.trim(),
+        API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+        DISABLE_TELEMETRY: "1",
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        AI_LANGUAGE: activeConfig.language || "zh",
+        AI_TEMPERATURE: activeConfig.temperature || "",
+        AI_MAX_TOKENS: activeConfig.maxTokens || "",
+        SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+      };
+    }
+  } else {
+    payload = {
+      MODEL_PROVIDER: "anthropic",
+      ANTHROPIC_BASE_URL: cloudBaseUrlByProvider("openrouter"),
+      ANTHROPIC_API_KEY: apiKey.value.trim(),
+      ANTHROPIC_AUTH_TOKEN: apiKey.value.trim(),
+      ANTHROPIC_MODEL: "openrouter/auto",
+      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+      DISABLE_TELEMETRY: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      AI_LANGUAGE: activeConfig.language || "zh",
+      AI_TEMPERATURE: activeConfig.temperature || "",
+      AI_MAX_TOKENS: activeConfig.maxTokens || "",
+      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+    };
+  }
+
+  if (payload) {
+    try {
+      const saved = await callBackend("saveSettings", JSON.stringify(payload));
+      applySettings(saved);
+    } catch {}
+  }
 }
 
 async function clearModelFields() {
@@ -1906,9 +2020,23 @@ function saveZhipuLocalKeys() {
   try {
     localStorage.setItem("zhipu_local_keys", JSON.stringify(zhipuLocalKeys.value));
   } catch {}
+  try {
+    callBackend("saveZhipuKeys", JSON.stringify(zhipuLocalKeys.value));
+  } catch {}
 }
 
-function loadZhipuLocalKeys() {
+async function loadZhipuLocalKeys() {
+  try {
+    const backendData = await callBackend("loadZhipuKeys");
+    if (backendData) {
+      const parsed = typeof backendData === "string" ? JSON.parse(backendData) : backendData;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        zhipuLocalKeys.value = parsed;
+        refreshZhipuAccountDisplay();
+        return;
+      }
+    }
+  } catch {}
   try {
     const saved = localStorage.getItem("zhipu_local_keys");
     if (saved) {
@@ -2547,6 +2675,9 @@ function loadLocalSettings() {
       if (typeof data.runMode === "string") {
         runMode.value = data.runMode;
       }
+      if (typeof data.apiSource === "string") {
+        apiSource.value = data.apiSource;
+      }
       if (typeof data.apiHost === "string") {
         apiHost.value = data.apiHost;
       }
@@ -2559,6 +2690,9 @@ function loadLocalSettings() {
       if (typeof data.apiKey === "string") {
         apiKey.value = data.apiKey;
       }
+      if (typeof data.apiBaseUrl === "string") {
+        apiBaseUrl.value = data.apiBaseUrl;
+      }
       if (typeof data.ollamaBaseUrl === "string") {
         ollamaBaseUrl.value = data.ollamaBaseUrl;
       }
@@ -2567,6 +2701,21 @@ function loadLocalSettings() {
       }
       if (typeof data.apiStepProgress === "number") {
         apiStepProgress.value = data.apiStepProgress;
+      }
+      if (typeof data.zhipuApiKey === "string") {
+        zhipuApiKey.value = data.zhipuApiKey;
+      }
+      if (typeof data.zhipuModel === "string") {
+        zhipuModel.value = data.zhipuModel;
+      }
+      if (typeof data.zhipuApiHost === "string") {
+        zhipuApiHost.value = data.zhipuApiHost;
+      }
+      if (typeof data.zhipuApiPort === "number") {
+        zhipuApiPort.value = data.zhipuApiPort;
+      }
+      if (typeof data.zhipuStepProgress === "number") {
+        zhipuStepProgress.value = data.zhipuStepProgress;
       }
       if (Array.isArray(data.qwenAccounts)) {
         qwenAccounts.value = data.qwenAccounts;
@@ -2590,13 +2739,20 @@ function saveLocalSettings() {
       autoApprove: autoApprove.value,
       toolApprovalMode: toolApprovalMode.value,
       runMode: runMode.value,
+      apiSource: apiSource.value,
       apiHost: apiHost.value,
       apiPort: apiPort.value,
       apiModel: apiModel.value,
       apiKey: apiKey.value,
+      apiBaseUrl: apiBaseUrl.value,
       ollamaBaseUrl: ollamaBaseUrl.value,
       ollamaModel: ollamaModel.value,
       apiStepProgress: apiStepProgress.value,
+      zhipuApiKey: zhipuApiKey.value,
+      zhipuModel: zhipuModel.value,
+      zhipuApiHost: zhipuApiHost.value,
+      zhipuApiPort: zhipuApiPort.value,
+      zhipuStepProgress: zhipuStepProgress.value,
       qwenAccounts: qwenAccounts.value,
       stickyEmail: stickyEmail.value,
       activeRole: activeRole.value,
@@ -2613,13 +2769,21 @@ watch(
     autoApprove,
     toolApprovalMode,
     runMode,
+    apiSource,
     apiHost,
     apiPort,
     apiModel,
     apiKey,
+    apiBaseUrl,
     ollamaBaseUrl,
     ollamaModel,
     apiStepProgress,
+    zhipuApiKey,
+    zhipuModel,
+    zhipuApiHost,
+    zhipuApiPort,
+    zhipuStepProgress,
+    activeRole,
   ],
   () => {
     saveLocalSettings();
@@ -2653,7 +2817,7 @@ onMounted(async () => {
 
   loadLocalSettings();
   loadTheme();
-  loadZhipuLocalKeys();
+  await loadZhipuLocalKeys();
 
   await loadProjects();
   const appState = await callBackend("getState");
@@ -3164,11 +3328,12 @@ async function loadOfflineModels() {
               <span style="font-size: 10px; color: #666;">~{{ totalTokens }}tk</span>
               <button v-if="sessionFileChanges.length > 0" class="btn-icon-sm" @click="showFileChanges = !showFileChanges" :title="`${sessionFileChanges.length} 个文件变更`" style="font-size: 10px;">📁{{ sessionFileChanges.length }}</button>
             </div>
-            <div style="display: flex; align-items: center; gap: 4px;">
-              <button class="btn-sm" @click="exportConversation('markdown')" :disabled="messages.length === 0" title="导出 Markdown" style="background: #2a3a2a;">📤</button>
-              <button class="btn-sm" @click="createSession" :disabled="isBusy" title="新会话" style="background: #2a3a2a;">＋ 新</button>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <button class="composer-action-btn" @click="exportConversation('markdown')" :disabled="messages.length === 0" title="导出对话">导出</button>
+              <button class="composer-action-btn" @click="createSession" :disabled="isBusy" title="新建会话">新建</button>
+              <div class="composer-action-divider"></div>
               <button class="btn-red" @click="stopMessage" :disabled="!isBusy" title="停止当前任务" v-if="isBusy">■ 停止</button>
-              <button class="btn-red" @click="sendMessage">▶ 发送</button>
+              <button class="composer-send-btn" @click="sendMessage">▶ 发送</button>
             </div>
           </div>
           <div v-if="showFileChanges && sessionFileChanges.length > 0" class="file-changes-panel">
@@ -4609,6 +4774,52 @@ export default { name: "App" };
 .composer-foot > div {
   display: flex;
   gap: 8px;
+}
+
+.composer-action-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+  color: #999;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+
+.composer-action-btn:hover {
+  background: #252525;
+  color: #ddd;
+  border-color: #555;
+}
+
+.composer-action-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.composer-send-btn {
+  padding: 4px 20px;
+  font-size: 12px;
+  border: none;
+  background: #ef4444;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+
+.composer-send-btn:hover {
+  background: #dc2626;
+}
+
+.composer-action-divider {
+  width: 1px;
+  height: 18px;
+  background: #333;
+  margin: 0 2px;
 }
 
 .panel {
