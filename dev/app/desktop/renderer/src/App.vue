@@ -112,12 +112,18 @@ const workspacePath = ref("");
 const inputText = ref("");
 const showPanel = ref(true);
 const noticeText = ref("");
-const noticeType = ref<"ok" | "warn">("ok");
+const noticeType = ref<"ok" | "warn" | "info">("ok");
 const messages = ref<ChatMessage[]>([]);
 const currentAssistantId = ref("");
 
+// runMode: 当前活跃的模型来源（决定 sendMessage 用哪个 provider）
 const runMode = ref<"cloud" | "ollama" | "api">("ollama");
+// apiSource: API 模式下的子来源（qwen / zhipu）
 const apiSource = ref<"qwen" | "zhipu">("qwen");
+// 新增：用户自定义快捷模型列表（在发送按钮左侧展示）
+const quickModels = ref<{ id: string; name: string; provider: "cloud" | "ollama" | "api"; apiSource?: "qwen" | "zhipu"; modelId: string }[]>([]);
+const activeQuickModel = ref<string>("");
+const showQuickModelDropdown = ref(false);
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
@@ -186,6 +192,27 @@ const apiSteps = [
 const apiStepProgress = ref(0);
 const apiStepBusy = ref(false);
 const apiStepMessage = ref("点击「一键启动」自动配置 API 服务");
+const allServicesBusy = ref(false);
+
+async function startAllServices() {
+  if (allServicesBusy.value) return;
+  allServicesBusy.value = true;
+  try {
+    const r = await callBackend("startAllApiServices");
+    if (r && r.ok) {
+      showNotice("所有 API 服务已启动", "ok");
+      apiStepProgress.value = apiSteps.length;
+      zhipuStepProgress.value = zhipuSteps.length;
+      apiServiceRunning.value = true;
+    } else {
+      const errors = r?.services ? Object.entries(r.services).filter(([, v]: [string, any]) => !v.ok).map(([k, v]: [string, any]) => `${k}: ${v.error}`).join("; ") : "启动失败";
+      showNotice("部分服务启动失败: " + errors, "warn");
+    }
+  } catch (e) {
+    showNotice("启动异常: " + String(e), "warn");
+  }
+  allServicesBusy.value = false;
+}
 
 const apiProgressPercent = computed(() => {
   if (apiStepProgress.value >= apiSteps.length) return 100;
@@ -248,6 +275,72 @@ const selectedOllamaModelToolSupport = computed<boolean | undefined>(() => {
   return found?.toolSupport;
 });
 
+// 自动检测激活的模型，生成快捷模型列表
+const autoQuickModels = computed(() => {
+  const models: { id: string; name: string; provider: "cloud" | "ollama" | "api"; apiSource?: "qwen" | "zhipu"; modelId: string; auto: true }[] = [];
+
+  // 千问 API：服务已启动且有选择的模型
+  if (apiServiceRunning.value && apiModel.value) {
+    models.push({
+      id: "auto-qwen",
+      name: apiModel.value,
+      provider: "api",
+      apiSource: "qwen",
+      modelId: apiModel.value,
+      auto: true,
+    });
+  }
+
+  // 智谱 API：服务已启动且有选择的模型
+  if (zhipuStepProgress.value >= zhipuSteps.length && zhipuModel.value) {
+    models.push({
+      id: "auto-zhipu",
+      name: zhipuModel.value,
+      provider: "api",
+      apiSource: "zhipu",
+      modelId: zhipuModel.value,
+      auto: true,
+    });
+  }
+
+  // Ollama：本地模型
+  if (ollamaModel.value) {
+    models.push({
+      id: "auto-ollama",
+      name: ollamaModel.value,
+      provider: "ollama",
+      modelId: ollamaModel.value,
+      auto: true,
+    });
+  }
+
+  return models;
+});
+
+// 判断快捷模型是否可用（服务已启动）
+function isQuickModelAvailable(m: typeof quickModels.value[0] | typeof autoQuickModels.value[0]): boolean {
+  if (m.provider === "cloud") return true;
+  if (m.provider === "ollama") return true;
+  if (m.provider === "api") {
+    if (m.apiSource === "qwen") return apiServiceRunning.value;
+    if (m.apiSource === "zhipu") return zhipuStepProgress.value >= zhipuSteps.length;
+  }
+  return false;
+}
+
+// 合并自动模型和用户自定义模型（去重）
+const allQuickModels = computed(() => {
+  const autoIds = new Set(autoQuickModels.value.map(m => m.modelId + ":" + (m.apiSource || m.provider)));
+  const userModels = quickModels.value.filter(m => {
+    const key = m.modelId + ":" + (m.apiSource || m.provider);
+    return !autoIds.has(key);
+  });
+  return [...autoQuickModels.value, ...userModels];
+});
+
+const availableQuickModels = computed(() => allQuickModels.value.filter(m => isQuickModelAvailable(m)));
+const unavailableQuickModels = computed(() => allQuickModels.value.filter(m => !isQuickModelAvailable(m)));
+
 watch(runMode, (newMode) => {
   if (newMode === "ollama") {
     cloudModels.value = [];
@@ -281,16 +374,82 @@ async function checkApiServiceStatus() {
     const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
     if (result && result.running) {
       apiServiceRunning.value = true;
-      apiStepProgress.value = 2;
-      apiStepMessage.value = "服务已运行，点击「一键就绪」继续配置";
+      // 如果服务在运行，恢复完整状态（获取key + 加载模型）
+      if (apiStepProgress.value < apiSteps.length) {
+        apiStepProgress.value = apiSteps.length;
+        apiStepMessage.value = "✓ 服务已就绪";
+        // 自动获取key和加载模型
+        await checkQwenAccounts();
+        if (!apiKey.value) {
+          try {
+            const keyResult = await callBackend("fetchApiKey", JSON.stringify({ baseUrl: apiBaseUrl.value.trim(), adminKey: "admin" }));
+            if (keyResult && keyResult.ok && keyResult.key) {
+              apiKey.value = keyResult.key;
+            }
+          } catch {}
+        }
+        if (apiModels.value.length === 0) {
+          try {
+            const payload = { source: "api", baseUrl: apiBaseUrl.value, apiKey: apiKey.value };
+            const modelResult = await callBackend("listModels", JSON.stringify(payload));
+            if (modelResult && modelResult.ok) {
+              apiModels.value = modelResult.models || [];
+              cloudModels.value = modelResult.models || [];
+              if (apiModels.value.length > 0 && !apiModel.value) {
+                apiModel.value = apiModels.value[0].id;
+              }
+            }
+          } catch {}
+        }
+      }
     } else {
       apiServiceRunning.value = false;
       apiStepProgress.value = 0;
-      apiStepMessage.value = "点击「一键就绪」自动配置 API 服务";
+      apiStepMessage.value = "点击「启动服务」启动千问 API";
     }
   } catch {
     apiServiceRunning.value = false;
-    apiStepMessage.value = "点击「一键就绪」自动配置 API 服务";
+    apiStepMessage.value = "点击「启动服务」启动千问 API";
+  }
+}
+
+async function restoreServiceStatus() {
+  // 恢复千问服务状态
+  if (apiServiceRunning.value) {
+    try {
+      const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
+      if (result && result.running && result.serviceType === "qwen") {
+        apiStepProgress.value = apiSteps.length;
+        apiStepMessage.value = "✓ 服务已就绪";
+        await checkQwenAccounts();
+      } else {
+        apiServiceRunning.value = false;
+        apiStepProgress.value = 0;
+        apiStepMessage.value = "点击「启动服务」启动千问 API";
+      }
+    } catch {
+      apiServiceRunning.value = false;
+      apiStepProgress.value = 0;
+      apiStepMessage.value = "点击「启动服务」启动千问 API";
+    }
+  }
+  // 恢复智谱服务状态
+  if (zhipuStepProgress.value >= zhipuSteps.length) {
+    try {
+      const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+      const result = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+      if (result && result.running && result.serviceType === "zhipu") {
+        zhipuStepProgress.value = zhipuSteps.length;
+        zhipuStepMessage.value = "✓ 服务已就绪";
+        await checkZhipuAccounts();
+      } else {
+        zhipuStepProgress.value = 0;
+        zhipuStepMessage.value = "点击「启动服务」启动智谱 API";
+      }
+    } catch {
+      zhipuStepProgress.value = 0;
+      zhipuStepMessage.value = "点击「启动服务」启动智谱 API";
+    }
   }
 }
 
@@ -406,6 +565,10 @@ const collaborationMode = ref<"none" | "plan-code-review" | "pair" | "review-onl
 const collabPhase = ref<"planning" | "coding" | "reviewing">("planning");
 const collabHistory = ref<any[]>([]);
 const settingsTab = ref<"general" | "model" | "account" | "memory" | "project" | "advanced" | "plugins" | "voice" | "offline">("general");
+const newQuickModelName = ref("");
+const newQuickModelProvider = ref<"cloud" | "ollama" | "api">("api");
+const newQuickModelApiSource = ref<"qwen" | "zhipu">("qwen");
+const newQuickModelId = ref("");
 const APP_VERSION = "2026.05.11";
 const activeNav = ref<"chat" | "project" | "version" | "settings">("chat");
 const versionHistory = ref<any[]>([]);
@@ -413,6 +576,9 @@ const showTerminal = ref(false);
 const terminalInput = ref("");
 const terminalHistory = ref<{cmd: string; output: string; ts: string}[]>([]);
 const terminalCwd = ref("");
+const terminalExpanded = ref(false);
+const terminalDebug = ref(false);
+const terminalOutputRef = ref<HTMLElement | null>(null);
 const gitStatus = ref<any>(null);
 const gitLog = ref<any[]>([]);
 const gitCommitMsg = ref("");
@@ -539,7 +705,7 @@ function addMessage(role: MessageRole, text: string, model?: string) {
   return item.id;
 }
 
-function showNotice(text: string, type: "ok" | "warn" = "ok") {
+function showNotice(text: string, type: "ok" | "warn" | "info" = "ok") {
   noticeText.value = text;
   noticeType.value = type;
 }
@@ -724,6 +890,48 @@ function getAutoConfigHint(modelId: string): string {
   }
 
   return hints.join(" | ");
+}
+
+function selectQuickModel(modelId: string) {
+  const model = allQuickModels.value.find((m) => m.id === modelId);
+  if (!model) return;
+  activeQuickModel.value = modelId;
+  showQuickModelDropdown.value = false;
+  // 切换对应的运行模式和模型
+  runMode.value = model.provider;
+  if (model.provider === "api" && model.apiSource) {
+    apiSource.value = model.apiSource;
+    if (model.apiSource === "qwen") {
+      apiModel.value = model.modelId;
+    } else if (model.apiSource === "zhipu") {
+      zhipuModel.value = model.modelId;
+    }
+  } else if (model.provider === "ollama") {
+    ollamaModel.value = model.modelId;
+  } else if (model.provider === "cloud") {
+    settings.ANTHROPIC_MODEL = model.modelId;
+  }
+  showNotice(`已切换至 ${model.name}`, "ok");
+}
+
+function addQuickModel() {
+  const name = newQuickModelName.value.trim();
+  const modelId = newQuickModelId.value.trim();
+  if (!name) {
+    showNotice("请输入显示名称", "warn");
+    return;
+  }
+  const id = "quick-" + Date.now();
+  quickModels.value.push({
+    id,
+    name,
+    provider: newQuickModelProvider.value,
+    apiSource: newQuickModelProvider.value === "api" ? newQuickModelApiSource.value : undefined,
+    modelId,
+  });
+  newQuickModelName.value = "";
+  newQuickModelId.value = "";
+  showNotice("快捷模型已添加", "ok");
 }
 
 async function sendMessage() {
@@ -1073,6 +1281,16 @@ async function searchConversations() {
   }
 }
 
+async function loadProjectConversations() {
+  if (!activeProject.value) return;
+  try {
+    const convs = await callBackend("listConversations", activeProject.value.id);
+    projectConversations.value = convs || [];
+  } catch (e) {
+    console.warn("loadProjectConversations failed:", e);
+  }
+}
+
 function clearConvSearch() {
   convSearchQuery.value = "";
   loadProjectConversations();
@@ -1145,8 +1363,9 @@ function applyRole(roleKey: string) {
     return;
   }
   activeRole.value = roleKey;
-  systemPrompt.value = preset.prompt;
-  temperature.value = preset.temp;
+  const activeConfig = getActiveModelConfig();
+  activeConfig.systemPrompt = preset.prompt;
+  activeConfig.temperature = preset.temp;
   saveLocalSettings();
 }
 
@@ -1586,28 +1805,6 @@ async function saveSettings() {
         return;
       }
       const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
-      try {
-        const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
-        if (!chk || !chk.running) {
-          showNotice("智谱模式需要代理服务，正在自动启动...", "info");
-          const startR = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
-          if (startR && startR.ok) {
-            for (let i = 0; i < 10; i++) {
-              await new Promise(ok => setTimeout(ok, 1000));
-              const chk2 = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
-              if (chk2 && chk2.running) break;
-            }
-          }
-          const chk3 = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
-          if (!chk3 || !chk3.running) {
-            showNotice("代理服务启动失败，无法使用智谱", "warn");
-            return;
-          }
-        }
-      } catch {
-        showNotice("代理服务启动失败，无法使用智谱", "warn");
-        return;
-      }
       const payload: Record<string, string> = {
         MODEL_PROVIDER: "api",
         API_BASE_URL: proxyBaseUrl,
@@ -1708,19 +1905,6 @@ async function saveSettingsQuiet() {
     if (apiSource.value === "zhipu") {
       const effectiveApiKey = zhipuApiKey.value.trim() || (zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "");
       const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
-      try {
-        const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
-        if (!chk || !chk.running) {
-          const startR = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
-          if (startR && startR.ok) {
-            for (let i = 0; i < 10; i++) {
-              await new Promise(ok => setTimeout(ok, 1000));
-              const chk2 = await callBackend("checkApiService", JSON.stringify({ baseUrl: proxyBaseUrl }));
-              if (chk2 && chk2.running) break;
-            }
-          }
-        }
-      } catch {}
       payload = {
         MODEL_PROVIDER: "api",
         API_BASE_URL: proxyBaseUrl,
@@ -1907,7 +2091,12 @@ async function zhipuStepAutoRun() {
 
       if (step.action === "check") {
         const r = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
-        if (r && r.running) { zhipuStepProgress.value = zhipuSteps.length; break; }
+        if (r && r.running && r.serviceType === "zhipu") { zhipuStepProgress.value = zhipuSteps.length; break; }
+        if (r && r.running && r.serviceType !== "zhipu") {
+          zhipuStepMessage.value = "端口被其他服务占用，正在切换...";
+          await callBackend("stopZhipu2Api", JSON.stringify({ baseUrl }));
+          await new Promise(ok => setTimeout(ok, 1000));
+        }
         zhipuStepProgress.value = 1;
       } else if (step.action === "start") {
         const r = await callBackend("startZhipu2Api", JSON.stringify({ port: zhipuApiPort.value || 7780, adminKey: "admin" }));
@@ -1915,7 +2104,7 @@ async function zhipuStepAutoRun() {
         for (let i = 0; i < 15; i++) {
           await new Promise(ok => setTimeout(ok, 1000));
           const chk = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
-          if (chk && chk.running) break;
+          if (chk && chk.running && chk.serviceType === "zhipu") break;
         }
         zhipuStepProgress.value = 2;
       } else if (step.action === "key") {
@@ -2078,6 +2267,15 @@ async function loginZhipuAccount() {
       region: "international",
     }));
     if (r && r.ok && r.api_key) {
+      const newKey = r.api_key;
+      const existing = zhipuLocalKeys.value.find(k => k.key === newKey);
+      if (!existing) {
+        zhipuLocalKeys.value.push({ key: newKey, label: r.email || newKey.slice(0, 8) + "...", valid: true });
+        saveZhipuLocalKeys();
+      }
+      if (!zhipuApiKey.value) {
+        zhipuApiKey.value = newKey;
+      }
       showNotice("登录成功！API Key 已自动添加", "ok");
       zhipuLoginEmail.value = "";
       zhipuLoginPassword.value = "";
@@ -2394,7 +2592,7 @@ async function apiStepAutoRun() {
 
       if (step.action === "check") {
         const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
-        if (result && result.running) {
+        if (result && result.running && result.serviceType === "qwen") {
           apiServiceRunning.value = true;
           if (result.warning) {
             showNotice(result.warning, "warn");
@@ -2408,7 +2606,11 @@ async function apiStepAutoRun() {
           apiStepProgress.value++;
           continue;
         }
-        apiStepMessage.value = "服务未启动，准备启动...";
+        if (result && result.running && result.serviceType !== "qwen") {
+          apiStepMessage.value = "端口被其他服务占用，准备切换...";
+        } else {
+          apiStepMessage.value = "服务未启动，准备启动...";
+        }
         apiStepProgress.value++;
       }
 
@@ -2505,14 +2707,14 @@ async function stopApiService() {
   }
 }
 
-function waitForApiService(maxRetries = 30): Promise<boolean> {
+function waitForApiService(maxRetries = 30, expectedType = "qwen"): Promise<boolean> {
   return new Promise((resolve) => {
     let count = 0;
     const timer = setInterval(async () => {
       count++;
       try {
         const result = await callBackend("checkApiService", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
-        if (result && result.running) {
+        if (result && result.running && result.serviceType === expectedType) {
           clearInterval(timer);
           resolve(true);
           return;
@@ -2669,7 +2871,7 @@ const categorizedModels = computed(() => {
   return { local, cloud };
 });
 
-// 从 localStorage 加载设置
+// 从 localStorage 加载设置（在 applySettings 之后调用，localStorage 优先）
 function loadLocalSettings() {
   try {
     const saved = localStorage.getItem("claude-desktop-settings");
@@ -2701,17 +2903,11 @@ function loadLocalSettings() {
       if (typeof data.apiKey === "string") {
         apiKey.value = data.apiKey;
       }
-      if (typeof data.apiBaseUrl === "string") {
-        apiBaseUrl.value = data.apiBaseUrl;
-      }
       if (typeof data.ollamaBaseUrl === "string") {
         ollamaBaseUrl.value = data.ollamaBaseUrl;
       }
       if (typeof data.ollamaModel === "string") {
         ollamaModel.value = data.ollamaModel;
-      }
-      if (typeof data.apiStepProgress === "number") {
-        apiStepProgress.value = data.apiStepProgress;
       }
       if (typeof data.zhipuApiKey === "string") {
         zhipuApiKey.value = data.zhipuApiKey;
@@ -2725,18 +2921,63 @@ function loadLocalSettings() {
       if (typeof data.zhipuApiPort === "number") {
         zhipuApiPort.value = data.zhipuApiPort;
       }
-      if (typeof data.zhipuStepProgress === "number") {
-        zhipuStepProgress.value = data.zhipuStepProgress;
-      }
-      if (Array.isArray(data.qwenAccounts)) {
-        qwenAccounts.value = data.qwenAccounts;
-        qwenAccountCount.value = data.qwenAccounts.length;
+      if (typeof data.zhipuApiChecked === "boolean") {
+        zhipuApiChecked.value = data.zhipuApiChecked;
       }
       if (typeof data.stickyEmail === "string") {
         stickyEmail.value = data.stickyEmail;
       }
       if (typeof data.activeRole === "string") {
         activeRole.value = data.activeRole;
+      }
+      if (Array.isArray(data.quickModels)) {
+        quickModels.value = data.quickModels;
+      }
+      if (typeof data.activeQuickModel === "string") {
+        activeQuickModel.value = data.activeQuickModel;
+      }
+      if (typeof data.workspacePath === "string") {
+        workspacePath.value = data.workspacePath;
+      }
+      if (typeof data.showPanel === "boolean") {
+        showPanel.value = data.showPanel;
+      }
+      if (typeof data.showTerminal === "boolean") {
+        showTerminal.value = data.showTerminal;
+      }
+      if (typeof data.inputText === "string") {
+        inputText.value = data.inputText;
+      }
+      if (typeof data.terminalInput === "string") {
+        terminalInput.value = data.terminalInput;
+      }
+      // 恢复 settings（AI_LANGUAGE, AI_TEMPERATURE, AI_MAX_TOKENS, SYSTEM_PROMPT 等）
+      if (data.settings && typeof data.settings === "object") {
+        for (const [key, val] of Object.entries(data.settings)) {
+          if (key in settings && val !== undefined && val !== null) {
+            (settings as any)[key] = val;
+          }
+        }
+      }
+      // 恢复 modelConfigs（每个模型的 per-model 参数）
+      if (data.modelConfigs && typeof data.modelConfigs === "object") {
+        for (const [modelId, cfg] of Object.entries(data.modelConfigs)) {
+          if (typeof cfg === "object" && cfg !== null) {
+            modelConfigs[modelId] = { ...(cfg as ModelConfig) };
+          }
+        }
+      }
+      // 恢复 qwenAccounts
+      if (Array.isArray(data.qwenAccounts)) {
+        qwenAccounts.value = data.qwenAccounts;
+        qwenAccountCount.value = data.qwenAccounts.length;
+      }
+      // 恢复终端设置
+      if (typeof data.terminalExpanded === "boolean") {
+        terminalExpanded.value = data.terminalExpanded;
+      }
+      if (typeof data.terminalDebug === "boolean") {
+        terminalDebug.value = data.terminalDebug;
       }
     }
   } catch (e) {
@@ -2755,18 +2996,27 @@ function saveLocalSettings() {
       apiPort: apiPort.value,
       apiModel: apiModel.value,
       apiKey: apiKey.value,
-      apiBaseUrl: apiBaseUrl.value,
       ollamaBaseUrl: ollamaBaseUrl.value,
       ollamaModel: ollamaModel.value,
-      apiStepProgress: apiStepProgress.value,
       zhipuApiKey: zhipuApiKey.value,
       zhipuModel: zhipuModel.value,
       zhipuApiHost: zhipuApiHost.value,
       zhipuApiPort: zhipuApiPort.value,
-      zhipuStepProgress: zhipuStepProgress.value,
+      zhipuApiChecked: zhipuApiChecked.value,
       qwenAccounts: qwenAccounts.value,
       stickyEmail: stickyEmail.value,
       activeRole: activeRole.value,
+      quickModels: quickModels.value,
+      activeQuickModel: activeQuickModel.value,
+      workspacePath: workspacePath.value,
+      showPanel: showPanel.value,
+      showTerminal: showTerminal.value,
+      inputText: inputText.value,
+      terminalInput: terminalInput.value,
+      terminalExpanded: terminalExpanded.value,
+      terminalDebug: terminalDebug.value,
+      settings: { ...settings },
+      modelConfigs: { ...modelConfigs },
     };
     localStorage.setItem("claude-desktop-settings", JSON.stringify(data));
   } catch (e) {
@@ -2785,16 +3035,23 @@ watch(
     apiPort,
     apiModel,
     apiKey,
-    apiBaseUrl,
     ollamaBaseUrl,
     ollamaModel,
-    apiStepProgress,
     zhipuApiKey,
     zhipuModel,
     zhipuApiHost,
     zhipuApiPort,
-    zhipuStepProgress,
+    zhipuApiChecked,
     activeRole,
+    workspacePath,
+    showPanel,
+    showTerminal,
+    inputText,
+    terminalInput,
+    terminalExpanded,
+    terminalDebug,
+    () => ({ ...settings }),
+    () => ({ ...modelConfigs }),
   ],
   () => {
     saveLocalSettings();
@@ -2826,7 +3083,6 @@ watch(
 onMounted(async () => {
   document.addEventListener("click", () => { modelDropdownOpen.value = false; });
 
-  loadLocalSettings();
   loadTheme();
   await loadZhipuLocalKeys();
 
@@ -2841,6 +3097,9 @@ onMounted(async () => {
     applySettings(appState.settings || {});
   }
 
+  // localStorage 优先级最高，在 applySettings 之后加载，确保用户设置不被后端覆盖
+  loadLocalSettings();
+
   detectHardware();
 
   if (runMode.value === "ollama") {
@@ -2849,6 +3108,9 @@ onMounted(async () => {
     await checkApiServiceStatus();
     await autoActivateApiService();
   }
+
+  // 启动时自动检测并恢复服务状态（支持两边同时运行）
+  await restoreServiceStatus();
 
   addMessage("assistant", "选择模型并配置参数，打开项目目录后即可下达编码任务。");
 
@@ -3020,6 +3282,37 @@ function clearTerminal() {
 
 function toggleTerminal() {
   showTerminal.value = !showTerminal.value;
+}
+
+function scrollTerminalToBottom() {
+  nextTick(() => {
+    if (terminalOutputRef.value) {
+      terminalOutputRef.value.scrollTop = terminalOutputRef.value.scrollHeight;
+    }
+  });
+}
+
+function copyTerminalOutput() {
+  const text = terminalHistory.value.map(e => `[${e.ts}] $ ${e.cmd}\n${e.output}`).join("\n\n");
+  if (!text) { showNotice("没有日志可复制", "warn"); return; }
+  navigator.clipboard.writeText(text).then(() => {
+    showNotice("日志已复制到剪贴板", "ok");
+  }).catch(() => {
+    showNotice("复制失败", "warn");
+  });
+}
+
+function saveTerminalOutput() {
+  const text = terminalHistory.value.map(e => `[${e.ts}] $ ${e.cmd}\n${e.output}`).join("\n\n");
+  if (!text) { showNotice("没有日志可保存", "warn"); return; }
+  const blob = new Blob([text], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `terminal-log-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showNotice("日志已保存", "ok");
 }
 
 async function loadGitStatus() {
@@ -3293,18 +3586,23 @@ async function loadOfflineModels() {
           <iframe :src="previewUrl" style="flex: 1; width: 100%; border: none; background: #fff;"></iframe>
         </div>
 
-        <div v-if="showTerminal" class="terminal-panel">
+        <div v-if="showTerminal" class="terminal-panel" :class="{ 'terminal-expanded': terminalExpanded }">
           <div class="terminal-toolbar">
             <span style="font-size: 11px; color: #4af;">⌨ 终端</span>
             <span style="font-size: 10px; color: #555; margin-left: 8px;">{{ terminalCwd || activeProject?.workspace_path || workspacePath || '~' }}</span>
             <div style="display: flex; gap: 4px; margin-left: auto;">
+              <button class="btn-icon-sm" @click="scrollTerminalToBottom" style="font-size: 10px;" title="滚动到底部">⬇</button>
+              <button class="btn-icon-sm" @click="terminalExpanded = !terminalExpanded" style="font-size: 10px;" :title="terminalExpanded ? '折叠' : '展开'">{{ terminalExpanded ? '🔽' : '🔼' }}</button>
+              <button class="btn-icon-sm" @click="terminalDebug = !terminalDebug" :style="{ fontSize: '10px', color: terminalDebug ? '#4af' : '#666' }" title="调试模式">🐛</button>
+              <button class="btn-icon-sm" @click="copyTerminalOutput" style="font-size: 10px;" title="复制日志">📋</button>
+              <button class="btn-icon-sm" @click="saveTerminalOutput" style="font-size: 10px;" title="保存日志">💾</button>
               <button class="btn-icon-sm" @click="clearTerminal" style="font-size: 10px;" title="清空">🗑️</button>
               <button class="btn-icon-sm" @click="showTerminal = false" style="font-size: 10px;">✕</button>
             </div>
           </div>
           <div class="terminal-output" ref="terminalOutputRef">
             <div v-for="(entry, idx) in terminalHistory" :key="idx" class="terminal-entry">
-              <div class="terminal-cmd"><span style="color: #4af;">❯</span> {{ entry.cmd }}</div>
+              <div class="terminal-cmd"><span style="color: #4af;">❯</span> {{ entry.cmd }} <span v-if="terminalDebug" style="color: #555; font-size: 9px;">[{{ entry.ts }}]</span></div>
               <pre class="terminal-result">{{ entry.output }}</pre>
             </div>
             <div v-if="terminalHistory.length === 0" class="terminal-empty">输入命令开始执行（如 ls, dir, npm run dev）</div>
@@ -3340,11 +3638,36 @@ async function loadOfflineModels() {
               <button v-if="sessionFileChanges.length > 0" class="btn-icon-sm" @click="showFileChanges = !showFileChanges" :title="`${sessionFileChanges.length} 个文件变更`" style="font-size: 10px;">📁{{ sessionFileChanges.length }}</button>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
+              <!-- 快捷模型选择 -->
+              <div class="quick-model-select" style="position: relative;">
+                <button class="composer-action-btn" @click="showQuickModelDropdown = !showQuickModelDropdown" title="快捷切换模型">
+                  {{ allQuickModels.find(m => m.id === activeQuickModel)?.name || '⚡ 模型' }}
+                </button>
+                <div v-if="showQuickModelDropdown" class="quick-model-dropdown" style="position: absolute; bottom: 100%; left: 0; margin-bottom: 4px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 4px; min-width: 200px; z-index: 100; max-height: 300px; overflow-y: auto;">
+                  <!-- 可用模型 -->
+                  <div v-if="availableQuickModels.length > 0" style="margin-bottom: 4px;">
+                    <div style="font-size: 10px; color: #4af; padding: 2px 8px; font-weight: 600;">可用</div>
+                    <div v-for="m in availableQuickModels" :key="m.id" :class="['quick-model-item', { active: activeQuickModel === m.id }]" @click="selectQuickModel(m.id)" style="padding: 4px 8px; cursor: pointer; border-radius: 4px; font-size: 12px; white-space: nowrap; display: flex; align-items: center; gap: 4px;">
+                      <span style="color: #4CAF50;">●</span> {{ m.name }} <span v-if="(m as any).auto" style="font-size: 9px; color: #4af; background: #1a2a3a; padding: 0 4px; border-radius: 3px;">自动</span>
+                    </div>
+                  </div>
+                  <!-- 不可用模型 -->
+                  <div v-if="unavailableQuickModels.length > 0" style="margin-bottom: 4px;">
+                    <div style="font-size: 10px; color: #666; padding: 2px 8px; font-weight: 600;">未就绪</div>
+                    <div v-for="m in unavailableQuickModels" :key="m.id" class="quick-model-item disabled" style="padding: 4px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap; display: flex; align-items: center; gap: 4px; color: #555; cursor: not-allowed;">
+                      <span style="color: #555;">●</span> {{ m.name }}
+                    </div>
+                  </div>
+                  <div v-if="allQuickModels.length === 0" style="padding: 4px 8px; color: #666; font-size: 11px;">
+                    启动服务后自动显示模型
+                  </div>
+                </div>
+              </div>
               <button class="composer-action-btn" @click="exportConversation('markdown')" :disabled="messages.length === 0" title="导出对话">导出</button>
               <button class="composer-action-btn" @click="createSession" :disabled="isBusy" title="新建会话">新建</button>
               <div class="composer-action-divider"></div>
-              <button class="btn-red" @click="stopMessage" :disabled="!isBusy" title="停止当前任务" v-if="isBusy">■ 停止</button>
-              <button class="composer-send-btn" @click="sendMessage">▶ 发送</button>
+              <button v-if="isBusy" class="composer-stop-btn" @click="stopMessage" title="停止当前任务">■ 停止</button>
+              <button v-else class="composer-send-btn" @click="sendMessage">▶ 发送</button>
             </div>
           </div>
           <div v-if="showFileChanges && sessionFileChanges.length > 0" class="file-changes-panel">
@@ -3365,6 +3688,7 @@ async function loadOfflineModels() {
             <button :class="['mode-btn', { active: runMode === 'cloud' }]" @click="runMode = 'cloud'">☁️ 云端</button>
             <button :class="['mode-btn', { active: runMode === 'api' }]" @click="runMode = 'api'">🔗 API</button>
             <button :class="['mode-btn', { active: runMode === 'ollama' }]" @click="runMode = 'ollama'">🦙 Ollama</button>
+            <span class="help-bubble" style="margin-left: 4px;">?<span class="help-bubble-content">☁️ <b>云端模式</b>：使用 OpenRouter 云端服务，无需本地配置，适合新手<br/><br/>🔗 <b>API 模式</b>：使用千问或智谱的 API 服务，需要启动本地代理或填写 API Key<br/><br/>🦙 <b>Ollama 模式</b>：使用本地安装的模型，数据完全本地处理，隐私最安全</span></span>
           </div>
         </div>
 
@@ -3389,22 +3713,18 @@ async function loadOfflineModels() {
 
         <div v-if="runMode === 'api' && apiSource === 'qwen'" class="sidebar-section">
           <div class="sidebar-section-title">🔗 千问 API
-            <span class="help-bubble">?<span class="help-bubble-content">本地代理服务，将千问网页版转为 OpenAI 兼容 API<br/><br/>1. 点击「一键启动」自动配置<br/>2. 启动后自动获取 API Key 和模型列表<br/>3. 无需手动配置，全程自动化</span></span>
+            <span class="help-bubble">?<span class="help-bubble-content">本地代理服务，将千问网页版转为 OpenAI 兼容 API<br/><br/>1. 点击「启动服务」启动本地代理<br/>2. 启动后自动获取 API Key 和模型列表<br/>3. 或手动添加 Key 直连官方 API</span></span>
           </div>
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; align-items: center; gap: 0;">
-              <span style="padding: 0 6px; font-size: 11px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;">http://</span>
-              <input v-model="apiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 28px; font-size: 11px;" />
-              <span style="padding: 0 4px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;">:</span>
-              <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 28px; font-size: 11px;" />
+              <span style="padding: 0 6px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
+              <input v-model="apiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 32px; font-size: 12px;" />
+              <span style="padding: 0 4px; font-size: 13px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
+              <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 32px; font-size: 12px;" />
             </div>
           </div>
-          <div class="sidebar-field">
-            <label>API Key</label>
-            <input v-model="apiKey" type="text" placeholder="自动获取或手动输入" class="setting-input" style="width: 100%;" />
-          </div>
-          <div class="api-progress-section" style="margin-top: 6px;">
+          <div class="api-progress-section" style="margin-top: 8px;">
             <div class="api-progress-bar">
               <div v-for="(step, idx) in apiSteps" :key="idx" :class="['api-step', { done: apiStepProgress > idx, active: apiStepProgress === idx, pending: apiStepProgress < idx }]">
                 <div class="step-dot"><span v-if="apiStepProgress > idx">✓</span><span v-else>{{ idx + 1 }}</span></div>
@@ -3414,11 +3734,11 @@ async function loadOfflineModels() {
             <div class="api-progress-track"><div class="api-progress-fill" :style="{ width: apiProgressPercent + '%' }"></div></div>
             <p class="api-progress-msg">{{ apiStepMessage }}</p>
             <div style="display: flex; gap: 4px; margin-top: 4px;">
-              <button class="btn-blue" style="flex: 1; font-size: 11px; padding: 4px 8px;" @click="apiStepAutoRun" :disabled="apiStepBusy || apiStepProgress >= apiSteps.length">{{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ 已就绪' : '▶ 一键启动') }}</button>
-              <button class="btn-red" style="flex: 0 0 auto; min-width: 60px; font-size: 11px; padding: 4px 8px;" @click="stopApiService" :disabled="apiStepBusy || apiStepProgress < apiSteps.length" v-if="apiStepProgress >= apiSteps.length">■ 停止</button>
+              <button class="btn-blue" style="flex: 1; font-size: 12px; padding: 6px 10px;" @click="apiStepAutoRun" :disabled="apiStepBusy || apiStepProgress >= apiSteps.length">{{ apiStepBusy ? apiStepMessage : (apiStepProgress >= apiSteps.length ? '✓ 已就绪' : '▶ 启动服务') }}</button>
+              <button class="btn-red" style="flex: 0 0 auto; min-width: 60px; font-size: 12px; padding: 6px 10px;" @click="stopApiService" :disabled="apiStepBusy || apiStepProgress < apiSteps.length" v-if="apiStepProgress >= apiSteps.length">■ 停止</button>
             </div>
           </div>
-          <div class="sidebar-field" style="margin-top: 6px;">
+          <div class="sidebar-field" style="margin-top: 8px;">
             <label>模型选择</label>
             <div v-if="apiModels.length > 0" class="model-quick-select">
               <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
@@ -3436,22 +3756,29 @@ async function loadOfflineModels() {
               </div>
             </div>
           </div>
+          <details style="margin-top: 8px;">
+            <summary style="font-size: 12px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <div class="reg-form" style="margin-top: 4px;">
+              <input v-model="apiKey" type="text" placeholder="粘贴千问 API Key" style="font-size: 12px;" />
+              <button class="btn-blue btn-sm" @click="showNotice('API Key 已保存', 'ok')" :disabled="!apiKey.trim()" style="width: 100%; font-size: 12px;">添加</button>
+            </div>
+          </details>
         </div>
 
         <div v-if="runMode === 'api' && apiSource === 'zhipu'" class="sidebar-section">
           <div class="sidebar-section-title">🧠 智谱 API
-            <span class="help-bubble">?<span class="help-bubble-content">本地代理服务，支持多 Key 轮换<br/><br/>1. 点击「一键启动」启动代理<br/>2. 或不启动代理，直接添加 Key 直连官方 API<br/><br/>💡 启动代理后可多 Key 轮换 = 无限算力</span></span>
+            <span class="help-bubble">?<span class="help-bubble-content">本地代理服务，支持多 Key 轮换<br/><br/>1. 点击「启动服务」启动代理<br/>2. 或不启动代理，直接添加 Key 直连官方 API<br/><br/>💡 启动代理后可多 Key 轮换 = 无限算力</span></span>
           </div>
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; align-items: center; gap: 0;">
-              <span style="padding: 0 6px; font-size: 11px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;">http://</span>
-              <input v-model="zhipuApiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 28px; font-size: 11px;" />
-              <span style="padding: 0 4px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;">:</span>
-              <input v-model="zhipuApiPort" type="number" min="1" max="65535" placeholder="7780" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 28px; font-size: 11px;" />
+              <span style="padding: 0 6px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
+              <input v-model="zhipuApiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 32px; font-size: 12px;" />
+              <span style="padding: 0 4px; font-size: 13px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
+              <input v-model="zhipuApiPort" type="number" min="1" max="65535" placeholder="7780" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 32px; font-size: 12px;" />
             </div>
           </div>
-          <div class="api-progress-section" style="margin-top: 6px;">
+          <div class="api-progress-section" style="margin-top: 8px;">
             <div class="api-progress-bar">
               <div v-for="(step, idx) in zhipuSteps" :key="idx" :class="['api-step', { done: zhipuStepProgress > idx, active: zhipuStepProgress === idx, pending: zhipuStepProgress < idx }]">
                 <div class="step-dot"><span v-if="zhipuStepProgress > idx">✓</span><span v-else>{{ idx + 1 }}</span></div>
@@ -3461,11 +3788,11 @@ async function loadOfflineModels() {
             <div class="api-progress-track"><div class="api-progress-fill" :style="{ width: zhipuProgressPercent + '%' }"></div></div>
             <p class="api-progress-msg">{{ zhipuStepMessage }}</p>
             <div style="display: flex; gap: 4px; margin-top: 4px;">
-              <button class="btn-blue" style="flex: 1; font-size: 11px; padding: 4px 8px;" @click="zhipuStepAutoRun" :disabled="zhipuStepBusy || zhipuStepProgress >= zhipuSteps.length">{{ zhipuStepBusy ? zhipuStepMessage : (zhipuStepProgress >= zhipuSteps.length ? '✓ 已就绪' : '▶ 一键启动') }}</button>
-              <button class="btn-red" style="flex: 0 0 auto; min-width: 60px; font-size: 11px; padding: 4px 8px;" @click="stopZhipuService" :disabled="zhipuStepBusy || zhipuStepProgress < zhipuSteps.length" v-if="zhipuStepProgress >= zhipuSteps.length">■ 停止</button>
+              <button class="btn-blue" style="flex: 1; font-size: 12px; padding: 6px 10px;" @click="zhipuStepAutoRun" :disabled="zhipuStepBusy || zhipuStepProgress >= zhipuSteps.length">{{ zhipuStepBusy ? zhipuStepMessage : (zhipuStepProgress >= zhipuSteps.length ? '✓ 已就绪' : '▶ 启动服务') }}</button>
+              <button class="btn-red" style="flex: 0 0 auto; min-width: 60px; font-size: 12px; padding: 6px 10px;" @click="stopZhipuService" :disabled="zhipuStepBusy || zhipuStepProgress < zhipuSteps.length" v-if="zhipuStepProgress >= zhipuSteps.length">■ 停止</button>
             </div>
           </div>
-          <div class="sidebar-field" style="margin-top: 6px;">
+          <div class="sidebar-field" style="margin-top: 8px;">
             <label>模型选择</label>
             <div v-if="zhipuModels.length > 0" class="model-quick-select">
               <div class="custom-select" :class="{ open: modelDropdownOpen }" @click.stop="modelDropdownOpen = !modelDropdownOpen">
@@ -3491,38 +3818,38 @@ async function loadOfflineModels() {
           </div>
           <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
             <span v-if="zhipuAccountCount >= 0" :class="['account-badge', zhipuAccountCount > 0 ? 'ok' : 'warn']">{{ zhipuAccountCount }} 个</span>
-            <span v-if="zhipuValidCount > 0" style="color: #4CAF50; font-size: 10px;">{{ zhipuValidCount }} 可用</span>
-            <button class="btn-blue btn-sm" @click="checkZhipuAccounts" style="margin-left: auto; font-size: 10px;">刷新</button>
+            <span v-if="zhipuValidCount > 0" style="color: #4CAF50; font-size: 12px;">{{ zhipuValidCount }} 可用</span>
+            <button class="btn-blue btn-sm" @click="checkZhipuAccounts" style="margin-left: auto; font-size: 12px;">刷新</button>
           </div>
-          <p v-if="zhipuAccountCount === 0" class="hint warn" style="margin: 2px 0; font-size: 10px;">未添加 API Key，请先添加</p>
+          <p v-if="zhipuAccountCount === 0" class="hint warn" style="margin: 2px 0; font-size: 12px;">未添加 API Key，请先添加</p>
           <div v-if="zhipuAccounts.length > 0" class="account-list" style="max-height: 120px; overflow-y: auto;">
             <div v-for="acc in zhipuAccounts" :key="acc.full_key || acc.api_key" :class="['account-row']">
               <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
               <span class="account-email">{{ acc.label || acc.api_key }}</span>
-              <button class="btn-icon btn-sticky" @click="validateZhipuAccount(acc.full_key || acc.api_key)" title="验证" style="color: #4af;">✓</button>
+              <button class="btn-icon btn-sticky" @click="checkZhipuAccounts()" title="验证全部" style="color: #4af;">✓</button>
               <button class="btn-icon btn-del" @click="deleteZhipuAccount(acc.full_key || acc.api_key)" title="删除">✕</button>
             </div>
           </div>
-          <details style="margin-top: 4px;">
-            <summary style="font-size: 10px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
-            <div class="reg-form" style="margin-top: 2px;">
-              <input v-model="zhipuLoginEmail" type="text" placeholder="邮箱" style="font-size: 11px;" />
-              <input v-model="zhipuLoginPassword" type="password" placeholder="密码" style="font-size: 11px;" />
-              <button class="btn-blue btn-sm" @click="loginZhipuAccount" :disabled="zhipuLoginBusy || !zhipuLoginEmail.trim() || !zhipuLoginPassword.trim()" style="width: 100%; font-size: 10px;">{{ zhipuLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
+          <details style="margin-top: 8px;">
+            <summary style="font-size: 12px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+            <div class="reg-form" style="margin-top: 4px;">
+              <input v-model="zhipuLoginEmail" type="text" placeholder="邮箱" style="font-size: 12px;" />
+              <input v-model="zhipuLoginPassword" type="password" placeholder="密码" style="font-size: 12px;" />
+              <button class="btn-blue btn-sm" @click="loginZhipuAccount" :disabled="zhipuLoginBusy || !zhipuLoginEmail.trim() || !zhipuLoginPassword.trim()" style="width: 100%; font-size: 12px;">{{ zhipuLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
             </div>
-            <p v-if="zhipuLoginError" class="hint warn" style="margin: 2px 0; font-size: 10px;">{{ zhipuLoginError }}</p>
+            <p v-if="zhipuLoginError" class="hint warn" style="margin: 2px 0; font-size: 12px;">{{ zhipuLoginError }}</p>
           </details>
-          <details style="margin-top: 4px;">
-            <summary style="font-size: 10px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
-            <div class="reg-form" style="margin-top: 2px;">
-              <input v-model="zhipuNewLabel" type="text" placeholder="标签（可选）" style="font-size: 11px;" />
-              <input v-model="zhipuNewKey" type="text" placeholder="粘贴智谱 API Key" style="font-size: 11px;" />
-              <button class="btn-blue btn-sm" @click="addZhipuAccount" :disabled="!zhipuNewKey.trim()" style="width: 100%; font-size: 10px;">添加</button>
+          <details style="margin-top: 8px;">
+            <summary style="font-size: 12px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <div class="reg-form" style="margin-top: 4px;">
+              <input v-model="zhipuNewLabel" type="text" placeholder="标签（可选）" style="font-size: 12px;" />
+              <input v-model="zhipuNewKey" type="text" placeholder="粘贴智谱 API Key" style="font-size: 12px;" />
+              <button class="btn-blue btn-sm" @click="addZhipuAccount" :disabled="!zhipuNewKey.trim()" style="width: 100%; font-size: 12px;">添加</button>
             </div>
           </details>
-          <div style="display: flex; gap: 4px; margin-top: 4px;">
-            <button class="btn-blue" @click="callBackend('openExternalUrl', 'https://z.ai/chat')" style="flex: 1; font-size: 11px; padding: 4px 8px;">🌐 Z.ai 注册(海外)</button>
-            <button class="btn-blue" @click="callBackend('openExternalUrl', 'https://open.bigmodel.cn/user/login')" style="flex: 1; font-size: 11px; padding: 4px 8px;">🇨🇳 国内版注册</button>
+          <div style="display: flex; gap: 4px; margin-top: 8px;">
+            <button class="btn-blue" @click="callBackend('openExternalUrl', 'https://z.ai/chat')" style="flex: 1; font-size: 12px; padding: 6px 10px;">🌐 Z.ai 注册(海外)</button>
+            <button class="btn-blue" @click="callBackend('openExternalUrl', 'https://open.bigmodel.cn/user/login')" style="flex: 1; font-size: 12px; padding: 6px 10px;">🇨🇳 国内版注册</button>
           </div>
         </div>
 
@@ -3545,10 +3872,10 @@ async function loadOfflineModels() {
           </div>
           <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
             <span v-if="qwenAccountCount >= 0" :class="['account-badge', qwenAccountCount > 0 ? 'ok' : 'warn']">{{ qwenAccountCount }} 个</span>
-            <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 10px;">{{ qwenValidCount }} 可用</span>
-            <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto; font-size: 10px;">刷新</button>
+            <span v-if="qwenValidCount > 0" style="color: #4CAF50; font-size: 12px;">{{ qwenValidCount }} 可用</span>
+            <button class="btn-blue btn-sm" @click="checkQwenAccounts" style="margin-left: auto; font-size: 12px;">刷新</button>
           </div>
-          <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 2px 0; font-size: 10px;">未添加账户，对话将返回 500</p>
+          <p v-if="qwenAccountCount === 0" class="hint warn" style="margin: 2px 0; font-size: 12px;">未添加账户，对话将返回 500</p>
           <div v-if="qwenAccounts.length > 0" class="account-list" style="max-height: 120px; overflow-y: auto;">
             <div v-for="acc in qwenAccounts" :key="acc.email" :class="['account-row', { sticky: stickyEmail === acc.email }]">
               <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
@@ -3558,26 +3885,30 @@ async function loadOfflineModels() {
               <button class="btn-icon btn-del" @click="deleteQwenAccount(acc.email)" title="删除">✕</button>
             </div>
           </div>
-          <div style="display: flex; gap: 4px; margin-top: 4px;">
-            <button class="btn-blue" @click="autoRegisterQwenAccount" :disabled="qwenRegisterBusy" style="flex: 1; font-size: 11px; padding: 4px 8px;">{{ qwenRegisterBusy ? '⏳ 注册中...' : '🤖 自动注册' }}</button>
+          <div style="display: flex; gap: 4px; margin-top: 8px;">
+            <button class="btn-blue" @click="autoRegisterQwenAccount" :disabled="qwenRegisterBusy" style="flex: 1; font-size: 12px; padding: 6px 10px;">{{ qwenRegisterBusy ? '⏳ 注册中...' : '🤖 自动注册' }}</button>
           </div>
-          <details style="margin-top: 4px;">
-            <summary style="font-size: 10px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
-            <div class="reg-form" style="margin-top: 2px;">
-              <input v-model="loginEmail" type="text" placeholder="邮箱" style="font-size: 11px;" />
-              <input v-model="loginPassword" type="password" placeholder="密码" style="font-size: 11px;" />
-              <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%; font-size: 10px;">{{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
+          <details style="margin-top: 8px;">
+            <summary style="font-size: 12px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+            <div class="reg-form" style="margin-top: 4px;">
+              <input v-model="loginEmail" type="text" placeholder="邮箱" style="font-size: 12px;" />
+              <input v-model="loginPassword" type="password" placeholder="密码" style="font-size: 12px;" />
+              <button class="btn-blue btn-sm" @click="loginQwenAccount" :disabled="qwenLoginBusy || !loginEmail.trim() || !loginPassword.trim()" style="width: 100%; font-size: 12px;">{{ qwenLoginBusy ? '⏳ 登录中...' : '登录' }}</button>
             </div>
-            <p v-if="qwenLoginError" class="hint warn" style="margin: 2px 0; font-size: 10px;">{{ qwenLoginError }}</p>
+            <p v-if="qwenLoginError" class="hint warn" style="margin: 2px 0; font-size: 12px;">{{ qwenLoginError }}</p>
           </details>
-          <details style="margin-top: 4px;">
-            <summary style="font-size: 10px; color: #888; cursor: pointer;">手动添加 Token</summary>
-            <div class="qwen-token-input" style="margin-top: 2px;">
-              <input v-model="qwenToken" type="text" placeholder="粘贴 Token" style="font-size: 11px;" />
-              <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()" style="font-size: 10px;">添加</button>
+          <details style="margin-top: 8px;">
+            <summary style="font-size: 12px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <div class="reg-form" style="margin-top: 4px;">
+              <input v-model="qwenToken" type="text" placeholder="粘贴 Token / API Key" style="font-size: 12px;" />
+              <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()" style="width: 100%; font-size: 12px;">添加</button>
             </div>
           </details>
-          <div v-if="qwenRegisterLogs.length > 0" class="register-log-box" style="margin-top: 4px; max-height: 60px; overflow-y: auto;">
+          <div v-if="qwenRegisterLogs.length > 0" class="register-log-box" style="margin-top: 4px; max-height: 80px; overflow-y: auto;">
+            <div style="display: flex; justify-content: flex-end; gap: 4px; margin-bottom: 2px;">
+              <button class="btn-icon-sm" @click="navigator.clipboard.writeText(qwenRegisterLogs.join('\n')).then(()=>showNotice('已复制','ok'))" style="font-size: 9px;" title="复制">📋</button>
+              <button class="btn-icon-sm" @click="qwenRegisterLogs = []" style="font-size: 9px;" title="清空">🗑️</button>
+            </div>
             <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">{{ log }}</div>
           </div>
         </div>
@@ -3691,6 +4022,9 @@ async function loadOfflineModels() {
             <button :class="['settings-nav-item', { active: settingsTab === 'general' }]" @click="settingsTab = 'general'">
               <span class="nav-icon">🏠</span><span class="nav-label">通用</span>
             </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'model' }]" @click="settingsTab = 'model'">
+              <span class="nav-icon">🤖</span><span class="nav-label">模型设置</span>
+            </button>
             <button :class="['settings-nav-item', { active: settingsTab === 'memory' }]" @click="settingsTab = 'memory'">
               <span class="nav-icon">🧠</span><span class="nav-label">记忆与知识</span>
             </button>
@@ -3763,6 +4097,53 @@ async function loadOfflineModels() {
                 <div class="shortcut-row"><span>打开设置</span><kbd>/settings</kbd></div>
                 <div class="shortcut-row"><span>压缩上下文</span><kbd>/compact</kbd></div>
                 <div class="shortcut-row"><span>导出对话</span><kbd>/export</kbd></div>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="settingsTab === 'model'" class="settings-section">
+            <h3 class="section-title">🤖 模型设置</h3>
+            <div class="settings-card">
+              <div class="card-title">快捷模型列表</div>
+              <div class="setting-desc" style="margin-bottom: 8px;">配置发送按钮左侧的快捷模型切换选项</div>
+              <div v-for="m in autoQuickModels" :key="m.id" class="setting-row" style="align-items: center; padding: 6px 0; border-bottom: 1px solid #222;">
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-size: 13px; color: #ddd;">{{ m.name }} <span style="font-size: 9px; color: #4af; background: #1a2a3a; padding: 0 4px; border-radius: 3px;">自动</span></div>
+                  <div style="font-size: 10px; color: #666;">{{ m.provider }}{{ m.apiSource ? ' / ' + m.apiSource : '' }}</div>
+                </div>
+                <div style="display: flex; gap: 4px; align-items: center;">
+                  <span v-if="activeQuickModel === m.id" style="font-size: 11px; color: #4af;">✓ 当前</span>
+                  <button class="btn-sm" @click="selectQuickModel(m.id)" :disabled="activeQuickModel === m.id">切换</button>
+                </div>
+              </div>
+              <div v-for="(m, idx) in quickModels" :key="m.id" class="setting-row" style="align-items: center; padding: 6px 0; border-bottom: 1px solid #222;">
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-size: 13px; color: #ddd;">{{ m.name }}</div>
+                  <div style="font-size: 10px; color: #666;">{{ m.provider }}{{ m.apiSource ? ' / ' + m.apiSource : '' }} — {{ m.modelId || '默认' }}</div>
+                </div>
+                <div style="display: flex; gap: 4px; align-items: center;">
+                  <span v-if="activeQuickModel === m.id" style="font-size: 11px; color: #4af;">✓ 当前</span>
+                  <button class="btn-sm" @click="selectQuickModel(m.id)" :disabled="activeQuickModel === m.id">切换</button>
+                  <button class="btn-sm" style="background: #3a1a1a; color: #f55;" @click="quickModels.splice(idx, 1); if (activeQuickModel === m.id) activeQuickModel = ''">删除</button>
+                </div>
+              </div>
+              <div v-if="allQuickModels.length === 0" style="padding: 12px; color: #666; font-size: 12px; text-align: center;">启动服务后自动显示模型</div>
+            </div>
+            <div class="settings-card">
+              <div class="card-title">添加快捷模型</div>
+              <div style="display: flex; flex-direction: column; gap: 8px;">
+                <input v-model="newQuickModelName" placeholder="显示名称（如：🦙 本地模型）" class="setting-input" />
+                <select v-model="newQuickModelProvider" class="setting-select">
+                  <option value="ollama">🦙 Ollama</option>
+                  <option value="api">🔗 API</option>
+                  <option value="cloud">☁️ 云端</option>
+                </select>
+                <select v-if="newQuickModelProvider === 'api'" v-model="newQuickModelApiSource" class="setting-select">
+                  <option value="qwen">🔗 千问</option>
+                  <option value="zhipu">🧠 智谱</option>
+                </select>
+                <input v-model="newQuickModelId" :placeholder="newQuickModelProvider === 'ollama' ? '模型ID（如：qwen2.5:14b）' : newQuickModelProvider === 'api' ? '模型ID（如：qwen3.6-plus）' : '模型ID（如：openrouter/auto）'" class="setting-input" />
+                <button class="btn-blue" @click="addQuickModel" style="width: 100%;">添加</button>
               </div>
             </div>
           </div>
@@ -4830,6 +5211,22 @@ export default { name: "App" };
 
 .composer-send-btn:hover {
   background: #dc2626;
+}
+
+.composer-stop-btn {
+  padding: 4px 20px;
+  font-size: 12px;
+  border: none;
+  background: #3b82f6;
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+
+.composer-stop-btn:hover {
+  background: #2563eb;
 }
 
 .composer-action-divider {
@@ -6293,6 +6690,11 @@ button:disabled {
   flex-direction: column;
   border-top: 1px solid #2a2a2a;
   background: #0a0a0a;
+  transition: height 0.2s ease;
+}
+
+.terminal-panel.terminal-expanded {
+  height: 400px;
 }
 
 .terminal-toolbar {

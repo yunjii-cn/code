@@ -119,10 +119,6 @@ class ChatRequest(BaseModel):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, api_key: str = Depends(_check_api_key)):
-    acc = await key_pool.acquire()
-    if not acc:
-        raise HTTPException(503, "No available API keys in pool")
-
     model = MODEL_MAP.get(req.model, req.model)
 
     zhipu_messages = []
@@ -163,36 +159,54 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(_check_api_k
     if req.tool_choice:
         payload["tool_choice"] = req.tool_choice
 
-    upstream_key = acc["api_key"]
-    headers = {
-        "Authorization": f"Bearer {upstream_key}",
-        "Content-Type": "application/json",
-    }
+    # 429重试逻辑
+    max_retries = 3
+    upstream_key = None
+    headers = None
+    for attempt in range(max_retries + 1):
+        acc = await key_pool.acquire()
+        if not acc:
+            if attempt < max_retries:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            raise HTTPException(503, "No available API keys in pool")
+
+        upstream_key = acc["api_key"]
+        headers = {
+            "Authorization": f"Bearer {upstream_key}",
+            "Content-Type": "application/json",
+        }
+
+        if req.stream:
+            break  # 流式模式直接交给stream函数处理
+
+        # 非流式：试探请求，429时切换key重试
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
+                if resp.status_code == 429 and attempt < max_retries:
+                    await key_pool.mark_rate_limited(upstream_key, cooldown=15)
+                    logger.warning(f"429 rate limited on key ...{upstream_key[-4:]}, retry {attempt+1}/{max_retries}")
+                    await asyncio.sleep(1)
+                    continue
+                if resp.status_code == 429:
+                    await key_pool.mark_rate_limited(upstream_key, cooldown=15)
+                    raise HTTPException(429, "Rate limited after retries")
+                if resp.status_code == 401:
+                    await key_pool.mark_invalid(upstream_key)
+                    raise HTTPException(401, "API key invalid")
+                if resp.status_code >= 400:
+                    raise HTTPException(resp.status_code, f"Upstream error: {resp.text[:200]}")
+                await key_pool.mark_valid(upstream_key)
+                return JSONResponse(content=resp.json(), status_code=200)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Chat error: {e}")
+            raise HTTPException(500, str(e))
 
     if req.stream:
         return await _stream_chat(payload, headers, model, upstream_key)
-    else:
-        return await _normal_chat(payload, headers, model, upstream_key)
-
-
-async def _normal_chat(payload, headers, model, upstream_key):
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
-            if resp.status_code == 429:
-                await key_pool.mark_rate_limited(upstream_key, cooldown=60)
-                raise HTTPException(429, "Rate limited, switching key")
-            if resp.status_code == 401:
-                await key_pool.mark_invalid(upstream_key)
-                raise HTTPException(401, "API key invalid")
-            if resp.status_code >= 400:
-                raise HTTPException(resp.status_code, f"Upstream error: {resp.text[:200]}")
-            return JSONResponse(content=resp.json(), status_code=200)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Chat error: {e}")
-        raise HTTPException(500, str(e))
 
 
 async def _stream_chat(payload, headers, model, upstream_key):
@@ -203,7 +217,7 @@ async def _stream_chat(payload, headers, model, upstream_key):
             async with httpx.AsyncClient(timeout=120) as client:
                 async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
                     if resp.status_code == 429:
-                        await key_pool.mark_rate_limited(upstream_key, cooldown=60)
+                        await key_pool.mark_rate_limited(upstream_key, cooldown=15)
                         yield f"data: {json.dumps({'error': 'rate_limited'})}\n\n"
                         return
                     if resp.status_code == 401:
@@ -341,12 +355,6 @@ def _sse(event_type: str, data: dict) -> str:
 @app.post("/anthropic/v1/messages")
 @app.post("/v1/messages")
 async def anthropic_messages(request: Request, api_key: str = Depends(_check_anthropic_key)):
-    acc = await key_pool.acquire()
-    if acc:
-        upstream_key = acc["api_key"]
-    else:
-        upstream_key = api_key
-
     try:
         req_data = await request.json()
     except Exception:
@@ -379,99 +387,123 @@ async def anthropic_messages(request: Request, api_key: str = Depends(_check_ant
         elif isinstance(tc, str):
             payload["tool_choice"] = tc
 
-    upstream_key = api_key
-    headers = {
-        "Authorization": f"Bearer {upstream_key}",
-        "Content-Type": "application/json",
-    }
-
     msg_id = f"msg_{uuid.uuid4().hex[:24]}"
     is_stream = req_data.get("stream", False)
+
+    # 429重试逻辑：尝试获取可用key，遇到429切换key重试
+    max_retries = 3
+    for attempt in range(max_retries + 1):
+        acc = await key_pool.acquire()
+        if acc:
+            upstream_key = acc["api_key"]
+        else:
+            # key pool空，等待最短冷却期后重试
+            if attempt < max_retries:
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
+            upstream_key = api_key
+
+        headers = {
+            "Authorization": f"Bearer {upstream_key}",
+            "Content-Type": "application/json",
+        }
+
+        # 非流式：先试探请求，429时切换key重试
+        if not is_stream:
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
+                    if resp.status_code == 429 and attempt < max_retries:
+                        await key_pool.mark_rate_limited(upstream_key, cooldown=15)
+                        logger.warning(f"429 rate limited on key ...{upstream_key[-4:]}, retry {attempt+1}/{max_retries}")
+                        await asyncio.sleep(1)
+                        continue
+                    break
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Request error: {e}, retry {attempt+1}/{max_retries}")
+                    await asyncio.sleep(1)
+                    continue
+                raise HTTPException(500, str(e))
+        else:
+            break  # 流式模式直接交给stream函数处理
 
     if is_stream:
         return await _anthropic_stream(payload, headers, model, upstream_key, msg_id, requested_model)
     else:
-        return await _anthropic_normal(payload, headers, model, upstream_key, msg_id, requested_model)
+        if resp.status_code == 429:
+            await key_pool.mark_rate_limited(upstream_key, cooldown=15)
+            return JSONResponse(
+                status_code=429,
+                content={"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited after retries"}},
+            )
+        if resp.status_code == 401:
+            await key_pool.mark_invalid(upstream_key)
+            return JSONResponse(
+                status_code=401,
+                content={"type": "error", "error": {"type": "authentication_error", "message": "API key invalid"}},
+            )
+        if resp.status_code >= 400:
+            err_text = resp.text[:500]
+            return JSONResponse(
+                status_code=resp.status_code,
+                content={"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {err_text}"}},
+            )
+        # 成功时重置key的失败计数
+        await key_pool.mark_valid(upstream_key)
+        return _anthropic_format_response(resp.json(), msg_id, requested_model)
 
 
-async def _anthropic_normal(payload, headers, model, upstream_key, msg_id, requested_model):
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
-            if resp.status_code == 429:
-                await key_pool.mark_rate_limited(upstream_key, cooldown=60)
-                return JSONResponse(
-                    status_code=429,
-                    content={"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}},
-                )
-            if resp.status_code == 401:
-                await key_pool.mark_invalid(upstream_key)
-                return JSONResponse(
-                    status_code=401,
-                    content={"type": "error", "error": {"type": "authentication_error", "message": "API key invalid"}},
-                )
-            if resp.status_code >= 400:
-                err_text = resp.text[:500]
-                return JSONResponse(
-                    status_code=resp.status_code,
-                    content={"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {err_text}"}},
-                )
+def _anthropic_format_response(data, msg_id, requested_model):
+    """将OpenAI格式的响应转换为Anthropic格式"""
+    choice = data.get("choices", [{}])[0]
+    message = choice.get("message", {})
+    finish_reason = choice.get("finish_reason", "stop")
 
-            data = resp.json()
-            choice = data.get("choices", [{}])[0]
-            message = choice.get("message", {})
-            finish_reason = choice.get("finish_reason", "stop")
+    content_blocks = []
+    reasoning = message.get("reasoning_content", "")
+    if reasoning:
+        content_blocks.append({"type": "text", "text": reasoning})
+    if message.get("content"):
+        content_blocks.append({"type": "text", "text": message["content"]})
 
-            content_blocks = []
-            reasoning = message.get("reasoning_content", "")
-            if reasoning:
-                content_blocks.append({"type": "text", "text": reasoning})
-            if message.get("content"):
-                content_blocks.append({"type": "text", "text": message["content"]})
-
-            if message.get("tool_calls"):
-                for tc in message["tool_calls"]:
-                    func = tc.get("function", {})
-                    try:
-                        input_data = json.loads(func.get("arguments", "{}"))
-                    except Exception:
-                        input_data = {}
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
-                        "name": func.get("name", ""),
-                        "input": input_data,
-                    })
-
-            if not content_blocks:
-                content_blocks.append({"type": "text", "text": ""})
-
-            stop_reason = "end_turn"
-            if finish_reason == "tool_calls" or (message.get("tool_calls") and len(message["tool_calls"]) > 0):
-                stop_reason = "tool_use"
-            elif finish_reason == "length":
-                stop_reason = "max_tokens"
-
-            usage_data = data.get("usage", {})
-            return JSONResponse(content={
-                "id": msg_id,
-                "type": "message",
-                "role": "assistant",
-                "model": requested_model,
-                "content": content_blocks,
-                "stop_reason": stop_reason,
-                "stop_sequence": None,
-                "usage": {
-                    "input_tokens": usage_data.get("prompt_tokens", 0),
-                    "output_tokens": usage_data.get("completion_tokens", 0),
-                },
+    if message.get("tool_calls"):
+        for tc in message["tool_calls"]:
+            func = tc.get("function", {})
+            try:
+                input_data = json.loads(func.get("arguments", "{}"))
+            except Exception:
+                input_data = {}
+            content_blocks.append({
+                "type": "tool_use",
+                "id": tc.get("id", f"toolu_{uuid.uuid4().hex[:24]}"),
+                "name": func.get("name", ""),
+                "input": input_data,
             })
-    except Exception as e:
-        logger.error(f"Anthropic normal error: {e}")
-        return JSONResponse(
-            status_code=500,
-            content={"type": "error", "error": {"type": "api_error", "message": str(e)}},
-        )
+
+    if not content_blocks:
+        content_blocks.append({"type": "text", "text": ""})
+
+    stop_reason = "end_turn"
+    if finish_reason == "tool_calls" or (message.get("tool_calls") and len(message["tool_calls"]) > 0):
+        stop_reason = "tool_use"
+    elif finish_reason == "length":
+        stop_reason = "max_tokens"
+
+    usage_data = data.get("usage", {})
+    return JSONResponse(content={
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "model": requested_model,
+        "content": content_blocks,
+        "stop_reason": stop_reason,
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": usage_data.get("prompt_tokens", 0),
+            "output_tokens": usage_data.get("completion_tokens", 0),
+        },
+    })
 
 
 async def _anthropic_stream(payload, headers, model, upstream_key, msg_id, requested_model):
@@ -489,7 +521,7 @@ async def _anthropic_stream(payload, headers, model, upstream_key, msg_id, reque
             async with httpx.AsyncClient(timeout=180) as client:
                 async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
                     if resp.status_code == 429:
-                        await key_pool.mark_rate_limited(upstream_key, cooldown=60)
+                        await key_pool.mark_rate_limited(upstream_key, cooldown=15)
                         yield _sse("error", {"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}})
                         return
                     if resp.status_code == 401:

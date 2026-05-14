@@ -3,32 +3,37 @@
 # ============================================
 # 仓库根目录: dev/
 #
-# 目录架构（对齐参考项目）：
+# 三目录纯净整合包架构：
 #   dev/*.exe      = 开发测试 EXE（gitignore，不推送）
 #   dev/_internal/ = PyInstaller 运行时（gitignore，不推送）
-#   dev/projects/  = 用户项目工作区（gitignore，不推送）
-#   dev/app/       = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
+#   dev/app/       = 应用程序代码（只读，Git管理，推送）
+#   dev/data/      = 用户数据（可写，Git不管理，不推送）
+#   dev/temp/      = 临时文件（可删除，Git不管理，不推送）
 #   dev/ver/*.exe  = 稳定版 EXE（git 跟踪，推送）
-#   dev/           = Git 仓库根目录
 #
 # 推送内容：
-# - app/ 的源代码文件 (main.py, backend.py, desktop/src/, etc.)
+# - app/ 的源代码文件 (main.py, backend.py, desktop/src/, api/, src/, etc.)
 # - ver/*.exe (稳定版 EXE)
 # - .gitignore
 #
-# 不推送（用户通过部署维护功能自动安装）：
+# 不推送：
 # - *.exe            (开发测试 EXE，在 dev/ 根目录)
 # - _internal/       (PyInstaller 运行时 DLL，在 dev/ 根目录)
-# - app/nodejs/      (Node.js 运行时，~190MB)
-# - app/bun/         (Bun 运行时，~104MB)
-# - app/node_modules/(npm 依赖，~500MB)
-# - app/.venv/       (Python 虚拟环境)
-# - app/.env         (含 API 密钥，敏感信息)
+# - data/            (用户数据：.env, projects, sessions, api数据, .venv)
+# - temp/            (临时文件：logs, cache, debug)
+# - app/nodejs/      (Node.js 运行时，~190MB，部署维护安装)
+# - app/bun/         (Bun 运行时，~104MB，部署维护安装)
+# - app/node_modules/(npm 依赖，~500MB，部署维护安装)
 # ============================================
 
 # ── dev/ 根目录下的 EXE 和 _internal/（不推送）──
 /*.exe
 /_internal/
+
+# ── dev/ 根目录下的构建产物和运行时文件（不推送）──
+/icon.ico
+/icon.png
+/backup/
 
 # ── ver/ 下的稳定 EXE 要推送 ──
 !ver/*.exe
@@ -36,21 +41,33 @@
 # ── build/ 目录（PyInstaller 工作目录，不推送）──
 /build/
 
-# ── 用户项目目录（用户工作区，不推送）──
-projects/
+# ── data/ 用户数据目录（不推送）──
+/data/
+
+# ── temp/ 临时文件目录（不推送）──
+/temp/
 
 # ── 运行时环境（由部署维护功能自动安装，不推送）──
 app/nodejs/
 app/bun/
 app/node_modules/
-app/.venv/
+app/python/
 app/env_install_status.json
+
+# ── app/ 下的运行时生成物（不推送）──
+app/.venv/
+app/.uv_cache/
+app/.bun_cache/
+app/__pycache__/
+app/**/__pycache__/
+app/cli_debug.log
+app/version_info.txt
 
 # ── 敏感信息 ──
 app/.env
 app/.env.*
 !app/.env.example
-app/zhipu2api/data/api_keys.json
+app/api/zhipu2api/data/api_keys.json
 
 # ── Python 缓存 ──
 __pycache__/
@@ -86,7 +103,6 @@ Desktop.ini
 logs/
 
 # ── 临时文件 ──
-temp/
 tmp/
 *.tmp
 *.bak
@@ -103,6 +119,3 @@ app/fix_all_bundle_imports.cjs
 app/fix_bundle_imports.cjs
 app/fix_bundle_imports_v2.cjs
 app/fix_bundle_imports_v3.cjs
-
-# ── 版本历史（提交到 Git 以支持远程版本对比）──
-# app/version_history.json

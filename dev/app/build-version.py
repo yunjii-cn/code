@@ -285,86 +285,143 @@ def build_exe():
 
 # ── 打包后处理：将运行时文件复制到发布目录（build/ 下的整合包）──
 def post_build(release_dir: Path):
-    """将 desktop/dist/ 等资源复制到 build/ 下的发布目录（用于打包分发）
-    
-    注意：dev/app/ 下已有这些资源，这里是为 build/ 里的完整整合包准备的。
-    """
-    print("  打包后处理...")
+    """将资源组织到三目录结构中（app/data/temp），用于打包分发
 
-    # 1. 复制 desktop/dist/ (Vue 前端)
+    三目录纯净整合包结构：
+      发布目录/
+      ├── *.exe              # PyInstaller输出的EXE
+      ├── _internal/         # PyInstaller运行时
+      ├── app/               # 应用程序（只读，纯净可发布）
+      ├── data/              # 用户数据（可写，需备份）
+      └── temp/              # 临时文件（可删除）
+    """
+    print("  打包后处理（三目录纯净整合包结构）...")
+
+    app_dir = release_dir / "app"
+    data_dir = release_dir / "data"
+    temp_dir = release_dir / "temp"
+
+    _ignore_cache = shutil.ignore_patterns(
+        "__pycache__", "*.pyc", ".venv", ".uv_cache", ".bun_cache",
+        "node_modules", "nodejs", "bun", ".env", ".env.*",
+        "*.log", "*.tmp", "*.bak",
+    )
+
+    # ── 1. 创建 app/ 目录并复制资源 ──
+    app_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1.1 复制 desktop/dist/ (Vue 前端)
     dist_src = DEV_APP_DIR / "desktop" / "dist"
-    dist_dst = release_dir / "desktop" / "dist"
+    dist_dst = app_dir / "desktop" / "dist"
     if dist_src.exists():
         if dist_dst.exists():
             shutil.rmtree(str(dist_dst), ignore_errors=True)
-        shutil.copytree(str(dist_src), str(dist_dst))
-        print("  ✓ 复制 desktop/dist/ (前端)")
+        shutil.copytree(str(dist_src), str(dist_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 desktop/dist/ -> app/desktop/dist/ (前端)")
     else:
         print("  ✗ desktop/dist/ 不存在，前端将不可用")
 
-    # 2. 复制 icon.ico (窗口图标)
+    # 1.2 复制 icon.ico / icon.png (窗口图标)
     icon_src = DEV_APP_DIR / "icon.ico"
     if icon_src.exists():
-        shutil.copy2(str(icon_src), str(release_dir / "icon.ico"))
-
+        shutil.copy2(str(icon_src), str(app_dir / "icon.ico"))
     icon_png_src = DEV_APP_DIR / "icon.png"
     if icon_png_src.exists():
-        shutil.copy2(str(icon_png_src), str(release_dir / "icon.png"))
+        shutil.copy2(str(icon_png_src), str(app_dir / "icon.png"))
 
-    # 3. 复制 bin/ (CLI 工具)
+    # 1.3 复制 bin/ (CLI 工具)
     bin_src = DEV_APP_DIR / "bin"
-    bin_dst = release_dir / "bin"
-    if bin_src.exists() and not bin_dst.exists():
-        shutil.copytree(str(bin_src), str(bin_dst))
-        print("  ✓ 复制 bin/ (CLI)")
+    bin_dst = app_dir / "bin"
+    if bin_src.exists():
+        if bin_dst.exists():
+            shutil.rmtree(str(bin_dst), ignore_errors=True)
+        shutil.copytree(str(bin_src), str(bin_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 bin/ -> app/bin/ (CLI)")
 
-    # 4. 复制 stubs/ (类型定义)
+    # 1.4 复制 stubs/ (类型定义)
     stubs_src = DEV_APP_DIR / "stubs"
-    stubs_dst = release_dir / "stubs"
-    if stubs_src.exists() and not stubs_dst.exists():
-        shutil.copytree(str(stubs_src), str(stubs_dst))
-        print("  ✓ 复制 stubs/")
+    stubs_dst = app_dir / "stubs"
+    if stubs_src.exists():
+        if stubs_dst.exists():
+            shutil.rmtree(str(stubs_dst), ignore_errors=True)
+        shutil.copytree(str(stubs_src), str(stubs_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 stubs/ -> app/stubs/")
 
-    # 5. 复制 package.json
-    pkg_src = DEV_APP_DIR / "package.json"
-    if pkg_src.exists():
-        shutil.copy2(str(pkg_src), str(release_dir / "package.json"))
+    # 1.5 复制 package.json / bunfig.toml / preload.ts
+    for fname in ["package.json", "bunfig.toml", "preload.ts"]:
+        fsrc = DEV_APP_DIR / fname
+        if fsrc.exists():
+            shutil.copy2(str(fsrc), str(app_dir / fname))
 
-    # 6. 复制 scripts/ (安装/启动脚本)
+    # 1.6 复制 scripts/ (安装/启动脚本)
     scripts_src = DEV_APP_DIR / "scripts"
-    scripts_dst = release_dir / "scripts"
-    if scripts_src.exists() and not scripts_dst.exists():
-        shutil.copytree(str(scripts_src), str(scripts_dst))
-        print("  ✓ 复制 scripts/")
+    scripts_dst = app_dir / "scripts"
+    if scripts_src.exists():
+        if scripts_dst.exists():
+            shutil.rmtree(str(scripts_dst), ignore_errors=True)
+        shutil.copytree(str(scripts_src), str(scripts_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 scripts/ -> app/scripts/")
 
-    # 7. 复制 qwen2api/ (API 服务后端)
-    qwen_src = DEV_APP_DIR / "qwen2api"
-    qwen_dst = release_dir / "qwen2api"
-    if qwen_src.exists():
-        if qwen_dst.exists():
-            shutil.rmtree(str(qwen_dst))
-        shutil.copytree(str(qwen_src), str(qwen_dst))
-        print("  ✓ 复制 qwen2api/ (API 服务)")
+    # 1.7 复制 api/ (API 服务代码 - 只读)
+    api_src = DEV_APP_DIR / "api"
+    api_dst = app_dir / "api"
+    if api_src.exists():
+        if api_dst.exists():
+            shutil.rmtree(str(api_dst), ignore_errors=True)
+        shutil.copytree(str(api_src), str(api_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 api/ -> app/api/ (API 服务代码)")
 
-    zhipu_src = DEV_APP_DIR / "zhipu2api"
-    zhipu_dst = release_dir / "zhipu2api"
-    if zhipu_src.exists():
-        if zhipu_dst.exists():
-            shutil.rmtree(str(zhipu_dst))
-        shutil.copytree(str(zhipu_src), str(zhipu_dst))
-        print("  ✓ 复制 zhipu2api/ (智谱 API 服务)")
-
-    # 8. 复制整个 src/ (CLI 代码和工具) - 这是关键！
+    # 1.8 复制整个 src/ (CLI 代码和工具)
     src_src = DEV_APP_DIR / "src"
-    src_dst = release_dir / "src"
+    src_dst = app_dir / "src"
     if src_src.exists():
         if src_dst.exists():
-            shutil.rmtree(str(src_dst))
-        shutil.copytree(str(src_src), str(src_dst))
-        print("  ✓ 复制 src/ (CLI 代码)")
+            shutil.rmtree(str(src_dst), ignore_errors=True)
+        shutil.copytree(str(src_src), str(src_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 src/ -> app/src/ (CLI 代码)")
+
+    # 1.9 复制 uv/ (包管理器)
+    uv_src = DEV_APP_DIR / "uv"
+    uv_dst = app_dir / "uv"
+    if uv_src.exists():
+        if uv_dst.exists():
+            shutil.rmtree(str(uv_dst), ignore_errors=True)
+        shutil.copytree(str(uv_src), str(uv_dst), ignore=_ignore_cache)
+        print("  ✓ 复制 uv/ -> app/uv/")
+
+    # 1.10 复制 version_history.json
+    vh_src = DEV_APP_DIR / "version_history.json"
+    if vh_src.exists():
+        shutil.copy2(str(vh_src), str(app_dir / "version_history.json"))
 
     # nodejs/, bun/, node_modules/ 不复制到 build/ 发布包
     # 用户拿到整合包后，通过部署维护功能自动下载安装
+
+    # ── 2. 创建 data/ 目录结构 (数据分级架构) ──
+    data_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 2.1 公共数据目录 (所有用户共享)
+    (data_dir / "public" / "models").mkdir(parents=True, exist_ok=True)
+    (data_dir / "public" / "templates").mkdir(parents=True, exist_ok=True)
+    (data_dir / "public" / "plugins").mkdir(parents=True, exist_ok=True)
+    (data_dir / "public" / "api" / "qwen2api").mkdir(parents=True, exist_ok=True)
+    (data_dir / "public" / "api" / "zhipu2api").mkdir(parents=True, exist_ok=True)
+    
+    # 2.2 用户数据目录 (默认用户，支持多用户扩展)
+    (data_dir / "users" / "default" / "projects").mkdir(parents=True, exist_ok=True)
+    (data_dir / "users" / "default" / "sessions").mkdir(parents=True, exist_ok=True)
+    (data_dir / "users" / "default" / "webdata").mkdir(parents=True, exist_ok=True)
+    
+    print("  ✓ 创建 data/ 目录结构 (public/ + users/)")
+
+    # ── 3. 创建 temp/ 目录结构 ──
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    (temp_dir / "__pycache__").mkdir(parents=True, exist_ok=True)
+    (temp_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (temp_dir / "cache").mkdir(parents=True, exist_ok=True)
+    (temp_dir / "debug").mkdir(parents=True, exist_ok=True)
+    (temp_dir / "tmp").mkdir(parents=True, exist_ok=True)
+    print("  ✓ 创建 temp/ 目录结构")
 
     # 计算发布目录大小
     total_size = sum(f.stat().st_size for f in release_dir.rglob("*") if f.is_file())
@@ -423,19 +480,19 @@ def _set_hidden_attribute(path: str):
 
 def _deploy_to_dev(release_dir: Path):
     """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/ 下
-    
-    优化后的架构:
+
+    三目录纯净整合包架构:
     - EXE 直接放在 dev/ 下（dev/云集智能编程工作站vX.X.exe）
     - _internal/ 在 dev/ 下（隐藏文件夹，包含 PyInstaller 运行时）
-    - app/ 在 dev/ 下（用户可见的资源文件夹）
-    - 关键资源同时复制到 _internal/app/ 下，确保 PyInstaller 打包后能找到
+    - app/ 在 dev/ 下（源代码目录，Git管理）
+    - data/ 在 dev/ 下（用户数据，Git不管理）
+    - temp/ 在 dev/ 下（临时文件，Git不管理）
     """
     release_name = release_dir.name
-    
-    # 先尝试终止正在运行的旧版 EXE
+
     _kill_running_exe()
-    
-    # 1. 复制 EXE 文件到 dev/ 根目录（保留旧版 EXE，方便 git 回滚切换）
+
+    # 1. 复制 EXE 文件到 dev/ 根目录
     new_exe = release_dir / f"{release_name}.exe"
     if new_exe.exists():
         existing = DEV_DIR / new_exe.name
@@ -460,7 +517,7 @@ def _deploy_to_dev(release_dir: Path):
             print(f"  复制 EXE: {new_exe.name}")
         shutil.copy2(str(new_exe), str(DEV_DIR / new_exe.name))
         print(f"  ✓ 复制 EXE: {new_exe.name}")
-    
+
     # 2. 复制 _internal/ 并设置为隐藏属性
     new_internal = release_dir / "_internal"
     old_internal = DEV_DIR / "_internal"
@@ -473,23 +530,46 @@ def _deploy_to_dev(release_dir: Path):
                 print(f"  ⚠ 部分 _internal/ 文件被占用，尝试强制替换...")
                 shutil.rmtree(str(old_internal), ignore_errors=True)
         shutil.copytree(str(new_internal), str(old_internal), dirs_exist_ok=True)
-        # 设置为隐藏文件夹
         if _set_hidden_attribute(str(old_internal)):
             print(f"  ✓ 复制 _internal/ (已隐藏)")
         else:
             print(f"  ✓ 复制 _internal/")
-    
-    # 3. 复制 icon.ico 到 dev/ 根目录（任务栏图标需要）
-    icon_src = release_dir / "icon.ico"
+
+    # 3. 复制 icon 到 dev/ 根目录（任务栏图标需要）
+    # 优先从 build 产物的 app/ 目录找，其次从 release_dir 根目录找
+    icon_src = release_dir / "app" / "icon.ico"
+    if not icon_src.exists():
+        icon_src = release_dir / "icon.ico"
     if icon_src.exists():
         shutil.copy2(str(icon_src), str(DEV_DIR / "icon.ico"))
         print(f"  ✓ 复制 icon.ico")
-    
-    icon_png_src = release_dir / "icon.png"
+
+    icon_png_src = release_dir / "app" / "icon.png"
+    if not icon_png_src.exists():
+        icon_png_src = release_dir / "icon.png"
     if icon_png_src.exists():
         shutil.copy2(str(icon_png_src), str(DEV_DIR / "icon.png"))
         print(f"  ✓ 复制 icon.png")
+
+    # 4. 确保 data/ 和 temp/ 目录存在 (数据分级架构)
+    dev_data_dir = DEV_DIR / "data"
+    dev_temp_dir = DEV_DIR / "temp"
+    dev_data_dir.mkdir(parents=True, exist_ok=True)
+    dev_temp_dir.mkdir(parents=True, exist_ok=True)
     
+    # 4.1 公共数据目录
+    for sub in ["public/models", "public/templates", "public/plugins", "public/api/qwen2api", "public/api/zhipu2api"]:
+        (dev_data_dir / sub).mkdir(parents=True, exist_ok=True)
+    
+    # 4.2 用户数据目录 (默认用户)
+    for sub in ["users/default/projects", "users/default/sessions", "users/default/webdata"]:
+        (dev_data_dir / sub).mkdir(parents=True, exist_ok=True)
+    
+    # 4.3 临时目录
+    for sub in ["__pycache__", "logs", "cache", "debug", "tmp"]:
+        (dev_temp_dir / sub).mkdir(parents=True, exist_ok=True)
+    print(f"  ✓ 确保 data/ 和 temp/ 目录结构 (数据分级)")
+
     print(f"  ✓ 部署完成，EXE 在 {DEV_DIR}")
 
 

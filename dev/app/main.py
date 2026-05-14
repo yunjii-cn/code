@@ -13,6 +13,21 @@
 
 import sys
 import os
+
+# 将 Python 字节码缓存目录重定向到 temp/__pycache__/
+# 避免在 app/ 目录下生成 __pycache__ 污染代码目录
+if hasattr(sys, 'frozen'):
+    # 打包模式: 使用 exe 同级 temp/
+    _temp_pycache = os.path.join(os.path.abspath(os.path.dirname(sys.executable)), "temp", "__pycache__")
+else:
+    # 开发模式: 使用 dev/temp/
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _temp_pycache = os.path.join(os.path.dirname(_script_dir), "temp", "__pycache__")
+os.makedirs(_temp_pycache, exist_ok=True)
+os.environ["PYTHONPYCACHEPREFIX"] = _temp_pycache
+
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import json
 import time
 import subprocess
@@ -286,31 +301,87 @@ MIRROR_SETTINGS_FILE = "mirror_source.json"
 
 
 class ProjectManager:
-    DATA_ROOT = os.path.join(os.path.expanduser("~"), ".yunji", "data")
-
-    def __init__(self, app_dir: str, base_dir: str):
+    """项目管理器 - 支持多用户数据隔离架构
+    
+    数据目录结构 (数据分级):
+        {base_dir}/
+        └── data/                    # 数据总目录
+            ├── public/              # 公共数据 (所有用户共享)
+            │   ├── models/         # AI模型文件
+            │   ├── templates/      # 共享模板
+            │   └── plugins/        # 插件
+            └── users/               # 用户数据隔离目录
+                └── {user_id}/      # 用户目录 (默认: "default")
+                    ├── projects/   # 项目注册表
+                    ├── sessions/   # AI会话数据
+                    └── .env        # 用户私密配置
+    
+    未来多用户扩展:
+        users/
+        ├── default/                 # 本地默认用户
+        ├── user_abc123/             # 登录用户A
+        └── user_def456/             # 登录用户B
+    """
+    
+    DEFAULT_USER_ID = "default"
+    
+    def __init__(self, app_dir: str, base_dir: str, data_dir: str = None, user_id: str = None):
         self.app_dir = app_dir
         self.base_dir = base_dir
-        self.projects_dir = os.path.join(base_dir, "projects")
+        # 使用传入的 data_dir 作为根数据目录，如果没有则使用默认位置
+        self.data_root = data_dir if data_dir else os.path.join(base_dir, "data")
+        # 用户ID，未来支持多用户登录切换
+        self.user_id = user_id or self.DEFAULT_USER_ID
+        # 公共数据目录: data/public/
+        self.public_dir = os.path.join(self.data_root, "public")
+        # 实际用户数据目录: data/users/{user_id}/
+        self.data_dir = os.path.join(self.data_root, "users", self.user_id)
+        self.projects_dir = os.path.join(self.data_dir, "projects")
+        self.sessions_dir = os.path.join(self.data_dir, "sessions")
         self.registry_path = os.path.join(self.projects_dir, "registry.json")
         os.makedirs(self.projects_dir, exist_ok=True)
-        os.makedirs(self.DATA_ROOT, exist_ok=True)
+        os.makedirs(self.sessions_dir, exist_ok=True)
+        os.makedirs(self.public_dir, exist_ok=True)
         self._registry = self._load_registry()
         self._migrate_old_projects()
 
     def _get_data_path(self, project_id: str) -> str:
-        dp = os.path.join(self.DATA_ROOT, project_id)
+        dp = os.path.join(self.sessions_dir, project_id)
         os.makedirs(dp, exist_ok=True)
         return dp
 
     def _migrate_old_projects(self):
-        old_data_root = os.path.join(os.path.expanduser("~"), ".yunji", "projects")
-        if os.path.exists(old_data_root) and not os.path.exists(self.DATA_ROOT):
+        """向后兼容：迁移旧版数据到新的用户隔离架构"""
+        # 迁移路径1: ~/.yunji/projects/ → {data_dir}/default/projects/
+        old_yunji_projects = os.path.join(os.path.expanduser("~"), ".yunji", "projects")
+        if os.path.exists(old_yunji_projects) and not os.path.exists(self.projects_dir):
             try:
                 import shutil
-                shutil.copytree(old_data_root, self.DATA_ROOT)
+                shutil.copytree(old_yunji_projects, self.projects_dir)
             except Exception:
                 pass
+        
+        # 迁移路径2: 旧版扁平结构 {data_dir}/projects/ → {data_dir}/default/projects/
+        old_flat_projects = os.path.join(self.data_root, "projects")
+        if os.path.exists(old_flat_projects) and old_flat_projects != self.projects_dir:
+            if not os.path.exists(self.projects_dir):
+                try:
+                    import shutil
+                    shutil.copytree(old_flat_projects, self.projects_dir)
+                except Exception:
+                    pass
+        
+        # 迁移路径3: 旧版扁平结构 {data_dir}/sessions/ → {data_dir}/default/sessions/
+        old_flat_sessions = os.path.join(self.data_root, "sessions")
+        if os.path.exists(old_flat_sessions) and old_flat_sessions != self.sessions_dir:
+            if not os.path.exists(self.sessions_dir):
+                try:
+                    import shutil
+                    shutil.copytree(old_flat_sessions, self.sessions_dir)
+                except Exception:
+                    pass
+        
+        # 迁移 registry 中的项目数据路径
         for pid, info in self._registry.get("projects", {}).items():
             if "data_path" not in info:
                 dp = self._get_data_path(pid)
@@ -957,8 +1028,12 @@ class ProjectManager:
         results = self.search_memories(project_id, query)
         return results[:limit]
 
+    def _get_templates_dir(self) -> str:
+        """获取模板目录，公共数据"""
+        return os.path.join(self.public_dir, "templates")
+
     def save_custom_template(self, name: str, category: str, desc: str, prompt: str, files: str = "") -> bool:
-        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        tpl_dir = self._get_templates_dir()
         os.makedirs(tpl_dir, exist_ok=True)
         safe_name = name.replace(" ", "-").lower()
         fpath = os.path.join(tpl_dir, f"{safe_name}.json")
@@ -980,7 +1055,7 @@ class ProjectManager:
             return False
 
     def list_custom_templates(self) -> list:
-        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        tpl_dir = self._get_templates_dir()
         if not os.path.exists(tpl_dir):
             return []
         result = []
@@ -998,7 +1073,7 @@ class ProjectManager:
         return result
 
     def delete_custom_template(self, template_id: str) -> bool:
-        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        tpl_dir = self._get_templates_dir()
         fpath = os.path.join(tpl_dir, f"{template_id}.json")
         if os.path.exists(fpath):
             try:
@@ -1017,7 +1092,7 @@ class ProjectManager:
             "static-site": {"files": {"index.html": '<!DOCTYPE html>\n<html><head><title>My Site</title></head><body><h1>Hello World</h1></body></html>', "style.css": "body { font-family: sans-serif; }", "script.js": 'console.log("Hello");'}},
             "landing-page": {"files": {"index.html": '<!DOCTYPE html>\n<html><head><title>Landing Page</title><link rel="stylesheet" href="style.css"></head><body><header><h1>Welcome</h1></header><main><section class="hero"><h2>Our Product</h2><p>Description here</p></section></main></body></html>', "style.css": "* { margin: 0; padding: 0; box-sizing: border-box; }\nbody { font-family: sans-serif; }\n.hero { padding: 80px 20px; text-align: center; }"}},
         }
-        tpl_dir = os.path.join(os.path.expanduser("~"), ".yunji", "templates")
+        tpl_dir = self._get_templates_dir()
         custom_fpath = os.path.join(tpl_dir, f"{template_id}.json")
         tpl_data = None
         if os.path.exists(custom_fpath):
@@ -1318,6 +1393,79 @@ class BackendBridge(QObject):
         if main and hasattr(main, '_finish_splash'):
             QTimer.singleShot(300, main._finish_splash)
 
+    # ── 用户管理 API (多用户登录架构) ──
+
+    @pyqtSlot(result=str)
+    def getCurrentUser(self):
+        """获取当前用户信息"""
+        main = self._get_main()
+        if not main:
+            return json.dumps({"id": "default", "name": "本地用户"})
+        return json.dumps({
+            "id": main.current_user_id,
+            "name": main.current_user_id,
+            "is_default": main.current_user_id == "default"
+        })
+
+    @pyqtSlot(result=str)
+    def listUsers(self):
+        """列出所有用户目录"""
+        main = self._get_main()
+        if not main:
+            return json.dumps([{"id": "default", "name": "本地用户"}])
+        users = []
+        users_dir = os.path.join(main.data_dir, "users")
+        if os.path.exists(users_dir):
+            for uid in os.listdir(users_dir):
+                user_path = os.path.join(users_dir, uid)
+                if os.path.isdir(user_path):
+                    users.append({"id": uid, "name": uid})
+        if not users:
+            users.append({"id": "default", "name": "本地用户"})
+        return json.dumps(users)
+
+    @pyqtSlot(str, result=bool)
+    def switchUser(self, user_id: str):
+        """切换用户 - 重新初始化 ProjectManager 和相关组件"""
+        main = self._get_main()
+        if not main:
+            return False
+        try:
+            # 保存当前用户状态
+            if main.project_mgr:
+                main.project_mgr._save_registry()
+            
+            # 切换用户ID
+            main.current_user_id = user_id or "default"
+            main.user_dir = os.path.join(main.data_dir, "users", main.current_user_id)
+            os.makedirs(main.user_dir, exist_ok=True)
+            os.makedirs(os.path.join(main.user_dir, "projects"), exist_ok=True)
+            os.makedirs(os.path.join(main.user_dir, "sessions"), exist_ok=True)
+            
+            # 重新初始化 ProjectManager
+            main.project_mgr = ProjectManager(
+                main.app_dir, 
+                main.exe_dir, 
+                data_dir=main.data_dir,
+                user_id=main.current_user_id
+            )
+            
+            # 重新加载环境配置
+            main.env_manager = EnvFileManager(os.path.join(main.user_dir, ".env"))
+            
+            # 更新当前项目状态
+            main.active_project_id = None
+            main.current_workspace = main.app_dir
+            active_proj = main.project_mgr.get_active_project()
+            if active_proj:
+                main.active_project_id = active_proj["id"]
+                main.current_workspace = active_proj.get("workspace_path") or main.app_dir
+            
+            return True
+        except Exception as e:
+            print(f"切换用户失败: {e}")
+            return False
+
     # ── 项目管理 API ──
 
     @pyqtSlot(result=str)
@@ -1578,10 +1726,14 @@ class BackendBridge(QObject):
             return False
         return main.project_mgr.delete_custom_template(template_id)
 
+    def _get_zhipu_keys_path(self) -> str:
+        """获取智谱API密钥存储路径，用户私密数据"""
+        return os.path.join(self.user_dir, "zhipu_keys.json")
+
     @pyqtSlot(str, result=bool)
     def saveZhipuKeys(self, keys_json: str):
         try:
-            keys_path = os.path.join(os.path.expanduser("~"), ".yunji", "zhipu_keys.json")
+            keys_path = self._get_zhipu_keys_path()
             os.makedirs(os.path.dirname(keys_path), exist_ok=True)
             with open(keys_path, "w", encoding="utf-8") as f:
                 f.write(keys_json)
@@ -1592,7 +1744,7 @@ class BackendBridge(QObject):
     @pyqtSlot(result=str)
     def loadZhipuKeys(self):
         try:
-            keys_path = os.path.join(os.path.expanduser("~"), ".yunji", "zhipu_keys.json")
+            keys_path = self._get_zhipu_keys_path()
             if os.path.exists(keys_path):
                 with open(keys_path, "r", encoding="utf-8") as f:
                     return f.read()
@@ -1772,9 +1924,13 @@ class BackendBridge(QObject):
             except Exception:
                 return False
 
+    def _get_plugins_dir(self) -> str:
+        """获取插件目录，公共数据"""
+        return os.path.join(self.public_dir, "plugins")
+
     @pyqtSlot(result=str)
     def listPlugins(self):
-        plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+        plugin_dir = self._get_plugins_dir()
         os.makedirs(plugin_dir, exist_ok=True)
         result = []
         for fname in os.listdir(plugin_dir):
@@ -1799,7 +1955,7 @@ class BackendBridge(QObject):
     def installPlugin(self, plugin_json: str):
         try:
             meta = json.loads(plugin_json)
-            plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+            plugin_dir = self._get_plugins_dir()
             os.makedirs(plugin_dir, exist_ok=True)
             meta_path = os.path.join(plugin_dir, f"{meta.get('id', 'unknown')}.json")
             with open(meta_path, "w", encoding="utf-8") as f:
@@ -1817,7 +1973,7 @@ class BackendBridge(QObject):
     @pyqtSlot(str, result=bool)
     def uninstallPlugin(self, plugin_id: str):
         try:
-            plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+            plugin_dir = self._get_plugins_dir()
             meta_path = os.path.join(plugin_dir, f"{plugin_id}.json")
             if os.path.exists(meta_path):
                 os.remove(meta_path)
@@ -1830,7 +1986,7 @@ class BackendBridge(QObject):
 
     @pyqtSlot(str, str, result=str)
     def executePlugin(self, plugin_id: str, input_data: str):
-        plugin_dir = os.path.join(os.path.expanduser("~"), ".yunji", "plugins")
+        plugin_dir = self._get_plugins_dir()
         code_path = os.path.join(plugin_dir, plugin_id, "index.js")
         if not os.path.exists(code_path):
             return json.dumps({"error": "插件未安装"})
@@ -1888,22 +2044,29 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
+    def _get_models_dir(self) -> str:
+        """获取模型目录，公共数据 (所有用户共享)"""
+        return os.path.join(self.public_dir, "models")
+
     @pyqtSlot(result=str)
     def getOfflineModels(self):
-        models_dir = os.path.join(os.path.expanduser("~"), ".yunji", "models")
+        # 模型是公共数据，所有用户共享
+        models_dir = self._get_models_dir()
         os.makedirs(models_dir, exist_ok=True)
         models = []
-        for fname in os.listdir(models_dir):
-            if fname.endswith(".gguf") or fname.endswith(".bin"):
-                fpath = os.path.join(models_dir, fname)
-                size_mb = os.path.getsize(fpath) / (1024 * 1024)
-                models.append({"name": fname, "path": fpath, "size_mb": round(size_mb, 1)})
+        if os.path.exists(models_dir):
+            for fname in os.listdir(models_dir):
+                if fname.endswith(".gguf") or fname.endswith(".bin"):
+                    fpath = os.path.join(models_dir, fname)
+                    size_mb = os.path.getsize(fpath) / (1024 * 1024)
+                    models.append({"name": fname, "path": fpath, "size_mb": round(size_mb, 1)})
         return json.dumps(models)
 
     @pyqtSlot(str, result=bool)
     def downloadModel(self, url: str):
         try:
-            models_dir = os.path.join(os.path.expanduser("~"), ".yunji", "models")
+            # 模型是公共数据，所有用户共享
+            models_dir = self._get_models_dir()
             os.makedirs(models_dir, exist_ok=True)
             fname = url.split("/")[-1] or "model.gguf"
             fpath = os.path.join(models_dir, fname)
@@ -2304,6 +2467,49 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"fetchApiKey异常: {e}"})
 
+    @pyqtSlot(result=str)
+    def listApiServices(self):
+        try:
+            return json.dumps({"ok": True, "services": backend.list_api_services()})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    @pyqtSlot(str, result=str)
+    def getApiServiceInfo(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            service_name = payload.get("service", "").strip()
+            return json.dumps(backend.get_api_service_info(service_name))
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    @pyqtSlot(str, result=str)
+    def stopServiceByPort(self, payload_json: str = "{}"):
+        try:
+            payload = json.loads(payload_json) if payload_json else {}
+            port = int(payload.get("port", 0))
+            if port:
+                backend._stop_port_service(port)
+            return json.dumps({"ok": True})
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    @pyqtSlot(result=str)
+    def startAllApiServices(self):
+        try:
+            result = backend.start_all_api_services()
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
+    @pyqtSlot(result=str)
+    def listAllModels(self):
+        try:
+            result = backend.list_all_models()
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"ok": False, "error": str(e)})
+
     @pyqtSlot(str, result=str)
     def startQwen2Api(self, payload_json: str = "{}"):
         try:
@@ -2618,6 +2824,10 @@ class BackendBridge(QObject):
                 api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777").strip()
                 api_model = (settings.get("API_MODEL", "") or "qwen3.6-plus").strip()
                 api_key = (settings.get("API_KEY", "") or "").strip()
+                auto_base = backend.resolve_api_base_url(api_model)
+                if auto_base != api_base:
+                    main.log_signal.emit(f"[路由] 模型={api_model} 自动路由 {api_base} → {auto_base}", "#2196F3")
+                    api_base = auto_base
                 is_zhipu = "bigmodel.cn" in api_base or "z.ai" in api_base or ":7780" in api_base
                 if is_zhipu:
                     zhipu_base = api_base.rstrip("/").removesuffix("/v1")
@@ -2761,15 +2971,17 @@ def _uuid() -> str:
 class EnvInstaller:
     """便携版环境下载与安装"""
 
-    def __init__(self, base_dir: str, log_func=None, progress_func=None):
+    def __init__(self, base_dir: str, log_func=None, progress_func=None, data_dir: str = None, temp_dir: str = None):
         self.base_dir = base_dir
+        self.data_dir = data_dir or base_dir
+        self.temp_dir = temp_dir or os.path.join(os.path.dirname(base_dir), "temp")
         self.log = log_func or (lambda *a: None)
         self.progress = progress_func
         self._mirror_key = "china"
 
     def _load_mirror(self):
         try:
-            fp = os.path.join(self.base_dir, MIRROR_SETTINGS_FILE)
+            fp = os.path.join(self.data_dir, MIRROR_SETTINGS_FILE)
             if os.path.isfile(fp):
                 with open(fp, "r", encoding="utf-8") as f:
                     key = f.read().strip()
@@ -2778,22 +2990,10 @@ class EnvInstaller:
         except Exception:
             pass
 
-        self.tray_icon = None
-        try:
-            from PyQt6.QtWidgets import QSystemTrayIcon
-            tray_icon = QSystemTrayIcon(self)
-            if os.path.exists(icon_path):
-                tray_icon.setIcon(QIcon(icon_path))
-            tray_icon.setToolTip(f"云集智能编程工作站 v{VERSION}")
-            tray_icon.show()
-            self.tray_icon = tray_icon
-        except Exception:
-            pass
-
     def _save_mirror(self, key: str):
         self._mirror_key = key
         try:
-            fp = os.path.join(self.base_dir, MIRROR_SETTINGS_FILE)
+            fp = os.path.join(self.data_dir, MIRROR_SETTINGS_FILE)
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(key)
         except Exception:
@@ -2830,7 +3030,7 @@ class EnvInstaller:
     @property
     def scripts_dir(self): return os.path.join(self.base_dir, "scripts")
     @property
-    def venv_dir(self): return os.path.join(self.scripts_dir, ".venv")
+    def venv_dir(self): return os.path.join(self.data_dir, ".venv")
     @property
     def venv_python(self):
         return os.path.join(self.venv_dir, "Scripts", "python.exe") if os.name == "nt" else os.path.join(self.venv_dir, "bin", "python")
@@ -2952,6 +3152,9 @@ class EnvInstaller:
                 env["PATH"] = self.node_extract + ";" + env.get("PATH", "")
             if os.path.exists(self.bun_extract):
                 env["PATH"] = self.bun_extract + ";" + env.get("PATH", "")
+            bun_cache_dir = os.path.join(self.temp_dir, "cache", "bun_cache")
+            os.makedirs(bun_cache_dir, exist_ok=True)
+            env["BUN_INSTALL_CACHE_DIR"] = bun_cache_dir
             subprocess.run([self.bun_exe, "config", "set", "registry", "https://registry.npmmirror.com"],
                            cwd=self.base_dir, env=env, startupinfo=self._si(), capture_output=True, timeout=30,
                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -3017,6 +3220,9 @@ class EnvInstaller:
                 env["PATH"] = self.node_extract + ";" + env.get("PATH", "")
             if os.path.exists(self.bun_extract):
                 env["PATH"] = self.bun_extract + ";" + env.get("PATH", "")
+            bun_cache_dir = os.path.join(self.temp_dir, "cache", "bun_cache")
+            os.makedirs(bun_cache_dir, exist_ok=True)
+            env["BUN_INSTALL_CACHE_DIR"] = bun_cache_dir
             r = subprocess.run([self.bun_exe, "run", "desktop:build"], cwd=self.base_dir, env=env,
                                startupinfo=self._si(), capture_output=True, text=True, timeout=120,
                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -3112,7 +3318,7 @@ try {{
         env["UV_PYTHON_INSTALL_DIR"] = self.uv_python_dir
         env["UV_PYTHON_DOWNLOADS"] = "auto"
         # 设置 UV 缓存目录设置到我们的 app 目录下，避免权限问题
-        uv_cache_dir = os.path.join(self.base_dir, ".uv_cache")
+        uv_cache_dir = os.path.join(self.temp_dir, "cache", "uv_cache")
         os.makedirs(uv_cache_dir, exist_ok=True)
         env["UV_CACHE_DIR"] = uv_cache_dir
         python_mirror = self.mirror.get("uv_python_mirror", "")
@@ -3128,35 +3334,33 @@ try {{
         if self.check_qwen2api():
             self.log("✓ API 服务依赖已安装")
             return True
-        qwen_dir = os.path.join(self.base_dir, "qwen2api")
-        if not os.path.isdir(qwen_dir):
-            self.log("⚠ 未找到 qwen2api 目录，跳过 API 服务依赖安装", "#FF9800")
-            return True
-        req_file = os.path.join(qwen_dir, "backend", "requirements.txt")
-        if not os.path.exists(req_file):
-            self.log("⚠ qwen2api/requirements.txt 不存在，跳过", "#FF9800")
-            return True
         if not self.install_uv():
             self.log("[错误] uv 安装失败，无法继续", "#F44336")
             return False
         try:
             env = self._uv_env()
 
-            # 获取绝对路径
             uv_exe_abs = os.path.abspath(self.uv_exe)
             venv_dir_abs = os.path.abspath(self.venv_dir)
             venv_python_abs = os.path.abspath(self.venv_python)
-            req_file_abs = os.path.abspath(req_file)
             base_dir_abs = os.path.abspath(self.base_dir)
 
-            # 确保脚本目录存在
-            scripts_dir = os.path.dirname(venv_dir_abs)
-            os.makedirs(scripts_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(venv_dir_abs), exist_ok=True)
 
-            # 检查虚拟环境是否完整
+            old_venv_dir = os.path.join(self.data_dir, "venvs", ".venv")
+            if os.path.isdir(old_venv_dir) and not os.path.isdir(venv_dir_abs):
+                self.log("  迁移旧虚拟环境: data/venvs/.venv → data/.venv")
+                try:
+                    shutil.move(old_venv_dir, venv_dir_abs)
+                    old_venvs_parent = os.path.join(self.data_dir, "venvs")
+                    if os.path.isdir(old_venvs_parent) and not os.listdir(old_venvs_parent):
+                        os.rmdir(old_venvs_parent)
+                    self.log("  ✓ 虚拟环境迁移完成")
+                except Exception as e:
+                    self.log(f"  迁移失败: {e}，将重新创建", "#FF9800")
+
             venv_valid = False
             if os.path.isfile(venv_python_abs):
-                # 检查是否有 pip
                 pip_exe = os.path.join(venv_dir_abs, "Scripts", "pip.exe")
                 if not os.path.exists(pip_exe):
                     pip_exe = os.path.join(venv_dir_abs, "bin", "pip")
@@ -3169,7 +3373,6 @@ try {{
             if not venv_valid:
                 self.log("正在创建虚拟环境...")
                 self.log(f"  虚拟环境目录: {venv_dir_abs}")
-                # 先删除旧的虚拟环境（如果存在）
                 if os.path.exists(venv_dir_abs):
                     import shutil
                     try:
@@ -3177,7 +3380,6 @@ try {{
                         self.log(f"  已清理旧的虚拟环境目录")
                     except Exception as e:
                         self.log(f"  警告：无法清理旧的虚拟环境目录: {e}")
-                # 直接用 Python 自带的 venv 来创建虚拟环境，更可靠
                 try:
                     import venv
                     self.log("  使用 Python venv 创建虚拟环境...")
@@ -3185,7 +3387,6 @@ try {{
                     self.log("  ✓ venv 创建成功")
                 except Exception as e:
                     self.log(f"  警告: venv 创建失败: {e}, 尝试用 uv...", "#FF9800")
-                    # 如果 venv 失败，再试 uv
                     r = subprocess.run(
                         [uv_exe_abs, "venv", self.venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
                         env=env, capture_output=True, text=True, timeout=600,
@@ -3198,10 +3399,8 @@ try {{
                             self.log(f"  stdout: {r.stdout[:500]}")
                         if r.stderr:
                             self.log(f"  stderr: {r.stderr[:500]}", "#FF9800")
-                # 验证虚拟环境是否创建成功
                 if not os.path.exists(venv_python_abs):
                     self.log(f"[错误] 找不到 python.exe: {venv_python_abs}", "#F44336")
-                    # 列出目录内容以调试
                     if os.path.exists(venv_dir_abs):
                         contents = os.listdir(venv_dir_abs)
                         self.log(f"  虚拟环境目录内容: {contents}")
@@ -3209,13 +3408,27 @@ try {{
                 self.log("✓ 虚拟环境已创建")
 
             self.log("正在安装 API 服务依赖...")
-            # 先确保 pip 是最新的
             pip_exe = os.path.join(venv_dir_abs, "Scripts", "pip.exe")
             if not os.path.exists(pip_exe):
                 pip_exe = os.path.join(venv_dir_abs, "bin", "pip")
+
+            req_files = []
+            for svc in ["qwen2api", "zhipu2api"]:
+                for candidate in [
+                    os.path.join(self.base_dir, "api", svc, "backend", "requirements.txt"),
+                    os.path.join(self.base_dir, "api", svc, "requirements.txt"),
+                ]:
+                    if os.path.exists(candidate):
+                        req_files.append(candidate)
+                        break
+
+            if not req_files:
+                self.log("⚠ 未找到任何 API 服务的 requirements.txt", "#FF9800")
+                return True
+
+            last_r = None
             if os.path.exists(pip_exe):
                 self.log(f"  使用 pip: {pip_exe}")
-                # 升级 pip
                 self.log("  升级 pip...")
                 subprocess.run(
                     [pip_exe, "install", "--upgrade", "pip"],
@@ -3223,31 +3436,38 @@ try {{
                     cwd=base_dir_abs,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
-                # 安装依赖
-                self.log("  安装依赖包...")
-                r = subprocess.run(
-                    [pip_exe, "install", "-r", req_file_abs],
-                    env=env, capture_output=True, text=True, timeout=600,
-                    cwd=base_dir_abs,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
+                for rf in req_files:
+                    self.log(f"  安装 {os.path.basename(os.path.dirname(rf))} 依赖...")
+                    last_r = subprocess.run(
+                        [pip_exe, "install", "-r", rf],
+                        env=env, capture_output=True, text=True, timeout=600,
+                        cwd=base_dir_abs,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                    if last_r.returncode != 0:
+                        break
             else:
                 self.log(f"  警告: pip.exe 不存在，尝试用 uv pip")
-                # 备选：用 venv 的目录作为 cwd 来运行 uv pip
-                r = subprocess.run(
-                    [uv_exe_abs, "pip", "install", "-r", req_file],
-                    env=env, capture_output=True, text=True, timeout=600,
-                    cwd=venv_dir_abs,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            if r.returncode == 0:
+                for rf in req_files:
+                    self.log(f"  安装 {os.path.basename(os.path.dirname(rf))} 依赖...")
+                    last_r = subprocess.run(
+                        [uv_exe_abs, "pip", "install", "-r", rf],
+                        env=env, capture_output=True, text=True, timeout=600,
+                        cwd=venv_dir_abs,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                    if last_r.returncode != 0:
+                        break
+
+            if last_r and last_r.returncode == 0:
                 self.log("✓ API 服务依赖安装完成")
                 return True
-            self.log(f"[警告] API 服务依赖安装返回码: {r.returncode}", "#FF9800")
-            if r.stdout:
-                self.log(f"  stdout: {r.stdout[:500]}")
-            if r.stderr:
-                self.log(f"  stderr: {r.stderr[:500]}", "#FF9800")
+            if last_r:
+                self.log(f"[警告] API 服务依赖安装返回码: {last_r.returncode}", "#FF9800")
+                if last_r.stdout:
+                    self.log(f"  stdout: {last_r.stdout[:500]}")
+                if last_r.stderr:
+                    self.log(f"  stderr: {last_r.stderr[:500]}", "#FF9800")
             return False
         except Exception as e:
             self.log(f"[错误] API 服务依赖安装失败: {e}", "#F44336")
@@ -3376,7 +3596,7 @@ class MainWindow(QMainWindow):
             if hasattr(sys, '_MEIPASS'):
                 icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
             elif hasattr(sys, 'frozen'):
-                icon_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
+                icon_path = os.path.join(os.path.dirname(sys.executable), 'app', 'icon.ico')
             else:
                 icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
             if os.path.exists(icon_path):
@@ -3395,39 +3615,117 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        # 基础目录
-        # 架构（对齐参考项目）：
-        #   dev/*.exe      = 开发测试 EXE（gitignore，不推送）
-        #   dev/_internal/ = PyInstaller 运行时（gitignore，不推送）
-        #   dev/app/       = 资源目录（main.py, desktop/, nodejs/ 等，git 管理）
-        #   dev/ver/*.exe  = 稳定版 EXE（git 跟踪，推送）
-        #   dev/           = Git 仓库根目录
-        #
-        # --onedir 打包后：EXE 在 dev/ 下，_internal/ 也在 dev/ 下
-        #   desktop/、nodejs/ 等资源在 dev/app/ 下
-        # 开发模式：main.py 在 dev/app/ 下
+        # 基础目录（三目录架构）
+        # 架构说明：
+        #   YunJiSmartIDE/           = 安装目录
+        #   ├── YunJiSmartIDE.exe    = 主程序
+        #   ├── app/                 = 应用程序（只读资源）
+        #   │   ├── main.py
+        #   │   ├── desktop/dist/
+        #   │   ├── nodejs/
+        #   │   ├── api/qwen2api/
+        #   │   └── api/zhipu2api/
+        #   ├── data/                = 用户数据（可写，需备份）
+        #   │   ├── .env
+        #   │   ├── projects/
+        #   │   ├── sessions/
+        #   │   ├── api/qwen2api/
+        #   │   ├── api/zhipu2api/
+        #   │   └── .venv/
+        #   └── temp/                = 临时文件（可清空）
+        #       ├── logs/
+        #       ├── cache/
+        #       └── debug/
+        
         if hasattr(sys, 'frozen'):
-            # PyInstaller 打包模式：EXE 在 dev/ 下
+            # PyInstaller 打包模式
             exe_dir = os.path.abspath(os.path.dirname(sys.executable))
-            self.base_dir = exe_dir       # dev/（EXE 所在目录）
-            self.app_dir = os.path.join(exe_dir, "app")  # dev/app/（资源目录）
-            self.dev_dir = exe_dir        # dev/ = Git 仓库根
+            self.exe_dir = exe_dir
+            self.app_dir = os.path.join(exe_dir, "app")
+            self.data_dir = os.path.join(exe_dir, "data")
+            self.temp_dir = os.path.join(exe_dir, "temp")
         else:
-            self.base_dir = os.path.dirname(os.path.abspath(__file__))  # dev/app/（脚本所在）
-            self.app_dir = self.base_dir  # 开发模式：main.py 在 dev/app/ 下
-            self.dev_dir = os.path.dirname(self.base_dir)  # dev/
+            # 开发模式：main.py 在 dev/app/ 下
+            script_dir = os.path.dirname(os.path.abspath(__file__))  # dev/app/
+            self.exe_dir = os.path.dirname(script_dir)  # dev/
+            self.app_dir = script_dir
+            self.data_dir = os.path.join(self.exe_dir, "data")
+            self.temp_dir = os.path.join(self.exe_dir, "temp")
+        
+        # 确保目录存在
+        os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # ============================================
+        # 数据分级架构 (类似 Windows 用户目录逻辑)
+        # ============================================
+        # 
+        # data/                          ← 数据根目录
+        # ├── public/                    ← 公共数据 (所有用户共享)
+        # │   ├── models/               ← AI模型文件
+        # │   ├── templates/            ← 共享模板
+        # │   ├── plugins/              ← 插件
+        # │   └── api/                  ← API服务配置
+        # │       ├── qwen2api/
+        # │       └── zhipu2api/
+        # │
+        # └── users/                     ← 用户数据隔离目录
+        #     └── default/              ← 默认本地用户 (未登录)
+        #         ├── projects/         ← 项目注册表
+        #         ├── sessions/         ← AI会话数据
+        #         ├── .env              ← 用户环境配置 (API密钥等)
+        #         └── zhipu_keys.json   ← 用户私密密钥
+        #
+        # 未来多用户登录:
+        #     users/
+        #     ├── default/              ← 本地用户
+        #     ├── user_abc123/          ← 登录用户A
+        #     └── user_def456/          ← 登录用户B
+        #
+        # ============================================
+        
+        # 公共数据目录
+        self.public_dir = os.path.join(self.data_dir, "public")
+        os.makedirs(os.path.join(self.public_dir, "models"), exist_ok=True)
+        os.makedirs(os.path.join(self.public_dir, "templates"), exist_ok=True)
+        os.makedirs(os.path.join(self.public_dir, "plugins"), exist_ok=True)
+        os.makedirs(os.path.join(self.public_dir, "api", "qwen2api"), exist_ok=True)
+        os.makedirs(os.path.join(self.public_dir, "api", "zhipu2api"), exist_ok=True)
+        
+        # 用户数据目录 (当前默认用户)
+        self.current_user_id = "default"
+        self.user_dir = os.path.join(self.data_dir, "users", self.current_user_id)
+        os.makedirs(self.user_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.user_dir, "projects"), exist_ok=True)
+        os.makedirs(os.path.join(self.user_dir, "sessions"), exist_ok=True)
+        
+        # 临时目录
+        os.makedirs(os.path.join(self.temp_dir, "logs"), exist_ok=True)
+        os.makedirs(os.path.join(self.temp_dir, "cache"), exist_ok=True)
+        os.makedirs(os.path.join(self.temp_dir, "debug"), exist_ok=True)
+        os.makedirs(os.path.join(self.temp_dir, "tmp"), exist_ok=True)
 
-        # 初始化后端（desktop/、nodejs/ 等资源在 app_dir 下）
-        self.env_manager = EnvFileManager(os.path.join(self.app_dir, ".env"))
+        # 初始化后端组件
+        # .env 文件现在在 data/users/default/ 目录下 (用户级私密配置)
+        self.env_manager = EnvFileManager(os.path.join(self.user_dir, ".env"))
+        
         self.cli_runner = ClaudeCliRunner(
             self.app_dir,
             os.path.join(self.app_dir, "nodejs", NODE_DIR_NAME),
             os.path.join(self.app_dir, "bun", BUN_DIR_NAME),
         )
-        # 恢复原始设计：EnvInstaller 的 base_dir 是 app_dir，所有资源都在 app/ 目录里
-        self.installer = EnvInstaller(self.app_dir)
-        self.updater = SoftwareUpdater(self.dev_dir)
-        self.project_mgr = ProjectManager(self.app_dir, self.base_dir)
+        
+        # EnvInstaller: base_dir=app_dir(资源), data_dir=data_dir(用户设置)
+        self.installer = EnvInstaller(self.app_dir, data_dir=self.data_dir, temp_dir=self.temp_dir)
+        self.updater = SoftwareUpdater(self.exe_dir)
+        
+        # ProjectManager 需要知道 data_dir 和 user_id
+        self.project_mgr = ProjectManager(
+            self.app_dir, 
+            self.exe_dir, 
+            data_dir=self.data_dir,
+            user_id=self.current_user_id
+        )
 
         # 状态
         self.active_session_id = _uuid()
@@ -3601,7 +3899,8 @@ class MainWindow(QMainWindow):
         self.web_view = QWebEngineView()
         self.web_view.setPage(ChineseWebPage(self.web_view))
         profile = self.web_view.page().profile()
-        storage_path = os.path.join(os.path.expanduser("~"), ".yunji", "webdata")
+        # Web存储路径: 用户级数据 (跟随用户隔离)
+        storage_path = os.path.join(self.user_dir, "webdata")
         os.makedirs(storage_path, exist_ok=True)
         profile.setPersistentStoragePath(storage_path)
         profile.setHttpCacheMaximumSize(50 * 1024 * 1024)
@@ -4635,7 +4934,7 @@ def main():
         if hasattr(sys, '_MEIPASS'):
             icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
         elif hasattr(sys, 'frozen'):
-            icon_path = os.path.join(os.path.dirname(sys.executable), 'icon.ico')
+            icon_path = os.path.join(os.path.dirname(sys.executable), 'app', 'icon.ico')
         else:
             icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icon.ico')
         if os.path.exists(icon_path):

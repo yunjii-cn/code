@@ -1,12 +1,14 @@
 Set-Location $PSScriptRoot
 Set-Location ..
 
+$projectRoot = Get-Location
+
 Write-Output "============================================================"
 Write-Output "  YUNJII-CODE - 启动脚本"
 Write-Output "============================================================"
 Write-Output ""
 
-Write-Output "🚀 启动 YUNJII-CODE..."
+Write-Output "📂 工作目录: $projectRoot"
 Write-Output ""
 
 python main.py
