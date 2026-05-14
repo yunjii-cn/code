@@ -13,6 +13,9 @@
 
 import os
 import sys
+
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import json
 import re
 import uuid
@@ -553,6 +556,26 @@ def check_api_service(base_url: str, timeout_ms: int = 5000) -> dict:
         if result["ok"]:
             info = {"ok": True, "running": True}
             try:
+                models_result = fetch_json_with_timeout(
+                    f"{base.rstrip('/')}/v1/models",
+                    headers={"Content-Type": "application/json", "Authorization": "Bearer admin"},
+                    timeout_ms=timeout_ms,
+                )
+                if models_result["ok"]:
+                    models_data = (models_result.get("data") or {}).get("data") or []
+                    if models_data:
+                        owners = set(m.get("owned_by", "") for m in models_data)
+                        if "zhipu" in owners:
+                            info["serviceType"] = "zhipu"
+                        elif "qwen" in owners:
+                            info["serviceType"] = "qwen"
+                        else:
+                            info["serviceType"] = "unknown"
+                    else:
+                        info["serviceType"] = "unknown"
+            except Exception:
+                pass
+            try:
                 acct_result = fetch_json_with_timeout(
                     f"{base.rstrip('/')}/api/admin/accounts",
                     headers={"Content-Type": "application/json", "Authorization": "Bearer admin"},
@@ -791,10 +814,12 @@ _register_state = {
 
 
 def _get_qwen2api_log_path() -> str:
-    app_dir = _app_dir()
-    qwen_dir = Path(app_dir) / "qwen2api"
-    if qwen_dir.exists():
-        return str(qwen_dir / "data" / "qwen2api.log")
+    log_path = _get_log_path("qwen2api.log")
+    if os.path.isfile(log_path):
+        return log_path
+    old_dir = Path(_app_dir()) / "qwen2api" / "data"
+    if old_dir.exists():
+        return str(old_dir / "qwen2api.log")
     return ""
 
 
@@ -978,11 +1003,81 @@ MIRROR_SOURCES = {
     },
 }
 
-def _app_dir() -> str:
+def _exe_dir() -> str:
+    """获取安装根目录（三目录架构的根）
+
+    三目录架构：
+      根目录/
+      ├── app/     = 应用程序（只读资源）
+      ├── data/    = 用户数据（可写，需备份）
+      └── temp/    = 临时文件（可清空）
+
+    打包模式：根目录 = EXE 所在目录
+    开发模式：根目录 = dev/（backend.py 在 dev/app/ 下）
+    """
     if getattr(sys, 'frozen', False):
-        exe_dir = os.path.abspath(os.path.dirname(sys.executable))
-        return os.path.join(exe_dir, "app")
-    return str(Path(__file__).resolve().parent)
+        return os.path.abspath(os.path.dirname(sys.executable))
+    else:
+        return str(Path(__file__).resolve().parent.parent)
+
+def _app_dir() -> str:
+    """获取 app/ 目录（只读资源：代码、脚本、便携工具）"""
+    return os.path.join(_exe_dir(), "app")
+
+def _data_dir() -> str:
+    """获取 data/ 目录（用户数据：虚拟环境、项目、会话、配置）"""
+    return _ensure_dir(os.path.join(_exe_dir(), "data"))
+
+def _temp_dir() -> str:
+    """获取 temp/ 目录（临时文件：日志、缓存、调试）"""
+    return _ensure_dir(os.path.join(_exe_dir(), "temp"))
+
+def _ensure_dir(path: str) -> str:
+    """确保目录存在并返回路径"""
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def _get_api_code_dir(service_name: str) -> str:
+    """获取 API 服务代码目录（app/api/xxx/）"""
+    return os.path.join(_app_dir(), "api", service_name)
+
+def _get_api_data_dir(service_name: str) -> str:
+    """获取 API 服务数据目录（data/api/xxx/）"""
+    return _ensure_dir(os.path.join(_data_dir(), "api", service_name))
+
+def _get_api_venv_dir(service_name: str = "") -> str:
+    """获取虚拟环境目录（data/.venv/）"""
+    return os.path.join(_data_dir(), ".venv")
+
+def _get_log_path(log_name: str) -> str:
+    """获取日志文件路径（temp/logs/xxx.log）"""
+    return os.path.join(_temp_dir(), "logs", log_name)
+
+def _get_cache_dir(cache_type: str) -> str:
+    """获取缓存目录（temp/cache/xxx/）"""
+    return _ensure_dir(os.path.join(_temp_dir(), "cache", cache_type))
+
+def _get_debug_path(debug_file: str) -> str:
+    """获取调试文件路径（temp/debug/xxx）"""
+    return os.path.join(_temp_dir(), "debug", debug_file)
+
+def _get_venv_python(venv_dir: str) -> str:
+    """获取虚拟环境的 Python 解释器路径"""
+    if os.name == "nt":
+        return os.path.join(venv_dir, "Scripts", "python.exe")
+    return os.path.join(venv_dir, "bin", "python")
+
+def _check_deps_installed(venv_python: str) -> bool:
+    """检查依赖是否已安装"""
+    try:
+        result = subprocess.run(
+            [venv_python, "-c", "import fastapi"],
+            capture_output=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except:
+        return False
 
 def _uv_exe() -> str:
     return os.path.join(_app_dir(), "uv", "uv.exe")
@@ -990,18 +1085,127 @@ def _uv_exe() -> str:
 def _uv_python_dir() -> str:
     return os.path.join(_app_dir(), "python")
 
+API_SERVICE_REGISTRY = {
+    "qwen2api": {
+        "label": "千问",
+        "default_port": 7777,
+        "code_dir": "api/qwen2api",
+        "entry_module": "qwen2api.main:app",
+        "service_type": "qwen",
+        "data_dir": "api/qwen2api",
+        "model_prefixes": ["qwen"],
+    },
+    "zhipu2api": {
+        "label": "智谱",
+        "default_port": 7780,
+        "code_dir": "api/zhipu2api",
+        "entry_module": "zhipu2api.main:app",
+        "service_type": "zhipu",
+        "data_dir": "api/zhipu2api",
+        "model_prefixes": ["glm", "chatglm"],
+    },
+}
+
+def get_api_service_info(service_name: str) -> dict:
+    if service_name not in API_SERVICE_REGISTRY:
+        return {"ok": False, "error": f"未知服务: {service_name}"}
+    reg = API_SERVICE_REGISTRY[service_name]
+    return {
+        "ok": True,
+        "name": service_name,
+        "label": reg["label"],
+        "defaultPort": reg["default_port"],
+        "serviceType": reg["service_type"],
+        "codeDir": os.path.join(_app_dir(), reg["code_dir"]),
+        "dataDir": _get_api_data_dir(reg["data_dir"].split("/")[-1]),
+        "venvDir": _get_api_venv_dir(),
+        "venvPython": _get_venv_python(_get_api_venv_dir()),
+    }
+
+def list_api_services() -> list:
+    result = []
+    for name, reg in API_SERVICE_REGISTRY.items():
+        info = get_api_service_info(name)
+        info.pop("ok", None)
+        result.append(info)
+    return result
+
+def resolve_api_base_url(model: str) -> str:
+    """根据模型名自动解析对应的 API 服务地址"""
+    model_lower = model.lower()
+    for name, reg in API_SERVICE_REGISTRY.items():
+        for prefix in reg.get("model_prefixes", []):
+            if model_lower.startswith(prefix):
+                return f"http://127.0.0.1:{reg['default_port']}"
+    if model_lower.startswith("glm"):
+        return f"http://127.0.0.1:{API_SERVICE_REGISTRY['zhipu2api']['default_port']}"
+    return f"http://127.0.0.1:{API_SERVICE_REGISTRY['qwen2api']['default_port']}"
+
+def start_all_api_services() -> dict:
+    """一键启动所有 API 服务"""
+    results = {}
+    all_ok = True
+    for name, reg in API_SERVICE_REGISTRY.items():
+        base_url = f"http://127.0.0.1:{reg['default_port']}"
+        chk = check_api_service(base_url)
+        if chk.get("running") and chk.get("serviceType") == reg["service_type"]:
+            results[name] = {"ok": True, "message": f"{reg['label']}服务已运行", "alreadyRunning": True}
+            continue
+        if chk.get("running") and chk.get("serviceType") != reg["service_type"]:
+            _stop_port_service(reg["default_port"])
+            time.sleep(1)
+        if name == "qwen2api":
+            r = start_qwen2api(port=reg["default_port"])
+        elif name == "zhipu2api":
+            r = start_zhipu2api(port=reg["default_port"])
+        else:
+            results[name] = {"ok": False, "error": f"未知服务: {name}"}
+            all_ok = False
+            continue
+        if r.get("ok"):
+            for _ in range(15):
+                time.sleep(1)
+                chk2 = check_api_service(base_url)
+                if chk2.get("running") and chk2.get("serviceType") == reg["service_type"]:
+                    results[name] = {"ok": True, "message": f"{reg['label']}服务已启动"}
+                    break
+            else:
+                results[name] = {"ok": False, "error": f"{reg['label']}服务启动超时"}
+                all_ok = False
+        else:
+            results[name] = r
+            all_ok = False
+    return {"ok": all_ok, "services": results}
+
+def list_all_models() -> dict:
+    """合并所有运行中服务的模型列表"""
+    all_models = []
+    for name, reg in API_SERVICE_REGISTRY.items():
+        base_url = f"http://127.0.0.1:{reg['default_port']}"
+        try:
+            result = fetch_json_with_timeout(
+                f"{base_url}/v1/models",
+                headers={"Content-Type": "application/json", "Authorization": "Bearer admin"},
+                timeout_ms=5000,
+            )
+            if result.get("ok"):
+                models_data = (result.get("data") or {}).get("data") or []
+                all_models.extend(models_data)
+        except Exception:
+            pass
+    return {"ok": True, "models": all_models}
+
 def _qwen2api_venv_python() -> str:
-    venv_dir = os.path.join(_app_dir(), "scripts", ".venv")
-    if os.name == "nt":
-        return os.path.join(venv_dir, "Scripts", "python.exe")
-    return os.path.join(venv_dir, "bin", "python")
+    """获取 qwen2api 虚拟环境的 Python 解释器路径（兼容旧代码）"""
+    venv_dir = _get_api_venv_dir("qwen2api")
+    return _get_venv_python(venv_dir)
 
 def _qwen2api_venv_exists() -> bool:
     return os.path.isfile(_qwen2api_venv_python())
 
 def _load_mirror_key() -> str:
     try:
-        fp = os.path.join(_app_dir(), "mirror_source.json")
+        fp = os.path.join(_data_dir(), "mirror_source.json")
         if os.path.isfile(fp):
             with open(fp, "r", encoding="utf-8") as f:
                 key = f.read().strip()
@@ -1015,6 +1219,9 @@ def _uv_env() -> dict:
     env = os.environ.copy()
     env["UV_PYTHON_INSTALL_DIR"] = _uv_python_dir()
     env["UV_PYTHON_DOWNLOADS"] = "auto"
+    uv_cache_dir = os.path.join(_temp_dir(), "cache", "uv_cache")
+    os.makedirs(uv_cache_dir, exist_ok=True)
+    env["UV_CACHE_DIR"] = uv_cache_dir
     mirror = MIRROR_SOURCES.get(_load_mirror_key(), MIRROR_SOURCES["china"])
     python_mirror = mirror.get("uv_python_mirror", "")
     if python_mirror:
@@ -1042,28 +1249,9 @@ def _check_qwen2api_deps() -> bool:
 
 _qwen2api_proc = None
 
-def stop_qwen2api(base_url: str = "") -> dict:
-    global _qwen2api_proc
+def _stop_port_service(port: int) -> bool:
     stopped = False
-    if _qwen2api_proc is not None and _qwen2api_proc.poll() is None:
-        try:
-            _qwen2api_proc.terminate()
-            try:
-                _qwen2api_proc.wait(timeout=10)
-            except Exception:
-                _qwen2api_proc.kill()
-                try:
-                    _qwen2api_proc.wait(timeout=5)
-                except Exception:
-                    pass
-            stopped = True
-        except Exception:
-            pass
-        _qwen2api_proc = None
-
-    port = _extract_port(base_url, 7777)
     try:
-        import subprocess
         r = subprocess.run(
             ["netstat", "-ano"],
             capture_output=True, text=True, timeout=10,
@@ -1091,6 +1279,30 @@ def stop_qwen2api(base_url: str = "") -> dict:
                 break
     except Exception:
         pass
+    return stopped
+
+def stop_qwen2api(base_url: str = "") -> dict:
+    global _qwen2api_proc
+    stopped = False
+    if _qwen2api_proc is not None and _qwen2api_proc.poll() is None:
+        try:
+            _qwen2api_proc.terminate()
+            try:
+                _qwen2api_proc.wait(timeout=10)
+            except Exception:
+                _qwen2api_proc.kill()
+                try:
+                    _qwen2api_proc.wait(timeout=5)
+                except Exception:
+                    pass
+            stopped = True
+        except Exception:
+            pass
+        _qwen2api_proc = None
+
+    port = _extract_port(base_url, 7777)
+    if _stop_port_service(port):
+        stopped = True
 
     if stopped:
         return {"ok": True, "message": "API 服务已停止"}
@@ -1098,105 +1310,117 @@ def stop_qwen2api(base_url: str = "") -> dict:
 
 def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "admin") -> dict:
     global _qwen2api_proc
+    
+    # 1. 确定代码目录（从 app/api/qwen2api/ 读取）
+    qwen_code_dir = project_dir.strip()
+    if not qwen_code_dir:
+        qwen_code_dir = _get_api_code_dir("qwen2api")
+    
+    if not Path(qwen_code_dir).exists():
+        return {"ok": False, "error": f"未找到 qwen2api 目录: {qwen_code_dir}"}
+    
+    # 2. 确定数据目录（data/api/qwen2api/）
+    qwen_data_dir = _get_api_data_dir("qwen2api")
+    
+    # 3. 确定虚拟环境目录（data/.venv/）
+    venv_dir = _get_api_venv_dir("qwen2api")
+    venv_python = _get_venv_python(venv_dir)
 
-    _debug_log = []
-    _debug_log.append(f"_app_dir={_app_dir()}")
-    _debug_log.append(f"frozen={getattr(sys, 'frozen', False)}")
-    _debug_log.append(f"exe={getattr(sys, 'executable', '')}")
-    _debug_log.append(f"__file__={__file__}")
+    # 3.5 迁移旧虚拟环境（data/venvs/.venv → data/.venv）
+    old_venv_dir = os.path.join(_data_dir(), "venvs", ".venv")
+    if os.path.isdir(old_venv_dir) and not os.path.isdir(venv_dir):
+        try:
+            shutil.move(old_venv_dir, venv_dir)
+            old_venvs_parent = os.path.join(_data_dir(), "venvs")
+            if os.path.isdir(old_venvs_parent) and not os.listdir(old_venvs_parent):
+                os.rmdir(old_venvs_parent)
+        except Exception:
+            pass
 
-    try:
-        _debug_path = os.path.join(os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)), "start_qwen2api_debug.log")
-        with open(_debug_path, "w", encoding="utf-8") as _df:
-            _df.write("\n".join(_debug_log) + "\n")
-    except Exception:
-        pass
-
-    base = f"http://127.0.0.1:{port}"
-    status = check_api_service(base)
-    if status.get("running"):
-        return {"ok": True, "message": "API 服务已在运行", "baseUrl": base}
-
-    if _qwen2api_proc and _qwen2api_proc.poll() is None:
-        return {"ok": True, "message": "API 服务正在启动中", "baseUrl": base}
-
-    qwen_dir = project_dir.strip()
-    if not qwen_dir:
-        app_qwen_dir = Path(_app_dir()) / "qwen2api"
-        _debug_log.append(f"app_qwen_dir={app_qwen_dir}")
-        _debug_log.append(f"app_qwen_dir.exists={app_qwen_dir.exists()}")
-        if app_qwen_dir.exists():
-            qwen_dir = str(app_qwen_dir)
-        else:
-            debug_info = " | ".join(_debug_log)
-            return {"ok": False, "error": f"未找到 qwen2api 目录: {app_qwen_dir} [{debug_info}]"}
-
-    if not Path(qwen_dir).exists():
-        return {"ok": False, "error": f"qwen2api 目录不存在: {qwen_dir}"}
-
-    venv_python = _qwen2api_venv_python()
-    _debug_log.append(f"venv_python={venv_python}")
-    _debug_log.append(f"venv_python.exists={os.path.isfile(venv_python)}")
-    venv_dir = os.path.join(_app_dir(), "scripts", ".venv")
+    # 4. 检查并安装依赖
     uv = _uv_exe()
-    _debug_log.append(f"uv={uv}")
-    _debug_log.append(f"uv.exists={os.path.isfile(uv)}")
+    if not os.path.isfile(venv_python):
+        if not os.path.isfile(uv):
+            return {"ok": False, "error": "uv 未安装，请先在部署维护中安装 uv"}
+        try:
+            subprocess.check_call(
+                [uv, "venv", venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                env=_uv_env(),
+                timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
+    
+    req_file = Path(qwen_code_dir) / "backend" / "requirements.txt"
+    if req_file.exists() and not _check_deps_installed(venv_python):
+        try:
+            subprocess.check_call(
+                [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
+                env=_uv_env(),
+                timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"安装 API 服务依赖失败: {e}"}
+    
+    # 5. 设置环境变量
     env = _uv_env()
-
-    if not _check_qwen2api_deps():
-        if not os.path.isfile(venv_python):
-            if not os.path.isfile(uv):
-                return {"ok": False, "error": "uv 未安装，请先在部署维护中安装 uv"}
-            try:
-                subprocess.check_call(
-                    [uv, "venv", venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
-                    env=env,
-                    timeout=300,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except Exception as e:
-                return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
-
-        req_file = Path(qwen_dir) / "backend" / "requirements.txt"
-        if req_file.exists():
-            try:
-                subprocess.check_call(
-                    [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
-                    env=env,
-                    timeout=300,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except Exception as e:
-                return {"ok": False, "error": f"安装 API 服务依赖失败: {e}"}
-
     env.update({
-        "PYTHONPATH": str(qwen_dir),
+        "PYTHONPATH": str(qwen_code_dir),
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
         "PORT": str(port),
         "ADMIN_KEY": admin_key,
         "WORKERS": "1",
         "ENGINE_MODE": "httpx",
         "LOG_LEVEL": "WARNING",
-        "ACCOUNTS_FILE": str(Path(qwen_dir) / "data" / "accounts.json"),
-        "USERS_FILE": str(Path(qwen_dir) / "data" / "users.json"),
+        "ACCOUNTS_FILE": str(Path(qwen_data_dir) / "accounts.json"),
+        "USERS_FILE": str(Path(qwen_data_dir) / "users.json"),
+        "CAPTURES_FILE": str(Path(qwen_data_dir) / "captures.json"),
+        "CONFIG_FILE": str(Path(qwen_data_dir) / "config.json"),
+        "QWEN_DATA_DIR": str(qwen_data_dir),
         "VIRTUAL_ENV": venv_dir,
+        "PYDANTIC_SETTINGS_DISABLE_DOTENV": "1",
     })
-
-    data_dir = Path(qwen_dir) / "data"
-    data_dir.mkdir(exist_ok=True)
-
-    log_path = Path(qwen_dir) / "data" / "qwen2api.log"
+    
+    # 6. 确保数据目录存在
+    Path(qwen_data_dir).mkdir(exist_ok=True)
+    
+    # 7. 日志文件路径（temp/logs/qwen2api.log）
+    log_path = _get_log_path("qwen2api.log")
     try:
         log_file = open(log_path, "a", encoding="utf-8")
     except Exception:
         log_file = subprocess.PIPE
-
+    
+    # 8. 调试日志（temp/debug/start_qwen2api_debug.log）
+    debug_path = _get_debug_path("start_qwen2api_debug.log")
+    try:
+        with open(debug_path, "w", encoding="utf-8") as df:
+            df.write(f"qwen_code_dir={qwen_code_dir}\n")
+            df.write(f"qwen_data_dir={qwen_data_dir}\n")
+            df.write(f"venv_dir={venv_dir}\n")
+            df.write(f"log_path={log_path}\n")
+    except:
+        pass
+    
+    # 9. 检查服务是否已在运行
+    base = f"http://127.0.0.1:{port}"
+    status = check_api_service(base)
+    if status.get("running"):
+        return {"ok": True, "message": "API 服务已在运行", "baseUrl": base}
+    
+    if _qwen2api_proc and _qwen2api_proc.poll() is None:
+        return {"ok": True, "message": "API 服务正在启动中", "baseUrl": base}
+    
+    # 10. 启动子进程
     try:
         proc = subprocess.Popen(
             [venv_python, "-m", "uvicorn", "backend.main:app",
              "--host", "0.0.0.0", "--port", str(port), "--workers", "1"],
-            cwd=qwen_dir,
+            cwd=qwen_code_dir,
             env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -1207,8 +1431,9 @@ def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "ad
         if log_file != subprocess.PIPE:
             try: log_file.close()
             except: pass
-        return {"ok": False, "error": f"启动 API 服务失败: {e} [{chr(124).join(_debug_log)}]"}
-
+        return {"ok": False, "error": f"启动失败: {e}"}
+    
+    # 11. 等待启动
     import time as _time
     _time.sleep(2)
     if proc.poll() is not None:
@@ -1222,29 +1447,17 @@ def start_qwen2api(project_dir: str = "", port: int = 7777, admin_key: str = "ad
                     err_msg = tail.strip().split("\n")[-1][:200]
             except:
                 pass
-        _debug_log.append(f"RESULT=进程意外退出 err_msg={err_msg}")
-        try:
-            with open(_debug_path, "a", encoding="utf-8") as _df:
-                _df.write("\n".join(_debug_log) + "\n")
-        except: pass
-        return {"ok": False, "error": f"API 服务启动失败: {err_msg}", "logPath": str(log_path), "debug": " | ".join(_debug_log)}
-
-    _debug_log.append("RESULT=ok")
-    try:
-        with open(_debug_path, "a", encoding="utf-8") as _df:
-            _df.write("\n".join(_debug_log) + "\n")
-    except: pass
-    return {"ok": True, "message": "API 服务正在启动，请稍候检查状态", "baseUrl": base, "pid": proc.pid, "logPath": str(log_path)}
+        return {"ok": False, "error": f"启动失败: {err_msg}", "logPath": log_path}
+    
+    return {"ok": True, "message": "服务已启动", "baseUrl": base, "pid": proc.pid, "logPath": log_path}
 
 
 # ── 智谱 API 代理服务 ──
 _zhipu2api_proc = None
 
 def _zhipu2api_venv_python():
-    venv_dir = os.path.join(_app_dir(), "scripts", ".zhipu_venv")
-    if os.name == "nt":
-        return os.path.join(venv_dir, "Scripts", "python.exe")
-    return os.path.join(venv_dir, "bin", "python")
+    venv_dir = _get_api_venv_dir("zhipu2api")
+    return _get_venv_python(venv_dir)
 
 def _check_zhipu2api_deps():
     vp = _zhipu2api_venv_python()
@@ -1263,7 +1476,85 @@ def _check_zhipu2api_deps():
 
 def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "admin") -> dict:
     global _zhipu2api_proc
+    
+    # 1. 确定代码目录（从 app/api/zhipu2api/ 读取）
+    zhipu_code_dir = project_dir.strip()
+    if not zhipu_code_dir:
+        zhipu_code_dir = _get_api_code_dir("zhipu2api")
+    
+    if not Path(zhipu_code_dir).exists():
+        return {"ok": False, "error": f"未找到 zhipu2api 目录: {zhipu_code_dir}"}
+    
+    # 2. 确定数据目录（data/api/zhipu2api/）
+    zhipu_data_dir = _get_api_data_dir("zhipu2api")
+    
+    # 3. 确定虚拟环境目录（data/.venv/）
+    venv_dir = _get_api_venv_dir("zhipu2api")
+    venv_python = _get_venv_python(venv_dir)
 
+    # 3.5 迁移旧虚拟环境（data/venvs/.venv → data/.venv）
+    old_venv_dir = os.path.join(_data_dir(), "venvs", ".venv")
+    if os.path.isdir(old_venv_dir) and not os.path.isdir(venv_dir):
+        try:
+            shutil.move(old_venv_dir, venv_dir)
+            old_venvs_parent = os.path.join(_data_dir(), "venvs")
+            if os.path.isdir(old_venvs_parent) and not os.listdir(old_venvs_parent):
+                os.rmdir(old_venvs_parent)
+        except Exception:
+            pass
+
+    # 4. 检查并安装依赖
+    uv = _uv_exe()
+    if not os.path.isfile(venv_python):
+        if not os.path.isfile(uv):
+            return {"ok": False, "error": "uv 未安装，请先在部署维护中安装 uv"}
+        try:
+            subprocess.check_call(
+                [uv, "venv", venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
+                env=_uv_env(),
+                timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
+    
+    req_file = Path(zhipu_code_dir) / "requirements.txt"
+    if req_file.exists():
+        try:
+            subprocess.check_call(
+                [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
+                env=_uv_env(),
+                timeout=300,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"安装智谱 API 服务依赖失败: {e}"}
+    
+    # 5. 设置环境变量
+    env = _uv_env()
+    env.update({
+        "PYTHONPATH": str(zhipu_code_dir),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PORT": str(port),
+        "ADMIN_KEY": admin_key,
+        "ZHIPU_DATA_DIR": str(zhipu_data_dir),
+        "ZHIPU_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
+        "VIRTUAL_ENV": venv_dir,
+    })
+    
+    # 6. 确保数据目录存在
+    Path(zhipu_data_dir).mkdir(exist_ok=True)
+    
+    # 7. 日志文件路径（temp/logs/zhipu2api.log）
+    log_path = _get_log_path("zhipu2api.log")
+    try:
+        log_file = open(log_path, "a", encoding="utf-8")
+    except Exception:
+        log_file = subprocess.PIPE
+    
+    # 8. 检查服务是否已在运行
     base = f"http://127.0.0.1:{port}"
     status = check_api_service(base)
     if status.get("running"):
@@ -1275,75 +1566,16 @@ def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "a
         except Exception:
             pass
         _kill_zhipu2api(port)
-
+    
     if _zhipu2api_proc and _zhipu2api_proc.poll() is None:
         return {"ok": True, "message": "智谱 API 服务正在启动中", "baseUrl": base}
-
-    zhipu_dir = project_dir.strip()
-    if not zhipu_dir:
-        app_zhipu_dir = Path(_app_dir()) / "zhipu2api"
-        if app_zhipu_dir.exists():
-            zhipu_dir = str(app_zhipu_dir)
-        else:
-            return {"ok": False, "error": f"未找到 zhipu2api 目录: {app_zhipu_dir}"}
-
-    if not Path(zhipu_dir).exists():
-        return {"ok": False, "error": f"zhipu2api 目录不存在: {zhipu_dir}"}
-
-    venv_python = _zhipu2api_venv_python()
-    venv_dir = os.path.join(_app_dir(), "scripts", ".zhipu_venv")
-    uv = _uv_exe()
-    env = _uv_env()
-
-    if not _check_zhipu2api_deps():
-        if not os.path.isfile(venv_python):
-            if not os.path.isfile(uv):
-                return {"ok": False, "error": "uv 未安装，请先在部署维护中安装 uv"}
-            try:
-                subprocess.check_call(
-                    [uv, "venv", venv_dir, "--python", UV_PYTHON_VERSION, "--clear"],
-                    env=env, timeout=300,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except Exception as e:
-                return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
-
-        req_file = Path(zhipu_dir) / "requirements.txt"
-        if req_file.exists():
-            try:
-                subprocess.check_call(
-                    [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
-                    env=env, timeout=300,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except Exception as e:
-                return {"ok": False, "error": f"安装智谱 API 服务依赖失败: {e}"}
-
-    data_dir = Path(zhipu_dir) / "data"
-    data_dir.mkdir(exist_ok=True)
-
-    env.update({
-        "PYTHONPATH": str(zhipu_dir),
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONUTF8": "1",
-        "PORT": str(port),
-        "ADMIN_KEY": admin_key,
-        "ZHIPU_DATA_DIR": str(data_dir),
-        "ZHIPU_BASE_URL": "https://open.bigmodel.cn/api/paas/v4",
-        "VIRTUAL_ENV": venv_dir,
-    })
-
-    log_path = Path(zhipu_dir) / "data" / "zhipu2api.log"
-    try:
-        log_file = open(log_path, "a", encoding="utf-8")
-    except Exception:
-        log_file = subprocess.PIPE
-
+    
+    # 9. 启动子进程
     try:
         proc = subprocess.Popen(
             [venv_python, "-m", "uvicorn", "main:app",
              "--host", "0.0.0.0", "--port", str(port), "--workers", "1"],
-            cwd=zhipu_dir,
+            cwd=zhipu_code_dir,
             env=env,
             stdout=log_file,
             stderr=subprocess.STDOUT,
@@ -1355,7 +1587,8 @@ def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "a
             try: log_file.close()
             except: pass
         return {"ok": False, "error": f"启动智谱 API 服务失败: {e}"}
-
+    
+    # 10. 等待启动
     import time as _time
     _time.sleep(2)
     if proc.poll() is not None:
@@ -1369,9 +1602,9 @@ def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "a
                     err_msg = tail.strip().split("\n")[-1][:200]
             except:
                 pass
-        return {"ok": False, "error": f"智谱 API 服务启动失败: {err_msg}", "logPath": str(log_path)}
-
-    return {"ok": True, "message": "智谱 API 服务正在启动", "baseUrl": base, "pid": proc.pid, "logPath": str(log_path)}
+        return {"ok": False, "error": f"启动失败: {err_msg}", "logPath": log_path}
+    
+    return {"ok": True, "message": "智谱服务已启动", "baseUrl": base, "pid": proc.pid, "logPath": log_path}
 
 def stop_zhipu2api(base_url: str = "") -> dict:
     global _zhipu2api_proc
@@ -1388,34 +1621,8 @@ def stop_zhipu2api(base_url: str = "") -> dict:
         _zhipu2api_proc = None
 
     port = _extract_port(base_url, 7780)
-    try:
-        import subprocess
-        r = subprocess.run(
-            ["netstat", "-ano"], capture_output=True, text=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-        )
-        for line in r.stdout.splitlines():
-            if f":{port}" in line and "LISTENING" in line:
-                parts = line.split()
-                pid = int(parts[-1])
-                if pid and pid != os.getpid():
-                    try:
-                        import signal
-                        os.kill(pid, signal.SIGTERM)
-                        stopped = True
-                    except Exception:
-                        try:
-                            subprocess.run(
-                                ["taskkill", "/F", "/PID", str(pid)],
-                                capture_output=True, timeout=10,
-                                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                            )
-                            stopped = True
-                        except Exception:
-                            pass
-                break
-    except Exception:
-        pass
+    if _stop_port_service(port):
+        stopped = True
 
     if stopped:
         return {"ok": True, "message": "智谱 API 服务已停止"}
@@ -1597,7 +1804,7 @@ class OllamaProxyHandler(http.server.BaseHTTPRequestHandler):
     def _log_proxy(cls, msg):
         try:
             if cls._proxy_log_file is None:
-                log_dir = cls._proxy_log_dir or _app_dir()
+                log_dir = cls._proxy_log_dir or os.path.join(_temp_dir(), "logs")
                 os.makedirs(log_dir, exist_ok=True)
                 cls._proxy_log_file = open(os.path.join(log_dir, "proxy_debug.log"), "a", encoding="utf-8")
             ts = time.strftime("%H:%M:%S")
@@ -2406,7 +2613,7 @@ class ClaudeCliRunner:
     def _build_args(self, session_id: str, model: str, is_resuming: bool,
                     system_prompt: str = None, auto_approve: bool = False,
                     workspace_path: str = None) -> list:
-        env_file = os.path.join(self.project_root, ".env")
+        env_file = os.path.join(_data_dir(), ".env")
         version = "1.0.0"
         try:
             pkg_path = os.path.join(self.project_root, "package.json")
@@ -2487,7 +2694,7 @@ class ClaudeCliRunner:
         _log(f"[CLI] 启动: runner={runner_path} bun={use_bun} entry_exists={os.path.exists(self.cli_entry)}")
         _log(f"[CLI] MODEL_PROVIDER={env.get('MODEL_PROVIDER')} API_BASE_URL={env.get('API_BASE_URL')} OLLAMA_BASE_URL={env.get('OLLAMA_BASE_URL')} API_MODEL={env.get('API_MODEL')} OLLAMA_MODEL={env.get('OLLAMA_MODEL')}")
 
-        _log_path = os.path.join(self.project_root, "cli_debug.log")
+        _log_path = _get_debug_path("cli_debug.log")
         _log_file = open(_log_path, "a", encoding="utf-8")
         _log_file.write(f"=== CLI Debug Log {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         _log_file.write(f"runner={runner_path}\n")

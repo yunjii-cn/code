@@ -4,13 +4,21 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Dict, Set
 
+# 代码目录（用于定位模块）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = BASE_DIR / "data"
+
+# 数据目录由环境变量指定（backend.py 会设置 QWEN_DATA_DIR）
+DATA_DIR_PATH = os.getenv("QWEN_DATA_DIR", "")
+if DATA_DIR_PATH:
+    DATA_DIR = Path(DATA_DIR_PATH)
+else:
+    # 回退：使用默认位置（相对于代码目录）
+    DATA_DIR = BASE_DIR / "data"
 
 class Settings(BaseSettings):
     # 服务配置
-    PORT: int = int(os.getenv("PORT", 8080))
-    WORKERS: int = int(os.getenv("WORKERS", 3))
+    PORT: int = int(os.getenv("PORT", 7777))
+    WORKERS: int = int(os.getenv("WORKERS", 1))
     ADMIN_KEY: str = os.getenv("ADMIN_KEY", "admin")
 
     # 并发配置（浏览器仅用于账号注册，不用于对话请求）
@@ -28,15 +36,15 @@ class Settings(BaseSettings):
     RATE_LIMIT_MAX_COOLDOWN: int = int(os.getenv("RATE_LIMIT_MAX_COOLDOWN", 3600))
 
     # 日志
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "WARNING")
 
-    # 数据文件路径
+    # 数据文件路径 - 完全依赖环境变量（由 backend.py 传递）
     ACCOUNTS_FILE: str = os.getenv("ACCOUNTS_FILE", str(DATA_DIR / "accounts.json"))
     USERS_FILE: str = os.getenv("USERS_FILE", str(DATA_DIR / "users.json"))
     CAPTURES_FILE: str = os.getenv("CAPTURES_FILE", str(DATA_DIR / "captures.json"))
     CONFIG_FILE: str = os.getenv("CONFIG_FILE", str(DATA_DIR / "config.json"))
 
-    # ????? / ????
+    # 上下文 / 附件
     CONTEXT_INLINE_MAX_CHARS: int = int(os.getenv("CONTEXT_INLINE_MAX_CHARS", 4000))
     CONTEXT_FORCE_FILE_MAX_CHARS: int = int(os.getenv("CONTEXT_FORCE_FILE_MAX_CHARS", 10000))
     CONTEXT_ATTACHMENT_TTL_SECONDS: int = int(os.getenv("CONTEXT_ATTACHMENT_TTL_SECONDS", 1800))
@@ -49,7 +57,7 @@ class Settings(BaseSettings):
     CONTEXT_ALLOWED_USER_EXTS: str = os.getenv("CONTEXT_ALLOWED_USER_EXTS", "txt,md,json,log,xml,yaml,yml,csv,html,css,py,js,ts,java,c,cpp,cs,php,go,rb,sh,zsh,ps1,bat,cmd,pdf,doc,docx,ppt,pptx,xls,xlsx,png,jpg,jpeg,webp,gif,tiff,bmp,svg")
 
     class Config:
-        env_file = ".env"
+        env_file = None  # ← 禁用 .env 文件，完全使用环境变量
 
 API_KEYS_FILE = DATA_DIR / "api_keys.json"
 
