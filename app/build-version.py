@@ -283,6 +283,77 @@ def build_exe():
     return release_dir
 
 
+# ── 裁剪 _internal/ 冗余文件 ──
+def _slim_internal(release_dir: Path):
+    """裁剪 PyInstaller 输出的 _internal/ 目录，移除用户不需要的文件
+
+    只裁剪 100% 安全的项目：
+      - Qt WebEngine debug 资源 (~74 MB)
+      - 非中英语言包 (~40 MB)
+    预计减少 ~114 MB
+
+    注意：Qt6WebEngineCore 依赖 Qt6Quick/Qml/Positioning 等模块，
+    不能删除任何 Qt6 DLL 或 .pyd 文件，否则会导致 DLL load failed。
+    """
+    internal = release_dir / "_internal"
+    if not internal.exists():
+        return
+
+    removed_size = 0
+    removed_count = 0
+
+    def _remove(path: Path):
+        nonlocal removed_size, removed_count
+        if not path.exists():
+            return
+        if path.is_dir():
+            for f in path.rglob("*"):
+                if f.is_file():
+                    removed_size += f.stat().st_size
+                    removed_count += 1
+            shutil.rmtree(str(path), ignore_errors=True)
+        elif path.is_file():
+            removed_size += path.stat().st_size
+            removed_count += 1
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+    # 1. Qt WebEngine debug 资源 (安全：这些是开发者调试用，用户不需要)
+    for name in [
+        "qtwebengine_devtools_resources.debug.pak",
+        "qtwebengine_resources.debug.pak",
+        "qtwebengine_resources_100p.debug.pak",
+        "qtwebengine_resources_200p.debug.pak",
+        "v8_context_snapshot.debug.bin",
+    ]:
+        for f in internal.rglob(name):
+            _remove(f)
+
+    # 2. 非中英语言包 (安全：只保留中英文语言包)
+    keep_locales = {"zh-CN.pak", "zh-TW.pak", "en-US.pak", "en-GB.pak"}
+    for locales_dir in internal.rglob("qtwebengine_locales"):
+        if locales_dir.is_dir():
+            for pak in locales_dir.iterdir():
+                if pak.is_file() and pak.name not in keep_locales:
+                    _remove(pak)
+
+    # 3. 清理空目录
+    for d in sorted(internal.rglob("*"), reverse=True):
+        if d.is_dir() and not any(d.iterdir()):
+            try:
+                d.rmdir()
+            except Exception:
+                pass
+
+    if removed_count > 0:
+        saved_mb = removed_size / (1024 * 1024)
+        print(f"  ✓ 裁剪 _internal/ 完成: 移除 {removed_count} 个文件, 节省 {saved_mb:.1f} MB")
+    else:
+        print("  ✓ _internal/ 无需裁剪")
+
+
 # ── 打包后处理：将运行时文件复制到发布目录（build/ 下的整合包）──
 def post_build(release_dir: Path):
     """将资源组织到三目录结构中（app/data/temp），用于打包分发
@@ -422,6 +493,9 @@ def post_build(release_dir: Path):
     (temp_dir / "debug").mkdir(parents=True, exist_ok=True)
     (temp_dir / "tmp").mkdir(parents=True, exist_ok=True)
     print("  ✓ 创建 temp/ 目录结构")
+
+    # ── 4. 裁剪 _internal/ 中的冗余文件 ──
+    _slim_internal(release_dir)
 
     # 计算发布目录大小
     total_size = sum(f.stat().st_size for f in release_dir.rglob("*") if f.is_file())

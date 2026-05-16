@@ -42,6 +42,7 @@ type DesktopSettings = {
   ZHIPU_API_KEY?: string;
   ZHIPU_MODEL?: string;
   ZHIPU_BASE_URL?: string;
+  API_SOURCE?: string;
   AI_LANGUAGE?: string;
   AI_TEMPERATURE?: string;
   AI_MAX_TOKENS?: string;
@@ -68,24 +69,47 @@ type ModelConfig = {
 };
 
 let _backend: any = null;
+let _backendType: "qt" | "electron" | null = null;
 
 async function getBackend(): Promise<any> {
   if (_backend) return _backend;
-  return new Promise((resolve) => {
-    if (typeof (window as any).QWebChannel === "undefined") {
-      console.warn("QWebChannel not available, running in browser mode");
-      resolve(null);
-      return;
-    }
-    new (window as any).QWebChannel(
-      (window as any).qt.webChannelTransport,
-      (channel: any) => {
-        _backend = channel.objects.backend;
-        resolve(_backend);
-      }
-    );
-  });
+
+  if (typeof (window as any).desktopApi !== "undefined") {
+    _backendType = "electron";
+    _backend = (window as any).desktopApi;
+    return _backend;
+  }
+
+  if (typeof (window as any).QWebChannel !== "undefined") {
+    return new Promise((resolve) => {
+      new (window as any).QWebChannel(
+        (window as any).qt.webChannelTransport,
+        (channel: any) => {
+          _backendType = "qt";
+          _backend = channel.objects.backend;
+          resolve(_backend);
+        }
+      );
+    });
+  }
+
+  console.warn("No backend available (neither Electron desktopApi nor Qt QWebChannel)");
+  return null;
 }
+
+const ELECTRON_METHOD_MAP: Record<string, string> = {
+  getState: "getState",
+  sendMessage: "sendMessage",
+  stopMessage: "stopMessage",
+  newSession: "newSession",
+  getWorkspace: "getWorkspace",
+  chooseWorkspace: "chooseWorkspace",
+  getSettings: "getSettings",
+  saveSettings: "saveSettings",
+  clearModelSettings: "clearModelSettings",
+  listModels: "listModels",
+  addZhipuAccount: "addZhipuAccount",
+};
 
 async function callBackend(method: string, ...args: any[]): Promise<any> {
   const backend = await getBackend();
@@ -93,6 +117,36 @@ async function callBackend(method: string, ...args: any[]): Promise<any> {
     console.warn("[callBackend] backend not available, method:", method);
     return null;
   }
+
+  if (_backendType === "electron") {
+    const mappedMethod = ELECTRON_METHOD_MAP[method];
+    if (!mappedMethod || typeof backend[mappedMethod] !== "function") {
+      console.warn("[callBackend] Electron method not mapped:", method);
+      return null;
+    }
+    try {
+      let result;
+      if (args.length === 0) {
+        result = await backend[mappedMethod]();
+      } else if (args.length === 1) {
+        let parsed = args[0];
+        if (typeof parsed === "string") {
+          try { parsed = JSON.parse(parsed); } catch {}
+        }
+        result = await backend[mappedMethod](parsed);
+      } else {
+        result = await backend[mappedMethod](...args);
+      }
+      if (typeof result === "string") {
+        try { return JSON.parse(result); } catch { return result; }
+      }
+      return result;
+    } catch (e) {
+      console.error("[callBackend] Electron error:", method, e);
+      return null;
+    }
+  }
+
   try {
     const result = await backend[method](...args);
     if (typeof result === "string") {
@@ -110,6 +164,8 @@ let busyTimeoutId: ReturnType<typeof setTimeout> | null = null;
 const sessionId = ref("");
 const workspacePath = ref("");
 const inputText = ref("");
+const isComposing = ref(false);
+let _composingJustEnded = false;
 const showPanel = ref(true);
 const noticeText = ref("");
 const noticeType = ref<"ok" | "warn" | "info">("ok");
@@ -214,6 +270,43 @@ async function startAllServices() {
   allServicesBusy.value = false;
 }
 
+const envCheckResults = ref<Record<string, { ok: boolean; label: string; version?: string; error?: string; fix?: string }> | null>(null);
+const envCheckBusy = ref(false);
+const envCheckFailedKeys = computed(() => {
+  if (!envCheckResults.value) return [];
+  return Object.keys(envCheckResults.value).filter(k => !envCheckResults.value![k].ok);
+});
+
+async function runEnvCheck() {
+  if (envCheckBusy.value) return;
+  envCheckBusy.value = true;
+  envCheckResults.value = null;
+  try {
+    const r = await callBackend("checkEnvironment");
+    if (r && typeof r === "object") {
+      const data = typeof r === "string" ? JSON.parse(r) : r;
+      envCheckResults.value = data;
+      const failCount = Object.values(data).filter((v: any) => !v.ok).length;
+      if (failCount === 0) {
+        showNotice("环境检测全部通过 ✓", "ok");
+      } else {
+        showNotice(`环境检测: ${failCount} 项未通过`, "warn");
+      }
+    } else {
+      envCheckResults.value = {
+        overall: { ok: false, label: "检测服务", error: "无法获取检测结果", fix: "请确保后端服务正常运行" },
+      };
+      showNotice("环境检测失败：无返回数据", "warn");
+    }
+  } catch (e: any) {
+    envCheckResults.value = {
+      overall: { ok: false, label: "检测服务", error: e.message || String(e), fix: "请确保后端服务正常运行" },
+    };
+    showNotice("环境检测异常: " + String(e), "warn");
+  }
+  envCheckBusy.value = false;
+}
+
 const apiProgressPercent = computed(() => {
   if (apiStepProgress.value >= apiSteps.length) return 100;
   return Math.round((apiStepProgress.value / apiSteps.length) * 100);
@@ -239,6 +332,7 @@ const settings = reactive<Required<DesktopSettings>>({
   ZHIPU_API_KEY: "",
   ZHIPU_MODEL: "",
   ZHIPU_BASE_URL: "",
+  API_SOURCE: "",
   AI_LANGUAGE: "zh",
   AI_TEMPERATURE: "",
   AI_MAX_TOKENS: "",
@@ -279,11 +373,10 @@ const selectedOllamaModelToolSupport = computed<boolean | undefined>(() => {
 const autoQuickModels = computed(() => {
   const models: { id: string; name: string; provider: "cloud" | "ollama" | "api"; apiSource?: "qwen" | "zhipu"; modelId: string; auto: true }[] = [];
 
-  // 千问 API：服务已启动且有选择的模型
   if (apiServiceRunning.value && apiModel.value) {
     models.push({
       id: "auto-qwen",
-      name: apiModel.value,
+      name: "🔗 " + apiModel.value,
       provider: "api",
       apiSource: "qwen",
       modelId: apiModel.value,
@@ -291,11 +384,10 @@ const autoQuickModels = computed(() => {
     });
   }
 
-  // 智谱 API：服务已启动且有选择的模型
   if (zhipuStepProgress.value >= zhipuSteps.length && zhipuModel.value) {
     models.push({
       id: "auto-zhipu",
-      name: zhipuModel.value,
+      name: "🧠 " + zhipuModel.value,
       provider: "api",
       apiSource: "zhipu",
       modelId: zhipuModel.value,
@@ -303,13 +395,22 @@ const autoQuickModels = computed(() => {
     });
   }
 
-  // Ollama：本地模型
   if (ollamaModel.value) {
     models.push({
       id: "auto-ollama",
-      name: ollamaModel.value,
+      name: "🖥️ " + ollamaModel.value,
       provider: "ollama",
       modelId: ollamaModel.value,
+      auto: true,
+    });
+  }
+
+  if (settings.ANTHROPIC_MODEL) {
+    models.push({
+      id: "auto-cloud",
+      name: "☁️ " + settings.ANTHROPIC_MODEL,
+      provider: "cloud",
+      modelId: settings.ANTHROPIC_MODEL,
       auto: true,
     });
   }
@@ -354,12 +455,36 @@ watch(runMode, (newMode) => {
   }
 });
 
-watch(apiSource, (source) => {
+watch(apiSource, async (source) => {
   if (runMode.value === "api") {
     if (source === "zhipu") {
+      apiModels.value = [];
       loadZhipuModels();
     } else {
+      zhipuModels.value = [];
+      apiHost.value = "127.0.0.1";
+      apiPort.value = "7777";
       checkApiServiceStatus();
+    }
+    await saveSettingsQuiet();
+  }
+});
+
+// 模型选择变化时，同步更新快捷模型按钮显示
+watch(zhipuModel, (newModel) => {
+  if (runMode.value === "api" && apiSource.value === "zhipu") {
+    const autoZhipu = allQuickModels.value.find(m => m.id === "auto-zhipu");
+    if (autoZhipu) {
+      activeQuickModel.value = "auto-zhipu";
+    }
+  }
+});
+
+watch(apiModel, (newModel) => {
+  if (runMode.value === "api" && apiSource.value === "qwen") {
+    const autoQwen = allQuickModels.value.find(m => m.id === "auto-qwen");
+    if (autoQwen) {
+      activeQuickModel.value = "auto-qwen";
     }
   }
 });
@@ -434,7 +559,7 @@ async function restoreServiceStatus() {
     }
   }
   // 恢复智谱服务状态
-  if (zhipuStepProgress.value >= zhipuSteps.length) {
+  if (zhipuStepProgress.value >= zhipuSteps.length || (runMode.value === "api" && apiSource.value === "zhipu" && zhipuApiKey.value.trim())) {
     try {
       const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
       const result = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
@@ -442,6 +567,9 @@ async function restoreServiceStatus() {
         zhipuStepProgress.value = zhipuSteps.length;
         zhipuStepMessage.value = "✓ 服务已就绪";
         await checkZhipuAccounts();
+        if (zhipuApiKey.value.trim()) {
+          await syncZhipuKeyToPool();
+        }
       } else {
         zhipuStepProgress.value = 0;
         zhipuStepMessage.value = "点击「启动服务」启动智谱 API";
@@ -515,6 +643,10 @@ function makeId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function sleep(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 const userName = ref("你");
 const assistantName = ref("助手");
 const autoApprove = ref(true);
@@ -578,6 +710,7 @@ const terminalHistory = ref<{cmd: string; output: string; ts: string}[]>([]);
 const terminalCwd = ref("");
 const terminalExpanded = ref(false);
 const terminalDebug = ref(false);
+const terminalAutoScroll = ref(true);
 const terminalOutputRef = ref<HTMLElement | null>(null);
 const gitStatus = ref<any>(null);
 const gitLog = ref<any[]>([]);
@@ -733,16 +866,15 @@ function applySettings(data?: DesktopSettings) {
   settings.ZHIPU_API_KEY = data.ZHIPU_API_KEY ?? "";
   settings.ZHIPU_MODEL = data.ZHIPU_MODEL ?? "";
   settings.ZHIPU_BASE_URL = data.ZHIPU_BASE_URL ?? "";
+  settings.API_SOURCE = data.API_SOURCE ?? "";
   settings.AI_LANGUAGE = data.AI_LANGUAGE ?? "zh";
   settings.AI_TEMPERATURE = data.AI_TEMPERATURE ?? "";
   settings.AI_MAX_TOKENS = data.AI_MAX_TOKENS ?? "";
   settings.SYSTEM_PROMPT = data.SYSTEM_PROMPT ?? "";
 
   runMode.value = settings.MODEL_PROVIDER === "ollama" ? "ollama" : settings.MODEL_PROVIDER === "api" ? "api" : "cloud";
-  if (settings.MODEL_PROVIDER === "api" && settings.ZHIPU_API_KEY && settings.ZHIPU_MODEL) {
-    apiSource.value = "zhipu";
-  } else {
-    apiSource.value = "qwen";
+  if (settings.MODEL_PROVIDER === "api") {
+    apiSource.value = (settings.API_SOURCE || "qwen") as "qwen" | "zhipu";
   }
   const cloudKey = settings.ANTHROPIC_API_KEY || settings.ANTHROPIC_AUTH_TOKEN || "";
   apiKey.value = cloudKey === "ollama-local" ? "" : cloudKey;
@@ -751,7 +883,8 @@ function applySettings(data?: DesktopSettings) {
   const _apiBase = settings.API_BASE_URL || "http://127.0.0.1:7777";
   const _apiMatch = _apiBase.match(/^https?:\/\/([^:/]+)(?::(\d+))?/);
   apiHost.value = _apiMatch ? _apiMatch[1] : "127.0.0.1";
-  apiPort.value = _apiMatch && _apiMatch[2] ? _apiMatch[2] : "7777";
+  const _parsedPort = _apiMatch && _apiMatch[2] ? _apiMatch[2] : "7777";
+  apiPort.value = _parsedPort === "7780" ? "7777" : _parsedPort;
   apiModel.value = settings.API_MODEL || "qwen3.6-plus";
   if (settings.API_KEY) {
     const ak = settings.API_KEY;
@@ -761,7 +894,7 @@ function applySettings(data?: DesktopSettings) {
   }
 
   zhipuApiKey.value = settings.ZHIPU_API_KEY || "";
-  zhipuModel.value = settings.ZHIPU_MODEL || "glm-5.1";
+  zhipuModel.value = settings.ZHIPU_MODEL || "glm-4.7-flash";
   zhipuBaseUrl.value = settings.ZHIPU_BASE_URL || "https://open.bigmodel.cn/api/paas/v4";
 
   if (settings.OLLAMA_MODEL || settings.ANTHROPIC_MODEL) {
@@ -934,6 +1067,12 @@ function addQuickModel() {
   showNotice("快捷模型已添加", "ok");
 }
 
+function handleEnterKey(e: KeyboardEvent) {
+  if (isComposing.value || (e as any).isComposing || _composingJustEnded) return;
+  e.preventDefault();
+  sendMessage();
+}
+
 async function sendMessage() {
   const text = inputText.value.trim();
   if (!text) return;
@@ -995,7 +1134,12 @@ async function doSend(text: string, addUserMsg: boolean = false) {
     } else if (result?.stopped) {
       addMessage("assistant", "任务已停止。", displayName(currentModel));
     } else {
-      addMessage("error", result?.error || "请求失败");
+      const errMsg = result?.error || "请求失败";
+      if (errMsg.includes("429") || errMsg.toLowerCase().includes("rate limit") || errMsg.toLowerCase().includes("too many requests")) {
+        addMessage("error", "API 频率限制，请稍后再试或添加更多 API Key");
+      } else {
+        addMessage("error", errMsg);
+      }
     }
     isBusy.value = false;
     if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
@@ -1639,6 +1783,22 @@ function handleInputChange() {
   }
 }
 
+watch(inputText, () => {
+  if (isComposing.value) return;
+  handleInputChange();
+});
+
+function onCompositionEnd() {
+  isComposing.value = false;
+  _composingJustEnded = true;
+  setTimeout(() => {
+    _composingJustEnded = false;
+  }, 300);
+  nextTick(() => {
+    handleInputChange();
+  });
+}
+
 function executeSlashCommand(cmdKey: string) {
   showSlashMenu.value = false;
   inputText.value = "";
@@ -1807,9 +1967,7 @@ async function saveSettings() {
       const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
       const payload: Record<string, string> = {
         MODEL_PROVIDER: "api",
-        API_BASE_URL: proxyBaseUrl,
-        API_MODEL: zhipuModel.value.trim(),
-        API_KEY: zhipuApiKey.value.trim() || effectiveApiKey,
+        API_SOURCE: "zhipu",
         ZHIPU_API_KEY: effectiveApiKey,
         ZHIPU_MODEL: zhipuModel.value.trim(),
         ZHIPU_BASE_URL: proxyBaseUrl,
@@ -1835,6 +1993,7 @@ async function saveSettings() {
       }
       const payload: Record<string, string> = {
         MODEL_PROVIDER: "api",
+        API_SOURCE: "qwen",
         API_BASE_URL: apiBaseUrl.value.trim(),
         API_MODEL: apiModel.value.trim(),
         API_KEY: apiKey.value.trim(),
@@ -1886,6 +2045,8 @@ async function saveSettings() {
 async function saveSettingsQuiet() {
   const activeConfig = getActiveModelConfig();
   let payload: Record<string, string> | null = null;
+  const zhipuEffectiveKey = zhipuApiKey.value.trim() || (zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "");
+  const zhipuPersistBase = zhipuBaseUrl.value.trim() || "https://open.bigmodel.cn/api/paas/v4";
 
   if (runMode.value === "ollama") {
     const localBase = ollamaBaseUrl.value.trim() || "http://127.0.0.1:11434";
@@ -1893,6 +2054,10 @@ async function saveSettingsQuiet() {
       MODEL_PROVIDER: "ollama",
       OLLAMA_BASE_URL: localBase,
       OLLAMA_MODEL: ollamaModel.value.trim() || "qwen3:8b",
+      API_SOURCE: apiSource.value || "qwen",
+      ZHIPU_API_KEY: zhipuEffectiveKey,
+      ZHIPU_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
+      ZHIPU_BASE_URL: zhipuPersistBase,
       API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
       DISABLE_TELEMETRY: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -1902,41 +2067,24 @@ async function saveSettingsQuiet() {
       SYSTEM_PROMPT: activeConfig.systemPrompt || "",
     };
   } else if (runMode.value === "api") {
-    if (apiSource.value === "zhipu") {
-      const effectiveApiKey = zhipuApiKey.value.trim() || (zhipuLocalKeys.value.length > 0 ? zhipuLocalKeys.value[0].key : "");
-      const proxyBaseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
-      payload = {
-        MODEL_PROVIDER: "api",
-        API_BASE_URL: proxyBaseUrl,
-        API_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
-        API_KEY: zhipuApiKey.value.trim() || effectiveApiKey,
-        ZHIPU_API_KEY: effectiveApiKey,
-        ZHIPU_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
-        ZHIPU_BASE_URL: proxyBaseUrl,
-        API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
-        DISABLE_TELEMETRY: "1",
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-        AI_LANGUAGE: activeConfig.language || "zh",
-        AI_TEMPERATURE: activeConfig.temperature || "",
-        AI_MAX_TOKENS: activeConfig.maxTokens || "",
-        SYSTEM_PROMPT: activeConfig.systemPrompt || "",
-      };
-    } else {
-      const qwenBase = apiBaseUrl.value.trim() || `http://${apiHost.value || "127.0.0.1"}:${apiPort.value || "7777"}`;
-      payload = {
-        MODEL_PROVIDER: "api",
-        API_BASE_URL: qwenBase,
-        API_MODEL: apiModel.value.trim() || "qwen3.6-plus",
-        API_KEY: apiKey.value.trim(),
-        API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
-        DISABLE_TELEMETRY: "1",
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-        AI_LANGUAGE: activeConfig.language || "zh",
-        AI_TEMPERATURE: activeConfig.temperature || "",
-        AI_MAX_TOKENS: activeConfig.maxTokens || "",
-        SYSTEM_PROMPT: activeConfig.systemPrompt || "",
-      };
-    }
+    const qwenBase = apiBaseUrl.value.trim() || `http://${apiHost.value || "127.0.0.1"}:${apiPort.value || "7777"}`;
+    payload = {
+      MODEL_PROVIDER: "api",
+      API_SOURCE: apiSource.value || "qwen",
+      API_BASE_URL: qwenBase,
+      API_MODEL: apiModel.value.trim() || "qwen3.6-plus",
+      API_KEY: apiKey.value.trim(),
+      ZHIPU_API_KEY: zhipuEffectiveKey,
+      ZHIPU_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
+      ZHIPU_BASE_URL: zhipuPersistBase,
+      API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
+      DISABLE_TELEMETRY: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      AI_LANGUAGE: activeConfig.language || "zh",
+      AI_TEMPERATURE: activeConfig.temperature || "",
+      AI_MAX_TOKENS: activeConfig.maxTokens || "",
+      SYSTEM_PROMPT: activeConfig.systemPrompt || "",
+    };
   } else {
     payload = {
       MODEL_PROVIDER: "anthropic",
@@ -1944,6 +2092,10 @@ async function saveSettingsQuiet() {
       ANTHROPIC_API_KEY: apiKey.value.trim(),
       ANTHROPIC_AUTH_TOKEN: apiKey.value.trim(),
       ANTHROPIC_MODEL: "openrouter/auto",
+      API_SOURCE: apiSource.value || "qwen",
+      ZHIPU_API_KEY: zhipuEffectiveKey,
+      ZHIPU_MODEL: zhipuModel.value.trim() || "glm-4.7-flash",
+      ZHIPU_BASE_URL: zhipuPersistBase,
       API_TIMEOUT_MS: settings.API_TIMEOUT_MS || "3000000",
       DISABLE_TELEMETRY: "1",
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
@@ -1956,9 +2108,36 @@ async function saveSettingsQuiet() {
 
   if (payload) {
     try {
-      const saved = await callBackend("saveSettings", JSON.stringify(payload));
-      applySettings(saved);
+      await callBackend("saveSettings", JSON.stringify(payload));
     } catch {}
+  }
+
+  if (apiSource.value === "zhipu" && zhipuApiKey.value.trim()) {
+    syncZhipuKeyToPool();
+  }
+}
+
+async function syncZhipuKeyToPool() {
+  const key = zhipuApiKey.value.trim();
+  if (!key) return;
+  const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
+      if (!checkR || !checkR.running) {
+        if (attempt < 2) { await new Promise(r => setTimeout(r, 2000)); continue; }
+        return;
+      }
+      await callBackend("addZhipuAccount", JSON.stringify({
+        baseUrl,
+        apiKey: key,
+        adminKey: "admin",
+        label: "auto-synced",
+      }));
+      return;
+    } catch {
+      if (attempt < 2) { await new Promise(r => setTimeout(r, 2000)); }
+    }
   }
 }
 
@@ -2055,7 +2234,15 @@ async function checkZhipuApiConnect() {
     if (result && result.ok) {
       zhipuApiChecked.value = true;
       showNotice("智谱 API 连接成功！", "ok");
+      const existingKey = zhipuLocalKeys.value.find(k => k.key === zhipuApiKey.value.trim());
+      if (!existingKey) {
+        zhipuLocalKeys.value.push({ key: zhipuApiKey.value.trim(), label: "manual", valid: true });
+        saveZhipuLocalKeys();
+        refreshZhipuAccountDisplay();
+      }
+      await syncZhipuKeyToPool();
       await loadZhipuModels();
+      await saveSettingsQuiet();
     } else {
       zhipuApiChecked.value = false;
       showNotice(result?.error || "智谱 API 连接失败", "warn");
@@ -2108,14 +2295,18 @@ async function zhipuStepAutoRun() {
         }
         zhipuStepProgress.value = 2;
       } else if (step.action === "key") {
-        let r = await callBackend("fetchZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
-        if (r && r.keys && r.keys.length > 0) {
-          zhipuApiKey.value = r.keys[r.keys.length - 1].key;
+        if (zhipuApiKey.value.trim()) {
+          await syncZhipuKeyToPool();
         } else {
-          r = await callBackend("createZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
-          if (r && r.key) { zhipuApiKey.value = r.key; }
-          else { zhipuStepMessage.value = "获取 API Key 失败"; zhipuStepBusy.value = false; return; }
+          let r = await callBackend("fetchZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
+          if (r && r.keys && r.keys.length > 0) {
+            zhipuApiKey.value = r.keys[r.keys.length - 1].key;
+          } else {
+            r = await callBackend("createZhipuApiKey", JSON.stringify({ baseUrl, adminKey: "admin" }));
+            if (r && r.key) { zhipuApiKey.value = r.key; }
+          }
         }
+        if (!zhipuApiKey.value.trim()) { zhipuStepMessage.value = "请先填写智谱 API Key"; zhipuStepBusy.value = false; return; }
         zhipuStepProgress.value = 3;
       } else if (step.action === "models") {
         const r = await callBackend("listModels", JSON.stringify({ source: "zhipu", baseUrl, apiKey: zhipuApiKey.value }));
@@ -2125,6 +2316,10 @@ async function zhipuStepAutoRun() {
     }
     zhipuStepMessage.value = "智谱 API 服务已就绪";
     await checkZhipuAccounts();
+    if (zhipuApiKey.value.trim()) {
+      await syncZhipuKeyToPool();
+    }
+    await saveSettingsQuiet();
   } catch (e) {
     zhipuStepMessage.value = "启动异常: " + String(e);
   }
@@ -2158,9 +2353,20 @@ async function addZhipuAccount() {
   }
 
   const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  
+  // 优先通过 API 服务端保存，与千问机制保持一致
+  // 服务运行时：直接调用 API 保存到服务端
+  // 服务未运行时：启动服务后再保存
   const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
   if (checkR && checkR.running) {
     await callBackend("addZhipuAccount", JSON.stringify({ baseUrl, apiKey: key, label, adminKey: "admin" }));
+  } else {
+    // 服务未运行时，尝试启动服务后再保存
+    const startR = await callBackend("startZhipuApi", JSON.stringify({}));
+    if (startR && startR.ok) {
+      await sleep(2000);
+      await callBackend("addZhipuAccount", JSON.stringify({ baseUrl, apiKey: key, label, adminKey: "admin" }));
+    }
   }
 
   showNotice("API Key 已添加", "ok");
@@ -2176,9 +2382,18 @@ async function deleteZhipuAccount(apiKey: string) {
   }
 
   const baseUrl = `http://${zhipuApiHost.value || "127.0.0.1"}:${zhipuApiPort.value || 7780}`;
+  
+  // 优先通过 API 服务端删除，与千问机制保持一致
   const checkR = await callBackend("checkApiService", JSON.stringify({ baseUrl }));
   if (checkR && checkR.running) {
     await callBackend("deleteZhipuAccount", JSON.stringify({ baseUrl, apiKey, adminKey: "admin" }));
+  } else {
+    // 服务未运行时，尝试启动服务后再删除
+    const startR = await callBackend("startZhipuApi", JSON.stringify({}));
+    if (startR && startR.ok) {
+      await sleep(2000);
+      await callBackend("deleteZhipuAccount", JSON.stringify({ baseUrl, apiKey, adminKey: "admin" }));
+    }
   }
 
   showNotice("已删除", "ok");
@@ -2196,6 +2411,14 @@ async function checkZhipuAccounts() {
           const existing = zhipuLocalKeys.value.find(k => k.key === acc.full_key);
           if (existing) {
             existing.valid = acc.valid;
+            existing.label = acc.label || existing.label;
+          } else {
+            // 将服务端的账户同步到本地，确保持久化
+            zhipuLocalKeys.value.push({
+              key: acc.full_key,
+              label: acc.label || acc.full_key.slice(0, 8) + "...",
+              valid: acc.valid
+            });
           }
         }
         saveZhipuLocalKeys();
@@ -2607,7 +2830,10 @@ async function apiStepAutoRun() {
           continue;
         }
         if (result && result.running && result.serviceType !== "qwen") {
-          apiStepMessage.value = "端口被其他服务占用，准备切换...";
+          apiStepMessage.value = "端口被其他服务占用，正在停止...";
+          await callBackend("stopQwen2Api", JSON.stringify({ baseUrl: apiBaseUrl.value.trim() }));
+          await new Promise(r => setTimeout(r, 1500));
+          apiStepMessage.value = "已停止占用服务，准备启动千问...";
         } else {
           apiStepMessage.value = "服务未启动，准备启动...";
         }
@@ -2877,6 +3103,9 @@ function loadLocalSettings() {
     const saved = localStorage.getItem("claude-desktop-settings");
     if (saved) {
       const data = JSON.parse(saved);
+      const restoreStr = (ref, val) => { if (typeof val === "string" && val) ref.value = val; };
+      const restoreBool = (ref, val) => { if (typeof val === "boolean") ref.value = val; };
+      const restoreNum = (ref, val) => { if (typeof val === "number") ref.value = val; };
       if (typeof data.autoApprove === "boolean") {
         autoApprove.value = data.autoApprove;
         if (!data.autoApprove) toolApprovalMode.value = "manual";
@@ -2885,81 +3114,63 @@ function loadLocalSettings() {
         toolApprovalMode.value = data.toolApprovalMode;
         autoApprove.value = data.toolApprovalMode === "auto";
       }
-      if (typeof data.runMode === "string") {
+      if (typeof data.runMode === "string" && data.runMode) {
         runMode.value = data.runMode;
       }
-      if (typeof data.apiSource === "string") {
-        apiSource.value = data.apiSource;
-      }
-      if (typeof data.apiHost === "string") {
-        apiHost.value = data.apiHost;
-      }
-      if (typeof data.apiPort === "string") {
-        apiPort.value = data.apiPort;
-      }
-      if (typeof data.apiModel === "string") {
-        apiModel.value = data.apiModel;
-      }
-      if (typeof data.apiKey === "string") {
-        apiKey.value = data.apiKey;
-      }
-      if (typeof data.ollamaBaseUrl === "string") {
-        ollamaBaseUrl.value = data.ollamaBaseUrl;
-      }
-      if (typeof data.ollamaModel === "string") {
-        ollamaModel.value = data.ollamaModel;
-      }
-      if (typeof data.zhipuApiKey === "string") {
-        zhipuApiKey.value = data.zhipuApiKey;
-      }
-      if (typeof data.zhipuModel === "string") {
-        zhipuModel.value = data.zhipuModel;
-      }
-      if (typeof data.zhipuApiHost === "string") {
-        zhipuApiHost.value = data.zhipuApiHost;
-      }
-      if (typeof data.zhipuApiPort === "number") {
-        zhipuApiPort.value = data.zhipuApiPort;
-      }
-      if (typeof data.zhipuApiChecked === "boolean") {
-        zhipuApiChecked.value = data.zhipuApiChecked;
-      }
-      if (typeof data.stickyEmail === "string") {
-        stickyEmail.value = data.stickyEmail;
-      }
-      if (typeof data.activeRole === "string") {
-        activeRole.value = data.activeRole;
-      }
+      restoreStr(apiSource, data.apiSource);
+      restoreStr(apiHost, data.apiHost);
+      restoreStr(apiPort, data.apiPort);
+      restoreStr(apiModel, data.apiModel);
+      restoreStr(apiKey, data.apiKey);
+      restoreStr(ollamaBaseUrl, data.ollamaBaseUrl);
+      restoreStr(ollamaModel, data.ollamaModel);
+      restoreStr(zhipuApiKey, data.zhipuApiKey);
+      restoreStr(zhipuModel, data.zhipuModel);
+      restoreStr(zhipuApiHost, data.zhipuApiHost);
+      restoreNum(zhipuApiPort, data.zhipuApiPort);
+      restoreBool(zhipuApiChecked, data.zhipuApiChecked);
+      restoreStr(stickyEmail, data.stickyEmail);
+      restoreStr(activeRole, data.activeRole);
       if (Array.isArray(data.quickModels)) {
         quickModels.value = data.quickModels;
       }
-      if (typeof data.activeQuickModel === "string") {
-        activeQuickModel.value = data.activeQuickModel;
-      }
-      if (typeof data.workspacePath === "string") {
-        workspacePath.value = data.workspacePath;
-      }
-      if (typeof data.showPanel === "boolean") {
-        showPanel.value = data.showPanel;
-      }
-      if (typeof data.showTerminal === "boolean") {
-        showTerminal.value = data.showTerminal;
-      }
+      restoreStr(activeQuickModel, data.activeQuickModel);
+      restoreStr(workspacePath, data.workspacePath);
+      restoreBool(showPanel, data.showPanel);
+      restoreBool(showTerminal, data.showTerminal);
       if (typeof data.inputText === "string") {
         inputText.value = data.inputText;
       }
       if (typeof data.terminalInput === "string") {
         terminalInput.value = data.terminalInput;
       }
-      // 恢复 settings（AI_LANGUAGE, AI_TEMPERATURE, AI_MAX_TOKENS, SYSTEM_PROMPT 等）
+      restoreBool(apiServiceRunning, data.apiServiceRunning);
+      restoreNum(apiStepProgress, data.apiStepProgress);
+      if (typeof data.apiStepMessage === "string") {
+        apiStepMessage.value = data.apiStepMessage;
+      }
+      restoreNum(zhipuStepProgress, data.zhipuStepProgress);
+      if (typeof data.zhipuStepMessage === "string") {
+        zhipuStepMessage.value = data.zhipuStepMessage;
+      }
+      if (Array.isArray(data.zhipuAccounts) && data.zhipuAccounts.length > 0) {
+        zhipuAccounts.value = data.zhipuAccounts;
+        zhipuAccountCount.value = data.zhipuAccounts.length;
+        zhipuValidCount.value = data.zhipuAccounts.filter((a: any) => a.valid).length;
+      }
+      if (Array.isArray(data.zhipuLocalKeys) && data.zhipuLocalKeys.length > 0) {
+        zhipuLocalKeys.value = data.zhipuLocalKeys;
+      }
+      if (typeof data.zhipuBaseUrl === "string" && data.zhipuBaseUrl) {
+        zhipuBaseUrl.value = data.zhipuBaseUrl;
+      }
       if (data.settings && typeof data.settings === "object") {
         for (const [key, val] of Object.entries(data.settings)) {
-          if (key in settings && val !== undefined && val !== null) {
+          if (key in settings && val !== undefined && val !== null && val !== "") {
             (settings as any)[key] = val;
           }
         }
       }
-      // 恢复 modelConfigs（每个模型的 per-model 参数）
       if (data.modelConfigs && typeof data.modelConfigs === "object") {
         for (const [modelId, cfg] of Object.entries(data.modelConfigs)) {
           if (typeof cfg === "object" && cfg !== null) {
@@ -2967,17 +3178,15 @@ function loadLocalSettings() {
           }
         }
       }
-      // 恢复 qwenAccounts
-      if (Array.isArray(data.qwenAccounts)) {
+      if (Array.isArray(data.qwenAccounts) && data.qwenAccounts.length > 0) {
         qwenAccounts.value = data.qwenAccounts;
         qwenAccountCount.value = data.qwenAccounts.length;
       }
-      // 恢复终端设置
-      if (typeof data.terminalExpanded === "boolean") {
-        terminalExpanded.value = data.terminalExpanded;
-      }
-      if (typeof data.terminalDebug === "boolean") {
-        terminalDebug.value = data.terminalDebug;
+      restoreBool(terminalExpanded, data.terminalExpanded);
+      restoreBool(terminalDebug, data.terminalDebug);
+      restoreBool(terminalAutoScroll, data.terminalAutoScroll);
+      if (typeof data.currentTheme === "string" && data.currentTheme) {
+        currentTheme.value = data.currentTheme;
       }
     }
   } catch (e) {
@@ -3003,6 +3212,14 @@ function saveLocalSettings() {
       zhipuApiHost: zhipuApiHost.value,
       zhipuApiPort: zhipuApiPort.value,
       zhipuApiChecked: zhipuApiChecked.value,
+      zhipuBaseUrl: zhipuBaseUrl.value,
+      zhipuAccounts: zhipuAccounts.value,
+      zhipuLocalKeys: zhipuLocalKeys.value,
+      zhipuStepProgress: zhipuStepProgress.value,
+      zhipuStepMessage: zhipuStepMessage.value,
+      apiServiceRunning: apiServiceRunning.value,
+      apiStepProgress: apiStepProgress.value,
+      apiStepMessage: apiStepMessage.value,
       qwenAccounts: qwenAccounts.value,
       stickyEmail: stickyEmail.value,
       activeRole: activeRole.value,
@@ -3015,6 +3232,8 @@ function saveLocalSettings() {
       terminalInput: terminalInput.value,
       terminalExpanded: terminalExpanded.value,
       terminalDebug: terminalDebug.value,
+      terminalAutoScroll: terminalAutoScroll.value,
+      currentTheme: currentTheme.value,
       settings: { ...settings },
       modelConfigs: { ...modelConfigs },
     };
@@ -3024,7 +3243,7 @@ function saveLocalSettings() {
   }
 }
 
-// 监听设置变化，实时保存
+// 监听设置变化，实时保存到 localStorage
 watch(
   [
     autoApprove,
@@ -3042,16 +3261,26 @@ watch(
     zhipuApiHost,
     zhipuApiPort,
     zhipuApiChecked,
+    zhipuBaseUrl,
+    zhipuStepProgress,
+    zhipuStepMessage,
+    apiServiceRunning,
+    apiStepProgress,
+    apiStepMessage,
     activeRole,
     workspacePath,
     showPanel,
     showTerminal,
-    inputText,
     terminalInput,
     terminalExpanded,
     terminalDebug,
+    terminalAutoScroll,
+    currentTheme,
     () => ({ ...settings }),
     () => ({ ...modelConfigs }),
+    () => [...zhipuLocalKeys.value],
+    () => [...zhipuAccounts.value.map((a: any) => a.full_key || a.api_key)],
+    () => [...qwenAccounts.value.map((a: any) => a.email)],
   ],
   () => {
     saveLocalSettings();
@@ -3059,7 +3288,19 @@ watch(
   { deep: true }
 );
 
-// 同时自动调用 saveSettings 保存到后端
+let _backendSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let _backendSaveReady = false;
+
+function scheduleBackendSave() {
+  if (!_backendSaveReady) return;
+  if (_backendSaveTimer) clearTimeout(_backendSaveTimer);
+  _backendSaveTimer = setTimeout(async () => {
+    try {
+      await saveSettingsQuiet();
+    } catch {}
+  }, 1000);
+}
+
 watch(
   [
     runMode,
@@ -3069,13 +3310,15 @@ watch(
     apiKey,
     ollamaBaseUrl,
     ollamaModel,
+    zhipuApiKey,
+    zhipuModel,
+    zhipuApiHost,
+    zhipuApiPort,
+    zhipuApiChecked,
+    () => ({ ...settings }),
   ],
   () => {
-    // 避免在加载时触发，设置一个小延迟
-    setTimeout(() => {
-      // 这里可以直接调用 saveSettings，但需要检查是否已经完成初始化
-      // 暂时只使用 localStorage，用户可以手动点击保存按钮
-    }, 100);
+    scheduleBackendSave();
   },
   { deep: true }
 );
@@ -3105,8 +3348,12 @@ onMounted(async () => {
   if (runMode.value === "ollama") {
     loadCloudModels("ollama");
   } else if (runMode.value === "api") {
-    await checkApiServiceStatus();
-    await autoActivateApiService();
+    if (apiSource.value === "zhipu") {
+      await loadZhipuModels();
+    } else {
+      await checkApiServiceStatus();
+      await autoActivateApiService();
+    }
   }
 
   // 启动时自动检测并恢复服务状态（支持两边同时运行）
@@ -3115,7 +3362,70 @@ onMounted(async () => {
   addMessage("assistant", "选择模型并配置参数，打开项目目录后即可下达编码任务。");
 
   const backend = await getBackend();
-  if (backend) {
+
+  if (_backendType === "electron" && backend) {
+    backend.onDelta((payload: any) => {
+      try {
+        if (!payload?.text) return;
+        const target = messages.value.find((m) => m.id === currentAssistantId.value);
+        if (target) {
+          let newText = payload.text;
+          const isLoginPrompt =
+            newText.trim() === "Not logged in · Please run /login" ||
+            newText.trim() === "Not logged in · Run /login";
+          if (isLoginPrompt) return;
+          if (newText.includes("Not logged in")) {
+            newText = newText
+              .replace(/Not logged in · Please run \/login/g, "")
+              .replace(/Not logged in · Run \/login/g, "")
+              .trim();
+            if (!newText) return;
+          }
+          if (newText.startsWith("\x00TOOL\x00")) {
+            const statusLine = newText.slice(5);
+            target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
+            const writeMatch = statusLine.match(/写入文件|Write.*?✅\s*(.+)/);
+            const editMatch = statusLine.match(/编辑文件|Edit.*?✅\s*(.+)/);
+            if (writeMatch) trackFileChange("Write", writeMatch[1].trim(), "create");
+            else if (editMatch) trackFileChange("Edit", editMatch[1].trim(), "modify");
+          } else {
+            if (target.text === "" && newText.trim() === "") return;
+            if (target.toolStatus) target.toolStatus = "";
+            target.text += newText;
+          }
+        }
+      } catch {}
+    });
+
+    backend.onStatus((payload: any) => {
+      try {
+        if (payload && typeof payload.busy === "boolean") {
+          isBusy.value = payload.busy;
+          if (!payload.busy) {
+            if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+            if (currentAssistantId.value) {
+              const checkId = currentAssistantId.value;
+              setTimeout(() => {
+                const target = messages.value.find((m) => m.id === checkId);
+                if (target && !target.text.trim() && !target.toolStatus?.trim()) {
+                  target.text = "[模型未返回文本]";
+                }
+              }, 500);
+              const target = messages.value.find((m) => m.id === currentAssistantId.value);
+              if (target && messageStartTime.value > 0) {
+                target.completedAt = new Date().toLocaleString("zh-CN");
+                target.durationMs = Date.now() - messageStartTime.value;
+                target.tokens = Math.max(1, Math.round(target.text.length / 2));
+              }
+              messageStartTime.value = 0;
+            }
+            saveCurrentConversation();
+            processQueue();
+          }
+        }
+      } catch {}
+    });
+  } else if (backend) {
     backend.deltaReceived.connect((jsonStr: string) => {
       try {
         const payload = JSON.parse(jsonStr);
@@ -3123,14 +3433,12 @@ onMounted(async () => {
         const target = messages.value.find((m) => m.id === currentAssistantId.value);
         if (target) {
           let newText = payload.text;
-          // 过滤 "Not logged in" 提示
           const isLoginPrompt = 
             newText.trim() === "Not logged in · Please run /login" ||
             newText.trim() === "Not logged in · Run /login";
           if (isLoginPrompt) {
             return;
           }
-          // 清理登录提示文本
           if (newText.includes("Not logged in")) {
             newText = newText
               .replace(/Not logged in · Please run \/login/g, "")
@@ -3179,8 +3487,7 @@ onMounted(async () => {
               if (target && messageStartTime.value > 0) {
                 target.completedAt = new Date().toLocaleString("zh-CN");
                 target.durationMs = Date.now() - messageStartTime.value;
-                const textLen = target.text.length;
-                target.tokens = Math.max(1, Math.round(textLen / 2));
+                target.tokens = Math.max(1, Math.round(target.text.length / 2));
               }
               messageStartTime.value = 0;
             }
@@ -3229,6 +3536,14 @@ onMounted(async () => {
     });
   }
 
+  // 初始化完成，启用后端自动保存
+  _backendSaveReady = true;
+
+  // 初始化完成后立即保存一次当前设置到后端
+  try {
+    await saveSettingsQuiet();
+  } catch {}
+
   await nextTick();
   try {
     const b = await getBackend();
@@ -3266,6 +3581,7 @@ async function executeTerminalCommand() {
   const cwd = terminalCwd.value || activeProject.value?.workspace_path || workspacePath.value || "";
   const entry = { cmd, output: "", ts: new Date().toLocaleTimeString() };
   terminalHistory.value.push(entry);
+  if (terminalAutoScroll.value) scrollTerminalToBottom();
   try {
     const result = await callBackend("runTerminalCommand", cmd, cwd);
     const data = typeof result === "string" ? JSON.parse(result) : result;
@@ -3274,6 +3590,7 @@ async function executeTerminalCommand() {
   } catch (e: any) {
     entry.output = `错误: ${e.message || e}`;
   }
+  if (terminalAutoScroll.value) scrollTerminalToBottom();
 }
 
 function clearTerminal() {
@@ -3297,6 +3614,14 @@ function copyTerminalOutput() {
   if (!text) { showNotice("没有日志可复制", "warn"); return; }
   navigator.clipboard.writeText(text).then(() => {
     showNotice("日志已复制到剪贴板", "ok");
+  }).catch(() => {
+    showNotice("复制失败", "warn");
+  });
+}
+
+function copyQwenLogs() {
+  navigator.clipboard.writeText(qwenRegisterLogs.value.join("\n")).then(() => {
+    showNotice("已复制", "ok");
   }).catch(() => {
     showNotice("复制失败", "warn");
   });
@@ -3590,13 +3915,13 @@ async function loadOfflineModels() {
           <div class="terminal-toolbar">
             <span style="font-size: 11px; color: #4af;">⌨ 终端</span>
             <span style="font-size: 10px; color: #555; margin-left: 8px;">{{ terminalCwd || activeProject?.workspace_path || workspacePath || '~' }}</span>
-            <div style="display: flex; gap: 4px; margin-left: auto;">
-              <button class="btn-icon-sm" @click="scrollTerminalToBottom" style="font-size: 10px;" title="滚动到底部">⬇</button>
-              <button class="btn-icon-sm" @click="terminalExpanded = !terminalExpanded" style="font-size: 10px;" :title="terminalExpanded ? '折叠' : '展开'">{{ terminalExpanded ? '🔽' : '🔼' }}</button>
-              <button class="btn-icon-sm" @click="terminalDebug = !terminalDebug" :style="{ fontSize: '10px', color: terminalDebug ? '#4af' : '#666' }" title="调试模式">🐛</button>
-              <button class="btn-icon-sm" @click="copyTerminalOutput" style="font-size: 10px;" title="复制日志">📋</button>
-              <button class="btn-icon-sm" @click="saveTerminalOutput" style="font-size: 10px;" title="保存日志">💾</button>
-              <button class="btn-icon-sm" @click="clearTerminal" style="font-size: 10px;" title="清空">🗑️</button>
+            <div style="display: flex; gap: 4px; margin-left: auto; align-items: center;">
+              <button :class="['btn-icon-sm', { 'toggle-on': terminalAutoScroll }]" @click="terminalAutoScroll = !terminalAutoScroll" style="font-size: 10px;" :style="{ color: terminalAutoScroll ? '#4af' : '#666' }" title="自动滚动">滚动</button>
+              <button :class="['btn-icon-sm', { 'toggle-on': terminalExpanded }]" @click="terminalExpanded = !terminalExpanded" style="font-size: 10px;" :style="{ color: terminalExpanded ? '#4af' : '#666' }" title="展开终端">展开</button>
+              <button :class="['btn-icon-sm', { 'toggle-on': terminalDebug }]" @click="terminalDebug = !terminalDebug" style="font-size: 10px;" :style="{ color: terminalDebug ? '#4af' : '#666' }" title="调试模式">调试</button>
+              <span style="width: 1px; height: 14px; background: #333; margin: 0 2px;"></span>
+              <button class="btn-icon-sm" @click="clearTerminal" style="font-size: 10px;" title="清空日志">清空</button>
+              <button class="btn-icon-sm" @click="saveTerminalOutput" style="font-size: 10px;" title="保存日志">保存</button>
               <button class="btn-icon-sm" @click="showTerminal = false" style="font-size: 10px;">✕</button>
             </div>
           </div>
@@ -3618,8 +3943,9 @@ async function loadOfflineModels() {
             <textarea
               v-model="inputText"
               placeholder="输入编码任务（Enter 发送，Shift+Enter 换行，/ 快捷指令）"
-              @keydown.enter.exact.prevent="sendMessage"
-              @input="handleInputChange"
+              @compositionstart="isComposing = true"
+              @compositionend="onCompositionEnd"
+              @keydown.enter.exact="handleEnterKey"
             />
             <div v-if="showSlashMenu" class="slash-menu">
               <div v-for="(cmd, key) in SLASH_COMMANDS" :key="key" v-show="!slashMenuFilter || key.startsWith(slashMenuFilter)" class="slash-item" @click="executeSlashCommand(key)">
@@ -3641,7 +3967,7 @@ async function loadOfflineModels() {
               <!-- 快捷模型选择 -->
               <div class="quick-model-select" style="position: relative;">
                 <button class="composer-action-btn" @click="showQuickModelDropdown = !showQuickModelDropdown" title="快捷切换模型">
-                  {{ allQuickModels.find(m => m.id === activeQuickModel)?.name || '⚡ 模型' }}
+                  {{ activeQuickModel ? (allQuickModels.find(m => m.id === activeQuickModel)?.name || '⚡ 模型') : '⚡ 模型' }}
                 </button>
                 <div v-if="showQuickModelDropdown" class="quick-model-dropdown" style="position: absolute; bottom: 100%; left: 0; margin-bottom: 4px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 4px; min-width: 200px; z-index: 100; max-height: 300px; overflow-y: auto;">
                   <!-- 可用模型 -->
@@ -3906,7 +4232,7 @@ async function loadOfflineModels() {
           </details>
           <div v-if="qwenRegisterLogs.length > 0" class="register-log-box" style="margin-top: 4px; max-height: 80px; overflow-y: auto;">
             <div style="display: flex; justify-content: flex-end; gap: 4px; margin-bottom: 2px;">
-              <button class="btn-icon-sm" @click="navigator.clipboard.writeText(qwenRegisterLogs.join('\n')).then(()=>showNotice('已复制','ok'))" style="font-size: 9px;" title="复制">📋</button>
+              <button class="btn-icon-sm" @click="copyQwenLogs()" style="font-size: 9px;" title="复制">📋</button>
               <button class="btn-icon-sm" @click="qwenRegisterLogs = []" style="font-size: 9px;" title="清空">🗑️</button>
             </div>
             <div v-for="(log, idx) in qwenRegisterLogs" :key="idx" class="register-log-line">{{ log }}</div>
@@ -5970,14 +6296,14 @@ export default { name: "App" };
 }
 
 .btn-icon-sm {
-  width: 20px;
+  min-width: 20px;
   height: 20px;
   border: none;
   background: transparent;
   color: #666;
   cursor: pointer;
   font-size: 12px;
-  padding: 0;
+  padding: 0 4px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5985,6 +6311,11 @@ export default { name: "App" };
 
 .btn-icon-sm:hover {
   color: #fff;
+}
+
+.btn-icon-sm.toggle-on {
+  background: rgba(68, 170, 255, 0.15);
+  border-radius: 3px;
 }
 
 .btn-sm {

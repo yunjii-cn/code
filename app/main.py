@@ -59,33 +59,77 @@ from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtCore import QObject
 
 
-class ChineseWebPage(QWebEnginePage):
+MENU_TRANSLATIONS = {
+    "Back": "后退",
+    "Forward": "前进",
+    "Reload": "重新加载",
+    "Cut": "剪切",
+    "Copy": "复制",
+    "Paste": "粘贴",
+    "Undo": "撤销",
+    "Redo": "重做",
+    "Select All": "全选",
+    "Inspect": "检查",
+    "Save Image": "保存图片",
+    "Copy Image": "复制图片",
+    "Copy Link": "复制链接",
+    "Copy Image Address": "复制图片地址",
+    "Save Link": "保存链接",
+    "Open Link in New Tab": "在新标签页中打开链接",
+    "View Source": "查看源代码",
+    "Copy Link Address": "复制链接地址",
+    "Open Link in New Window": "在新窗口中打开链接",
+    "Open Image in New Tab": "在新标签页中打开图片",
+    "Save Page As": "页面另存为",
+    "Copy Page Link": "复制页面链接",
+    "Select All Text": "全选文本",
+    "Search": "搜索",
+    "Translate": "翻译",
+    "Print": "打印",
+    "Create QR Code for this Page": "为本页创建二维码",
+    "Cast": "投射",
+    "Share": "分享",
+    "Exit Full Screen": "退出全屏",
+    "Enter Full Screen": "进入全屏",
+    "Mute Site": "静音网站",
+    "Unmute Site": "取消静音网站",
+    "Check Spelling": "检查拼写",
+    "Look Up": "查找",
+    "Search with Google": "使用Google搜索",
+    "Search the Web": "搜索网页",
+    "Add to Dictionary": "添加到字典",
+    "No suggestions": "无建议",
+    "Spelling Suggestions": "拼写建议",
+    "Inspect Element": "检查元素",
+}
+
+
+class ChineseWebView(QWebEngineView):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_translated_menu)
 
-    def contextMenuEvent(self, event):
-        menu = self.createStandardContextMenu()
-        for action in menu.actions():
-            text = action.text()
-            text = text.replace("Back", "后退")
-            text = text.replace("Forward", "前进")
-            text = text.replace("Reload", "重新加载")
-            text = text.replace("Cut", "剪切")
-            text = text.replace("Copy", "复制")
-            text = text.replace("Paste", "粘贴")
-            text = text.replace("Undo", "撤销")
-            text = text.replace("Redo", "重做")
-            text = text.replace("Select All", "全选")
-            text = text.replace("Inspect", "检查")
-            text = text.replace("Save Image", "保存图片")
-            text = text.replace("Copy Image", "复制图片")
-            text = text.replace("Copy Link", "复制链接")
-            text = text.replace("Copy Image Address", "复制图片地址")
-            text = text.replace("Save Link", "保存链接")
-            text = text.replace("Open Link in New Tab", "在新标签页中打开链接")
-            text = text.replace("View Source", "查看源代码")
-            action.setText(text)
-        menu.exec(event.globalPos())
+    def _show_translated_menu(self, pos):
+        try:
+            page = self.page()
+            if page is None:
+                return
+            menu = page.createStandardContextMenu()
+            if menu is None:
+                return
+            for action in menu.actions():
+                text = action.text()
+                if text in MENU_TRANSLATIONS:
+                    action.setText(MENU_TRANSLATIONS[text])
+                else:
+                    for en, zh in MENU_TRANSLATIONS.items():
+                        if en in text:
+                            text = text.replace(en, zh)
+                    action.setText(text)
+            menu.exec(self.mapToGlobal(pos))
+        except Exception:
+            pass
 
 # 导入后端模块
 import backend
@@ -1264,11 +1308,71 @@ class SoftwareUpdater:
         exes.sort(key=lambda x: x["version"], reverse=True)
         return exes
 
+    def get_git_history(self, limit=20):
+        """获取Git提交历史记录"""
+        if not self.is_git_repo():
+            return []
+        r = self._run_git("log", f"-{limit}", "--oneline", "--format=%h|%s|%an|%ar", timeout=30)
+        if not r["ok"]:
+            return []
+        commits = []
+        for line in r["stdout"].splitlines():
+            parts = line.strip().split("|", 3)
+            if len(parts) >= 4:
+                commits.append({
+                    "hash": parts[0],
+                    "message": parts[1],
+                    "author": parts[2],
+                    "time": parts[3],
+                })
+        return commits
+
+    def switch_git_commit(self, commit_hash: str):
+        """切换到指定Git提交（资源包版本）"""
+        if not self.is_git_repo():
+            self.log("[错误] 不是 Git 仓库，无法切换版本", "#F44336")
+            return False
+        
+        self.log(f"正在切换到 commit {commit_hash}...", "#FF9800")
+        r = self._run_git("stash")
+        stashed = r["ok"] and "Saved" in r["stdout"]
+        
+        r = self._run_git("checkout", commit_hash, timeout=60)
+        if not r["ok"]:
+            self.log(f"[错误] 切换失败: {r['stderr'][:200]}", "#F44336")
+            if stashed:
+                self._run_git("stash", "pop")
+            return False
+        
+        if stashed:
+            self._run_git("stash", "pop")
+        
+        self.log(f"✓ 已切换到 commit {commit_hash}", "#4CAF50")
+        return True
+
     def switch_to_exe(self, exe_path: str, git_commit: str = ""):
-        """切换到指定 EXE 并重启，同时回滚代码到对应 git commit"""
+        """切换到指定 EXE 并重启，同时回滚代码到对应 git commit
+        
+        实现方式：
+        1. ver/ 目录存储所有历史版本 EXE
+        2. dev/ 目录只保留当前使用的 EXE（通过复制覆盖实现单一版本）
+        """
         if not os.path.exists(exe_path):
             self.log(f"[错误] EXE 不存在: {exe_path}", "#F44336")
             return False
+
+        # 实现单一 EXE 版本管理：从 ver/ 复制到 dev/ 根目录
+        exe_filename = os.path.basename(exe_path)
+        dev_exe_path = os.path.join(self.dev_dir, exe_filename)
+        
+        try:
+            import shutil
+            shutil.copy2(exe_path, dev_exe_path)
+            self.log(f"✓ 已将版本 {exe_filename} 复制到根目录", "#4CAF50")
+        except Exception as e:
+            self.log(f"[警告] 复制 EXE 失败: {e}", "#FF9800")
+            # 即使复制失败，也尝试直接启动原来的exe
+            dev_exe_path = exe_path
 
         if git_commit and self.is_git_repo():
             self.log(f"正在回滚代码到 commit {git_commit}...", "#FF9800")
@@ -1285,11 +1389,11 @@ class SoftwareUpdater:
                     self._run_git("stash", "pop")
 
         current_pid = os.getpid()
-        new_exe = exe_path
+        new_exe = dev_exe_path
         cmd = f'ping -n 3 127.0.0.1 >nul & start "" "{new_exe}"'
         subprocess.Popen(cmd, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
 
-        self.log(f"正在切换到 {os.path.basename(exe_path)}...", "#4CAF50")
+        self.log(f"正在切换到 {exe_filename}...", "#4CAF50")
 
         QApplication.quit()
         return True
@@ -2093,9 +2197,20 @@ class BackendBridge(QObject):
             return json.dumps({})
         env = main.env_manager
         settings = env.read_settings()
+        provider = settings.get("MODEL_PROVIDER", "")
+        if provider == "api":
+            api_source = settings.get("API_SOURCE", "")
+            if api_source == "zhipu":
+                active_model = settings.get("ZHIPU_MODEL", "")
+            else:
+                active_model = settings.get("API_MODEL", "")
+        elif provider == "ollama":
+            active_model = settings.get("OLLAMA_MODEL", "")
+        else:
+            active_model = settings.get("ANTHROPIC_MODEL", "")
         return json.dumps({
             "sessionId": main.active_session_id,
-            "model": settings.get("ANTHROPIC_MODEL", "") or settings.get("OLLAMA_MODEL", ""),
+            "model": active_model,
             "busy": main.is_busy,
             "settings": settings,
             "workspacePath": main.current_workspace,
@@ -2590,6 +2705,31 @@ class BackendBridge(QObject):
             port = int(payload.get("port", 7780) or 7780)
             admin_key = payload.get("adminKey", "admin").strip() or "admin"
             result = backend.start_zhipu2api(project_dir, port, admin_key)
+            if result.get("ok"):
+                base_url = result.get("baseUrl", f"http://127.0.0.1:{port}")
+                main = self._get_main()
+                if main:
+                    settings = main.env_manager.read_settings()
+                    zhipu_key = (settings.get("ZHIPU_API_KEY", "") or settings.get("API_KEY", "")).strip()
+                    if zhipu_key and len(zhipu_key) > 10:
+                        try:
+                            backend.add_zhipu_account(base_url, zhipu_key, admin_key, label="auto-synced")
+                        except Exception:
+                            pass
+                    zhipu_keys_path = os.path.join(main.user_dir, "zhipu_keys.json")
+                    if os.path.exists(zhipu_keys_path):
+                        try:
+                            with open(zhipu_keys_path, "r", encoding="utf-8") as f:
+                                keys_data = json.load(f)
+                            if isinstance(keys_data, list):
+                                for item in keys_data:
+                                    if isinstance(item, dict) and item.get("key") and len(item["key"]) > 10:
+                                        try:
+                                            backend.add_zhipu_account(base_url, item["key"], admin_key, label=item.get("label", "local-synced"))
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            pass
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startZhipu2Api异常: {e}"})
@@ -2821,25 +2961,36 @@ class BackendBridge(QObject):
                 env_overrides["OLLAMA_MODEL"] = ollama_model
                 main.log_signal.emit(f"[代理] Node.js代理模式 模型={ollama_model}", "#2196F3")
             elif provider == "api":
-                api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777").strip()
-                api_model = (settings.get("API_MODEL", "") or "qwen3.6-plus").strip()
-                api_key = (settings.get("API_KEY", "") or "").strip()
-                auto_base = backend.resolve_api_base_url(api_model)
-                if auto_base != api_base:
-                    main.log_signal.emit(f"[路由] 模型={api_model} 自动路由 {api_base} → {auto_base}", "#2196F3")
-                    api_base = auto_base
-                is_zhipu = "bigmodel.cn" in api_base or "z.ai" in api_base or ":7780" in api_base
-                if is_zhipu:
-                    zhipu_base = api_base.rstrip("/").removesuffix("/v1")
-                    main.log_signal.emit(f"[代理] 智谱API模式 模型={api_model} 直连={zhipu_base}", "#2196F3")
-                    env_overrides["MODEL_PROVIDER"] = "api"
-                    env_overrides["API_BASE_URL"] = zhipu_base
-                    env_overrides["API_MODEL"] = api_model
-                    env_overrides["API_KEY"] = api_key
-                    env_overrides["ANTHROPIC_API_KEY"] = api_key
-                    env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
-                    env_overrides["ANTHROPIC_MODEL"] = api_model
+                api_source = (settings.get("API_SOURCE", "") or "").strip().lower()
+                if api_source == "zhipu":
+                    zhipu_key = (settings.get("ZHIPU_API_KEY", "") or "").strip()
+                    zhipu_model = (settings.get("ZHIPU_MODEL", "") or "glm-4.7-flash").strip()
+                    zhipu_base = (settings.get("ZHIPU_BASE_URL", "") or "http://127.0.0.1:7780").strip()
+                    zhipu_base = zhipu_base.rstrip("/").removesuffix("/v1")
+                    is_proxy = ":7780" in zhipu_base or "127.0.0.1:7780" in zhipu_base or "localhost:7780" in zhipu_base
+                    if is_proxy:
+                        main.log_signal.emit(f"[代理] 智谱API代理模式(Anthropic兼容) 模型={zhipu_model} 代理={zhipu_base}", "#2196F3")
+                        env_overrides["MODEL_PROVIDER"] = "anthropic"
+                        env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
+                        env_overrides["ANTHROPIC_API_KEY"] = zhipu_key
+                        env_overrides["ANTHROPIC_AUTH_TOKEN"] = zhipu_key
+                        env_overrides["ANTHROPIC_MODEL"] = zhipu_model
+                        env_overrides["API_BASE_URL"] = zhipu_base
+                        env_overrides["API_MODEL"] = zhipu_model
+                        env_overrides["API_KEY"] = zhipu_key
+                    else:
+                        main.log_signal.emit(f"[代理] 智谱API直连模式(OpenAI兼容) 模型={zhipu_model} 目标={zhipu_base}", "#2196F3")
+                        env_overrides["MODEL_PROVIDER"] = "api"
+                        env_overrides["API_BASE_URL"] = zhipu_base
+                        env_overrides["API_MODEL"] = zhipu_model
+                        env_overrides["API_KEY"] = zhipu_key
+                        env_overrides["ANTHROPIC_API_KEY"] = zhipu_key
+                        env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
+                        env_overrides["ANTHROPIC_MODEL"] = zhipu_model
                 else:
+                    api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777").strip()
+                    api_model = (settings.get("API_MODEL", "") or "qwen3.6-plus").strip()
+                    api_key = (settings.get("API_KEY", "") or "").strip()
                     main.log_signal.emit(f"[代理] Qwen API模式 模型={api_model} 目标={api_base}", "#2196F3")
                     env_overrides["MODEL_PROVIDER"] = "api"
                     env_overrides["API_BASE_URL"] = api_base
@@ -3825,7 +3976,7 @@ class MainWindow(QMainWindow):
         nav_layout.addWidget(self.btn_deploy_nav)
 
         # 软件更新按钮
-        self.btn_update_nav = QPushButton("📋 版本管理")
+        self.btn_update_nav = QPushButton("📋 软件更新")
         self.btn_update_nav.setCheckable(True)
         self.btn_update_nav.setStyleSheet(menu_button_style)
         self.btn_update_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3896,8 +4047,7 @@ class MainWindow(QMainWindow):
         page_layout.setContentsMargins(0, 0, 0, 0)
 
         # QWebEngineView 加载 Vue 前端
-        self.web_view = QWebEngineView()
-        self.web_view.setPage(ChineseWebPage(self.web_view))
+        self.web_view = ChineseWebView()
         profile = self.web_view.page().profile()
         # Web存储路径: 用户级数据 (跟随用户隔离)
         storage_path = os.path.join(self.user_dir, "webdata")
@@ -4003,15 +4153,28 @@ class MainWindow(QMainWindow):
         top_row.addWidget(self.mirror_combo)
         deploy_layout.addLayout(top_row)
 
-        # 一键部署按钮
-        self.btn_install_all = QPushButton("🔄 一键部署全部")
+        # 按钮区域：环境检测 + 部署维护（左右结构）
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        self.btn_env_check = QPushButton("🔍 环境检测")
+        self.btn_env_check.setStyleSheet("""
+            QPushButton { background-color: #1565C0; border: 2px solid #1E88E5; border-radius: 6px; padding: 10px 20px; font-size: 13px; font-weight: bold; }
+            QPushButton:hover { background-color: #1E88E5; }
+            QPushButton:disabled { background-color: #333; color: #666; border-color: #444; }
+        """)
+        self.btn_env_check.clicked.connect(self._refresh_deploy_env_status)
+        btn_row.addWidget(self.btn_env_check)
+
+        self.btn_install_all = QPushButton("🚀 部署维护")
         self.btn_install_all.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; font-weight: bold; }
+            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 10px 20px; font-size: 13px; font-weight: bold; }
             QPushButton:hover { background-color: #388E3C; }
             QPushButton:disabled { background-color: #333; color: #666; border-color: #444; }
         """)
         self.btn_install_all.clicked.connect(self._on_deploy)
-        deploy_layout.addWidget(self.btn_install_all)
+        btn_row.addWidget(self.btn_install_all)
+        deploy_layout.addLayout(btn_row)
 
         # 步骤进度条按钮
         self.deploy_env_labels = {}
@@ -4151,7 +4314,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 10, 12, 10)
 
         top_bar = QHBoxLayout()
-        title = QLabel("🔄 版本管理")
+        title = QLabel("🔄 软件更新")
         title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
         title.setStyleSheet("color: #1565C0; border: none;")
         top_bar.addWidget(title)
@@ -4227,6 +4390,42 @@ class MainWindow(QMainWindow):
         self.update_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
         self.update_log_text.hide()
 
+        # Git历史记录面板
+        git_section = QFrame()
+        git_section.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; }")
+        git_layout = QVBoxLayout(git_section)
+        git_layout.setSpacing(8)
+        git_layout.setContentsMargins(12, 10, 12, 10)
+        
+        git_header = QHBoxLayout()
+        git_title = QLabel("🔀 Git 版本切换")
+        git_title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
+        git_title.setStyleSheet("color: #fff; border: none;")
+        git_header.addWidget(git_title)
+        git_header.addStretch()
+        
+        git_refresh_btn = QPushButton("刷新历史")
+        git_refresh_btn.setStyleSheet("""
+            QPushButton { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; padding: 6px 12px; font-size: 11px; color: #aaa; }
+            QPushButton:hover { background-color: #3a3a3a; color: #fff; }
+        """)
+        git_refresh_btn.clicked.connect(self._refresh_git_history)
+        git_header.addWidget(git_refresh_btn)
+        git_layout.addLayout(git_header)
+        
+        self.git_history_container = QWidget()
+        self.git_history_layout = QVBoxLayout(self.git_history_container)
+        self.git_history_layout.setSpacing(4)
+        self.git_history_layout.setContentsMargins(0, 0, 0, 0)
+        
+        git_scroll = QScrollArea()
+        git_scroll.setWidgetResizable(True)
+        git_scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+        git_scroll.setWidget(self.git_history_container)
+        git_layout.addWidget(git_scroll)
+        
+        layout.addWidget(git_section)
+
         return page
 
     # ── 页面切换 ──
@@ -4247,6 +4446,7 @@ class MainWindow(QMainWindow):
         # 切换到软件更新页面时刷新稳定版列表
         if index == 2:
             self._fetch_and_refresh_ver_list()
+            self._refresh_git_history()
         # 切换到项目管理或系统设置时，通过JS切换前端视图
         if index in (0, 3, 4):
             nav_name = {0: "chat", 3: "project", 4: "settings"}.get(index, "chat")
@@ -4254,6 +4454,124 @@ class MainWindow(QMainWindow):
                 self.web_view.page().runJavaScript(f"if(window.switchNav) window.switchNav('{nav_name}');")
             except Exception:
                 pass
+
+    def _refresh_git_history(self):
+        """刷新Git历史记录"""
+        if not hasattr(self, 'git_history_layout'):
+            return
+        
+        # 清空现有内容
+        while self.git_history_layout.count():
+            item = self.git_history_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        if not self.updater.is_git_repo():
+            no_git = QLabel("当前不是 Git 仓库，无法使用 Git 版本切换")
+            no_git.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
+            no_git.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.git_history_layout.addWidget(no_git)
+            return
+        
+        # 获取当前commit
+        current_commit = self.updater.get_current_commit()
+        
+        # 获取git历史
+        commits = self.updater.get_git_history(30)
+        
+        if not commits:
+            no_commits = QLabel("暂无 Git 提交记录")
+            no_commits.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
+            no_commits.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.git_history_layout.addWidget(no_commits)
+            return
+        
+        for commit in commits:
+            self._create_git_commit_card(commit, commit["hash"] == current_commit)
+
+    def _create_git_commit_card(self, commit_info, is_current):
+        """创建Git提交卡片"""
+        commit_hash = commit_info["hash"]
+        message = commit_info["message"]
+        author = commit_info["author"]
+        time = commit_info["time"]
+        
+        card = QFrame()
+        card.setObjectName("gitCommitCard")
+        if is_current:
+            card.setStyleSheet("""
+                #gitCommitCard { background-color: #162016; border: 1px solid #1f3a1f; border-radius: 6px; }
+                #gitCommitCard:hover { background-color: #1a2a1a; border-color: #2a4a2a; }
+                QLabel { border: none; background: transparent; }
+                QPushButton { border: none; }
+            """)
+        else:
+            card.setStyleSheet("""
+                #gitCommitCard { background-color: #161616; border: 1px solid #2a2a2a; border-radius: 6px; }
+                #gitCommitCard:hover { background-color: #1c1c1c; border-color: #3a3a3a; }
+                QLabel { border: none; background: transparent; }
+                QPushButton { border: none; }
+            """)
+        
+        cl = QVBoxLayout(card)
+        cl.setSpacing(3)
+        cl.setContentsMargins(10, 8, 10, 8)
+        
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        
+        hash_label = QLabel(commit_hash)
+        hash_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        if is_current:
+            hash_label.setStyleSheet("color: #4CAF50;")
+        else:
+            hash_label.setStyleSheet("color: #42A5F5;")
+        header.addWidget(hash_label)
+        
+        time_label = QLabel(time)
+        time_label.setFont(QFont("Consolas", 9))
+        time_label.setStyleSheet("color: #666;")
+        header.addWidget(time_label)
+        
+        header.addStretch()
+        
+        if is_current:
+            current_tag = QLabel("● 当前")
+            current_tag.setFont(QFont("Microsoft YaHei", 9))
+            current_tag.setStyleSheet("color: #4CAF50;")
+            header.addWidget(current_tag)
+        else:
+            switch_btn = QPushButton("切换")
+            switch_btn.setFixedWidth(55)
+            switch_btn.setStyleSheet("""
+                QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; padding: 3px 10px; font-size: 11px; color: #AAA; }
+                QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #FFF; }
+            """)
+            switch_btn.clicked.connect(lambda checked, h=commit_hash: self._switch_git_commit(h))
+            header.addWidget(switch_btn)
+        
+        cl.addLayout(header)
+        
+        msg_label = QLabel(message)
+        msg_label.setFont(QFont("Microsoft YaHei", 10))
+        msg_label.setStyleSheet("color: #ccc;")
+        msg_label.setWordWrap(True)
+        cl.addWidget(msg_label)
+        
+        author_label = QLabel(f"👤 {author}")
+        author_label.setFont(QFont("Microsoft YaHei", 9))
+        author_label.setStyleSheet("color: #666;")
+        cl.addWidget(author_label)
+        
+        self.git_history_layout.addWidget(card)
+
+    def _switch_git_commit(self, commit_hash):
+        """切换到指定Git提交"""
+        self._append_log(f"正在切换到 Git commit {commit_hash}...", "#FF9800")
+        success = self.updater.switch_git_commit(commit_hash)
+        if success:
+            self._append_log("✓ Git 版本切换成功，请重启应用以加载新资源包", "#4CAF50")
+            self._refresh_git_history()
 
     # ── 环境检查与自动加载 ──
     def _auto_check_and_load(self):
@@ -4552,11 +4870,16 @@ class MainWindow(QMainWindow):
             remote_tag.setFont(QFont("Microsoft YaHei", 9))
             remote_tag.setStyleSheet("color: #42A5F5;")
             header.addWidget(remote_tag)
-        elif is_available and exe_info and exe_info.get("size_mb"):
-            size_label = QLabel(f"{exe_info['size_mb']}MB")
-            size_label.setFont(QFont("Consolas", 9))
-            size_label.setStyleSheet("color: #555;")
-            header.addWidget(size_label)
+        elif is_available and exe_info:
+            exe_tag = QLabel("📦 含EXE稳定版")
+            exe_tag.setFont(QFont("Microsoft YaHei", 9))
+            exe_tag.setStyleSheet("color: #FF9800;")
+            header.addWidget(exe_tag)
+            if exe_info.get("size_mb"):
+                size_label = QLabel(f"{exe_info['size_mb']}MB")
+                size_label.setFont(QFont("Consolas", 9))
+                size_label.setStyleSheet("color: #555;")
+                header.addWidget(size_label)
         elif not is_available:
             status_label = QLabel("未提供")
             status_label.setFont(QFont("Microsoft YaHei", 9))

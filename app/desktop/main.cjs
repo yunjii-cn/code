@@ -31,9 +31,20 @@ const SETTINGS_KEYS = [
   "ANTHROPIC_DEFAULT_OPUS_MODEL",
   "OLLAMA_BASE_URL",
   "OLLAMA_MODEL",
+  "API_BASE_URL",
+  "API_MODEL",
+  "API_KEY",
+  "API_SOURCE",
   "API_TIMEOUT_MS",
+  "ZHIPU_API_KEY",
+  "ZHIPU_MODEL",
+  "ZHIPU_BASE_URL",
   "DISABLE_TELEMETRY",
   "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+  "AI_LANGUAGE",
+  "AI_TEMPERATURE",
+  "AI_MAX_TOKENS",
+  "SYSTEM_PROMPT",
 ];
 
 const OLLAMA_AGENT_MAX_STEPS = 10;
@@ -831,6 +842,44 @@ async function listOllamaModels(baseUrl, timeoutMs) {
   return { ok: true, models };
 }
 
+async function listApiModels(baseUrl, apiKey, timeoutMs) {
+  const base = baseUrl?.trim();
+  if (!base) {
+    return { ok: false, error: "API base URL is required." };
+  }
+  const url = `${base}/v1/models`;
+  const headers = { "Content-Type": "application/json" };
+  if (apiKey && apiKey.trim()) {
+    headers["Authorization"] = `Bearer ${apiKey.trim()}`;
+  }
+  const result = await fetchJsonWithTimeout(url, { headers, timeoutMs });
+  if (!result.ok) {
+    return { ok: false, error: `API models request failed (${result.status})` };
+  }
+  const models = normalizeModelEntries(result?.data?.data, "api");
+  return { ok: true, models };
+}
+
+async function listZhipuModels(apiKey, baseUrl, timeoutMs) {
+  const key = apiKey?.trim();
+  if (!key) {
+    return { ok: false, error: "Zhipu API key is required." };
+  }
+  const base = baseUrl?.trim() || "https://open.bigmodel.cn/api/paas/v4";
+  const url = `${base}/models`;
+  const result = await fetchJsonWithTimeout(url, {
+    timeoutMs,
+    headers: {
+      "Authorization": `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!result.ok) {
+    return { ok: false, error: `Zhipu models API failed (${result.status})` };
+  }
+  const models = normalizeModelEntries(result?.data?.data, "zhipu");
+  return { ok: true, models };
+}
 
 
 async function sendViaClaudeCli({ prompt, model, requestId, sessionId, isResuming, workspacePath, envOverrides }) {
@@ -938,9 +987,23 @@ async function sendViaClaudeCli({ prompt, model, requestId, sessionId, isResumin
 
 ipcMain.handle("chat:getState", async () => {
   const envSettings = readEnvSettings();
+  const provider = (envSettings.MODEL_PROVIDER || "anthropic").toLowerCase();
+  let activeModel = "";
+  if (provider === "ollama") {
+    activeModel = envSettings.OLLAMA_MODEL || "";
+  } else if (provider === "api") {
+    const apiSource = (envSettings.API_SOURCE || "").toLowerCase();
+    if (apiSource === "zhipu") {
+      activeModel = envSettings.ZHIPU_MODEL || "";
+    } else {
+      activeModel = envSettings.API_MODEL || "";
+    }
+  } else {
+    activeModel = envSettings.ANTHROPIC_MODEL || "";
+  }
   return {
     sessionId: activeSessionId,
-    model: envSettings.ANTHROPIC_MODEL || envSettings.OLLAMA_MODEL || "",
+    model: activeModel,
     busy: isBusy,
     settings: envSettings,
     workspacePath: currentWorkspace,
@@ -971,6 +1034,31 @@ ipcMain.handle("workspace:choose", async () => {
 ipcMain.handle("settings:get", async () => readEnvSettings());
 ipcMain.handle("settings:save", async (_event, payload) => writeEnvSettings(payload));
 ipcMain.handle("settings:clearModel", async () => clearModelSettings());
+ipcMain.handle("zhipu:addAccount", async (_event, payload) => {
+  const baseUrl = `${payload?.baseUrl || ""}`.trim();
+  const apiKey = `${payload?.apiKey || ""}`.trim();
+  const adminKey = `${payload?.adminKey || "admin"}`.trim();
+  const label = `${payload?.label || ""}`.trim();
+  if (!apiKey) return { ok: false, error: "API key is required" };
+  const targetBase = baseUrl || `http://127.0.0.1:7780`;
+  try {
+    const result = await fetchJsonWithTimeout(`${targetBase}/api/admin/accounts`, {
+      timeoutMs: 10000,
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${adminKey}`,
+        "Content-Type": "application/json",
+      },
+      body: Buffer.from(JSON.stringify({ api_key: apiKey, label: label || apiKey.slice(0, 8) + "..." })),
+    });
+    if (result.ok || result.status === 200) {
+      return { ok: true };
+    }
+    return { ok: false, error: `Failed to add account (HTTP ${result.status})` };
+  } catch (e) {
+    return { ok: false, error: `zhipu2api not reachable: ${e.message || e}` };
+  }
+});
 ipcMain.handle("models:list", async (_event, payload) => {
   const source = `${payload?.source || ""}`.toLowerCase();
   const envSettings = readEnvSettings();
@@ -988,6 +1076,18 @@ ipcMain.handle("models:list", async (_event, payload) => {
   if (source === "ollama") {
     const baseUrl = `${payload?.baseUrl || envSettings.OLLAMA_BASE_URL || "http://127.0.0.1:11434"}`;
     return listOllamaModels(baseUrl, timeoutMs);
+  }
+
+  if (source === "api") {
+    const baseUrl = `${payload?.baseUrl || envSettings.API_BASE_URL || ""}`;
+    const apiKey = `${payload?.apiKey || envSettings.API_KEY || ""}`;
+    return listApiModels(baseUrl, apiKey, timeoutMs);
+  }
+
+  if (source === "zhipu") {
+    const apiKey = `${payload?.apiKey || envSettings.ZHIPU_API_KEY || ""}`;
+    const baseUrl = `${payload?.baseUrl || envSettings.ZHIPU_BASE_URL || ""}`;
+    return listZhipuModels(apiKey, baseUrl, timeoutMs);
   }
 
   return { ok: false, error: "Unsupported model source." };
@@ -1032,7 +1132,7 @@ ipcMain.handle("chat:send", async (_event, payload) => {
         : envSettings.ANTHROPIC_MODEL || "";
 
   const timeoutMs = Number.parseInt(envSettings.API_TIMEOUT_MS || "3000000", 10) || 3000000;
-  if (provider !== "ollama") {
+  if (provider !== "ollama" && provider !== "api") {
     const cloudKey = `${envSettings.ANTHROPIC_API_KEY || envSettings.ANTHROPIC_AUTH_TOKEN || ""}`.trim();
     if (!cloudKey || cloudKey === "ollama-local") {
       return { ok: false, error: "请先在云端模式配置有效的 API Key。当前 key 为空或为本地占位值。" };
@@ -1049,6 +1149,57 @@ ipcMain.handle("chat:send", async (_event, payload) => {
       ANTHROPIC_AUTH_TOKEN: "ollama-local",
       ANTHROPIC_MODEL: ollamaModel,
     };
+  } else if (provider === "api") {
+    const apiSource = (envSettings.API_SOURCE || "").trim().toLowerCase();
+    if (apiSource === "zhipu") {
+      const zhipuKey = (envSettings.ZHIPU_API_KEY || "").trim();
+      const zhipuModel = (envSettings.ZHIPU_MODEL || model || "glm-4.7-flash").trim();
+      let zhipuBase = (envSettings.ZHIPU_BASE_URL || "http://127.0.0.1:7780").trim();
+      zhipuBase = zhipuBase.replace(/\/v1$/, "").replace(/\/+$/, "");
+      const isProxy = /:7780/.test(zhipuBase);
+      if (isProxy) {
+        envOverrides = {
+          MODEL_PROVIDER: "anthropic",
+          ANTHROPIC_BASE_URL: zhipuBase,
+          ANTHROPIC_API_KEY: zhipuKey,
+          ANTHROPIC_AUTH_TOKEN: zhipuKey,
+          ANTHROPIC_MODEL: zhipuModel,
+          API_BASE_URL: zhipuBase,
+          API_MODEL: zhipuModel,
+          API_KEY: zhipuKey,
+        };
+      } else {
+        envOverrides = {
+          MODEL_PROVIDER: "api",
+          API_BASE_URL: zhipuBase,
+          API_MODEL: zhipuModel,
+          API_KEY: zhipuKey,
+          ANTHROPIC_API_KEY: zhipuKey,
+          ANTHROPIC_BASE_URL: zhipuBase,
+          ANTHROPIC_MODEL: zhipuModel,
+        };
+      }
+    } else {
+      let apiBaseUrl = (envSettings.API_BASE_URL || "").trim();
+      const apiKeyVal = (envSettings.API_KEY || "").trim();
+      const apiModelVal = (envSettings.API_MODEL || model || "").trim();
+      if (!apiBaseUrl) {
+        return { ok: false, error: "请先配置 API 服务地址。" };
+      }
+      envOverrides = {
+        MODEL_PROVIDER: "api",
+        API_BASE_URL: apiBaseUrl,
+        API_MODEL: apiModelVal,
+        API_KEY: apiKeyVal || undefined,
+        ANTHROPIC_API_KEY: apiKeyVal || undefined,
+        ANTHROPIC_BASE_URL: apiBaseUrl,
+        ANTHROPIC_MODEL: apiModelVal,
+      };
+      if (!apiKeyVal) {
+        delete envOverrides.API_KEY;
+        delete envOverrides.ANTHROPIC_API_KEY;
+      }
+    }
   }
   if (!prompt) {
     return { ok: false, error: "Prompt cannot be empty." };

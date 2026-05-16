@@ -1,4 +1,4 @@
-﻿/// <reference types="vite/client" />
+/// <reference types="vite/client" />
 
 type ChatState = {
   sessionId: string;
@@ -21,6 +21,21 @@ type DeltaPayload = { requestId: string; text: string };
 type StatusPayload = { busy: boolean; requestId: string };
 type ModelEntry = { id: string; name: string; provider: string; toolSupport?: boolean };
 
+type DesktopApi = {
+  getState: () => Promise<ChatState>;
+  newSession: () => Promise<{ sessionId: string }>;
+  sendMessage: (payload: { prompt: string; provider: string; model: string; [key: string]: any }) => Promise<ChatSendResult>;
+  stopMessage: () => Promise<{ ok: boolean; error?: string; sessionId?: string }>;
+  getWorkspace: () => Promise<{ path: string }>;
+  chooseWorkspace: () => Promise<{ ok: boolean; path?: string; error?: string; canceled?: boolean }>;
+  getSettings: () => Promise<Record<string, string>>;
+  saveSettings: (payload: Record<string, string>) => Promise<Record<string, string>>;
+  clearModelSettings: () => Promise<Record<string, string>>;
+  listModels: (payload: { source: string; baseUrl?: string; apiKey?: string }) => Promise<{ ok: boolean; models?: ModelEntry[]; error?: string }>;
+  onDelta: (handler: (payload: DeltaPayload) => void) => () => void;
+  onStatus: (handler: (payload: StatusPayload) => void) => () => void;
+};
+
 // QWebChannel 后端桥接对象类型
 type BackendBridge = {
   getState: () => Promise<string>;           // 返回 JSON 字符串
@@ -40,7 +55,7 @@ type BackendBridge = {
 
 declare global {
   interface Window {
-    // QWebChannel 全局对象（由 PyQt6 QWebEngineView 注入）
+    desktopApi?: DesktopApi;
     QWebChannel: new (transport: any, initCallback: (channel: { objects: { backend: BackendBridge } }) => void) => void;
     qt: {
       webChannelTransport: any;
