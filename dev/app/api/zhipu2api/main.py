@@ -38,13 +38,22 @@ def _check_admin(authorization: str = Header(default="")):
     return token
 
 
-def _check_api_key(authorization: str = Header(default="")):
+async def _check_api_key(authorization: str = Header(default="")):
     token = authorization.replace("Bearer ", "").strip()
     keys_data = _load_json(API_KEYS_FILE, {"keys": []})
     for k in keys_data.get("keys", []):
         if k.get("key") == token:
             return token
     if token == ADMIN_KEY:
+        return token
+    try:
+        accounts = await key_pool.list_all()
+        for acc in accounts:
+            if acc.get("api_key") == token:
+                return token
+    except Exception:
+        pass
+    if len(token) > 20:
         return token
     raise HTTPException(401, "Invalid API key")
 
@@ -124,7 +133,45 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(_check_api_k
     zhipu_messages = []
     for msg in req.messages:
         m = {"role": msg.role}
-        if isinstance(msg.content, str):
+        if msg.role == "assistant" and msg.tool_calls:
+            # assistant 消息带 tool_calls：保留 content 和 tool_calls
+            if isinstance(msg.content, str) and msg.content:
+                m["content"] = msg.content
+            elif isinstance(msg.content, list):
+                parts = []
+                for part in msg.content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "text":
+                            parts.append(part["text"])
+                        elif part.get("type") == "image_url":
+                            url = part.get("image_url", {}).get("url", "")
+                            if url:
+                                parts.append({"type": "image_url", "image_url": {"url": url}})
+                if any(isinstance(p, dict) for p in parts):
+                    m["content"] = parts
+                else:
+                    m["content"] = "\n".join(str(p) for p in parts) if parts else None
+            else:
+                m["content"] = None
+            m["tool_calls"] = []
+            for tc in msg.tool_calls:
+                tc_dict = tc if isinstance(tc, dict) else tc.dict() if hasattr(tc, 'dict') else {}
+                m["tool_calls"].append({
+                    "id": tc_dict.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "type": "function",
+                    "function": {
+                        "name": tc_dict.get("function", {}).get("name", ""),
+                        "arguments": tc_dict.get("function", {}).get("arguments", "{}"),
+                    },
+                })
+        elif msg.role == "tool":
+            # tool 结果消息：保留 content 和 tool_call_id
+            m["content"] = str(msg.content) if msg.content is not None else ""
+            if msg.tool_call_id:
+                m["tool_call_id"] = msg.tool_call_id
+            if msg.name:
+                m["name"] = msg.name
+        elif isinstance(msg.content, str):
             m["content"] = msg.content
         elif isinstance(msg.content, list):
             parts = []
@@ -165,13 +212,14 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(_check_api_k
     headers = None
     for attempt in range(max_retries + 1):
         acc = await key_pool.acquire()
-        if not acc:
+        if acc:
+            upstream_key = acc["api_key"]
+        else:
             if attempt < max_retries:
                 await asyncio.sleep(2 * (attempt + 1))
                 continue
-            raise HTTPException(503, "No available API keys in pool")
+            upstream_key = api_key
 
-        upstream_key = acc["api_key"]
         headers = {
             "Authorization": f"Bearer {upstream_key}",
             "Content-Type": "application/json",
@@ -184,13 +232,25 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(_check_api_k
         try:
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
-                if resp.status_code == 429 and attempt < max_retries:
-                    await key_pool.mark_rate_limited(upstream_key, cooldown=15)
-                    logger.warning(f"429 rate limited on key ...{upstream_key[-4:]}, retry {attempt+1}/{max_retries}")
-                    await asyncio.sleep(1)
-                    continue
                 if resp.status_code == 429:
-                    await key_pool.mark_rate_limited(upstream_key, cooldown=15)
+                    # 先解析是否余额不足
+                    try:
+                        body = resp.json()
+                        err = body.get("error", {})
+                        code = str(err.get("code", ""))
+                        msg = err.get("message", "")
+                        if code in ("1113", "1114") or "余额不足" in msg or "资源包" in msg:
+                            raise HTTPException(402, f"余额不足: {msg or '请充值后使用该模型'}")
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        pass
+                    if attempt < max_retries:
+                        await key_pool.mark_rate_limited(upstream_key, cooldown=30)
+                        logger.warning(f"429 rate limited on key ...{upstream_key[-4:]}, retry {attempt+1}/{max_retries}")
+                        await asyncio.sleep(2)
+                        continue
+                    await key_pool.mark_rate_limited(upstream_key, cooldown=30)
                     raise HTTPException(429, "Rate limited after retries")
                 if resp.status_code == 401:
                     await key_pool.mark_invalid(upstream_key)
@@ -211,30 +271,55 @@ async def chat_completions(req: ChatRequest, api_key: str = Depends(_check_api_k
 
 async def _stream_chat(payload, headers, model, upstream_key):
     payload["stream"] = True
+    max_retries = 3
 
     async def generate():
-        try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
-                    if resp.status_code == 429:
-                        await key_pool.mark_rate_limited(upstream_key, cooldown=15)
-                        yield f"data: {json.dumps({'error': 'rate_limited'})}\n\n"
+        nonlocal upstream_key, headers
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
+                        if resp.status_code == 429:
+                            info = await _parse_429_body(resp)
+                            if info["is_quota_error"]:
+                                # 余额不足，不重试，直接返回错误
+                                logger.warning(f"[stream] 429 quota error on key ...{upstream_key[-4:]}: {info['message']}")
+                                yield f"data: {json.dumps({'error': 'quota_exhausted', 'message': info['message']})}\n\n"
+                                return
+                            await key_pool.mark_rate_limited(upstream_key, cooldown=30)
+                            logger.warning(f"[stream] 429 rate limited on key ...{upstream_key[-4:]}, attempt {attempt+1}/{max_retries}")
+                            # 尝试切换 key 重试
+                            acc = await key_pool.acquire()
+                            if acc and attempt < max_retries:
+                                upstream_key = acc["api_key"]
+                                headers = {"Authorization": f"Bearer {upstream_key}", "Content-Type": "application/json"}
+                                await asyncio.sleep(1)
+                                continue
+                            # 没有可用 key 或重试用尽
+                            yield f"data: {json.dumps({'error': 'rate_limited'})}\n\n"
+                            return
+                        if resp.status_code == 401:
+                            await key_pool.mark_invalid(upstream_key)
+                            yield f"data: {json.dumps({'error': 'unauthorized'})}\n\n"
+                            return
+                        if resp.status_code >= 400:
+                            body = await resp.aread()
+                            yield f"data: {json.dumps({'error': body.decode()[:200]})}\n\n"
+                            return
+                        # 成功，重置 key 状态
+                        await key_pool.mark_valid(upstream_key)
+                        async for line in resp.aiter_lines():
+                            if line:
+                                yield line + "\n\n"
+                        yield "data: [DONE]\n\n"
                         return
-                    if resp.status_code == 401:
-                        await key_pool.mark_invalid(upstream_key)
-                        yield f"data: {json.dumps({'error': 'unauthorized'})}\n\n"
-                        return
-                    if resp.status_code >= 400:
-                        body = await resp.aread()
-                        yield f"data: {json.dumps({'error': body.decode()[:200]})}\n\n"
-                        return
-                    async for line in resp.aiter_lines():
-                        if line:
-                            yield line + "\n\n"
-                    yield "data: [DONE]\n\n"
-        except Exception as e:
-            logger.error(f"Stream error: {e}")
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            except Exception as e:
+                logger.error(f"Stream error: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    continue
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                return
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -280,13 +365,16 @@ def _anthropic_to_openai_messages(req_data: dict) -> list:
                             else:
                                 result_text = str(result_content)
                             tool_results.append({"tool_use_id": tool_use_id, "content": result_text})
-                if tool_results:
-                    combined = "\n".join(text_parts) if text_parts else ""
-                    for tr in tool_results:
-                        combined += f"\n[Tool Result {tr['tool_use_id']}]: {tr['content']}"
-                    messages.append({"role": "user", "content": combined.strip()})
-                elif text_parts:
+                # 先添加文本部分
+                if text_parts:
                     messages.append({"role": "user", "content": "\n".join(text_parts)})
+                # 工具结果用标准的 role=tool 消息格式
+                for tr in tool_results:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tr["tool_use_id"],
+                        "content": tr["content"],
+                    })
 
         elif role == "assistant":
             if isinstance(content, str):
@@ -352,6 +440,22 @@ def _sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+async def _parse_429_body(resp) -> dict:
+    """解析429响应体，区分余额不足和频率限制。返回 {is_quota_error, error_code, message}"""
+    try:
+        body = await resp.aread()
+        data = json.loads(body.decode())
+        error = data.get("error", {})
+        code = str(error.get("code", ""))
+        msg = error.get("message", "")
+        # 智谱错误码：1113=余额不足, 1114=资源包耗尽
+        if code in ("1113", "1114") or "余额不足" in msg or "资源包" in msg:
+            return {"is_quota_error": True, "error_code": code, "message": msg or "余额不足或无可用资源包，请充值"}
+        return {"is_quota_error": False, "error_code": code, "message": msg or "Rate limited"}
+    except Exception:
+        return {"is_quota_error": False, "error_code": "", "message": "Rate limited"}
+
+
 @app.post("/anthropic/v1/messages")
 @app.post("/v1/messages")
 async def anthropic_messages(request: Request, api_key: str = Depends(_check_anthropic_key)):
@@ -413,11 +517,23 @@ async def anthropic_messages(request: Request, api_key: str = Depends(_check_ant
             try:
                 async with httpx.AsyncClient(timeout=120) as client:
                     resp = await client.post(f"{BASE_URL}/chat/completions", json=payload, headers=headers)
-                    if resp.status_code == 429 and attempt < max_retries:
-                        await key_pool.mark_rate_limited(upstream_key, cooldown=15)
-                        logger.warning(f"429 rate limited on key ...{upstream_key[-4:]}, retry {attempt+1}/{max_retries}")
-                        await asyncio.sleep(1)
-                        continue
+                    if resp.status_code == 429:
+                        # 先解析是否余额不足
+                        try:
+                            body = resp.json()
+                            err = body.get("error", {})
+                            code = str(err.get("code", ""))
+                            msg = err.get("message", "")
+                            if code in ("1113", "1114") or "余额不足" in msg or "资源包" in msg:
+                                # 余额不足，直接跳出循环，下面会处理
+                                break
+                        except Exception:
+                            pass
+                        if attempt < max_retries:
+                            await key_pool.mark_rate_limited(upstream_key, cooldown=30)
+                            logger.warning(f"429 rate limited on key ...{upstream_key[-4:]}, retry {attempt+1}/{max_retries}")
+                            await asyncio.sleep(2)
+                            continue
                     break
             except Exception as e:
                 if attempt < max_retries:
@@ -432,7 +548,23 @@ async def anthropic_messages(request: Request, api_key: str = Depends(_check_ant
         return await _anthropic_stream(payload, headers, model, upstream_key, msg_id, requested_model)
     else:
         if resp.status_code == 429:
-            await key_pool.mark_rate_limited(upstream_key, cooldown=15)
+            # 解析是否余额不足
+            quota_msg = ""
+            try:
+                body = resp.json()
+                err = body.get("error", {})
+                code = str(err.get("code", ""))
+                msg = err.get("message", "")
+                if code in ("1113", "1114") or "余额不足" in msg or "资源包" in msg:
+                    quota_msg = msg or "余额不足或无可用资源包，请充值"
+            except Exception:
+                pass
+            if quota_msg:
+                return JSONResponse(
+                    status_code=402,
+                    content={"type": "error", "error": {"type": "quota_error", "message": quota_msg}},
+                )
+            await key_pool.mark_rate_limited(upstream_key, cooldown=30)
             return JSONResponse(
                 status_code=429,
                 content={"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited after retries"}},
@@ -508,8 +640,10 @@ def _anthropic_format_response(data, msg_id, requested_model):
 
 async def _anthropic_stream(payload, headers, model, upstream_key, msg_id, requested_model):
     payload["stream"] = True
+    max_retries = 3
 
     async def generate():
+        nonlocal upstream_key, headers
         sent_message_start = False
         current_block_index = -1
         current_block_type = None
@@ -517,159 +651,183 @@ async def _anthropic_stream(payload, headers, model, upstream_key, msg_id, reque
         total_output_tokens = 0
         has_content = False
 
-        try:
-            async with httpx.AsyncClient(timeout=180) as client:
-                async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
-                    if resp.status_code == 429:
-                        await key_pool.mark_rate_limited(upstream_key, cooldown=15)
-                        yield _sse("error", {"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited"}})
-                        return
-                    if resp.status_code == 401:
-                        await key_pool.mark_invalid(upstream_key)
-                        yield _sse("error", {"type": "error", "error": {"type": "authentication_error", "message": "API key invalid"}})
-                        return
-                    if resp.status_code >= 400:
-                        body = await resp.aread()
-                        yield _sse("error", {"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {body.decode()[:200]}"}})
-                        return
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=180) as client:
+                    async with client.stream("POST", f"{BASE_URL}/chat/completions", json=payload, headers=headers) as resp:
+                        if resp.status_code == 429:
+                            info = await _parse_429_body(resp)
+                            if info["is_quota_error"]:
+                                # 余额不足，不重试，直接返回错误
+                                logger.warning(f"[anthropic-stream] 429 quota error on key ...{upstream_key[-4:]}: {info['message']}")
+                                yield _sse("error", {"type": "error", "error": {"type": "quota_error", "message": info["message"]}})
+                                return
+                            await key_pool.mark_rate_limited(upstream_key, cooldown=30)
+                            logger.warning(f"[anthropic-stream] 429 rate limited on key ...{upstream_key[-4:]}, attempt {attempt+1}/{max_retries}")
+                            # 尝试切换 key 重试
+                            acc = await key_pool.acquire()
+                            if acc and attempt < max_retries:
+                                upstream_key = acc["api_key"]
+                                headers = {"Authorization": f"Bearer {upstream_key}", "Content-Type": "application/json"}
+                                await asyncio.sleep(1)
+                                continue
+                            # 没有可用 key 或重试用尽
+                            yield _sse("error", {"type": "error", "error": {"type": "rate_limit_error", "message": "Rate limited after retries"}})
+                            return
+                        if resp.status_code == 401:
+                            await key_pool.mark_invalid(upstream_key)
+                            yield _sse("error", {"type": "error", "error": {"type": "authentication_error", "message": "API key invalid"}})
+                            return
+                        if resp.status_code >= 400:
+                            body = await resp.aread()
+                            yield _sse("error", {"type": "error", "error": {"type": "api_error", "message": f"Upstream error: {body.decode()[:200]}"}})
+                            return
 
-                    async for line in resp.aiter_lines():
-                        if not line:
-                            continue
-                        if line.startswith("data: "):
-                            data_str = line[6:]
-                        elif line.startswith("data:"):
-                            data_str = line[5:]
-                        else:
-                            continue
+                        # 成功，重置 key 状态
+                        await key_pool.mark_valid(upstream_key)
 
-                        data_str = data_str.strip()
-                        if data_str == "[DONE]":
-                            break
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            if line.startswith("data: "):
+                                data_str = line[6:]
+                            elif line.startswith("data:"):
+                                data_str = line[5:]
+                            else:
+                                continue
 
-                        try:
-                            chunk = json.loads(data_str)
-                        except Exception:
-                            continue
+                            data_str = data_str.strip()
+                            if data_str == "[DONE]":
+                                break
 
-                        choices = chunk.get("choices", [])
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta", {})
-                        finish_reason = choices[0].get("finish_reason")
+                            try:
+                                chunk = json.loads(data_str)
+                            except Exception:
+                                continue
 
-                        if not sent_message_start:
-                            usage_data = chunk.get("usage", {})
-                            yield _sse("message_start", {
-                                "type": "message_start",
-                                "message": {
-                                    "id": msg_id,
-                                    "type": "message",
-                                    "role": "assistant",
-                                    "model": requested_model,
-                                    "content": [],
-                                    "stop_reason": None,
-                                    "stop_sequence": None,
-                                    "usage": {
-                                        "input_tokens": usage_data.get("prompt_tokens", 0),
-                                        "output_tokens": 0,
+                            choices = chunk.get("choices", [])
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            finish_reason = choices[0].get("finish_reason")
+
+                            if not sent_message_start:
+                                usage_data = chunk.get("usage", {})
+                                yield _sse("message_start", {
+                                    "type": "message_start",
+                                    "message": {
+                                        "id": msg_id,
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "model": requested_model,
+                                        "content": [],
+                                        "stop_reason": None,
+                                        "stop_sequence": None,
+                                        "usage": {
+                                            "input_tokens": usage_data.get("prompt_tokens", 0),
+                                            "output_tokens": 0,
+                                        },
                                     },
-                                },
-                            })
-                            sent_message_start = True
+                                })
+                                sent_message_start = True
 
-                        for content_field in ["reasoning_content", "content"]:
-                            if delta.get(content_field) is not None:
-                                text = delta[content_field]
-                                if text:
-                                    has_content = True
-                                    if current_block_type != "text":
+                            for content_field in ["reasoning_content", "content"]:
+                                if delta.get(content_field) is not None:
+                                    text = delta[content_field]
+                                    if text:
+                                        has_content = True
+                                        if current_block_type != "text":
+                                            if current_block_type is not None:
+                                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
+                                            current_block_index += 1
+                                            current_block_type = "text"
+                                            yield _sse("content_block_start", {
+                                                "type": "content_block_start",
+                                                "index": current_block_index,
+                                                "content_block": {"type": "text", "text": ""},
+                                            })
+                                        total_output_tokens += 1
+                                        yield _sse("content_block_delta", {
+                                            "type": "content_block_delta",
+                                            "index": current_block_index,
+                                            "delta": {"type": "text_delta", "text": text},
+                                        })
+
+                            if delta.get("tool_calls"):
+                                has_content = True
+                                for tc in delta["tool_calls"]:
+                                    tc_id = tc.get("id", "")
+                                    tc_index = tc.get("index", 0)
+                                    func = tc.get("function", {})
+                                    tool_name = func.get("name", "")
+                                    partial_args = func.get("arguments", "")
+
+                                    if tc_id and tc_id not in open_tool_ids:
                                         if current_block_type is not None:
                                             yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
                                         current_block_index += 1
-                                        current_block_type = "text"
+                                        current_block_type = "tool_use"
+                                        open_tool_ids.add(tc_id)
                                         yield _sse("content_block_start", {
                                             "type": "content_block_start",
                                             "index": current_block_index,
-                                            "content_block": {"type": "text", "text": ""},
+                                            "content_block": {
+                                                "type": "tool_use",
+                                                "id": tc_id,
+                                                "name": tool_name,
+                                                "input": {},
+                                            },
                                         })
-                                    total_output_tokens += 1
-                                    yield _sse("content_block_delta", {
-                                        "type": "content_block_delta",
-                                        "index": current_block_index,
-                                        "delta": {"type": "text_delta", "text": text},
-                                    })
 
-                        if delta.get("tool_calls"):
-                            has_content = True
-                            for tc in delta["tool_calls"]:
-                                tc_id = tc.get("id", "")
-                                tc_index = tc.get("index", 0)
-                                func = tc.get("function", {})
-                                tool_name = func.get("name", "")
-                                partial_args = func.get("arguments", "")
+                                    if partial_args:
+                                        yield _sse("content_block_delta", {
+                                            "type": "content_block_delta",
+                                            "index": current_block_index,
+                                            "delta": {"type": "input_json_delta", "partial_json": partial_args},
+                                        })
 
-                                if tc_id and tc_id not in open_tool_ids:
-                                    if current_block_type is not None:
-                                        yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
-                                    current_block_index += 1
-                                    current_block_type = "tool_use"
-                                    open_tool_ids.add(tc_id)
+                            if finish_reason is not None:
+                                if current_block_type is not None:
+                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
+
+                                if not has_content:
                                     yield _sse("content_block_start", {
                                         "type": "content_block_start",
-                                        "index": current_block_index,
-                                        "content_block": {
-                                            "type": "tool_use",
-                                            "id": tc_id,
-                                            "name": tool_name,
-                                            "input": {},
-                                        },
+                                        "index": 0,
+                                        "content_block": {"type": "text", "text": ""},
                                     })
+                                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
 
-                                if partial_args:
-                                    yield _sse("content_block_delta", {
-                                        "type": "content_block_delta",
-                                        "index": current_block_index,
-                                        "delta": {"type": "input_json_delta", "partial_json": partial_args},
-                                    })
+                                stop_reason = "end_turn"
+                                if finish_reason == "tool_calls":
+                                    stop_reason = "tool_use"
+                                elif finish_reason == "length":
+                                    stop_reason = "max_tokens"
 
-                        if finish_reason is not None:
-                            if current_block_type is not None:
-                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": current_block_index})
-
-                            if not has_content:
-                                yield _sse("content_block_start", {
-                                    "type": "content_block_start",
-                                    "index": 0,
-                                    "content_block": {"type": "text", "text": ""},
+                                yield _sse("message_delta", {
+                                    "type": "message_delta",
+                                    "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                                    "usage": {"output_tokens": total_output_tokens},
                                 })
-                                yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+                                yield _sse("message_stop", {"type": "message_stop"})
+                                return  # 成功完成，退出重试循环
 
-                            stop_reason = "end_turn"
-                            if finish_reason == "tool_calls":
-                                stop_reason = "tool_use"
-                            elif finish_reason == "length":
-                                stop_reason = "max_tokens"
-
-                            yield _sse("message_delta", {
-                                "type": "message_delta",
-                                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                                "usage": {"output_tokens": total_output_tokens},
-                            })
-                            yield _sse("message_stop", {"type": "message_stop"})
-
-        except Exception as e:
-            logger.error(f"Anthropic stream error: {e}")
-            if not sent_message_start:
-                yield _sse("message_start", {
-                    "type": "message_start",
-                    "message": {
-                        "id": msg_id, "type": "message", "role": "assistant",
-                        "model": requested_model, "content": [], "stop_reason": None,
-                        "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0},
-                    },
-                })
-            yield _sse("error", {"type": "error", "error": {"type": "api_error", "message": str(e)}})
+            except Exception as e:
+                logger.error(f"Anthropic stream error: {e}")
+                if attempt < max_retries:
+                    await asyncio.sleep(1)
+                    continue
+                if not sent_message_start:
+                    yield _sse("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": msg_id, "type": "message", "role": "assistant",
+                            "model": requested_model, "content": [], "stop_reason": None,
+                            "stop_sequence": None, "usage": {"input_tokens": 0, "output_tokens": 0},
+                        },
+                    })
+                yield _sse("error", {"type": "error", "error": {"type": "api_error", "message": str(e)}})
+                return
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

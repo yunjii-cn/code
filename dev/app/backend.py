@@ -58,6 +58,7 @@ SETTINGS_KEYS = [
     "API_BASE_URL",
     "API_MODEL",
     "API_KEY",
+    "API_SOURCE",
     "API_TIMEOUT_MS",
     "ZHIPU_API_KEY",
     "ZHIPU_MODEL",
@@ -1474,6 +1475,45 @@ def _check_zhipu2api_deps():
     except Exception:
         return False
 
+def _sync_zhipu_keys_from_env(base_url: str, admin_key: str = "admin"):
+    keys_to_sync = set()
+    try:
+        env_path = os.path.join(_data_dir(), "..", "app", ".env")
+        if not os.path.exists(env_path):
+            env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" not in line:
+                        continue
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip()
+                    if key in ("ZHIPU_API_KEY", "API_KEY") and val and len(val) > 10:
+                        keys_to_sync.add(val)
+    except Exception:
+        pass
+    try:
+        user_dir = os.path.join(_data_dir(), "users", "default")
+        zhipu_keys_path = os.path.join(user_dir, "zhipu_keys.json")
+        if os.path.exists(zhipu_keys_path):
+            with open(zhipu_keys_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and item.get("key") and len(item["key"]) > 10:
+                        keys_to_sync.add(item["key"])
+    except Exception:
+        pass
+    for k in keys_to_sync:
+        try:
+            add_zhipu_account(base_url, k, admin_key, label="auto-synced", timeout_ms=5000)
+        except Exception:
+            pass
+
 def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "admin") -> dict:
     global _zhipu2api_proc
     
@@ -1604,7 +1644,11 @@ def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "a
                 pass
         return {"ok": False, "error": f"启动失败: {err_msg}", "logPath": log_path}
     
-    return {"ok": True, "message": "智谱服务已启动", "baseUrl": base, "pid": proc.pid, "logPath": log_path}
+    result = {"ok": True, "message": "智谱服务已启动", "baseUrl": base, "pid": proc.pid, "logPath": log_path}
+
+    _sync_zhipu_keys_from_env(base, admin_key)
+
+    return result
 
 def stop_zhipu2api(base_url: str = "") -> dict:
     global _zhipu2api_proc
@@ -1637,7 +1681,7 @@ def add_zhipu_account(base_url: str, api_key: str, admin_key: str = "", label: s
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {admin_key or 'admin'}",
             },
-            body={"api_key": api_key.strip(), "label": label.strip()},
+            body=json.dumps({"api_key": api_key.strip(), "label": label.strip()}).encode("utf-8"),
             timeout_ms=timeout_ms,
         )
         return result
@@ -2867,10 +2911,13 @@ class ClaudeCliRunner:
                     attempt = parsed.get("attempt", "?")
                     max_retries = parsed.get("max_retries", "?")
                     status = parsed.get("error_status", "?")
-                    if api_retry_count <= 3:
-                        _log(f"[CLI] API重试 {attempt}/{max_retries} (HTTP {status})", "#FF9800")
+                    _log(f"[CLI] API重试 {attempt}/{max_retries} (HTTP {status})", "#FF9800")
+                    # 前端只显示前3次和最后一次，避免刷屏
                     if on_delta:
-                        on_delta(f"\x00TOOL\x00⚠️ API重试 {attempt}/{max_retries} (HTTP {status})")
+                        if api_retry_count <= 2:
+                            on_delta(f"\x00TOOL\x00⚠️ API重试 {attempt}/{max_retries} (HTTP {status})")
+                        elif attempt == max_retries:
+                            on_delta(f"\x00TOOL\x00⚠️ API重试 {attempt}/{max_retries} - 仍受限流，请稍后再试")
 
                 if evt_type == "stream_event":
                     sub_type = parsed.get("event", {}).get("type", "?")
@@ -3014,7 +3061,11 @@ class ClaudeCliRunner:
                 error = stderr_out.strip() or "Unknown CLI error."
                 fallback = ""
                 if api_retry_count > 0:
-                    fallback = f"API服务暂时不可用(重试{api_retry_count}次后失败，HTTP {api_retry_last_error})，请稍后再试"
+                    # 检查是否是余额不足（智谱API错误码1113）
+                    if "1113" in str(api_retry_last_error) or "余额不足" in str(api_retry_last_error) or "资源包" in str(api_retry_last_error):
+                        fallback = f"❌ 模型余额不足，请充值后使用该模型（HTTP {api_retry_last_error}）"
+                    else:
+                        fallback = f"API服务暂时不可用(重试{api_retry_count}次后失败，HTTP {api_retry_last_error})，请稍后再试"
                 if not fallback and error == "Unknown CLI error.":
                     for raw_line in stdout_log.split("\n"):
                         raw_line = raw_line.strip()
@@ -3027,6 +3078,9 @@ class ClaudeCliRunner:
                                 fallback = pj.get("result", "") or pj.get("error", "")
                                 if not fallback and pj_sub == "error_max_turns":
                                     fallback = f"已达到最大对话轮次限制({pj.get('num_turns', '?')}轮)，请发送新消息继续"
+                                # 检测余额不足错误
+                                if fallback and ("1113" in str(fallback) or "余额不足" in str(fallback) or "资源包" in str(fallback) or "quota" in str(fallback).lower()):
+                                    fallback = f"❌ 模型余额不足，请充值后使用该模型"
                                 if fallback:
                                     break
                             if pj.get("type") == "error":

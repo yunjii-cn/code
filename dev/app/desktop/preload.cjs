@@ -1,4 +1,4 @@
-﻿const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer } = require("electron");
 
 function subscribe(channel, handler) {
   const wrapped = (_event, payload) => handler(payload);
@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("desktopApi", {
   saveSettings: (payload) => ipcRenderer.invoke("settings:save", payload),
   clearModelSettings: () => ipcRenderer.invoke("settings:clearModel"),
   listModels: (payload) => ipcRenderer.invoke("models:list", payload),
+  addZhipuAccount: (payload) => ipcRenderer.invoke("zhipu:addAccount", payload),
   onDelta: (handler) => subscribe("chat:delta", handler),
   onStatus: (handler) => subscribe("chat:status", handler),
 });
