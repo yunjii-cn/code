@@ -1830,31 +1830,36 @@ class BackendBridge(QObject):
             return False
         return main.project_mgr.delete_custom_template(template_id)
 
-    def _get_zhipu_keys_path(self) -> str:
-        """获取智谱API密钥存储路径，用户私密数据"""
-        return os.path.join(self.user_dir, "zhipu_keys.json")
+    def _get_app_data_path(self) -> str:
+        return os.path.join(self.user_dir, "app_data.json")
 
-    @pyqtSlot(str, result=bool)
-    def saveZhipuKeys(self, keys_json: str):
+    @pyqtSlot(str, result=str)
+    def saveAppData(self, data_json: str):
         try:
-            keys_path = self._get_zhipu_keys_path()
-            os.makedirs(os.path.dirname(keys_path), exist_ok=True)
-            with open(keys_path, "w", encoding="utf-8") as f:
-                f.write(keys_json)
-            return True
-        except Exception:
-            return False
+            data_path = self._get_app_data_path()
+            os.makedirs(os.path.dirname(data_path), exist_ok=True)
+            with open(data_path, "w", encoding="utf-8") as f:
+                f.write(data_json)
+            print(f"[saveAppData] OK path={data_path} size={len(data_json)}")
+            return json.dumps({"ok": True})
+        except Exception as e:
+            print(f"[saveAppData] ERROR: {e}")
+            return json.dumps({"ok": False, "error": str(e)})
 
     @pyqtSlot(result=str)
-    def loadZhipuKeys(self):
+    def loadAppData(self):
         try:
-            keys_path = self._get_zhipu_keys_path()
-            if os.path.exists(keys_path):
-                with open(keys_path, "r", encoding="utf-8") as f:
-                    return f.read()
-            return "[]"
-        except Exception:
-            return "[]"
+            data_path = self._get_app_data_path()
+            if os.path.exists(data_path):
+                with open(data_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                print(f"[loadAppData] OK path={data_path} size={len(content)}")
+                return content
+            print(f"[loadAppData] NOT FOUND path={data_path}")
+            return ""
+        except Exception as e:
+            print(f"[loadAppData] ERROR: {e}")
+            return ""
 
     @pyqtSlot(str, str, result=str)
     def createProjectFromTemplate(self, project_id: str, template_id: str):
@@ -2941,6 +2946,14 @@ class BackendBridge(QObject):
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listZhipuModels异常: {e}"})
+
+    @pyqtSlot(result=str)
+    def checkEnvironment(self):
+        try:
+            result = backend.check_environment()
+            return json.dumps(result)
+        except Exception as e:
+            return json.dumps({"overall": {"ok": False, "label": "检测服务", "error": str(e), "fix": "请确保后端服务正常运行"}})
 
     # ── 内部方法 ──
 

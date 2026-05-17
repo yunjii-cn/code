@@ -1196,6 +1196,114 @@ def list_all_models() -> dict:
             pass
     return {"ok": True, "models": all_models}
 
+def check_environment() -> dict:
+    results = {}
+
+    def _check_python():
+        try:
+            v = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+            return {"ok": True, "label": "Python 运行时", "version": v, "description": "Python 解释器，核心运行环境", "dependencies": ["Python 3.8+"]}
+        except Exception as e:
+            return {"ok": False, "label": "Python 运行时", "error": str(e), "fix": "请重新安装应用程序"}
+
+    def _check_uv():
+        try:
+            uv = _uv_exe()
+            if os.path.isfile(uv):
+                r = subprocess.run([uv, "--version"], capture_output=True, timeout=5, text=True)
+                v = r.stdout.strip() if r.returncode == 0 else "已安装"
+                return {"ok": True, "label": "UV 包管理器", "version": v, "description": "Python 包管理工具，用于安装依赖", "dependencies": ["uv.exe"]}
+            return {"ok": False, "label": "UV 包管理器", "error": "uv.exe 不存在", "fix": "请重新安装应用程序"}
+        except Exception as e:
+            return {"ok": False, "label": "UV 包管理器", "error": str(e), "fix": "请重新安装应用程序"}
+
+    def _check_venv():
+        try:
+            venv_dir = _get_api_venv_dir()
+            python_exe = _get_venv_python(venv_dir)
+            if os.path.isfile(python_exe):
+                r = subprocess.run([python_exe, "--version"], capture_output=True, timeout=5, text=True)
+                v = r.stdout.strip() if r.returncode == 0 else "已安装"
+                deps_ok = _check_deps_installed(python_exe)
+                info = {"ok": True, "label": "API 虚拟环境", "version": v, "description": "API 服务的 Python 虚拟环境", "dependencies": ["fastapi", "uvicorn", "httpx"]}
+                if not deps_ok:
+                    info["ok"] = False
+                    info["error"] = "依赖未安装"
+                    info["fix"] = "点击启动 API 服务将自动安装依赖"
+                return info
+            return {"ok": False, "label": "API 虚拟环境", "error": "虚拟环境不存在", "fix": "点击启动 API 服务将自动创建虚拟环境"}
+        except Exception as e:
+            return {"ok": False, "label": "API 虚拟环境", "error": str(e), "fix": "请尝试重新启动 API 服务"}
+
+    def _check_qwen2api():
+        try:
+            base_url = f"http://127.0.0.1:{API_SERVICE_REGISTRY['qwen2api']['default_port']}"
+            chk = check_api_service(base_url)
+            if chk.get("running") and chk.get("serviceType") == "qwen":
+                info = {"ok": True, "label": "千问 API 服务", "version": "运行中", "description": "Qwen2API 代理服务，提供千问模型接口", "dependencies": ["fastapi", "uvicorn", "qwen2api"]}
+                if chk.get("accountCount") is not None:
+                    info["accountCount"] = chk["accountCount"]
+                if chk.get("warning"):
+                    info["ok"] = False
+                    info["error"] = chk["warning"]
+                    info["fix"] = "请在管理台添加 chat.qwen.ai 的账号 Token"
+                return info
+            return {"ok": False, "label": "千问 API 服务", "error": "服务未运行", "fix": "点击启动千问 API 服务"}
+        except Exception as e:
+            return {"ok": False, "label": "千问 API 服务", "error": str(e), "fix": "请尝试重新启动服务"}
+
+    def _check_zhipu2api():
+        try:
+            base_url = f"http://127.0.0.1:{API_SERVICE_REGISTRY['zhipu2api']['default_port']}"
+            chk = check_api_service(base_url)
+            if chk.get("running") and chk.get("serviceType") == "zhipu":
+                info = {"ok": True, "label": "智谱 API 服务", "version": "运行中", "description": "Zhipu2API 代理服务，提供智谱模型接口", "dependencies": ["fastapi", "uvicorn", "zhipu2api"]}
+                if chk.get("accountCount") is not None:
+                    info["accountCount"] = chk["accountCount"]
+                if chk.get("warning"):
+                    info["ok"] = False
+                    info["error"] = chk["warning"]
+                    info["fix"] = "请在管理台添加智谱账号"
+                return info
+            return {"ok": False, "label": "智谱 API 服务", "error": "服务未运行", "fix": "点击启动智谱 API 服务"}
+        except Exception as e:
+            return {"ok": False, "label": "智谱 API 服务", "error": str(e), "fix": "请尝试重新启动服务"}
+
+    def _check_ollama():
+        try:
+            settings = EnvSettings(os.path.join(_data_dir(), ".env")).read_settings()
+            ollama_url = (settings.get("OLLAMA_BASE_URL") or "http://127.0.0.1:11434").strip()
+            result = fetch_json_with_timeout(f"{ollama_url.rstrip('/')}/api/tags", timeout_ms=5000)
+            if result.get("ok"):
+                models = (result.get("data") or {}).get("models") or []
+                model_names = [m.get("name", "") for m in models]
+                return {"ok": True, "label": "Ollama 本地模型", "version": f"{len(models)} 个模型", "description": "本地大语言模型运行时", "dependencies": model_names[:5] if model_names else ["Ollama"]}
+            return {"ok": False, "label": "Ollama 本地模型", "error": "Ollama 服务未运行", "fix": "请启动 Ollama 应用程序"}
+        except Exception:
+            return {"ok": False, "label": "Ollama 本地模型", "error": "无法连接 Ollama 服务", "fix": "请安装并启动 Ollama"}
+
+    def _check_data_dir():
+        try:
+            data = _data_dir()
+            temp = _temp_dir()
+            writable = os.access(data, os.W_OK) and os.access(temp, os.W_OK)
+            if writable:
+                return {"ok": True, "label": "数据目录", "version": "可写", "description": "用户数据与临时文件存储", "dependencies": [f"data: {data}", f"temp: {temp}"]}
+            return {"ok": False, "label": "数据目录", "error": "目录不可写", "fix": "请检查目录权限"}
+        except Exception as e:
+            return {"ok": False, "label": "数据目录", "error": str(e), "fix": "请检查目录权限"}
+
+    results["python"] = _check_python()
+    results["uv"] = _check_uv()
+    results["venv"] = _check_venv()
+    results["qwen2api"] = _check_qwen2api()
+    results["zhipu2api"] = _check_zhipu2api()
+    results["ollama"] = _check_ollama()
+    results["dataDir"] = _check_data_dir()
+
+    return results
+
+
 def _qwen2api_venv_python() -> str:
     """获取 qwen2api 虚拟环境的 Python 解释器路径（兼容旧代码）"""
     venv_dir = _get_api_venv_dir("qwen2api")
@@ -1559,7 +1667,7 @@ def start_zhipu2api(project_dir: str = "", port: int = 7780, admin_key: str = "a
             return {"ok": False, "error": f"创建虚拟环境失败: {e}"}
     
     req_file = Path(zhipu_code_dir) / "requirements.txt"
-    if req_file.exists():
+    if req_file.exists() and not _check_zhipu2api_deps():
         try:
             subprocess.check_call(
                 [uv, "pip", "install", "-r", str(req_file), "--python", venv_python],
@@ -3111,6 +3219,7 @@ BRIDGE_METHODS = [
     "startQwenLogin", "pollQwenLogin",
     "startQwenRegister", "pollQwenRegister",
     "addQwenAccount",
+    "checkEnvironment",
 ]
 
 BRIDGE_SIGNALS = [

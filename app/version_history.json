@@ -1,5 +1,89 @@
 [
   {
+    "version": "2026.05.18.0441",
+    "name": "云集智能编程工作站v2026.05.18.0441",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T04:42:28.086665",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0427",
+    "name": "云集智能编程工作站v2026.05.18.0427",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T04:28:07.140699",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0355",
+    "name": "云集智能编程工作站v2026.05.18.0355",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T03:56:44.472810",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0133",
+    "name": "云集智能编程工作站v2026.05.18.0133",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T01:34:19.800580",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0121",
+    "name": "云集智能编程工作站v2026.05.18.0121",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T01:22:01.266385",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.17.0905",
+    "name": "云集智能编程工作站v2026.05.17.0905",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-17T09:07:09.651941",
+    "git_commit": "3a0f361"
+  },
+  {
+    "version": "2026.05.17.0552",
+    "name": "云集智能编程工作站v2026.05.17.0552",
+    "changes": [
+      "修复API启动卡顿",
+      "修复智谱账户持久化",
+      "新增部署维护界面",
+      "主题简化为暗黑/明亮"
+    ],
+    "build_time": "2026-05-17T05:57:03.137119",
+    "git_commit": "3a0f361"
+  },
+  {
     "version": "2026.05.17.0055",
     "name": "云集智能编程工作站v2026.05.17.0055",
     "changes": [
