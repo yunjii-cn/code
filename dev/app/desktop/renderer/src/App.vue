@@ -270,7 +270,7 @@ async function startAllServices() {
   allServicesBusy.value = false;
 }
 
-const envCheckResults = ref<Record<string, { ok: boolean; label: string; version?: string; error?: string; fix?: string }> | null>(null);
+const envCheckResults = ref<Record<string, { ok: boolean; label: string; version?: string; error?: string; fix?: string; description?: string; dependencies?: string[]; accountCount?: number }> | null>(null);
 const envCheckBusy = ref(false);
 const envCheckFailedKeys = computed(() => {
   if (!envCheckResults.value) return [];
@@ -696,7 +696,7 @@ const newTaskDesc = ref("");
 const collaborationMode = ref<"none" | "plan-code-review" | "pair" | "review-only">("none");
 const collabPhase = ref<"planning" | "coding" | "reviewing">("planning");
 const collabHistory = ref<any[]>([]);
-const settingsTab = ref<"general" | "model" | "account" | "memory" | "project" | "advanced" | "plugins" | "voice" | "offline">("general");
+const settingsTab = ref<"general" | "model" | "account" | "memory" | "project" | "advanced" | "plugins" | "voice" | "offline" | "deploy">("general");
 const newQuickModelName = ref("");
 const newQuickModelProvider = ref<"cloud" | "ollama" | "api">("api");
 const newQuickModelApiSource = ref<"qwen" | "zhipu">("qwen");
@@ -722,7 +722,7 @@ const newSnippetName = ref("");
 const newSnippetLang = ref("javascript");
 const newSnippetCode = ref("");
 const showSnippetPanel = ref(false);
-const currentTheme = ref<"dark" | "light" | "blue" | "green">("dark");
+const currentTheme = ref<"dark" | "light">("dark");
 const searchQuery = ref("");
 const searchResults = ref<{msgId: string; text: string}[]>([]);
 const searchIndex = ref(0);
@@ -2440,33 +2440,11 @@ function refreshZhipuAccountDisplay() {
 }
 
 function saveZhipuLocalKeys() {
-  try {
-    localStorage.setItem("zhipu_local_keys", JSON.stringify(zhipuLocalKeys.value));
-  } catch {}
-  try {
-    callBackend("saveZhipuKeys", JSON.stringify(zhipuLocalKeys.value));
-  } catch {}
+  saveLocalSettings();
 }
 
 async function loadZhipuLocalKeys() {
-  try {
-    const backendData = await callBackend("loadZhipuKeys");
-    if (backendData) {
-      const parsed = typeof backendData === "string" ? JSON.parse(backendData) : backendData;
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        zhipuLocalKeys.value = parsed;
-        refreshZhipuAccountDisplay();
-        return;
-      }
-    }
-  } catch {}
-  try {
-    const saved = localStorage.getItem("zhipu_local_keys");
-    if (saved) {
-      zhipuLocalKeys.value = JSON.parse(saved);
-      refreshZhipuAccountDisplay();
-    }
-  } catch {}
+  // 由 loadLocalSettings() 统一从 app_data.json 文件恢复
 }
 
 async function loginZhipuAccount() {
@@ -3098,103 +3076,145 @@ const categorizedModels = computed(() => {
 });
 
 // 从 localStorage 加载设置（在 applySettings 之后调用，localStorage 优先）
-function loadLocalSettings() {
+async function loadLocalSettings() {
+  let data: any = null;
   try {
-    const saved = localStorage.getItem("claude-desktop-settings");
-    if (saved) {
-      const data = JSON.parse(saved);
-      const restoreStr = (ref, val) => { if (typeof val === "string" && val) ref.value = val; };
-      const restoreBool = (ref, val) => { if (typeof val === "boolean") ref.value = val; };
-      const restoreNum = (ref, val) => { if (typeof val === "number") ref.value = val; };
-      if (typeof data.autoApprove === "boolean") {
-        autoApprove.value = data.autoApprove;
-        if (!data.autoApprove) toolApprovalMode.value = "manual";
+    const backend = await getBackend();
+    if (backend && _backendType === "qt") {
+      const rawResult = await backend.loadAppData();
+      console.log("[loadLocalSettings] raw loadAppData type:", typeof rawResult, "preview:", typeof rawResult === "string" ? rawResult.substring(0, 100) : JSON.stringify(rawResult).substring(0, 100));
+      if (typeof rawResult === "string" && rawResult.length > 2) {
+        data = JSON.parse(rawResult);
+      } else if (typeof rawResult === "object" && rawResult !== null) {
+        data = rawResult;
       }
-      if (typeof data.toolApprovalMode === "string") {
-        toolApprovalMode.value = data.toolApprovalMode;
-        autoApprove.value = data.toolApprovalMode === "auto";
-      }
-      if (typeof data.runMode === "string" && data.runMode) {
-        runMode.value = data.runMode;
-      }
-      restoreStr(apiSource, data.apiSource);
-      restoreStr(apiHost, data.apiHost);
-      restoreStr(apiPort, data.apiPort);
-      restoreStr(apiModel, data.apiModel);
-      restoreStr(apiKey, data.apiKey);
-      restoreStr(ollamaBaseUrl, data.ollamaBaseUrl);
-      restoreStr(ollamaModel, data.ollamaModel);
-      restoreStr(zhipuApiKey, data.zhipuApiKey);
-      restoreStr(zhipuModel, data.zhipuModel);
-      restoreStr(zhipuApiHost, data.zhipuApiHost);
-      restoreNum(zhipuApiPort, data.zhipuApiPort);
-      restoreBool(zhipuApiChecked, data.zhipuApiChecked);
-      restoreStr(stickyEmail, data.stickyEmail);
-      restoreStr(activeRole, data.activeRole);
-      if (Array.isArray(data.quickModels)) {
-        quickModels.value = data.quickModels;
-      }
-      restoreStr(activeQuickModel, data.activeQuickModel);
-      restoreStr(workspacePath, data.workspacePath);
-      restoreBool(showPanel, data.showPanel);
-      restoreBool(showTerminal, data.showTerminal);
-      if (typeof data.inputText === "string") {
-        inputText.value = data.inputText;
-      }
-      if (typeof data.terminalInput === "string") {
-        terminalInput.value = data.terminalInput;
-      }
-      restoreBool(apiServiceRunning, data.apiServiceRunning);
-      restoreNum(apiStepProgress, data.apiStepProgress);
-      if (typeof data.apiStepMessage === "string") {
-        apiStepMessage.value = data.apiStepMessage;
-      }
-      restoreNum(zhipuStepProgress, data.zhipuStepProgress);
-      if (typeof data.zhipuStepMessage === "string") {
-        zhipuStepMessage.value = data.zhipuStepMessage;
-      }
-      if (Array.isArray(data.zhipuAccounts) && data.zhipuAccounts.length > 0) {
-        zhipuAccounts.value = data.zhipuAccounts;
-        zhipuAccountCount.value = data.zhipuAccounts.length;
-        zhipuValidCount.value = data.zhipuAccounts.filter((a: any) => a.valid).length;
-      }
-      if (Array.isArray(data.zhipuLocalKeys) && data.zhipuLocalKeys.length > 0) {
-        zhipuLocalKeys.value = data.zhipuLocalKeys;
-      }
-      if (typeof data.zhipuBaseUrl === "string" && data.zhipuBaseUrl) {
-        zhipuBaseUrl.value = data.zhipuBaseUrl;
-      }
-      if (data.settings && typeof data.settings === "object") {
-        for (const [key, val] of Object.entries(data.settings)) {
-          if (key in settings && val !== undefined && val !== null && val !== "") {
-            (settings as any)[key] = val;
-          }
+    } else if (backend) {
+      const fileData = await callBackend("loadAppData");
+      if (fileData) {
+        if (typeof fileData === "object") {
+          data = fileData;
+        } else if (typeof fileData === "string" && fileData.length > 2) {
+          data = JSON.parse(fileData);
         }
-      }
-      if (data.modelConfigs && typeof data.modelConfigs === "object") {
-        for (const [modelId, cfg] of Object.entries(data.modelConfigs)) {
-          if (typeof cfg === "object" && cfg !== null) {
-            modelConfigs[modelId] = { ...(cfg as ModelConfig) };
-          }
-        }
-      }
-      if (Array.isArray(data.qwenAccounts) && data.qwenAccounts.length > 0) {
-        qwenAccounts.value = data.qwenAccounts;
-        qwenAccountCount.value = data.qwenAccounts.length;
-      }
-      restoreBool(terminalExpanded, data.terminalExpanded);
-      restoreBool(terminalDebug, data.terminalDebug);
-      restoreBool(terminalAutoScroll, data.terminalAutoScroll);
-      if (typeof data.currentTheme === "string" && data.currentTheme) {
-        currentTheme.value = data.currentTheme;
       }
     }
   } catch (e) {
-    console.error("Failed to load local settings:", e);
+    console.error("[loadLocalSettings] loadAppData error:", e);
+  }
+  if (!data) {
+    try {
+      const saved = localStorage.getItem("claude-desktop-settings");
+      if (saved) {
+        data = JSON.parse(saved);
+        console.log("[loadLocalSettings] fallback to localStorage, keys:", Object.keys(data).length);
+      }
+    } catch {}
+  }
+  if (!data) {
+    console.log("[loadLocalSettings] no data found from any source");
+    return;
+  }
+  console.log("[loadLocalSettings] data loaded, zhipuLocalKeys:", data.zhipuLocalKeys?.length || 0, "zhipuApiKey:", data.zhipuApiKey ? "exists" : "empty");
+  const restoreStr = (ref: any, val: any) => { if (typeof val === "string" && val) ref.value = val; };
+  const restoreBool = (ref: any, val: any) => { if (typeof val === "boolean") ref.value = val; };
+  const restoreNum = (ref: any, val: any) => { if (typeof val === "number") ref.value = val; };
+  if (typeof data.autoApprove === "boolean") {
+    autoApprove.value = data.autoApprove;
+    if (!data.autoApprove) toolApprovalMode.value = "manual";
+  }
+  if (typeof data.toolApprovalMode === "string") {
+    toolApprovalMode.value = data.toolApprovalMode;
+    autoApprove.value = data.toolApprovalMode === "auto";
+  }
+  if (typeof data.runMode === "string" && data.runMode) {
+    runMode.value = data.runMode;
+  }
+  restoreStr(apiSource, data.apiSource);
+  restoreStr(apiHost, data.apiHost);
+  restoreStr(apiPort, data.apiPort);
+  restoreStr(apiModel, data.apiModel);
+  restoreStr(apiKey, data.apiKey);
+  restoreStr(ollamaBaseUrl, data.ollamaBaseUrl);
+  restoreStr(ollamaModel, data.ollamaModel);
+  restoreStr(zhipuApiKey, data.zhipuApiKey);
+  restoreStr(zhipuModel, data.zhipuModel);
+  restoreStr(zhipuApiHost, data.zhipuApiHost);
+  restoreNum(zhipuApiPort, data.zhipuApiPort);
+  restoreBool(zhipuApiChecked, data.zhipuApiChecked);
+  restoreStr(stickyEmail, data.stickyEmail);
+  restoreStr(activeRole, data.activeRole);
+  if (Array.isArray(data.quickModels)) {
+    quickModels.value = data.quickModels;
+  }
+  restoreStr(activeQuickModel, data.activeQuickModel);
+  restoreStr(workspacePath, data.workspacePath);
+  restoreBool(showPanel, data.showPanel);
+  restoreBool(showTerminal, data.showTerminal);
+  if (typeof data.inputText === "string") {
+    inputText.value = data.inputText;
+  }
+  if (typeof data.terminalInput === "string") {
+    terminalInput.value = data.terminalInput;
+  }
+  restoreBool(apiServiceRunning, data.apiServiceRunning);
+  restoreNum(apiStepProgress, data.apiStepProgress);
+  if (typeof data.apiStepMessage === "string") {
+    apiStepMessage.value = data.apiStepMessage;
+  }
+  restoreNum(zhipuStepProgress, data.zhipuStepProgress);
+  if (typeof data.zhipuStepMessage === "string") {
+    zhipuStepMessage.value = data.zhipuStepMessage;
+  }
+  if (Array.isArray(data.zhipuAccounts) && data.zhipuAccounts.length > 0) {
+    zhipuAccounts.value = data.zhipuAccounts;
+    zhipuAccountCount.value = data.zhipuAccounts.length;
+    zhipuValidCount.value = data.zhipuAccounts.filter((a: any) => a.valid).length;
+    console.log("[loadLocalSettings] restored zhipuAccounts:", data.zhipuAccounts.length);
+  }
+  if (Array.isArray(data.zhipuLocalKeys) && data.zhipuLocalKeys.length > 0) {
+    zhipuLocalKeys.value = data.zhipuLocalKeys;
+    refreshZhipuAccountDisplay();
+    console.log("[loadLocalSettings] restored zhipuLocalKeys:", data.zhipuLocalKeys.length, "accountCount:", zhipuAccountCount.value);
+  }
+  if (typeof data.zhipuBaseUrl === "string" && data.zhipuBaseUrl) {
+    zhipuBaseUrl.value = data.zhipuBaseUrl;
+  }
+  if (data.settings && typeof data.settings === "object") {
+    for (const [key, val] of Object.entries(data.settings)) {
+      if (key in settings && val !== undefined && val !== null && val !== "") {
+        (settings as any)[key] = val;
+      }
+    }
+  }
+  if (data.modelConfigs && typeof data.modelConfigs === "object") {
+    for (const [modelId, cfg] of Object.entries(data.modelConfigs)) {
+      if (typeof cfg === "object" && cfg !== null) {
+        modelConfigs[modelId] = { ...(cfg as ModelConfig) };
+      }
+    }
+  }
+  if (Array.isArray(data.qwenAccounts) && data.qwenAccounts.length > 0) {
+    qwenAccounts.value = data.qwenAccounts;
+    qwenAccountCount.value = data.qwenAccounts.length;
+  }
+  restoreBool(terminalExpanded, data.terminalExpanded);
+  restoreBool(terminalDebug, data.terminalDebug);
+  restoreBool(terminalAutoScroll, data.terminalAutoScroll);
+  if (typeof data.currentTheme === "string" && data.currentTheme) {
+    currentTheme.value = data.currentTheme;
+  }
+  if (zhipuLocalKeys.value.length === 0 && zhipuApiKey.value.trim()) {
+    zhipuLocalKeys.value.push({
+      key: zhipuApiKey.value.trim(),
+      label: zhipuApiKey.value.trim().slice(0, 8) + "...",
+      valid: true,
+    });
+    refreshZhipuAccountDisplay();
+    console.log("[loadLocalSettings] synced zhipuApiKey to zhipuLocalKeys, accountCount:", zhipuAccountCount.value);
   }
 }
 
-function saveLocalSettings() {
+async function saveLocalSettings() {
   try {
     const data = {
       autoApprove: autoApprove.value,
@@ -3238,6 +3258,16 @@ function saveLocalSettings() {
       modelConfigs: { ...modelConfigs },
     };
     localStorage.setItem("claude-desktop-settings", JSON.stringify(data));
+    try {
+      const backend = await getBackend();
+      if (backend) {
+        const jsonStr = JSON.stringify(data);
+        const saveResult = await backend.saveAppData(jsonStr);
+        console.log("[saveLocalSettings] saveAppData result:", saveResult, "dataSize:", jsonStr.length);
+      }
+    } catch (e) {
+      console.error("[saveLocalSettings] saveAppData error:", e);
+    }
   } catch (e) {
     console.error("Failed to save local settings:", e);
   }
@@ -3298,6 +3328,7 @@ function scheduleBackendSave() {
     try {
       await saveSettingsQuiet();
     } catch {}
+    saveLocalSettings();
   }, 1000);
 }
 
@@ -3315,7 +3346,10 @@ watch(
     zhipuApiHost,
     zhipuApiPort,
     zhipuApiChecked,
+    zhipuBaseUrl,
     () => ({ ...settings }),
+    () => [...zhipuLocalKeys.value.map((k: any) => k.key)],
+    () => [...qwenAccounts.value.map((a: any) => a.email)],
   ],
   () => {
     scheduleBackendSave();
@@ -3327,7 +3361,6 @@ onMounted(async () => {
   document.addEventListener("click", () => { modelDropdownOpen.value = false; });
 
   loadTheme();
-  await loadZhipuLocalKeys();
 
   await loadProjects();
   const appState = await callBackend("getState");
@@ -3341,7 +3374,7 @@ onMounted(async () => {
   }
 
   // localStorage 优先级最高，在 applySettings 之后加载，确保用户设置不被后端覆盖
-  loadLocalSettings();
+  await loadLocalSettings();
 
   detectHardware();
 
@@ -3716,14 +3749,14 @@ function insertSnippet(snippet: any) {
 }
 
 function applyTheme(theme: string) {
-  currentTheme.value = theme as any;
+  currentTheme.value = theme as "dark" | "light";
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem("yunji_theme", theme);
 }
 
 function loadTheme() {
   const saved = localStorage.getItem("yunji_theme");
-  if (saved && ["dark", "light", "blue", "green"].includes(saved)) {
+  if (saved === "dark" || saved === "light") {
     applyTheme(saved);
   }
 }
@@ -3842,20 +3875,20 @@ async function loadOfflineModels() {
 </script>
 
 <template>
-  <div class="page">
+  <div class="page" :data-theme="currentTheme">
     <main v-if="activeNav === 'chat'" class="workbench" :class="{ single: !showPanel }">
       <section class="chat card">
         <div class="toolbar">
           <div class="session">会话：{{ sessionId || "未创建" }}</div>
           <div class="actions">
             <div v-if="searchResults.length > 0" style="display: flex; align-items: center; gap: 4px; margin-right: 8px;">
-              <span style="font-size: 11px; color: #4af;">{{ searchIndex + 1 }}/{{ searchResults.length }}</span>
+              <span style="font-size: 11px; color: var(--accent);">{{ searchIndex + 1 }}/{{ searchResults.length }}</span>
               <button class="btn-icon-sm" @click="jumpToSearchResult(Math.max(0, searchIndex - 1))" style="font-size: 10px;">▲</button>
               <button class="btn-icon-sm" @click="jumpToSearchResult(Math.min(searchResults.length - 1, searchIndex + 1))" style="font-size: 10px;">▼</button>
               <button class="btn-icon-sm" @click="searchResults = []; searchQuery = ''" style="font-size: 10px;">✕</button>
             </div>
             <div style="display: flex; align-items: center; gap: 4px; margin-right: 4px;">
-              <input v-model="searchQuery" placeholder="搜索对话..." style="font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #ddd; width: 120px;" @keydown.enter="searchInConversation" />
+              <input v-model="searchQuery" placeholder="搜索对话..." style="font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary); width: 120px;" @keydown.enter="searchInConversation" />
               <button class="btn-icon-sm" @click="searchInConversation" style="font-size: 10px;">🔍</button>
             </div>
             <button v-if="showPreviewPanel" class="btn-blue" @click="closePreview">关闭预览</button>
@@ -3902,7 +3935,7 @@ async function loadOfflineModels() {
 
         <div v-if="showPreviewPanel && previewUrl" class="preview-panel">
           <div class="preview-toolbar">
-            <span style="font-size: 11px; color: #888;">🖥️ 实时预览</span>
+            <span style="font-size: 11px; color: var(--text-muted);">🖥️ 实时预览</span>
             <div style="display: flex; gap: 4px;">
               <button class="btn-icon-sm" @click="refreshPreview" style="font-size: 10px;">🔄</button>
               <button class="btn-icon-sm" @click="closePreview" style="font-size: 10px;">✕</button>
@@ -3913,8 +3946,8 @@ async function loadOfflineModels() {
 
         <div v-if="showTerminal" class="terminal-panel" :class="{ 'terminal-expanded': terminalExpanded }">
           <div class="terminal-toolbar">
-            <span style="font-size: 11px; color: #4af;">⌨ 终端</span>
-            <span style="font-size: 10px; color: #555; margin-left: 8px;">{{ terminalCwd || activeProject?.workspace_path || workspacePath || '~' }}</span>
+            <span style="font-size: 11px; color: var(--accent);">⌨ 终端</span>
+            <span style="font-size: 10px; color: var(--text-muted); margin-left: 8px;">{{ terminalCwd || activeProject?.workspace_path || workspacePath || '~' }}</span>
             <div style="display: flex; gap: 4px; margin-left: auto; align-items: center;">
               <button :class="['btn-icon-sm', { 'toggle-on': terminalAutoScroll }]" @click="terminalAutoScroll = !terminalAutoScroll" style="font-size: 10px;" :style="{ color: terminalAutoScroll ? '#4af' : '#666' }" title="自动滚动">滚动</button>
               <button :class="['btn-icon-sm', { 'toggle-on': terminalExpanded }]" @click="terminalExpanded = !terminalExpanded" style="font-size: 10px;" :style="{ color: terminalExpanded ? '#4af' : '#666' }" title="展开终端">展开</button>
@@ -3927,13 +3960,13 @@ async function loadOfflineModels() {
           </div>
           <div class="terminal-output" ref="terminalOutputRef">
             <div v-for="(entry, idx) in terminalHistory" :key="idx" class="terminal-entry">
-              <div class="terminal-cmd"><span style="color: #4af;">❯</span> {{ entry.cmd }} <span v-if="terminalDebug" style="color: #555; font-size: 9px;">[{{ entry.ts }}]</span></div>
+              <div class="terminal-cmd"><span style="color: var(--accent);">❯</span> {{ entry.cmd }} <span v-if="terminalDebug" style="color: var(--text-muted); font-size: 9px;">[{{ entry.ts }}]</span></div>
               <pre class="terminal-result">{{ entry.output }}</pre>
             </div>
             <div v-if="terminalHistory.length === 0" class="terminal-empty">输入命令开始执行（如 ls, dir, npm run dev）</div>
           </div>
           <div class="terminal-input-row">
-            <span style="color: #4af; font-size: 12px;">❯</span>
+            <span style="color: var(--accent); font-size: 12px;">❯</span>
             <input v-model="terminalInput" placeholder="输入命令..." @keydown.enter.exact="executeTerminalCommand" class="terminal-input" />
           </div>
         </div>
@@ -3960,7 +3993,7 @@ async function loadOfflineModels() {
               <div class="context-bar-wrap" :title="`上下文: ~${totalTokens} / ${contextWindowMax} tokens (${contextPercent}%)`">
                 <div class="context-bar" :style="{ width: contextPercent + '%', background: contextBarColor }"></div>
               </div>
-              <span style="font-size: 10px; color: #666;">~{{ totalTokens }}tk</span>
+              <span style="font-size: 10px; color: var(--text-muted);">~{{ totalTokens }}tk</span>
               <button v-if="sessionFileChanges.length > 0" class="btn-icon-sm" @click="showFileChanges = !showFileChanges" :title="`${sessionFileChanges.length} 个文件变更`" style="font-size: 10px;">📁{{ sessionFileChanges.length }}</button>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
@@ -3969,22 +4002,22 @@ async function loadOfflineModels() {
                 <button class="composer-action-btn" @click="showQuickModelDropdown = !showQuickModelDropdown" title="快捷切换模型">
                   {{ activeQuickModel ? (allQuickModels.find(m => m.id === activeQuickModel)?.name || '⚡ 模型') : '⚡ 模型' }}
                 </button>
-                <div v-if="showQuickModelDropdown" class="quick-model-dropdown" style="position: absolute; bottom: 100%; left: 0; margin-bottom: 4px; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 4px; min-width: 200px; z-index: 100; max-height: 300px; overflow-y: auto;">
+                <div v-if="showQuickModelDropdown" class="quick-model-dropdown" style="position: absolute; bottom: 100%; left: 0; margin-bottom: 4px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; padding: 4px; min-width: 200px; z-index: 100; max-height: 300px; overflow-y: auto;">
                   <!-- 可用模型 -->
                   <div v-if="availableQuickModels.length > 0" style="margin-bottom: 4px;">
-                    <div style="font-size: 10px; color: #4af; padding: 2px 8px; font-weight: 600;">可用</div>
+                    <div style="font-size: 10px; color: var(--accent); padding: 2px 8px; font-weight: 600;">可用</div>
                     <div v-for="m in availableQuickModels" :key="m.id" :class="['quick-model-item', { active: activeQuickModel === m.id }]" @click="selectQuickModel(m.id)" style="padding: 4px 8px; cursor: pointer; border-radius: 4px; font-size: 12px; white-space: nowrap; display: flex; align-items: center; gap: 4px;">
-                      <span style="color: #4CAF50;">●</span> {{ m.name }} <span v-if="(m as any).auto" style="font-size: 9px; color: #4af; background: #1a2a3a; padding: 0 4px; border-radius: 3px;">自动</span>
+                      <span style="color: #4CAF50;">●</span> {{ m.name }} <span v-if="(m as any).auto" style="font-size: 9px; color: var(--accent); background: var(--accent-bg); padding: 0 4px; border-radius: 3px;">自动</span>
                     </div>
                   </div>
                   <!-- 不可用模型 -->
                   <div v-if="unavailableQuickModels.length > 0" style="margin-bottom: 4px;">
-                    <div style="font-size: 10px; color: #666; padding: 2px 8px; font-weight: 600;">未就绪</div>
-                    <div v-for="m in unavailableQuickModels" :key="m.id" class="quick-model-item disabled" style="padding: 4px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap; display: flex; align-items: center; gap: 4px; color: #555; cursor: not-allowed;">
-                      <span style="color: #555;">●</span> {{ m.name }}
+                    <div style="font-size: 10px; color: var(--text-muted); padding: 2px 8px; font-weight: 600;">未就绪</div>
+                    <div v-for="m in unavailableQuickModels" :key="m.id" class="quick-model-item disabled" style="padding: 4px 8px; border-radius: 4px; font-size: 12px; white-space: nowrap; display: flex; align-items: center; gap: 4px; color: var(--text-muted); cursor: not-allowed;">
+                      <span style="color: var(--text-muted);">●</span> {{ m.name }}
                     </div>
                   </div>
-                  <div v-if="allQuickModels.length === 0" style="padding: 4px 8px; color: #666; font-size: 11px;">
+                  <div v-if="allQuickModels.length === 0" style="padding: 4px 8px; color: var(--text-muted); font-size: 11px;">
                     启动服务后自动显示模型
                   </div>
                 </div>
@@ -3997,7 +4030,7 @@ async function loadOfflineModels() {
             </div>
           </div>
           <div v-if="showFileChanges && sessionFileChanges.length > 0" class="file-changes-panel">
-            <div style="font-size: 11px; color: #888; margin-bottom: 4px;">本次会话文件变更</div>
+            <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">本次会话文件变更</div>
             <div v-for="(fc, i) in sessionFileChanges" :key="i" class="file-change-item">
               <span :class="['fc-action', fc.action]">{{ fc.action === 'create' ? '+' : fc.action === 'delete' ? '-' : '~' }}</span>
               <span class="fc-path">{{ fc.path }}</span>
@@ -4044,9 +4077,9 @@ async function loadOfflineModels() {
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; align-items: center; gap: 0;">
-              <span style="padding: 0 6px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
+              <span style="padding: 0 6px; font-size: 12px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-color); border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
               <input v-model="apiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 32px; font-size: 12px;" />
-              <span style="padding: 0 4px; font-size: 13px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
+              <span style="padding: 0 4px; font-size: 13px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-color); border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
               <input v-model="apiPort" type="number" min="1" max="65535" placeholder="7777" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 32px; font-size: 12px;" />
             </div>
           </div>
@@ -4083,7 +4116,7 @@ async function loadOfflineModels() {
             </div>
           </div>
           <details style="margin-top: 8px;">
-            <summary style="font-size: 12px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <summary style="font-size: 12px; color: var(--text-muted); cursor: pointer;">➕ 添加 API Key</summary>
             <div class="reg-form" style="margin-top: 4px;">
               <input v-model="apiKey" type="text" placeholder="粘贴千问 API Key" style="font-size: 12px;" />
               <button class="btn-blue btn-sm" @click="showNotice('API Key 已保存', 'ok')" :disabled="!apiKey.trim()" style="width: 100%; font-size: 12px;">添加</button>
@@ -4098,9 +4131,9 @@ async function loadOfflineModels() {
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; align-items: center; gap: 0;">
-              <span style="padding: 0 6px; font-size: 12px; color: #888; background: #1a1a1a; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
+              <span style="padding: 0 6px; font-size: 12px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-color); border-right: none; border-radius: 4px 0 0 4px; height: 32px; line-height: 32px;">http://</span>
               <input v-model="zhipuApiHost" placeholder="127.0.0.1" style="width: 90px; border-radius: 0; height: 32px; font-size: 12px;" />
-              <span style="padding: 0 4px; font-size: 13px; color: #888; background: #1a1a1a; border: 1px solid #333; border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
+              <span style="padding: 0 4px; font-size: 13px; color: var(--text-muted); background: var(--bg-input); border: 1px solid var(--border-color); border-left: none; border-right: none; height: 32px; line-height: 32px;">:</span>
               <input v-model="zhipuApiPort" type="number" min="1" max="65535" placeholder="7780" style="width: 60px; text-align: center; border-radius: 0 4px 4px 0; height: 32px; font-size: 12px;" />
             </div>
           </div>
@@ -4136,6 +4169,44 @@ async function loadOfflineModels() {
               </div>
             </div>
           </div>
+
+          <div v-if="settingsTab === 'deploy'" class="settings-section">
+            <h3 class="section-title">🛠️ 部署维护</h3>
+            <div class="settings-card">
+              <div class="card-title">环境检测</div>
+              <div class="setting-desc" style="margin-bottom: 12px;">检测系统运行环境，确保所有组件正常工作</div>
+              <button class="btn-blue" style="margin-bottom: 16px;" :disabled="envCheckBusy" @click="runEnvCheck">
+                <span v-if="envCheckBusy" class="spinner" style="width: 14px; height: 14px; border-width: 2px; margin-right: 6px;"></span>
+                {{ envCheckBusy ? '检测中...' : '🔍 检测环境' }}
+              </button>
+
+              <div v-if="envCheckResults" class="env-check-results">
+                <div v-for="(item, key) in envCheckResults" :key="key" class="env-check-card" :class="{ 'env-check-fail': !item.ok }">
+                  <div class="env-check-header">
+                    <span class="env-check-status">{{ item.ok ? '✓' : '✗' }}</span>
+                    <span class="env-check-label">{{ item.label }}</span>
+                    <span v-if="item.version" class="env-check-version">{{ item.version }}</span>
+                  </div>
+                  <div v-if="item.description" class="env-check-desc">{{ item.description }}</div>
+                  <div v-if="item.error" class="env-check-error">⚠ {{ item.error }}</div>
+                  <div v-if="item.fix" class="env-check-fix">💡 {{ item.fix }}</div>
+                  <div v-if="item.dependencies && item.dependencies.length" class="env-check-deps">
+                    <span class="env-check-deps-label">依赖组件:</span>
+                    <span v-for="dep in item.dependencies" :key="dep" class="env-check-dep-tag">{{ dep }}</span>
+                  </div>
+                </div>
+
+                <div class="env-check-summary">
+                  <span class="env-check-pass">✓ {{ Object.values(envCheckResults).filter((v: any) => v.ok).length }} 通过</span>
+                  <span v-if="envCheckFailedKeys.length" class="env-check-fail-count">✗ {{ envCheckFailedKeys.length }} 未通过</span>
+                </div>
+              </div>
+
+              <div v-if="!envCheckResults && !envCheckBusy" style="text-align: center; padding: 24px; color: var(--text-muted); font-size: 13px;">
+                点击"检测环境"按钮开始检测
+              </div>
+            </div>
+          </div>
         </div>
 
         <div v-if="runMode === 'api' && apiSource === 'zhipu'" class="sidebar-section">
@@ -4152,12 +4223,12 @@ async function loadOfflineModels() {
             <div v-for="acc in zhipuAccounts" :key="acc.full_key || acc.api_key" :class="['account-row']">
               <span :class="['account-status', acc.valid ? 'valid' : 'invalid']">●</span>
               <span class="account-email">{{ acc.label || acc.api_key }}</span>
-              <button class="btn-icon btn-sticky" @click="checkZhipuAccounts()" title="验证全部" style="color: #4af;">✓</button>
+              <button class="btn-icon btn-sticky" @click="checkZhipuAccounts()" title="验证全部" style="color: var(--accent);">✓</button>
               <button class="btn-icon btn-del" @click="deleteZhipuAccount(acc.full_key || acc.api_key)" title="删除">✕</button>
             </div>
           </div>
           <details style="margin-top: 8px;">
-            <summary style="font-size: 12px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+            <summary style="font-size: 12px; color: var(--text-muted); cursor: pointer;">🔑 登录已有账户</summary>
             <div class="reg-form" style="margin-top: 4px;">
               <input v-model="zhipuLoginEmail" type="text" placeholder="邮箱" style="font-size: 12px;" />
               <input v-model="zhipuLoginPassword" type="password" placeholder="密码" style="font-size: 12px;" />
@@ -4166,7 +4237,7 @@ async function loadOfflineModels() {
             <p v-if="zhipuLoginError" class="hint warn" style="margin: 2px 0; font-size: 12px;">{{ zhipuLoginError }}</p>
           </details>
           <details style="margin-top: 8px;">
-            <summary style="font-size: 12px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <summary style="font-size: 12px; color: var(--text-muted); cursor: pointer;">➕ 添加 API Key</summary>
             <div class="reg-form" style="margin-top: 4px;">
               <input v-model="zhipuNewLabel" type="text" placeholder="标签（可选）" style="font-size: 12px;" />
               <input v-model="zhipuNewKey" type="text" placeholder="粘贴智谱 API Key" style="font-size: 12px;" />
@@ -4215,7 +4286,7 @@ async function loadOfflineModels() {
             <button class="btn-blue" @click="autoRegisterQwenAccount" :disabled="qwenRegisterBusy" style="flex: 1; font-size: 12px; padding: 6px 10px;">{{ qwenRegisterBusy ? '⏳ 注册中...' : '🤖 自动注册' }}</button>
           </div>
           <details style="margin-top: 8px;">
-            <summary style="font-size: 12px; color: #888; cursor: pointer;">🔑 登录已有账户</summary>
+            <summary style="font-size: 12px; color: var(--text-muted); cursor: pointer;">🔑 登录已有账户</summary>
             <div class="reg-form" style="margin-top: 4px;">
               <input v-model="loginEmail" type="text" placeholder="邮箱" style="font-size: 12px;" />
               <input v-model="loginPassword" type="password" placeholder="密码" style="font-size: 12px;" />
@@ -4224,7 +4295,7 @@ async function loadOfflineModels() {
             <p v-if="qwenLoginError" class="hint warn" style="margin: 2px 0; font-size: 12px;">{{ qwenLoginError }}</p>
           </details>
           <details style="margin-top: 8px;">
-            <summary style="font-size: 12px; color: #888; cursor: pointer;">➕ 添加 API Key</summary>
+            <summary style="font-size: 12px; color: var(--text-muted); cursor: pointer;">➕ 添加 API Key</summary>
             <div class="reg-form" style="margin-top: 4px;">
               <input v-model="qwenToken" type="text" placeholder="粘贴 Token / API Key" style="font-size: 12px;" />
               <button class="btn-blue btn-sm" @click="addQwenAccount" :disabled="!qwenToken.trim()" style="width: 100%; font-size: 12px;">添加</button>
@@ -4281,16 +4352,16 @@ async function loadOfflineModels() {
           <div v-if="projects.length === 0" class="empty-hint">暂无项目，创建或打开一个项目开始开发</div>
         </div>
         <div style="padding: 16px 24px;">
-          <h3 style="font-size: 14px; color: #ccc; margin-bottom: 8px;">📦 项目模板</h3>
+          <h3 style="font-size: 14px; color: var(--text-secondary); margin-bottom: 8px;">📦 项目模板</h3>
           <div style="display: flex; gap: 3px; margin-bottom: 8px; flex-wrap: wrap;">
             <button v-for="cat in ['all', 'frontend', 'backend', 'fullstack', 'desktop', 'datascience']" :key="cat" :class="['tab-btn', { active: templateCategory === cat }]" @click="templateCategory = cat; loadProjectTemplates()" style="font-size: 10px;">{{ cat === 'all' ? '全部' : cat === 'frontend' ? '前端' : cat === 'backend' ? '后端' : cat === 'fullstack' ? '全栈' : cat === 'desktop' ? '桌面' : '数据' }}</button>
           </div>
           <div class="template-grid">
             <div v-for="t in projectTemplates" :key="t.id" class="template-card" @click="useTemplate(t)">
-              <div style="font-size: 12px; font-weight: 500; color: #ddd;">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
-              <div style="font-size: 10px; color: #888; margin-top: 2px;">{{ t.desc }}</div>
+              <div style="font-size: 12px; font-weight: 500; color: var(--text-primary);">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">{{ t.desc }}</div>
               <div style="display: flex; gap: 4px; margin-top: 4px;">
-                <button v-if="t.scaffold" class="btn-sm" @click.stop="scaffoldFromTemplate(t)" style="font-size: 9px; background: #2a3a2a;">🏗️ 脚手架</button>
+                <button v-if="t.scaffold" class="btn-sm" @click.stop="scaffoldFromTemplate(t)" style="font-size: 9px; background: var(--accent-bg);">🏗️ 脚手架</button>
                 <button v-if="t.custom" class="btn-icon-sm" @click.stop="deleteCustomTemplate(t.id)" style="font-size: 9px;">🗑️</button>
               </div>
             </div>
@@ -4307,12 +4378,12 @@ async function loadOfflineModels() {
         <div class="version-content">
           <div class="settings-card">
             <div class="card-title">当前版本</div>
-            <div style="font-size: 24px; font-weight: 700; color: #4af; margin-bottom: 4px;">v{{ APP_VERSION }}</div>
-            <div style="font-size: 11px; color: #888;">云集智能编程工作站</div>
+            <div style="font-size: 24px; font-weight: 700; color: var(--accent); margin-bottom: 4px;">v{{ APP_VERSION }}</div>
+            <div style="font-size: 11px; color: var(--text-muted);">云集智能编程工作站</div>
           </div>
           <div class="settings-card">
             <div class="card-title">版本历史</div>
-            <div v-if="versionHistory.length === 0" style="font-size: 11px; color: #555; padding: 8px;">暂无版本记录</div>
+            <div v-if="versionHistory.length === 0" style="font-size: 11px; color: var(--text-muted); padding: 8px;">暂无版本记录</div>
             <div v-for="(ver, idx) in versionHistory" :key="idx" class="version-item">
               <div class="version-dot"></div>
               <div class="version-info">
@@ -4326,15 +4397,15 @@ async function loadOfflineModels() {
             <div class="card-title">构建信息</div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">运行模式</div></div>
-              <span style="font-size: 12px; color: #4af;">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : '🦙 Ollama' }}</span>
+              <span style="font-size: 12px; color: var(--accent);">{{ runMode === 'cloud' ? '☁️ 云端' : runMode === 'api' ? '🔗 API' : '🦙 Ollama' }}</span>
             </div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">当前模型</div></div>
-              <span style="font-size: 12px; color: #ddd;">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
+              <span style="font-size: 12px; color: var(--text-primary);">{{ runMode === 'api' ? (apiSource === 'zhipu' ? zhipuModel : apiModel) : runMode === 'ollama' ? ollamaModel : 'openrouter/auto' }}</span>
             </div>
             <div class="setting-row">
               <div class="setting-info"><div class="setting-name">工作区路径</div></div>
-              <span style="font-size: 11px; color: #888;">{{ activeProject?.workspace_path || workspacePath || '未选择' }}</span>
+              <span style="font-size: 11px; color: var(--text-muted);">{{ activeProject?.workspace_path || workspacePath || '未选择' }}</span>
             </div>
           </div>
         </div>
@@ -4369,6 +4440,9 @@ async function loadOfflineModels() {
             <button :class="['settings-nav-item', { active: settingsTab === 'offline' }]" @click="settingsTab = 'offline'; loadOfflineModels()">
               <span class="nav-icon">📴</span><span class="nav-label">离线模式</span>
             </button>
+            <button :class="['settings-nav-item', { active: settingsTab === 'deploy' }]" @click="settingsTab = 'deploy'">
+              <span class="nav-icon">🛠️</span><span class="nav-label">部署维护</span>
+            </button>
           </nav>
         </div>
         <div class="settings-content">
@@ -4378,11 +4452,9 @@ async function loadOfflineModels() {
               <div class="card-title">界面</div>
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">主题</div><div class="setting-desc">切换界面配色方案</div></div>
-                <div style="display: flex; gap: 4px;">
-                  <button :class="['theme-btn', { active: currentTheme === 'dark' }]" @click="applyTheme('dark')" style="--tc: #1a1a1a; --tc2: #0d0d0d;">🌙</button>
-                  <button :class="['theme-btn', { active: currentTheme === 'light' }]" @click="applyTheme('light')" style="--tc: #f0f0f0; --tc2: #fff;">☀️</button>
-                  <button :class="['theme-btn', { active: currentTheme === 'blue' }]" @click="applyTheme('blue')" style="--tc: #0a1628; --tc2: #0d1f3c;">🔵</button>
-                  <button :class="['theme-btn', { active: currentTheme === 'green' }]" @click="applyTheme('green')" style="--tc: #0a1a0a; --tc2: #0d200d;">🟢</button>
+                <div style="display: flex; gap: 8px;">
+                  <button :class="['theme-btn', { active: currentTheme === 'dark' }]" @click="applyTheme('dark')" style="--tc: #1a1a1a; --tc2: #0d0d0d;">🌙 暗黑</button>
+                  <button :class="['theme-btn', { active: currentTheme === 'light' }]" @click="applyTheme('light')" style="--tc: #f0f0f0; --tc2: #fff;">☀️ 明亮</button>
                 </div>
               </div>
               <div class="setting-row">
@@ -4432,28 +4504,28 @@ async function loadOfflineModels() {
             <div class="settings-card">
               <div class="card-title">快捷模型列表</div>
               <div class="setting-desc" style="margin-bottom: 8px;">配置发送按钮左侧的快捷模型切换选项</div>
-              <div v-for="m in autoQuickModels" :key="m.id" class="setting-row" style="align-items: center; padding: 6px 0; border-bottom: 1px solid #222;">
+              <div v-for="m in autoQuickModels" :key="m.id" class="setting-row" style="align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                 <div style="flex: 1; min-width: 0;">
-                  <div style="font-size: 13px; color: #ddd;">{{ m.name }} <span style="font-size: 9px; color: #4af; background: #1a2a3a; padding: 0 4px; border-radius: 3px;">自动</span></div>
-                  <div style="font-size: 10px; color: #666;">{{ m.provider }}{{ m.apiSource ? ' / ' + m.apiSource : '' }}</div>
+                  <div style="font-size: 13px; color: var(--text-primary);">{{ m.name }} <span style="font-size: 9px; color: var(--accent); background: var(--accent-bg); padding: 0 4px; border-radius: 3px;">自动</span></div>
+                  <div style="font-size: 10px; color: var(--text-muted);">{{ m.provider }}{{ m.apiSource ? ' / ' + m.apiSource : '' }}</div>
                 </div>
                 <div style="display: flex; gap: 4px; align-items: center;">
-                  <span v-if="activeQuickModel === m.id" style="font-size: 11px; color: #4af;">✓ 当前</span>
+                  <span v-if="activeQuickModel === m.id" style="font-size: 11px; color: var(--accent);">✓ 当前</span>
                   <button class="btn-sm" @click="selectQuickModel(m.id)" :disabled="activeQuickModel === m.id">切换</button>
                 </div>
               </div>
-              <div v-for="(m, idx) in quickModels" :key="m.id" class="setting-row" style="align-items: center; padding: 6px 0; border-bottom: 1px solid #222;">
+              <div v-for="(m, idx) in quickModels" :key="m.id" class="setting-row" style="align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
                 <div style="flex: 1; min-width: 0;">
-                  <div style="font-size: 13px; color: #ddd;">{{ m.name }}</div>
-                  <div style="font-size: 10px; color: #666;">{{ m.provider }}{{ m.apiSource ? ' / ' + m.apiSource : '' }} — {{ m.modelId || '默认' }}</div>
+                  <div style="font-size: 13px; color: var(--text-primary);">{{ m.name }}</div>
+                  <div style="font-size: 10px; color: var(--text-muted);">{{ m.provider }}{{ m.apiSource ? ' / ' + m.apiSource : '' }} — {{ m.modelId || '默认' }}</div>
                 </div>
                 <div style="display: flex; gap: 4px; align-items: center;">
-                  <span v-if="activeQuickModel === m.id" style="font-size: 11px; color: #4af;">✓ 当前</span>
+                  <span v-if="activeQuickModel === m.id" style="font-size: 11px; color: var(--accent);">✓ 当前</span>
                   <button class="btn-sm" @click="selectQuickModel(m.id)" :disabled="activeQuickModel === m.id">切换</button>
                   <button class="btn-sm" style="background: #3a1a1a; color: #f55;" @click="quickModels.splice(idx, 1); if (activeQuickModel === m.id) activeQuickModel = ''">删除</button>
                 </div>
               </div>
-              <div v-if="allQuickModels.length === 0" style="padding: 12px; color: #666; font-size: 12px; text-align: center;">启动服务后自动显示模型</div>
+              <div v-if="allQuickModels.length === 0" style="padding: 12px; color: var(--text-muted); font-size: 12px; text-align: center;">启动服务后自动显示模型</div>
             </div>
             <div class="settings-card">
               <div class="card-title">添加快捷模型</div>
@@ -4480,39 +4552,39 @@ async function loadOfflineModels() {
               <div class="card-title">项目记忆 (CLAUDE.md)</div>
               <div class="setting-desc" style="margin-bottom: 8px;">AI 每次对话都会读取此内容，用于存储项目级指令和规范</div>
               <div v-if="activeProject">
-                <div style="font-size: 11px; color: #888; margin-bottom: 4px;">项目级记忆</div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">项目级记忆</div>
                 <textarea v-model="memoryContent" rows="5" placeholder="在此编辑项目记忆..." class="setting-textarea"></textarea>
                 <div style="display: flex; gap: 4px; margin-top: 4px;">
                   <button class="btn-sm" @click="saveMemoryContent" style="flex: 1;">保存项目记忆</button>
-                  <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: #2a3a2a;">+ 技术栈</button>
-                  <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: #2a3a2a;">+ 规范</button>
+                  <button class="btn-sm" @click="appendMemory('技术栈: ')" style="background: var(--accent-bg);">+ 技术栈</button>
+                  <button class="btn-sm" @click="appendMemory('编码规范: ')" style="background: var(--accent-bg);">+ 规范</button>
                 </div>
-                <div style="font-size: 11px; color: #888; margin-top: 8px; margin-bottom: 4px;">全局记忆</div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-top: 8px; margin-bottom: 4px;">全局记忆</div>
                 <textarea v-model="globalMemoryContent" rows="3" placeholder="全局记忆，适用于所有项目..." class="setting-textarea"></textarea>
                 <button class="btn-sm" @click="saveGlobalMemory" style="margin-top: 4px;">保存全局记忆</button>
               </div>
-              <div v-else style="font-size: 11px; color: #555; padding: 8px;">请先选择项目</div>
+              <div v-else style="font-size: 11px; color: var(--text-muted); padding: 8px;">请先选择项目</div>
             </div>
             <div class="settings-card">
               <div class="card-title">智能记忆</div>
               <div style="display: flex; gap: 4px; margin-bottom: 8px; align-items: center;">
                 <input v-model="memorySearchQuery" placeholder="搜索记忆..." class="setting-input" style="flex: 1;" @keydown.enter="searchSmartMemories" />
-                <button class="btn-sm" @click="searchSmartMemories" style="background: #2a3a2a;">🔍</button>
-                <button class="btn-sm" @click="extractMemoriesFromConversation" style="background: #2a3a2a;">📥 从对话提取</button>
+                <button class="btn-sm" @click="searchSmartMemories" style="background: var(--accent-bg);">🔍</button>
+                <button class="btn-sm" @click="extractMemoriesFromConversation" style="background: var(--accent-bg);">📥 从对话提取</button>
               </div>
-              <div style="font-size: 10px; color: #666; margin-bottom: 8px;">四类记忆：👤 用户偏好 | 🔄 反馈纠正 | 📋 项目上下文 | 🔗 外部引用</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-bottom: 8px;">四类记忆：👤 用户偏好 | 🔄 反馈纠正 | 📋 项目上下文 | 🔗 外部引用</div>
               <div v-if="activeProject">
-                <div v-if="smartMemories.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 12px;">暂无智能记忆，点击"从对话提取"自动生成</div>
+                <div v-if="smartMemories.length === 0" style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 12px;">暂无智能记忆，点击"从对话提取"自动生成</div>
                 <div v-for="mem in smartMemories" :key="mem.filename" class="memory-item">
                   <div style="display: flex; justify-content: space-between; align-items: center;">
                     <span :class="['mem-type-badge', mem.type]">{{ mem.type === 'user' ? '👤' : mem.type === 'feedback' ? '🔄' : mem.type === 'reference' ? '🔗' : '📋' }} {{ mem.title }}</span>
                     <button class="btn-icon-sm" @click="deleteSmartMemory(mem.filename)" style="font-size: 9px;">🗑️</button>
                   </div>
-                  <div v-if="mem.match_snippet" style="font-size: 10px; color: #4af; margin-top: 2px; padding: 2px 4px; background: #1a2a3a; border-radius: 2px;">匹配: {{ mem.match_snippet }}</div>
-                  <div style="font-size: 10px; color: #888; margin-top: 2px; white-space: pre-wrap; max-height: 60px; overflow-y: auto;">{{ mem.content.replace(/^---[\s\S]*?---\n*/, '').slice(0, 200) }}</div>
+                  <div v-if="mem.match_snippet" style="font-size: 10px; color: var(--accent); margin-top: 2px; padding: 2px 4px; background: var(--accent-bg); border-radius: 2px;">匹配: {{ mem.match_snippet }}</div>
+                  <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px; white-space: pre-wrap; max-height: 60px; overflow-y: auto;">{{ mem.content.replace(/^---[\s\S]*?---\n*/, '').slice(0, 200) }}</div>
                 </div>
-                <div style="margin-top: 8px; border-top: 1px solid #222; padding-top: 8px;">
-                  <div style="font-size: 11px; color: #888; margin-bottom: 4px;">添加新记忆</div>
+                <div style="margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px;">
+                  <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">添加新记忆</div>
                   <div style="display: flex; gap: 4px; margin-bottom: 4px;">
                     <input v-model="newMemoryTitle" placeholder="标题" class="setting-input" style="flex: 1;" />
                     <select v-model="newMemoryType" class="setting-select" style="width: 100px;">
@@ -4526,7 +4598,7 @@ async function loadOfflineModels() {
                   <button class="btn-sm" @click="addSmartMemory" style="margin-top: 4px; width: 100%;">添加记忆</button>
                 </div>
               </div>
-              <div v-else style="font-size: 11px; color: #555; padding: 8px;">请先选择项目</div>
+              <div v-else style="font-size: 11px; color: var(--text-muted); padding: 8px;">请先选择项目</div>
             </div>
           </div>
 
@@ -4534,21 +4606,21 @@ async function loadOfflineModels() {
             <h3 class="section-title">项目与模板</h3>
             <div class="settings-card">
               <div class="card-title">项目管理</div>
-              <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 8px;">当前项目：{{ activeProject.name }} <span style="color: #666;">{{ activeProject.workspace_path || '纯对话' }}</span></div>
+              <div v-if="activeProject" style="font-size: 11px; color: #42A5F5; margin-bottom: 8px;">当前项目：{{ activeProject.name }} <span style="color: var(--text-muted);">{{ activeProject.workspace_path || '纯对话' }}</span></div>
               <div style="margin-bottom: 8px;">
-                <div style="font-size: 11px; color: #888; margin-bottom: 4px;">新建项目</div>
+                <div style="font-size: 11px; color: var(--text-muted); margin-bottom: 4px;">新建项目</div>
                 <div style="display: flex; gap: 4px; margin-bottom: 4px;">
                   <input v-model="newProjectName" placeholder="项目名称" class="setting-input" style="flex: 1;" @input="updateDefaultPath" />
                   <button class="btn-blue btn-sm" @click="createProject" :disabled="!newProjectName.trim()">创建</button>
                 </div>
                 <div style="display: flex; align-items: center; gap: 4px; margin-bottom: 4px;">
-                  <label style="font-size: 10px; color: #888; cursor: pointer;">
+                  <label style="font-size: 10px; color: var(--text-muted); cursor: pointer;">
                     <input type="checkbox" v-model="newProjectCustomPath" style="margin-right: 4px;" />指定工作区
                   </label>
                   <button v-if="newProjectCustomPath" class="btn-sm" @click="selectWorkspaceDir" style="font-size: 10px;">📂 选择目录</button>
                 </div>
-                <div v-if="newProjectCustomPath && newProjectPath" style="font-size: 10px; color: #4af;">工作区: {{ newProjectPath }}</div>
-                <div v-if="!newProjectCustomPath" style="font-size: 10px; color: #666;">不指定工作区则为纯对话模式</div>
+                <div v-if="newProjectCustomPath && newProjectPath" style="font-size: 10px; color: var(--accent);">工作区: {{ newProjectPath }}</div>
+                <div v-if="!newProjectCustomPath" style="font-size: 10px; color: var(--text-muted);">不指定工作区则为纯对话模式</div>
               </div>
               <div v-for="p in projects" :key="p.id" :class="['project-item', { active: p.id === activeProject?.id }]" style="margin-bottom: 4px;">
                 <div style="display: flex; align-items: center; justify-content: space-between;" @click="switchProject(p.id)">
@@ -4558,7 +4630,7 @@ async function loadOfflineModels() {
                     <button class="btn-icon-sm" @click.stop="deleteProject(p.id)" title="删除">🗑️</button>
                   </div>
                 </div>
-                <div style="font-size: 10px; color: #666;">{{ p.workspace_path || '纯对话模式' }}</div>
+                <div style="font-size: 10px; color: var(--text-muted);">{{ p.workspace_path || '纯对话模式' }}</div>
               </div>
             </div>
             <div class="settings-card">
@@ -4568,17 +4640,17 @@ async function loadOfflineModels() {
               </div>
               <div class="template-grid">
                 <div v-for="t in projectTemplates" :key="t.id" class="template-card" @click="useTemplate(t)">
-                  <div style="font-size: 12px; font-weight: 500; color: #ddd;">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
-                  <div style="font-size: 10px; color: #888; margin-top: 2px;">{{ t.desc }}</div>
+                  <div style="font-size: 12px; font-weight: 500; color: var(--text-primary);">{{ t.custom ? '⭐ ' : '' }}{{ t.name }}</div>
+                  <div style="font-size: 10px; color: var(--text-muted); margin-top: 2px;">{{ t.desc }}</div>
                   <div style="display: flex; gap: 4px; margin-top: 4px;">
-                    <button v-if="t.scaffold" class="btn-sm" @click.stop="scaffoldFromTemplate(t)" style="font-size: 9px; background: #2a3a2a;">🏗️ 脚手架</button>
+                    <button v-if="t.scaffold" class="btn-sm" @click.stop="scaffoldFromTemplate(t)" style="font-size: 9px; background: var(--accent-bg);">🏗️ 脚手架</button>
                     <button v-if="t.custom" class="btn-icon-sm" @click.stop="deleteCustomTemplate(t.id)" style="font-size: 9px;">🗑️</button>
                   </div>
                 </div>
               </div>
-              <div style="margin-top: 8px; border-top: 1px solid #222; padding-top: 8px;">
+              <div style="margin-top: 8px; border-top: 1px solid var(--border-color); padding-top: 8px;">
                 <button class="btn-sm" @click="showAddTemplate = !showAddTemplate" style="width: 100%;">{{ showAddTemplate ? '取消' : '➕ 添加自定义模板' }}</button>
-                <div v-if="showAddTemplate" style="margin-top: 6px; padding: 8px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
+                <div v-if="showAddTemplate" style="margin-top: 6px; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-input);">
                   <input v-model="newTplName" placeholder="模板名称" class="setting-input" style="width: 100%; margin-bottom: 4px;" />
                   <div style="display: flex; gap: 4px; margin-bottom: 4px;">
                     <select v-model="newTplCategory" class="setting-select" style="flex: 1;">
@@ -4596,7 +4668,7 @@ async function loadOfflineModels() {
               <div style="display: flex; flex-wrap: wrap; gap: 6px;">
                 <button v-for="(wf, key) in WORKFLOW_PRESETS" :key="key" class="workflow-card" @click="applyWorkflow(key)">
                   <span style="font-size: 13px;">{{ wf.name }}</span>
-                  <span style="font-size: 10px; color: #888;">{{ wf.steps.join(' → ') }}</span>
+                  <span style="font-size: 10px; color: var(--text-muted);">{{ wf.steps.join(' → ') }}</span>
                 </button>
               </div>
             </div>
@@ -4615,28 +4687,28 @@ async function loadOfflineModels() {
                 </select>
               </div>
               <p v-if="toolApprovalMode === 'auto'" style="font-size: 11px; color: #FF9800; margin: 4px 0;">⚠ AI 可直接读写文件和执行命令</p>
-              <p v-else-if="toolApprovalMode === 'smart'" style="font-size: 11px; color: #4af; margin: 4px 0;">读取/搜索自动通过，写入/编辑/命令需确认</p>
-              <p v-else style="font-size: 11px; color: #888; margin: 4px 0;">所有工具调用都需要手动确认</p>
+              <p v-else-if="toolApprovalMode === 'smart'" style="font-size: 11px; color: var(--accent); margin: 4px 0;">读取/搜索自动通过，写入/编辑/命令需确认</p>
+              <p v-else style="font-size: 11px; color: var(--text-muted); margin: 4px 0;">所有工具调用都需要手动确认</p>
             </div>
             <div class="settings-card">
               <div class="card-title">AI 协作模式</div>
               <div style="display: flex; flex-wrap: wrap; gap: 6px;">
                 <button :class="['workflow-card', { active: collaborationMode === 'plan-code-review' }]" @click="setCollaborationMode('plan-code-review')">
                   <span style="font-size: 13px;">📋 规划→编码→审查</span>
-                  <span style="font-size: 10px; color: #888;">三阶段协作流程</span>
+                  <span style="font-size: 10px; color: var(--text-muted);">三阶段协作流程</span>
                 </button>
                 <button :class="['workflow-card', { active: collaborationMode === 'pair' }]" @click="setCollaborationMode('pair')">
                   <span style="font-size: 13px;">👥 结对编程</span>
-                  <span style="font-size: 10px; color: #888;">交替工作模式</span>
+                  <span style="font-size: 10px; color: var(--text-muted);">交替工作模式</span>
                 </button>
                 <button :class="['workflow-card', { active: collaborationMode === 'review-only' }]" @click="setCollaborationMode('review-only')">
                   <span style="font-size: 13px;">🔍 纯审查</span>
-                  <span style="font-size: 10px; color: #888;">只审查不修改</span>
+                  <span style="font-size: 10px; color: var(--text-muted);">只审查不修改</span>
                 </button>
               </div>
-              <div v-if="collaborationMode !== 'none'" style="margin-top: 8px; padding: 8px; border: 1px solid #333; border-radius: 4px; background: #1a1a1a;">
-                <div style="font-size: 11px; color: #888;">当前模式：{{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}
-                  <span v-if="collaborationMode === 'plan-code-review'" style="color: #4af;"> | 阶段：{{ collabPhase === 'planning' ? '📋 规划中' : collabPhase === 'coding' ? '💻 编码中' : '🔍 审查中' }}</span>
+              <div v-if="collaborationMode !== 'none'" style="margin-top: 8px; padding: 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-input);">
+                <div style="font-size: 11px; color: var(--text-muted);">当前模式：{{ collaborationMode === 'plan-code-review' ? '规划→编码→审查' : collaborationMode === 'pair' ? '结对编程' : '纯审查' }}
+                  <span v-if="collaborationMode === 'plan-code-review'" style="color: var(--accent);"> | 阶段：{{ collabPhase === 'planning' ? '📋 规划中' : collabPhase === 'coding' ? '💻 编码中' : '🔍 审查中' }}</span>
                 </div>
                 <div v-if="collaborationMode === 'plan-code-review'" style="display: flex; gap: 4px; margin-top: 4px;">
                   <button class="btn-sm" @click="advanceCollabPhase" style="flex: 1;">⏭ 进入下一阶段</button>
@@ -4651,12 +4723,12 @@ async function loadOfflineModels() {
                 <button class="btn-blue btn-sm" @click="addTask">添加</button>
               </div>
               <textarea v-model="newTaskDesc" rows="1" placeholder="任务描述（可选）" class="setting-textarea" style="margin-bottom: 8px;"></textarea>
-              <div v-if="taskList.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 8px;">暂无任务</div>
-              <div v-for="task in taskList" :key="task.id" style="display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #222;">
+              <div v-if="taskList.length === 0" style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 8px;">暂无任务</div>
+              <div v-for="task in taskList" :key="task.id" style="display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid var(--border-color);">
                 <span :style="{ color: task.status === 'done' ? '#4CAF50' : task.status === 'in_progress' ? '#FF9800' : '#888', fontSize: '12px', cursor: 'pointer' }" @click="updateTaskStatus(task.id, task.status === 'pending' ? 'in_progress' : task.status === 'in_progress' ? 'done' : 'pending')">
                   {{ task.status === 'done' ? '✅' : task.status === 'in_progress' ? '🔄' : '⬜' }}
                 </span>
-                <span style="flex: 1; font-size: 11px; color: #ddd;" :style="{ textDecoration: task.status === 'done' ? 'line-through' : 'none' }">{{ task.name }}</span>
+                <span style="flex: 1; font-size: 11px; color: var(--text-primary);" :style="{ textDecoration: task.status === 'done' ? 'line-through' : 'none' }">{{ task.name }}</span>
                 <button class="btn-icon-sm" @click="executeTaskAsPrompt(task)" title="执行" style="font-size: 9px;">▶</button>
                 <button class="btn-icon-sm" @click="removeTask(task.id)" title="删除" style="font-size: 9px;">✕</button>
               </div>
@@ -4666,8 +4738,8 @@ async function loadOfflineModels() {
               <div class="setting-row">
                 <div class="setting-info"><div class="setting-name">导出对话</div><div class="setting-desc">将当前对话导出为文件</div></div>
                 <div style="display: flex; gap: 4px;">
-                  <button class="btn-sm" @click="exportConversation('markdown')" :disabled="messages.length === 0" style="background: #2a3a2a;">📄 Markdown</button>
-                  <button class="btn-sm" @click="exportConversation('json')" :disabled="messages.length === 0" style="background: #2a3a2a;">📋 JSON</button>
+                  <button class="btn-sm" @click="exportConversation('markdown')" :disabled="messages.length === 0" style="background: var(--accent-bg);">📄 Markdown</button>
+                  <button class="btn-sm" @click="exportConversation('json')" :disabled="messages.length === 0" style="background: var(--accent-bg);">📋 JSON</button>
                 </div>
               </div>
             </div>
@@ -4677,11 +4749,11 @@ async function loadOfflineModels() {
             <h3 class="section-title">🧩 插件扩展</h3>
             <div class="settings-card">
               <div class="card-title">已安装插件</div>
-              <div v-if="pluginList.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 12px;">暂无已安装插件</div>
-              <div v-for="p in pluginList" :key="p.id" style="display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #222;">
-                <span style="font-size: 13px; color: #ddd; flex: 1;">{{ p.name }}</span>
-                <span style="font-size: 10px; color: #888;">{{ p.desc }}</span>
-                <button class="btn-sm" @click="runPlugin(p.id)" style="font-size: 10px; background: #2a3a2a;">▶ 执行</button>
+              <div v-if="pluginList.length === 0" style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 12px;">暂无已安装插件</div>
+              <div v-for="p in pluginList" :key="p.id" style="display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                <span style="font-size: 13px; color: var(--text-primary); flex: 1;">{{ p.name }}</span>
+                <span style="font-size: 10px; color: var(--text-muted);">{{ p.desc }}</span>
+                <button class="btn-sm" @click="runPlugin(p.id)" style="font-size: 10px; background: var(--accent-bg);">▶ 执行</button>
                 <button class="btn-icon-sm" @click="uninstallPluginById(p.id)" style="font-size: 9px;">🗑️</button>
               </div>
             </div>
@@ -4697,7 +4769,7 @@ async function loadOfflineModels() {
             </div>
             <div class="settings-card">
               <div class="card-title">插件开发指南</div>
-              <div style="font-size: 11px; color: #888; line-height: 1.6;">
+              <div style="font-size: 11px; color: var(--text-muted); line-height: 1.6;">
                 <p>插件使用 Python 编写，运行在安全沙箱中。</p>
                 <p><b>可用变量：</b></p>
                 <ul style="padding-left: 16px;">
@@ -4707,7 +4779,7 @@ async function loadOfflineModels() {
                   <li><code>result</code> - 设置此变量返回输出</li>
                 </ul>
                 <p style="margin-top: 8px;"><b>示例：</b>文本转大写</p>
-                <pre style="background: #111; padding: 8px; border-radius: 4px; font-size: 11px;">result = input.upper()</pre>
+                <pre style="background: var(--bg-input); padding: 8px; border-radius: 4px; font-size: 11px;">result = input.upper()</pre>
               </div>
             </div>
           </div>
@@ -4720,17 +4792,17 @@ async function loadOfflineModels() {
               <button :class="['btn-blue', { 'btn-active': isVoiceActive }]" @click="startVoice" style="width: 100%; font-size: 14px; padding: 12px;">
                 {{ isVoiceActive ? '🎤 正在录音...' : '🎤 开始语音输入' }}
               </button>
-              <div style="font-size: 10px; color: #555; margin-top: 6px;">需要安装 speech_recognition 库（pip install SpeechRecognition）</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">需要安装 speech_recognition 库（pip install SpeechRecognition）</div>
             </div>
             <div class="settings-card">
               <div class="card-title">语音朗读</div>
               <div class="setting-desc" style="margin-bottom: 8px;">点击消息旁的🔊按钮朗读AI回复</div>
               <div v-if="messages.length > 0" style="display: flex; gap: 4px; flex-wrap: wrap;">
-                <button v-for="m in messages.filter(m => m.role === 'assistant').slice(-5)" :key="m.id" class="btn-sm" @click="speakMessage(m.text?.slice(0, 500) || '')" style="font-size: 10px; background: #2a3a2a;">
+                <button v-for="m in messages.filter(m => m.role === 'assistant').slice(-5)" :key="m.id" class="btn-sm" @click="speakMessage(m.text?.slice(0, 500) || '')" style="font-size: 10px; background: var(--accent-bg);">
                   🔊 {{ (m.text || '').slice(0, 30) }}...
                 </button>
               </div>
-              <div style="font-size: 10px; color: #555; margin-top: 6px;">需要安装 pyttsx3 库（pip install pyttsx3）</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">需要安装 pyttsx3 库（pip install pyttsx3）</div>
             </div>
           </div>
 
@@ -4739,10 +4811,10 @@ async function loadOfflineModels() {
             <div class="settings-card">
               <div class="card-title">本地模型缓存</div>
               <div class="setting-desc" style="margin-bottom: 8px;">下载模型到本地，断网时仍可使用</div>
-              <div v-if="offlineModels.length === 0" style="font-size: 11px; color: #555; text-align: center; padding: 12px;">暂无本地模型</div>
-              <div v-for="m in offlineModels" :key="m.name" style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #222;">
-                <span style="font-size: 12px; color: #ddd; flex: 1;">{{ m.name }}</span>
-                <span style="font-size: 10px; color: #888;">{{ m.size_mb }} MB</span>
+              <div v-if="offlineModels.length === 0" style="font-size: 11px; color: var(--text-muted); text-align: center; padding: 12px;">暂无本地模型</div>
+              <div v-for="m in offlineModels" :key="m.name" style="display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border-color);">
+                <span style="font-size: 12px; color: var(--text-primary); flex: 1;">{{ m.name }}</span>
+                <span style="font-size: 10px; color: var(--text-muted);">{{ m.size_mb }} MB</span>
               </div>
             </div>
             <div class="settings-card">
@@ -4752,7 +4824,7 @@ async function loadOfflineModels() {
                 <input placeholder="https://huggingface.co/...model.gguf" class="setting-input" style="flex: 1;" />
                 <button class="btn-blue btn-sm" @click="showNotice('开始下载（后台）', 'ok')">下载</button>
               </div>
-              <div style="font-size: 10px; color: #555; margin-top: 6px;">推荐使用 Ollama 模式配合本地模型</div>
+              <div style="font-size: 10px; color: var(--text-muted); margin-top: 6px;">推荐使用 Ollama 模式配合本地模型</div>
             </div>
             <div class="settings-card">
               <div class="card-title">离线功能</div>
@@ -4904,7 +4976,7 @@ const ModelSettingsPanel = defineComponent({
 export default { name: "App" };
 </script>
 
-<style scoped>
+<style>
 :root, [data-theme="dark"] {
   --bg-primary: #0d0d0d;
   --bg-secondary: #111;
@@ -4937,38 +5009,8 @@ export default { name: "App" };
   --success: #388E3C;
   --warning: #F57C00;
 }
-[data-theme="blue"] {
-  --bg-primary: #0a1628;
-  --bg-secondary: #0d1f3c;
-  --bg-card: #0f2444;
-  --bg-input: #132d52;
-  --border-color: #1a3a5c;
-  --border-light: #2a4a6c;
-  --text-primary: #d0e0f0;
-  --text-secondary: #8ab4d8;
-  --text-muted: #4a7a9a;
-  --accent: #64b5f6;
-  --accent-bg: rgba(100, 181, 246, 0.1);
-  --danger: #ef5350;
-  --success: #66bb6a;
-  --warning: #ffa726;
-}
-[data-theme="green"] {
-  --bg-primary: #0a1a0a;
-  --bg-secondary: #0d200d;
-  --bg-card: #0f280f;
-  --bg-input: #133013;
-  --border-color: #1a3a1a;
-  --border-light: #2a4a2a;
-  --text-primary: #d0f0d0;
-  --text-secondary: #8ad88a;
-  --text-muted: #4a8a4a;
-  --accent: #66bb6a;
-  --accent-bg: rgba(102, 187, 106, 0.1);
-  --danger: #ef5350;
-  --success: #81c784;
-  --warning: #ffa726;
-}
+</style>
+<style scoped>
 .page {
   height: 100%;
   padding: 12px;
@@ -4980,9 +5022,9 @@ export default { name: "App" };
 
 .flowbar {
   border-radius: 6px;
-  border: 1px solid #2a2a2a;
-  background: #1a1a1a;
-  color: #888888;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-muted);
   font-size: 12px;
   padding: 8px 12px;
   display: grid;
@@ -5004,8 +5046,8 @@ export default { name: "App" };
 
 .card {
   border-radius: 8px;
-  border: 1px solid #2a2a2a;
-  background: #1a1a1a;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
   min-height: 0;
 }
 
@@ -5022,11 +5064,11 @@ export default { name: "App" };
   gap: 8px;
   align-items: center;
   padding-bottom: 8px;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .session {
-  color: #888888;
+  color: var(--text-muted);
   font-size: 12px;
 }
 
@@ -5048,7 +5090,7 @@ export default { name: "App" };
 
 .msg {
   border-radius: 4px;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--border-color);
   padding: 12px 14px;
 }
 
@@ -5058,7 +5100,7 @@ export default { name: "App" };
 }
 
 .msg.assistant {
-  background: #262626;
+  background: var(--bg-input);
 }
 
 .msg.error {
@@ -5078,18 +5120,18 @@ export default { name: "App" };
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  color: #888888;
+  color: var(--text-muted);
 }
 
 .msg .msg-time {
   font-size: 10px;
-  color: #555;
+  color: var(--text-muted);
 }
 
 .msg .msg-model {
   font-size: 10px;
-  color: #666;
-  background: #1a1a2e;
+  color: var(--text-muted);
+  background: var(--bg-input);
   padding: 1px 6px;
   border-radius: 3px;
 }
@@ -5109,7 +5151,7 @@ export default { name: "App" };
 .btn-msg-del {
   background: none;
   border: none;
-  color: #666;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
   padding: 0 4px;
@@ -5125,7 +5167,7 @@ export default { name: "App" };
 .btn-msg-action {
   background: none;
   border: none;
-  color: #666;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 13px;
   padding: 0 4px;
@@ -5134,7 +5176,7 @@ export default { name: "App" };
 }
 
 .btn-msg-action:hover {
-  color: #4af;
+  color: var(--accent);
   background: rgba(68, 170, 255, 0.1);
 }
 
@@ -5150,22 +5192,22 @@ export default { name: "App" };
   font-size: 10px;
   padding: 2px 6px;
   border-radius: 3px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #aaa;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-secondary);
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s;
 }
 
 .role-btn:hover {
-  border-color: #555;
-  color: #ddd;
+  border-color: var(--text-muted);
+  color: var(--text-primary);
 }
 
 .role-btn.active {
-  border-color: #4af;
-  color: #4af;
+  border-color: var(--accent);
+  color: var(--accent);
   background: rgba(68, 170, 255, 0.1);
 }
 
@@ -5173,7 +5215,7 @@ export default { name: "App" };
   flex: 1;
   max-width: 120px;
   height: 4px;
-  background: #222;
+  background: var(--bg-input);
   border-radius: 2px;
   overflow: hidden;
 }
@@ -5189,8 +5231,8 @@ export default { name: "App" };
   bottom: 100%;
   left: 0;
   right: 0;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: 6px;
   max-height: 200px;
   overflow-y: auto;
@@ -5208,27 +5250,27 @@ export default { name: "App" };
 }
 
 .slash-item:hover {
-  background: #252525;
+  background: var(--bg-input);
 }
 
 .slash-name {
   font-size: 12px;
-  color: #4af;
+  color: var(--accent);
   font-weight: 500;
   white-space: nowrap;
 }
 
 .slash-desc {
   font-size: 11px;
-  color: #888;
+  color: var(--text-muted);
 }
 
 .file-changes-panel {
   margin-top: 4px;
   padding: 6px 8px;
-  background: #111;
+  background: var(--bg-secondary);
   border-radius: 4px;
-  border: 1px solid #222;
+  border: 1px solid var(--border-color);
   max-height: 150px;
   overflow-y: auto;
 }
@@ -5263,7 +5305,7 @@ export default { name: "App" };
 }
 
 .fc-time {
-  color: #555;
+  color: var(--text-muted);
   font-size: 10px;
   flex-shrink: 0;
 }
@@ -5271,7 +5313,7 @@ export default { name: "App" };
 .advanced-toggle {
   padding: 4px 0;
   cursor: pointer;
-  color: #666;
+  color: var(--text-muted);
   font-size: 11px;
   user-select: none;
   transition: color 0.15s;
@@ -5283,29 +5325,29 @@ export default { name: "App" };
 
 .advanced-params {
   padding-top: 4px;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--border-color);
 }
 
 .workflow-btn {
   font-size: 10px;
   padding: 3px 8px;
   border-radius: 4px;
-  border: 1px solid #333;
-  background: #1a1a1a;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
   color: #aaa;
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .workflow-btn:hover {
-  border-color: #4af;
-  color: #4af;
+  border-color: var(--accent);
+  color: var(--accent);
   background: rgba(68, 170, 255, 0.08);
 }
 
 .workflow-btn.active {
-  border-color: #4af;
-  color: #4af;
+  border-color: var(--accent);
+  color: var(--accent);
   background: rgba(68, 170, 255, 0.12);
 }
 
@@ -5313,21 +5355,21 @@ export default { name: "App" };
   font-size: 10px;
   padding: 2px 8px;
   border-radius: 3px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #888;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .tab-btn:hover {
-  color: #bbb;
-  border-color: #444;
+  color: var(--text-muted);
+  border-color: var(--border-light);
 }
 
 .tab-btn.active {
-  color: #4af;
-  border-color: #4af;
+  color: var(--accent);
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.08);
 }
 
@@ -5335,8 +5377,8 @@ export default { name: "App" };
   padding: 6px;
   margin-bottom: 4px;
   border-radius: 4px;
-  border: 1px solid #222;
-  background: #111;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
 }
 
 .mem-type-badge {
@@ -5344,7 +5386,7 @@ export default { name: "App" };
   font-weight: 500;
 }
 
-.mem-type-badge.user { color: #4af; }
+.mem-type-badge.user { color: var(--accent); }
 .mem-type-badge.feedback { color: #fa0; }
 .mem-type-badge.project { color: #4f4; }
 .mem-type-badge.reference { color: #a8f; }
@@ -5353,14 +5395,14 @@ export default { name: "App" };
   padding: 6px 8px;
   margin-bottom: 3px;
   border-radius: 4px;
-  border: 1px solid #222;
-  background: #111;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .template-item:hover {
-  border-color: #4af;
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.05);
 }
 
@@ -5368,8 +5410,8 @@ export default { name: "App" };
   height: 250px;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid #2a2a2a;
-  background: #0d0d0d;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
 }
 
 .preview-toolbar {
@@ -5377,8 +5419,8 @@ export default { name: "App" };
   align-items: center;
   justify-content: space-between;
   padding: 4px 8px;
-  border-bottom: 1px solid #222;
-  background: #111;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
 }
 
 .msg .msg-footer {
@@ -5387,12 +5429,12 @@ export default { name: "App" };
   justify-content: space-between;
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px solid #222;
+  border-top: 1px solid var(--border-color);
 }
 
 .msg .msg-meta {
   font-size: 10px;
-  color: #555;
+  color: var(--text-muted);
   display: flex;
   gap: 4px;
 }
@@ -5404,14 +5446,14 @@ export default { name: "App" };
 
 .msg .msg-rating .star {
   font-size: 14px;
-  color: #333;
+  color: var(--text-muted);
   cursor: pointer;
   transition: color 0.1s;
   line-height: 1;
 }
 
 .msg .msg-rating .star:hover {
-  color: #888;
+  color: var(--text-muted);
 }
 
 .msg .msg-rating .star.active {
@@ -5419,12 +5461,12 @@ export default { name: "App" };
 }
 
 .msg .thinking {
-  color: #666;
+  color: var(--text-muted);
   font-style: italic;
 }
 
 .msg .tool-status {
-  color: #888;
+  color: var(--text-muted);
   font-size: 12px;
   line-height: 1.6;
   white-space: pre-wrap;
@@ -5455,7 +5497,7 @@ export default { name: "App" };
   word-break: break-all;
   overflow-wrap: break-word;
   line-height: 1.6;
-  color: #e5e5e5;
+  color: var(--text-primary);
   font-family: inherit;
   font-size: 14px;
 }
@@ -5465,7 +5507,7 @@ export default { name: "App" };
   flex-direction: column;
   gap: 8px;
   padding-top: 8px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid var(--border-color);
 }
 
 .composer textarea {
@@ -5473,11 +5515,11 @@ export default { name: "App" };
   min-height: 90px;
   max-height: 200px;
   resize: vertical;
-  background: #0d0d0d;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 10px 12px;
-  color: #e5e5e5;
+  color: var(--text-primary);
   font-size: 14px;
   outline: none;
 }
@@ -5492,7 +5534,7 @@ export default { name: "App" };
   align-items: center;
   gap: 10px;
   font-size: 12px;
-  color: #888888;
+  color: var(--text-muted);
 }
 
 .composer-foot > div {
@@ -5503,9 +5545,9 @@ export default { name: "App" };
 .composer-action-btn {
   padding: 4px 12px;
   font-size: 12px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #999;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-muted);
   border-radius: 4px;
   cursor: pointer;
   transition: all 0.15s;
@@ -5513,9 +5555,9 @@ export default { name: "App" };
 }
 
 .composer-action-btn:hover {
-  background: #252525;
-  color: #ddd;
-  border-color: #555;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border-color: var(--text-muted);
 }
 
 .composer-action-btn:disabled {
@@ -5591,7 +5633,7 @@ export default { name: "App" };
 .api-source-bar {
   display: flex;
   gap: 0;
-  background: #111;
+  background: var(--bg-secondary);
   border-radius: 6px;
   padding: 2px;
   align-items: center;
@@ -5603,40 +5645,40 @@ export default { name: "App" };
   font-weight: 500;
   border: none;
   background: transparent;
-  color: #777;
+  color: var(--text-muted);
   cursor: pointer;
   border-radius: 4px;
   transition: all 0.2s;
 }
 .api-source-btn:hover {
-  color: #ccc;
-  background: #1a1a2a;
+  color: var(--text-secondary);
+  background: var(--bg-input);
 }
 .api-source-btn.active {
   background: #1a3a5a;
-  color: #4af;
+  color: var(--accent);
   font-weight: 600;
 }
 .api-source-hint {
   font-size: 9px;
-  color: #555;
+  color: var(--text-muted);
   padding: 0 6px;
   white-space: nowrap;
 }
 
 .sidebar-section {
-  background: #0d0d0d;
-  border: 1px solid #222;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 8px 10px;
 }
 .sidebar-section-title {
   font-size: 12px;
   font-weight: 600;
-  color: #ccc;
+  color: var(--text-secondary);
   margin-bottom: 6px;
   padding-bottom: 4px;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -5649,8 +5691,8 @@ export default { name: "App" };
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: #2a2a3a;
-  color: #888;
+  background: var(--bg-input);
+  color: var(--text-muted);
   font-size: 9px;
   font-weight: 700;
   cursor: help;
@@ -5666,13 +5708,13 @@ export default { name: "App" };
   left: 50%;
   transform: translateX(-50%);
   bottom: calc(100% + 6px);
-  background: #1a1a2a;
+  background: var(--bg-input);
   border: 1px solid #3a3a5a;
   border-radius: 6px;
   padding: 8px 10px;
   font-size: 10px;
   font-weight: 400;
-  color: #bbb;
+  color: var(--text-muted);
   line-height: 1.5;
   white-space: normal;
   width: 220px;
@@ -5698,7 +5740,7 @@ export default { name: "App" };
 .sidebar-field label {
   display: block;
   font-size: 10px;
-  color: #888;
+  color: var(--text-muted);
   margin-bottom: 2px;
 }
 
@@ -5708,7 +5750,7 @@ export default { name: "App" };
   margin-bottom: 8px;
   border-radius: 6px;
   overflow: hidden;
-  border: 1px solid #333;
+  border: 1px solid var(--border-color);
 }
 .api-tab {
   flex: 1;
@@ -5716,8 +5758,8 @@ export default { name: "App" };
   font-size: 12px;
   font-weight: 500;
   border: none;
-  background: #1a1a1a;
-  color: #888;
+  background: var(--bg-card);
+  color: var(--text-muted);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -5726,12 +5768,12 @@ export default { name: "App" };
   transition: all 0.2s;
 }
 .api-tab:hover {
-  background: #2a2a2a;
-  color: #ccc;
+  background: var(--bg-input);
+  color: var(--text-secondary);
 }
 .api-tab.active {
   background: #1a3a5a;
-  color: #4af;
+  color: var(--accent);
   font-weight: 600;
 }
 .tab-icon {
@@ -5741,18 +5783,18 @@ export default { name: "App" };
 .mode-btn {
   padding: 5px 10px;
   font-size: 12px;
-  border: 1px solid #333;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: #1a1a1a;
-  color: #888;
+  background: var(--bg-card);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s;
   font-weight: 500;
 }
 
 .mode-btn:hover {
-  background: #252525;
-  color: #ccc;
+  background: var(--bg-input);
+  color: var(--text-secondary);
 }
 
 .mode-btn.active {
@@ -5762,15 +5804,15 @@ export default { name: "App" };
 }
 
 .api-progress-section {
-  background: #111;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 12px;
   margin: 4px 0;
 }
 
 .current-model-info {
-  background: #111;
+  background: var(--bg-secondary);
   border-radius: 6px;
   padding: 8px 10px;
   margin-top: 8px;
@@ -5783,20 +5825,20 @@ export default { name: "App" };
 }
 .info-label {
   font-size: 11px;
-  color: #666;
+  color: var(--text-muted);
 }
 .info-value {
   font-size: 11px;
-  color: #ccc;
+  color: var(--text-secondary);
 }
 .model-name-tag {
   font-weight: 600;
-  color: #4af;
+  color: var(--accent);
 }
 
 .qwen-account-section {
-  background: #111;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 10px 12px;
   margin: 4px 0;
@@ -5807,7 +5849,7 @@ export default { name: "App" };
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-secondary);
   margin-bottom: 6px;
 }
 
@@ -5835,11 +5877,11 @@ export default { name: "App" };
 
 .qwen-token-input input {
   flex: 1;
-  background: #1a1a1a;
-  border: 1px solid #333;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 4px 8px;
-  color: #f0f0f0;
+  color: var(--text-primary);
   font-size: 11px;
 }
 
@@ -5849,8 +5891,8 @@ export default { name: "App" };
 }
 
 .register-log-box {
-  background: #0a0a0a;
-  border: 1px solid #222;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 6px 8px;
   margin: 6px 0;
@@ -5895,7 +5937,7 @@ export default { name: "App" };
 }
 
 .account-email {
-  color: #ccc;
+  color: var(--text-secondary);
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5913,7 +5955,7 @@ export default { name: "App" };
 .btn-icon.btn-del {
   background: none;
   border: none;
-  color: #666;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 10px;
   padding: 0 4px;
@@ -5927,7 +5969,7 @@ export default { name: "App" };
 .btn-icon.btn-sticky {
   background: none;
   border: none;
-  color: #666;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 10px;
   padding: 0 4px;
@@ -5959,9 +6001,9 @@ export default { name: "App" };
 }
 
 .reg-form input {
-  background: #1a1a2e;
-  border: 1px solid #333;
-  color: #ddd;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
   padding: 4px 8px;
   border-radius: 4px;
   font-size: 11px;
@@ -5998,9 +6040,9 @@ export default { name: "App" };
   justify-content: center;
   font-size: 12px;
   font-weight: bold;
-  border: 2px solid #333;
-  background: #1a1a1a;
-  color: #666;
+  border: 2px solid var(--border-light);
+  background: var(--bg-card);
+  color: var(--text-muted);
   transition: all 0.3s;
 }
 
@@ -6019,7 +6061,7 @@ export default { name: "App" };
 
 .api-step .step-label {
   font-size: 10px;
-  color: #666;
+  color: var(--text-muted);
   text-align: center;
 }
 
@@ -6038,7 +6080,7 @@ export default { name: "App" };
 
 .api-progress-track {
   height: 4px;
-  background: #222;
+  background: var(--bg-input);
   border-radius: 2px;
   overflow: hidden;
   margin-bottom: 8px;
@@ -6053,7 +6095,7 @@ export default { name: "App" };
 
 .api-progress-msg {
   font-size: 11px;
-  color: #888;
+  color: var(--text-muted);
   text-align: center;
   margin: 0;
   min-height: 16px;
@@ -6062,11 +6104,11 @@ export default { name: "App" };
 .field-group-title {
   font-size: 12px;
   font-weight: 600;
-  color: #888;
+  color: var(--text-muted);
   margin-top: 12px;
   margin-bottom: 4px;
   padding-bottom: 4px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .field {
@@ -6078,7 +6120,7 @@ export default { name: "App" };
 .field span {
   font-size: 12px;
   font-weight: 500;
-  color: #888888;
+  color: var(--text-muted);
 }
 
 .model-list {
@@ -6109,9 +6151,9 @@ export default { name: "App" };
   justify-content: space-between;
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #f0f0f0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   font-size: 13px;
   min-height: 28px;
 }
@@ -6123,7 +6165,7 @@ export default { name: "App" };
 
 .custom-select-arrow {
   font-size: 10px;
-  color: #888;
+  color: var(--text-muted);
   transition: transform 0.15s;
 }
 
@@ -6138,7 +6180,7 @@ export default { name: "App" };
   right: 0;
   max-height: 240px;
   overflow-y: auto;
-  background: #1a1a1a;
+  background: var(--bg-card);
   border: 1px solid #4a90d9;
   border-top: none;
   border-radius: 0 0 6px 6px;
@@ -6150,13 +6192,13 @@ export default { name: "App" };
   align-items: center;
   justify-content: space-between;
   padding: 7px 10px;
-  color: #ccc;
+  color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
 }
 
 .custom-select-option:hover {
-  background: #2a2a2a;
+  background: var(--bg-input);
   color: #fff;
 }
 
@@ -6166,7 +6208,7 @@ export default { name: "App" };
 }
 
 .account-details-section {
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 0;
   margin: 4px 0;
@@ -6179,7 +6221,7 @@ export default { name: "App" };
   padding: 8px 12px;
   cursor: pointer;
   font-size: 12px;
-  color: #ccc;
+  color: var(--text-secondary);
   font-weight: 500;
   list-style: none;
 }
@@ -6191,7 +6233,7 @@ export default { name: "App" };
 .account-details-summary::before {
   content: '▶';
   font-size: 9px;
-  color: #666;
+  color: var(--text-muted);
   transition: transform 0.15s;
 }
 
@@ -6209,18 +6251,18 @@ export default { name: "App" };
   justify-content: space-between;
   align-items: center;
   padding: 8px 10px;
-  border: 1px solid #333;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: #1a1a1a;
-  color: #ccc;
+  background: var(--bg-card);
+  color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   transition: all 0.15s;
 }
 
 .model-row:hover {
-  background: #252525;
-  border-color: #444;
+  background: var(--bg-input);
+  border-color: var(--border-light);
 }
 
 .model-row.selected {
@@ -6261,7 +6303,7 @@ export default { name: "App" };
 }
 
 .btn-delete {
-  color: #666;
+  color: var(--text-muted);
   border-color: #333;
 }
 
@@ -6300,7 +6342,7 @@ export default { name: "App" };
   height: 20px;
   border: none;
   background: transparent;
-  color: #666;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
   padding: 0 4px;
@@ -6334,7 +6376,7 @@ export default { name: "App" };
 
 .btn-sm:disabled {
   background: #333;
-  color: #666;
+  color: var(--text-muted);
   cursor: not-allowed;
 }
 
@@ -6348,7 +6390,7 @@ export default { name: "App" };
 }
 
 .project-item:hover {
-  background: #1a1a1a;
+  background: var(--bg-card);
   border-color: #2a2a2a;
 }
 
@@ -6368,13 +6410,13 @@ export default { name: "App" };
 }
 
 .conv-item:hover {
-  background: #1a1a1a;
+  background: var(--bg-card);
 }
 
 .copy-select {
-  background: #111;
-  color: #888;
-  border: 1px solid #333;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
   border-radius: 3px;
   font-size: 10px;
   padding: 1px 4px;
@@ -6385,21 +6427,21 @@ export default { name: "App" };
   align-items: center;
   justify-content: space-between;
   padding: 6px 8px;
-  background: #111;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-radius: 6px;
   cursor: pointer;
   margin: 4px 0;
 }
 
 .model-manager-toggle:hover {
-  background: #1a1a1a;
+  background: var(--bg-card);
 }
 
 .model-manager-panel {
   padding: 8px;
-  background: #0d0d0d;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
   border-radius: 6px;
   margin-bottom: 8px;
 }
@@ -6436,9 +6478,9 @@ export default { name: "App" };
 .proj-section-title {
   font-size: 11px;
   font-weight: bold;
-  color: #888;
+  color: var(--text-muted);
   padding: 2px 0;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--border-color);
   margin-bottom: 4px;
 }
 
@@ -6451,9 +6493,9 @@ export default { name: "App" };
 
 .proj-default-path {
   font-size: 11px;
-  color: #888;
+  color: var(--text-muted);
   padding: 2px 4px;
-  background: #0a0a0a;
+  background: var(--bg-primary);
   border-radius: 3px;
   word-break: break-all;
   overflow: hidden;
@@ -6473,12 +6515,12 @@ export default { name: "App" };
 .proj-check-box {
   width: 14px;
   height: 14px;
-  border: 1px solid #444;
+  border: 1px solid var(--border-light);
   border-radius: 3px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: #111;
+  background: var(--bg-secondary);
   transition: all 0.15s;
 }
 
@@ -6489,9 +6531,9 @@ export default { name: "App" };
 
 .recommend-item {
   padding: 6px 8px;
-  background: #111;
+  background: var(--bg-secondary);
   border-radius: 4px;
-  border: 1px solid #222;
+  border: 1px solid var(--border-color);
 }
 
 .recommend-info {
@@ -6503,13 +6545,13 @@ export default { name: "App" };
 
 .recommend-name {
   font-size: 12px;
-  color: #e5e5e5;
+  color: var(--text-primary);
   font-weight: 500;
 }
 
 .recommend-reason {
   font-size: 11px;
-  color: #888;
+  color: var(--text-muted);
   line-height: 1.4;
 }
 
@@ -6535,7 +6577,7 @@ export default { name: "App" };
 
 .model-size {
   font-size: 10px;
-  color: #888;
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 
@@ -6562,8 +6604,8 @@ export default { name: "App" };
   height: 28px;
   border: 1px solid #444;
   border-radius: 4px;
-  background: #222;
-  color: #888;
+  background: var(--bg-input);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 14px;
   display: flex;
@@ -6577,7 +6619,7 @@ export default { name: "App" };
 .btn-icon:hover {
   background: #333;
   color: #fff;
-  border-color: #666;
+  border-color: var(--text-muted);
 }
 
 .btn-icon.active {
@@ -6618,8 +6660,8 @@ export default { name: "App" };
 }
 
 .model-settings {
-  background: #111;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
   border-top: none;
   border-radius: 0 0 4px 4px;
   padding: 10px;
@@ -6666,11 +6708,11 @@ export default { name: "App" };
   margin: 0;
   font-size: 11px;
   line-height: 1.5;
-  color: #888;
+  color: var(--text-muted);
   padding: 6px 8px;
-  background: #0d0d0d;
+  background: var(--bg-primary);
   border-radius: 4px;
-  border: 1px solid #222;
+  border: 1px solid var(--border-color);
 }
 
 .cloud-model-item {
@@ -6696,7 +6738,7 @@ export default { name: "App" };
 
 .empty-hint {
   text-align: center;
-  color: #555;
+  color: var(--text-muted);
   font-size: 12px;
   padding: 20px 0;
 }
@@ -6721,8 +6763,8 @@ export default { name: "App" };
   line-height: 1.5;
   padding: 6px 8px;
   border-radius: 4px;
-  background: #1a1a1a;
-  border: 1px solid #2a2a2a;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
 }
 
 .hint.ok {
@@ -6739,10 +6781,10 @@ input,
 textarea,
 button,
 select {
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  background: #0d0d0d;
-  color: #e5e5e5;
+  background: var(--bg-primary);
+  color: var(--text-primary);
   padding: 8px 12px;
   font-size: 14px;
   outline: none;
@@ -6790,16 +6832,16 @@ button:disabled {
   width: 100%;
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #f0f0f0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   font-size: 13px;
   outline: none;
 }
 
 .select-input option {
-  background: #1a1a1a;
-  color: #f0f0f0;
+  background: var(--bg-card);
+  color: var(--text-primary);
   padding: 6px;
 }
 
@@ -6817,9 +6859,9 @@ button:disabled {
   width: 100px;
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #f0f0f0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   font-size: 13px;
   outline: none;
 }
@@ -6829,7 +6871,7 @@ button:disabled {
 }
 
 .range-hint {
-  color: #666;
+  color: var(--text-muted);
   font-size: 12px;
 }
 
@@ -6837,9 +6879,9 @@ button:disabled {
   width: 100%;
   padding: 8px 10px;
   border-radius: 6px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #f0f0f0;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   font-size: 13px;
   outline: none;
   resize: vertical;
@@ -6877,7 +6919,7 @@ button:disabled {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #0d0d0d;
+  background: var(--bg-primary);
 }
 
 .page-view-inner {
@@ -6891,14 +6933,14 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   padding: 16px 24px;
-  border-bottom: 1px solid #222;
-  background: #111;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
 }
 
 .page-view-header h2 {
   font-size: 16px;
   font-weight: 600;
-  color: #eee;
+  color: var(--text-primary);
   margin: 0;
 }
 
@@ -6916,19 +6958,19 @@ button:disabled {
 
 .project-card {
   padding: 12px;
-  border: 1px solid #222;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: #141414;
+  background: var(--bg-card);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .project-card:hover {
-  border-color: #4af;
+  border-color: var(--accent);
 }
 
 .project-card.active {
-  border-color: #4af;
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.05);
 }
 
@@ -6942,12 +6984,12 @@ button:disabled {
 .project-card-name {
   font-size: 13px;
   font-weight: 500;
-  color: #ddd;
+  color: var(--text-primary);
 }
 
 .project-active-badge {
   font-size: 10px;
-  color: #4af;
+  color: var(--accent);
   background: rgba(68, 170, 255, 0.1);
   padding: 1px 6px;
   border-radius: 3px;
@@ -6955,7 +6997,7 @@ button:disabled {
 
 .project-card-path {
   font-size: 10px;
-  color: #666;
+  color: var(--text-muted);
   margin-bottom: 6px;
   word-break: break-all;
 }
@@ -6974,7 +7016,7 @@ button:disabled {
   display: flex;
   gap: 12px;
   padding: 8px 0;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .version-dot {
@@ -6993,23 +7035,23 @@ button:disabled {
 .version-name {
   font-size: 13px;
   font-weight: 500;
-  color: #ddd;
+  color: var(--text-primary);
 }
 
 .version-date {
   font-size: 10px;
-  color: #666;
+  color: var(--text-muted);
 }
 
 .version-desc {
   font-size: 11px;
-  color: #888;
+  color: var(--text-muted);
   margin-top: 2px;
 }
 
 .empty-hint {
   font-size: 12px;
-  color: #555;
+  color: var(--text-muted);
   text-align: center;
   padding: 24px;
   grid-column: 1 / -1;
@@ -7019,8 +7061,8 @@ button:disabled {
   height: 200px;
   display: flex;
   flex-direction: column;
-  border-top: 1px solid #2a2a2a;
-  background: #0a0a0a;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
   transition: height 0.2s ease;
 }
 
@@ -7032,8 +7074,8 @@ button:disabled {
   display: flex;
   align-items: center;
   padding: 4px 8px;
-  border-bottom: 1px solid #222;
-  background: #111;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
 }
 
 .terminal-output {
@@ -7049,12 +7091,12 @@ button:disabled {
 }
 
 .terminal-cmd {
-  color: #ddd;
+  color: var(--text-primary);
   font-size: 11px;
 }
 
 .terminal-result {
-  color: #888;
+  color: var(--text-muted);
   font-size: 11px;
   margin: 0;
   padding: 0;
@@ -7077,15 +7119,15 @@ button:disabled {
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  border-top: 1px solid #222;
-  background: #0d0d0d;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-primary);
 }
 
 .terminal-input {
   flex: 1;
   background: none;
   border: none;
-  color: #eee;
+  color: var(--text-primary);
   font-size: 12px;
   font-family: Consolas, 'Courier New', monospace;
   outline: none;
@@ -7097,21 +7139,23 @@ button:disabled {
 }
 
 .theme-btn {
-  width: 32px;
-  height: 32px;
+  padding: 6px 14px;
   border-radius: 6px;
-  border: 2px solid #333;
+  border: 2px solid var(--border-color);
   background: var(--tc, #1a1a1a);
+  color: var(--text-primary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   transition: all 0.15s;
+  white-space: nowrap;
 }
 
 .theme-btn:hover {
-  border-color: #888;
+  border-color: var(--text-muted);
 }
 
 .theme-btn.active {
@@ -7119,11 +7163,123 @@ button:disabled {
   box-shadow: 0 0 8px rgba(68, 170, 255, 0.3);
 }
 
+.env-check-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.env-check-card {
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px 14px;
+  transition: border-color 0.2s;
+}
+
+.env-check-card.env-check-fail {
+  border-color: var(--danger);
+  background: rgba(211, 47, 47, 0.06);
+}
+
+.env-check-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.env-check-status {
+  font-size: 16px;
+  font-weight: bold;
+  color: var(--success);
+}
+
+.env-check-fail .env-check-status {
+  color: var(--danger);
+}
+
+.env-check-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.env-check-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border-light);
+}
+
+.env-check-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.env-check-error {
+  font-size: 12px;
+  color: var(--danger);
+  margin-bottom: 2px;
+}
+
+.env-check-fix {
+  font-size: 12px;
+  color: var(--warning);
+  margin-bottom: 4px;
+}
+
+.env-check-deps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.env-check-deps-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.env-check-dep-tag {
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--border-light);
+}
+
+.env-check-summary {
+  display: flex;
+  gap: 16px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border-color);
+  margin-top: 4px;
+}
+
+.env-check-pass {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--success);
+}
+
+.env-check-fail-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
 .settings-sidebar {
   width: 200px;
   flex-shrink: 0;
-  background: #111;
-  border-right: 1px solid #222;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
 }
@@ -7143,7 +7299,7 @@ button:disabled {
   padding: 10px 12px;
   border: none;
   background: none;
-  color: #888;
+  color: var(--text-muted);
   font-size: 13px;
   cursor: pointer;
   border-radius: 6px;
@@ -7152,13 +7308,13 @@ button:disabled {
 }
 
 .settings-nav-item:hover {
-  background: #1a1a1a;
-  color: #ccc;
+  background: var(--bg-card);
+  color: var(--text-secondary);
 }
 
 .settings-nav-item.active {
   background: rgba(68, 170, 255, 0.1);
-  color: #4af;
+  color: var(--accent);
 }
 
 .settings-nav-item .nav-icon {
@@ -7180,15 +7336,15 @@ button:disabled {
 .section-title {
   font-size: 18px;
   font-weight: 600;
-  color: #eee;
+  color: var(--text-primary);
   margin: 0 0 16px 0;
   padding-bottom: 8px;
-  border-bottom: 1px solid #222;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .settings-card {
-  background: #141414;
-  border: 1px solid #222;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: 8px;
   padding: 16px;
   margin-bottom: 12px;
@@ -7197,10 +7353,10 @@ button:disabled {
 .card-title {
   font-size: 13px;
   font-weight: 600;
-  color: #ccc;
+  color: var(--text-secondary);
   margin-bottom: 12px;
   padding-bottom: 6px;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .setting-row {
@@ -7208,7 +7364,7 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   padding: 8px 0;
-  border-bottom: 1px solid #1a1a1a;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .setting-row:last-child {
@@ -7223,12 +7379,12 @@ button:disabled {
 .setting-name {
   font-size: 12px;
   font-weight: 500;
-  color: #ddd;
+  color: var(--text-primary);
 }
 
 .setting-desc {
   font-size: 10px;
-  color: #666;
+  color: var(--text-muted);
   margin-top: 2px;
 }
 
@@ -7236,31 +7392,31 @@ button:disabled {
   font-size: 12px;
   padding: 6px 10px;
   border-radius: 4px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #ddd;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   outline: none;
   transition: border-color 0.15s;
 }
 
 .setting-input:focus {
-  border-color: #4af;
+  border-color: var(--accent);
 }
 
 .setting-select {
   font-size: 12px;
   padding: 6px 10px;
   border-radius: 4px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #ddd;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   outline: none;
   cursor: pointer;
 }
 
 .setting-select option {
-  background: #1a1a1a;
-  color: #ddd;
+  background: var(--bg-card);
+  color: var(--text-primary);
   padding: 4px;
 }
 
@@ -7269,9 +7425,9 @@ button:disabled {
   font-size: 12px;
   padding: 8px;
   border-radius: 6px;
-  border: 1px solid #333;
-  background: #1a1a1a;
-  color: #ddd;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-primary);
   resize: vertical;
   font-family: monospace;
   outline: none;
@@ -7279,7 +7435,7 @@ button:disabled {
 }
 
 .setting-textarea:focus {
-  border-color: #4af;
+  border-color: var(--accent);
 }
 
 .mode-switch-large {
@@ -7294,23 +7450,23 @@ button:disabled {
   align-items: center;
   gap: 4px;
   padding: 16px 12px;
-  border: 1px solid #333;
+  border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: #1a1a1a;
-  color: #888;
+  background: var(--bg-card);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.2s;
 }
 
 .mode-card:hover {
-  border-color: #555;
-  color: #ccc;
+  border-color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .mode-card.active {
-  border-color: #4af;
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.08);
-  color: #4af;
+  color: var(--accent);
 }
 
 .mode-card .mode-icon {
@@ -7339,23 +7495,23 @@ button:disabled {
   align-items: center;
   gap: 2px;
   padding: 10px 8px;
-  border: 1px solid #333;
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #1a1a1a;
-  color: #888;
+  background: var(--bg-card);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .role-card:hover {
-  border-color: #555;
-  color: #ccc;
+  border-color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .role-card.active {
-  border-color: #4af;
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.08);
-  color: #4af;
+  color: var(--accent);
 }
 
 .role-card .role-icon {
@@ -7388,12 +7544,12 @@ button:disabled {
 }
 
 .shortcut-row kbd {
-  background: #222;
-  border: 1px solid #333;
+  background: var(--bg-input);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 10px;
-  color: #ccc;
+  color: var(--text-secondary);
   font-family: monospace;
 }
 
@@ -7405,15 +7561,15 @@ button:disabled {
 
 .template-card {
   padding: 10px;
-  border: 1px solid #222;
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #111;
+  background: var(--bg-secondary);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .template-card:hover {
-  border-color: #4af;
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.05);
 }
 
@@ -7422,21 +7578,21 @@ button:disabled {
   flex-direction: column;
   gap: 2px;
   padding: 10px 14px;
-  border: 1px solid #333;
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  background: #1a1a1a;
-  color: #888;
+  background: var(--bg-card);
+  color: var(--text-muted);
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .workflow-card:hover {
-  border-color: #555;
-  color: #ccc;
+  border-color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .workflow-card.active {
-  border-color: #4af;
+  border-color: var(--accent);
   background: rgba(68, 170, 255, 0.08);
-  color: #4af;
+  color: var(--accent);
 }</style>
