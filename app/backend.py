@@ -1586,7 +1586,7 @@ def _check_zhipu2api_deps():
 def _sync_zhipu_keys_from_env(base_url: str, admin_key: str = "admin"):
     keys_to_sync = set()
     try:
-        env_path = os.path.join(_data_dir(), "..", "app", ".env")
+        env_path = os.path.join(_data_dir(), ".env")
         if not os.path.exists(env_path):
             env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
         if os.path.exists(env_path):
@@ -1600,7 +1600,7 @@ def _sync_zhipu_keys_from_env(base_url: str, admin_key: str = "admin"):
                     key, val = line.split("=", 1)
                     key = key.strip()
                     val = val.strip()
-                    if key in ("ZHIPU_API_KEY", "API_KEY") and val and len(val) > 10:
+                    if key in ("ZHIPU_API_KEY", "API_KEY") and val and len(val) > 10 and not val.startswith("sk-zhipu-"):
                         keys_to_sync.add(val)
     except Exception:
         pass
@@ -1612,7 +1612,7 @@ def _sync_zhipu_keys_from_env(base_url: str, admin_key: str = "admin"):
                 data = json.load(f)
             if isinstance(data, list):
                 for item in data:
-                    if isinstance(item, dict) and item.get("key") and len(item["key"]) > 10:
+                    if isinstance(item, dict) and item.get("key") and len(item["key"]) > 10 and not item["key"].startswith("sk-zhipu-"):
                         keys_to_sync.add(item["key"])
     except Exception:
         pass

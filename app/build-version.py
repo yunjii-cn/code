@@ -43,6 +43,7 @@ DEV_APP_DIR = ROOT_DIR
 DEV_DIR = ROOT_DIR.parent                   # dev/ 根目录
 BUILD_DIR = ROOT_DIR.parent.parent / "build"  # 项目根/build/ (PyInstaller 工作目录)
 VERSION_HISTORY_FILE = ROOT_DIR / "version_history.json"
+VERSION_JSON_FILE = DEV_DIR / "ver" / "version.json"
 
 
 def load_version_history():
@@ -176,7 +177,7 @@ def build_frontend():
 
 # ── PyInstaller 打包 ──
 def build_exe():
-    """用 PyInstaller --onedir 模式打包，输出到 build/发布/xxx/"""
+    """用 PyInstaller --onefile 模式打包，输出单个 EXE"""
     print(f"  PyInstaller 打包 (v{VERSION})...")
 
     release_name = f"云集智能编程工作站v{VERSION}"
@@ -188,7 +189,6 @@ def build_exe():
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 生成 Windows 版本信息文件
     ver_parts = VERSION.split(".")
     ver_tuple = ", ".join(str(int(p)) for p in ver_parts)
     version_file_content = f"""VSVersionInfo(
@@ -235,33 +235,27 @@ def build_exe():
     pyinstaller_args = [
         sys.executable, "-m", "PyInstaller",
         "--name", release_name,
-        # --onedir 模式：QtWebEngine 不支持 --onefile (DLL 路径问题)
-        "--onedir", "--windowed",
+        "--onefile", "--windowed",
         "--icon", icon_path,
         "--distpath", str(BUILD_DIR),
         "--workpath", str(BUILD_DIR / "_pyinstaller_work"),
         "--specpath", str(BUILD_DIR / "_pyinstaller_work"),
         "--clean", "--noconfirm",
-        # PyQt6 核心
         "--hidden-import", "PyQt6",
         "--hidden-import", "PyQt6.QtCore",
         "--hidden-import", "PyQt6.QtGui",
         "--hidden-import", "PyQt6.QtWidgets",
-        # PyQt6 WebEngine (替代 Electron)
         "--hidden-import", "PyQt6.QtWebEngineWidgets",
         "--hidden-import", "PyQt6.QtWebEngineCore",
         "--hidden-import", "PyQt6.QtWebChannel",
-        # 后端模块
         "--hidden-import", "backend",
         "--hidden-import", "http.server",
         "--hidden-import", "socketserver",
         "--hidden-import", "urllib.request",
         "--hidden-import", "urllib.error",
         "--hidden-import", "urllib.parse",
-        # 系统工具
         "--hidden-import", "psutil",
         "--hidden-import", "uuid",
-        # 排除大型无用模块
         "--exclude-module", "matplotlib",
         "--exclude-module", "scipy",
         "--exclude-module", "numpy",
@@ -277,96 +271,31 @@ def build_exe():
         pyinstaller_args.insert(-1, "--add-data")
         pyinstaller_args.insert(-1, f"{icon_png};.")
 
-    print("  运行 PyInstaller (--onedir)...")
+    print("  运行 PyInstaller (--onefile)...")
     subprocess.run(pyinstaller_args, check=True)
+
+    release_dir.mkdir(parents=True, exist_ok=True)
+    exe_src = BUILD_DIR / f"{release_name}.exe"
+    if exe_src.exists():
+        shutil.copy2(str(exe_src), str(release_dir / f"{release_name}.exe"))
+        exe_size = exe_src.stat().st_size / (1024 * 1024)
+        print(f"  ✓ EXE: {exe_src.name} ({exe_size:.1f} MB)")
 
     return release_dir
 
 
-# ── 裁剪 _internal/ 冗余文件 ──
-def _slim_internal(release_dir: Path):
-    """裁剪 PyInstaller 输出的 _internal/ 目录，移除用户不需要的文件
-
-    只裁剪 100% 安全的项目：
-      - Qt WebEngine debug 资源 (~74 MB)
-      - 非中英语言包 (~40 MB)
-    预计减少 ~114 MB
-
-    注意：Qt6WebEngineCore 依赖 Qt6Quick/Qml/Positioning 等模块，
-    不能删除任何 Qt6 DLL 或 .pyd 文件，否则会导致 DLL load failed。
-    """
-    internal = release_dir / "_internal"
-    if not internal.exists():
-        return
-
-    removed_size = 0
-    removed_count = 0
-
-    def _remove(path: Path):
-        nonlocal removed_size, removed_count
-        if not path.exists():
-            return
-        if path.is_dir():
-            for f in path.rglob("*"):
-                if f.is_file():
-                    removed_size += f.stat().st_size
-                    removed_count += 1
-            shutil.rmtree(str(path), ignore_errors=True)
-        elif path.is_file():
-            removed_size += path.stat().st_size
-            removed_count += 1
-            try:
-                path.unlink()
-            except Exception:
-                pass
-
-    # 1. Qt WebEngine debug 资源 (安全：这些是开发者调试用，用户不需要)
-    for name in [
-        "qtwebengine_devtools_resources.debug.pak",
-        "qtwebengine_resources.debug.pak",
-        "qtwebengine_resources_100p.debug.pak",
-        "qtwebengine_resources_200p.debug.pak",
-        "v8_context_snapshot.debug.bin",
-    ]:
-        for f in internal.rglob(name):
-            _remove(f)
-
-    # 2. 非中英语言包 (安全：只保留中英文语言包)
-    keep_locales = {"zh-CN.pak", "zh-TW.pak", "en-US.pak", "en-GB.pak"}
-    for locales_dir in internal.rglob("qtwebengine_locales"):
-        if locales_dir.is_dir():
-            for pak in locales_dir.iterdir():
-                if pak.is_file() and pak.name not in keep_locales:
-                    _remove(pak)
-
-    # 3. 清理空目录
-    for d in sorted(internal.rglob("*"), reverse=True):
-        if d.is_dir() and not any(d.iterdir()):
-            try:
-                d.rmdir()
-            except Exception:
-                pass
-
-    if removed_count > 0:
-        saved_mb = removed_size / (1024 * 1024)
-        print(f"  ✓ 裁剪 _internal/ 完成: 移除 {removed_count} 个文件, 节省 {saved_mb:.1f} MB")
-    else:
-        print("  ✓ _internal/ 无需裁剪")
-
-
 # ── 打包后处理：将运行时文件复制到发布目录（build/ 下的整合包）──
 def post_build(release_dir: Path):
-    """将资源组织到三目录结构中（app/data/temp），用于打包分发
+    """将资源组织到发布目录中（--onefile 模式，无 _internal/）
 
-    三目录纯净整合包结构：
+    发布目录结构：
       发布目录/
-      ├── *.exe              # PyInstaller输出的EXE
-      ├── _internal/         # PyInstaller运行时
+      ├── *.exe              # 单文件 EXE（包含所有运行时）
       ├── app/               # 应用程序（只读，纯净可发布）
       ├── data/              # 用户数据（可写，需备份）
       └── temp/              # 临时文件（可删除）
     """
-    print("  打包后处理（三目录纯净整合包结构）...")
+    print("  打包后处理（--onefile 模式）...")
 
     app_dir = release_dir / "app"
     data_dir = release_dir / "data"
@@ -378,10 +307,8 @@ def post_build(release_dir: Path):
         "*.log", "*.tmp", "*.bak",
     )
 
-    # ── 1. 创建 app/ 目录并复制资源 ──
     app_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1.1 复制 desktop/dist/ (Vue 前端)
     dist_src = DEV_APP_DIR / "desktop" / "dist"
     dist_dst = app_dir / "desktop" / "dist"
     if dist_src.exists():
@@ -392,7 +319,6 @@ def post_build(release_dir: Path):
     else:
         print("  ✗ desktop/dist/ 不存在，前端将不可用")
 
-    # 1.2 复制 icon.ico / icon.png (窗口图标)
     icon_src = DEV_APP_DIR / "icon.ico"
     if icon_src.exists():
         shutil.copy2(str(icon_src), str(app_dir / "icon.ico"))
@@ -400,7 +326,6 @@ def post_build(release_dir: Path):
     if icon_png_src.exists():
         shutil.copy2(str(icon_png_src), str(app_dir / "icon.png"))
 
-    # 1.3 复制 bin/ (CLI 工具)
     bin_src = DEV_APP_DIR / "bin"
     bin_dst = app_dir / "bin"
     if bin_src.exists():
@@ -409,7 +334,6 @@ def post_build(release_dir: Path):
         shutil.copytree(str(bin_src), str(bin_dst), ignore=_ignore_cache)
         print("  ✓ 复制 bin/ -> app/bin/ (CLI)")
 
-    # 1.4 复制 stubs/ (类型定义)
     stubs_src = DEV_APP_DIR / "stubs"
     stubs_dst = app_dir / "stubs"
     if stubs_src.exists():
@@ -418,13 +342,11 @@ def post_build(release_dir: Path):
         shutil.copytree(str(stubs_src), str(stubs_dst), ignore=_ignore_cache)
         print("  ✓ 复制 stubs/ -> app/stubs/")
 
-    # 1.5 复制 package.json / bunfig.toml / preload.ts
     for fname in ["package.json", "bunfig.toml", "preload.ts"]:
         fsrc = DEV_APP_DIR / fname
         if fsrc.exists():
             shutil.copy2(str(fsrc), str(app_dir / fname))
 
-    # 1.6 复制 scripts/ (安装/启动脚本)
     scripts_src = DEV_APP_DIR / "scripts"
     scripts_dst = app_dir / "scripts"
     if scripts_src.exists():
@@ -433,7 +355,6 @@ def post_build(release_dir: Path):
         shutil.copytree(str(scripts_src), str(scripts_dst), ignore=_ignore_cache)
         print("  ✓ 复制 scripts/ -> app/scripts/")
 
-    # 1.7 复制 api/ (API 服务代码 - 只读)
     api_src = DEV_APP_DIR / "api"
     api_dst = app_dir / "api"
     if api_src.exists():
@@ -442,7 +363,6 @@ def post_build(release_dir: Path):
         shutil.copytree(str(api_src), str(api_dst), ignore=_ignore_cache)
         print("  ✓ 复制 api/ -> app/api/ (API 服务代码)")
 
-    # 1.8 复制整个 src/ (CLI 代码和工具)
     src_src = DEV_APP_DIR / "src"
     src_dst = app_dir / "src"
     if src_src.exists():
@@ -451,7 +371,6 @@ def post_build(release_dir: Path):
         shutil.copytree(str(src_src), str(src_dst), ignore=_ignore_cache)
         print("  ✓ 复制 src/ -> app/src/ (CLI 代码)")
 
-    # 1.9 复制 uv/ (包管理器)
     uv_src = DEV_APP_DIR / "uv"
     uv_dst = app_dir / "uv"
     if uv_src.exists():
@@ -460,32 +379,24 @@ def post_build(release_dir: Path):
         shutil.copytree(str(uv_src), str(uv_dst), ignore=_ignore_cache)
         print("  ✓ 复制 uv/ -> app/uv/")
 
-    # 1.10 复制 version_history.json
     vh_src = DEV_APP_DIR / "version_history.json"
     if vh_src.exists():
         shutil.copy2(str(vh_src), str(app_dir / "version_history.json"))
 
-    # nodejs/, bun/, node_modules/ 不复制到 build/ 发布包
-    # 用户拿到整合包后，通过部署维护功能自动下载安装
-
-    # ── 2. 创建 data/ 目录结构 (数据分级架构) ──
     data_dir.mkdir(parents=True, exist_ok=True)
     
-    # 2.1 公共数据目录 (所有用户共享)
     (data_dir / "public" / "models").mkdir(parents=True, exist_ok=True)
     (data_dir / "public" / "templates").mkdir(parents=True, exist_ok=True)
     (data_dir / "public" / "plugins").mkdir(parents=True, exist_ok=True)
     (data_dir / "public" / "api" / "qwen2api").mkdir(parents=True, exist_ok=True)
     (data_dir / "public" / "api" / "zhipu2api").mkdir(parents=True, exist_ok=True)
     
-    # 2.2 用户数据目录 (默认用户，支持多用户扩展)
     (data_dir / "users" / "default" / "projects").mkdir(parents=True, exist_ok=True)
     (data_dir / "users" / "default" / "sessions").mkdir(parents=True, exist_ok=True)
     (data_dir / "users" / "default" / "webdata").mkdir(parents=True, exist_ok=True)
     
     print("  ✓ 创建 data/ 目录结构 (public/ + users/)")
 
-    # ── 3. 创建 temp/ 目录结构 ──
     temp_dir.mkdir(parents=True, exist_ok=True)
     (temp_dir / "__pycache__").mkdir(parents=True, exist_ok=True)
     (temp_dir / "logs").mkdir(parents=True, exist_ok=True)
@@ -494,10 +405,6 @@ def post_build(release_dir: Path):
     (temp_dir / "tmp").mkdir(parents=True, exist_ok=True)
     print("  ✓ 创建 temp/ 目录结构")
 
-    # ── 4. 裁剪 _internal/ 中的冗余文件 ──
-    _slim_internal(release_dir)
-
-    # 计算发布目录大小
     total_size = sum(f.stat().st_size for f in release_dir.rglob("*") if f.is_file())
     size_mb = total_size / (1024 * 1024)
     print(f"  发布目录大小: {size_mb:.1f} MB")
@@ -553,11 +460,10 @@ def _set_hidden_attribute(path: str):
 
 
 def _deploy_to_dev(release_dir: Path):
-    """将 PyInstaller 构建产物（EXE + _internal/）复制到 dev/ 下
+    """将构建产物复制到 dev/ 下（--onefile 模式，无 _internal/）
 
-    三目录纯净整合包架构:
+    目录架构:
     - EXE 直接放在 dev/ 下（dev/云集智能编程工作站vX.X.exe）
-    - _internal/ 在 dev/ 下（隐藏文件夹，包含 PyInstaller 运行时）
     - app/ 在 dev/ 下（源代码目录，Git管理）
     - data/ 在 dev/ 下（用户数据，Git不管理）
     - temp/ 在 dev/ 下（临时文件，Git不管理）
@@ -566,7 +472,6 @@ def _deploy_to_dev(release_dir: Path):
 
     _kill_running_exe()
 
-    # 1. 复制 EXE 文件到 dev/ 根目录
     new_exe = release_dir / f"{release_name}.exe"
     if new_exe.exists():
         existing = DEV_DIR / new_exe.name
@@ -592,25 +497,14 @@ def _deploy_to_dev(release_dir: Path):
         shutil.copy2(str(new_exe), str(DEV_DIR / new_exe.name))
         print(f"  ✓ 复制 EXE: {new_exe.name}")
 
-    # 2. 复制 _internal/ 并设置为隐藏属性
-    new_internal = release_dir / "_internal"
     old_internal = DEV_DIR / "_internal"
-    if new_internal.exists():
-        if old_internal.exists():
-            print(f"  替换旧 _internal/")
-            try:
-                shutil.rmtree(str(old_internal))
-            except PermissionError:
-                print(f"  ⚠ 部分 _internal/ 文件被占用，尝试强制替换...")
-                shutil.rmtree(str(old_internal), ignore_errors=True)
-        shutil.copytree(str(new_internal), str(old_internal), dirs_exist_ok=True)
-        if _set_hidden_attribute(str(old_internal)):
-            print(f"  ✓ 复制 _internal/ (已隐藏)")
-        else:
-            print(f"  ✓ 复制 _internal/")
+    if old_internal.exists():
+        try:
+            shutil.rmtree(str(old_internal), ignore_errors=True)
+            print(f"  ✓ 清理旧 _internal/ (--onefile 模式不再需要)")
+        except Exception:
+            pass
 
-    # 3. 复制 icon 到 dev/ 根目录（任务栏图标需要）
-    # 优先从 build 产物的 app/ 目录找，其次从 release_dir 根目录找
     icon_src = release_dir / "app" / "icon.ico"
     if not icon_src.exists():
         icon_src = release_dir / "icon.ico"
@@ -625,21 +519,17 @@ def _deploy_to_dev(release_dir: Path):
         shutil.copy2(str(icon_png_src), str(DEV_DIR / "icon.png"))
         print(f"  ✓ 复制 icon.png")
 
-    # 4. 确保 data/ 和 temp/ 目录存在 (数据分级架构)
     dev_data_dir = DEV_DIR / "data"
     dev_temp_dir = DEV_DIR / "temp"
     dev_data_dir.mkdir(parents=True, exist_ok=True)
     dev_temp_dir.mkdir(parents=True, exist_ok=True)
     
-    # 4.1 公共数据目录
     for sub in ["public/models", "public/templates", "public/plugins", "public/api/qwen2api", "public/api/zhipu2api"]:
         (dev_data_dir / sub).mkdir(parents=True, exist_ok=True)
     
-    # 4.2 用户数据目录 (默认用户)
     for sub in ["users/default/projects", "users/default/sessions", "users/default/webdata"]:
         (dev_data_dir / sub).mkdir(parents=True, exist_ok=True)
     
-    # 4.3 临时目录
     for sub in ["__pycache__", "logs", "cache", "debug", "tmp"]:
         (dev_temp_dir / sub).mkdir(parents=True, exist_ok=True)
     print(f"  ✓ 确保 data/ 和 temp/ 目录结构 (数据分级)")
@@ -679,7 +569,44 @@ def record_version(release_name, changes):
         history.insert(0, version_info)
 
     save_version_history(history)
+
+    update_version_json(VERSION, release_name, changes)
+
     return version_info
+
+
+def update_version_json(version, release_name, changes):
+    ver_json_path = VERSION_JSON_FILE
+    ver_dir = ver_json_path.parent
+    ver_dir.mkdir(parents=True, exist_ok=True)
+
+    data = {}
+    if ver_json_path.exists():
+        try:
+            with open(str(ver_json_path), 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+
+    data["latest"] = version
+
+    entry = {
+        "version": version,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "exe": f"{release_name}.exe",
+        "changes": changes or [],
+    }
+
+    existing = [v for v in data.get("versions", []) if v.get("version") != version]
+    existing.insert(0, entry)
+    data["versions"] = existing
+
+    try:
+        with open(str(ver_json_path), 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"  ✓ 更新 version.json (latest={version})")
+    except Exception as e:
+        print(f"  ⚠ 更新 version.json 失败: {e}")
 
 
 # ── 主流程 ──
@@ -753,12 +680,6 @@ def main():
             print(f"  EXE 文件: {exe_path}")
             size_mb = exe_path.stat().st_size / (1024 * 1024)
             print(f"  EXE 大小: {size_mb:.1f} MB")
-        # 计算 _internal/ 大小
-        internal_dir = DEV_DIR / "_internal"
-        if internal_dir.exists():
-            total_size = sum(f.stat().st_size for f in internal_dir.rglob("*") if f.is_file())
-            total_mb = total_size / (1024 * 1024)
-            print(f"  _internal/ 大小: {total_mb:.1f} MB")
         print(f"  资源目录: {DEV_APP_DIR}")
         print(f"  版本历史: {VERSION_HISTORY_FILE}")
         print("=" * 60)

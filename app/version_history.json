@@ -1,5 +1,107 @@
 [
   {
+    "version": "2026.05.18.2348",
+    "name": "云集智能编程工作站v2026.05.18.2348",
+    "changes": [
+      "修复输入框中文拼音输入法",
+      "修复QHBoxLayout崩溃",
+      "改用onefile打包"
+    ],
+    "build_time": "2026-05-18T23:50:27.854914",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.1226",
+    "name": "云集智能编程工作站v2026.05.18.1226",
+    "changes": [
+      "Gitee API三通道更新",
+      "支持私有仓库Token认证",
+      "修复version_history.json旧格式兼容",
+      "下载zip包更新无需git"
+    ],
+    "build_time": "2026-05-18T12:27:34.643503",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.1026",
+    "name": "云集智能编程工作站v2026.05.18.1026",
+    "changes": [
+      "三通道版本更新(Gitee API/Git/HTTP)",
+      "无需安装git即可检查和下载更新",
+      "Gitee API下载zip包更新",
+      "保护用户数据(.env/venvs/projects)",
+      "GITEE_TOKEN配置"
+    ],
+    "build_time": "2026-05-18T10:27:44.933514",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0909",
+    "name": "云集智能编程工作站v2026.05.18.0909",
+    "changes": [
+      "更新页面聚焦远程版本",
+      "移除本地版本历史显示",
+      "添加更新资源包按钮",
+      "检查远程更新后可一键git pull"
+    ],
+    "build_time": "2026-05-18T09:10:10.092215",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0903",
+    "name": "云集智能编程工作站v2026.05.18.0903",
+    "changes": [
+      "软件更新页面重构",
+      "标签页架构(EXE稳定版/Git开发版)",
+      "远程版本检查改用git命令",
+      "卡片展开/折叠",
+      "全部展开/折叠按钮",
+      "version.json版本管理",
+      "构建脚本自动更新version.json"
+    ],
+    "build_time": "2026-05-18T09:04:27.491932",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0817",
+    "name": "云集智能编程工作站v2026.05.18.0817",
+    "changes": [
+      "三目录架构重构",
+      "修复sk-zhipu-伪Key过滤",
+      "修复.env路径",
+      "修复ProjectManager.DATA_ROOT",
+      "修复图标路径",
+      "UV/BUN缓存重定向到temp",
+      "日志路径修复"
+    ],
+    "build_time": "2026-05-18T08:17:55.047391",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0633",
+    "name": "云集智能编程工作站v2026.05.18.0633",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T06:34:04.162721",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0535",
+    "name": "云集智能编程工作站v2026.05.18.0535",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T05:36:11.392249",
+    "git_commit": ""
+  },
+  {
     "version": "2026.05.18.0441",
     "name": "云集智能编程工作站v2026.05.18.0441",
     "changes": [
