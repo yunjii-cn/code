@@ -1175,18 +1175,21 @@ class ProjectManager:
         return {"success": True, "files": files_created, "init_cmd": init_cmd}
 
 # ── Git 仓库配置 ──
-GIT_REMOTE = "git@gitee.com:yunjii/code.git"
+GIT_REMOTE = "https://github.com/yunjii-cn/code.git"
 GIT_BRANCH = "main"
-REMOTE_VERSIONS_URL = f"https://gitee.com/yunjii/code/raw/{GIT_BRANCH}/app/version_history.json"
+GITEE_OWNER = "yunjii-cn"
+GITEE_REPO = "code"
+GITEE_API_BASE = f"https://api.github.com/repos/{GITEE_OWNER}/{GITEE_REPO}"
+REMOTE_VERSIONS_URL = f"https://raw.githubusercontent.com/{GITEE_OWNER}/{GITEE_REPO}/{GIT_BRANCH}/dev/ver/version.json"
 
 
 # ── 软件更新器 ──
 class SoftwareUpdater:
-    """基于 Git 的软件更新和 EXE 版本切换"""
+    """软件更新器 - 支持 Git 命令和 Gitee API 双通道"""
 
     def __init__(self, dev_dir: str, log_func=None, progress_func=None):
-        self.dev_dir = dev_dir          # dev/ 根目录（Git 仓库）
-        self.app_dir = os.path.join(dev_dir, "app")  # 资源包
+        self.dev_dir = dev_dir
+        self.app_dir = os.path.join(dev_dir, "app")
         self.ver_dir = os.path.join(dev_dir, "ver")   # 稳定版 EXE
         self.log = log_func or (lambda *a: None)
         self.progress = progress_func
@@ -1398,8 +1401,110 @@ class SoftwareUpdater:
         QApplication.quit()
         return True
 
+    def _get_gitee_token(self):
+        token = ""
+        env_path = os.path.join(self.dev_dir, "data", ".env")
+        if not os.path.exists(env_path):
+            env_path = os.path.join(self.app_dir, ".env")
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        for key in ("GITHUB_TOKEN", "GITEE_TOKEN"):
+                            if line.startswith(f"{key}="):
+                                val = line.split("=", 1)[1].strip()
+                                if val:
+                                    return val
+            except Exception:
+                pass
+        return token
+
     def fetch_remote_version_history(self):
-        """通过 HTTP API 获取远程版本历史（零 subprocess，零弹窗）"""
+        """获取远程版本历史 - 三通道：Gitee API → Git命令 → HTTP直链"""
+        result = self._fetch_remote_via_gitee_api()
+        if result is not None:
+            return result
+        result = self._fetch_remote_via_git()
+        if result is not None:
+            return result
+        return self._fetch_remote_via_http()
+
+    def _fetch_remote_via_gitee_api(self):
+        """通过 GitHub API 获取远程版本历史（无需安装git，支持私有仓库）"""
+        try:
+            from urllib.request import urlopen, Request
+            from urllib.error import URLError, HTTPError
+            import base64
+            token = self._get_gitee_token()
+            for path in ["dev/ver/version.json", "app/version_history.json"]:
+                try:
+                    url = f"{GITEE_API_BASE}/contents/{path}?ref={GIT_BRANCH}"
+                    req = Request(url)
+                    req.add_header('User-Agent', 'Mozilla/5.0')
+                    if token:
+                        req.add_header('Authorization', f'token {token}')
+                    resp = urlopen(req, timeout=15)
+                    data = json.loads(resp.read().decode())
+                    if isinstance(data, list):
+                        continue
+                    content_b64 = data.get("content", "")
+                    if not content_b64:
+                        continue
+                    content = base64.b64decode(content_b64).decode('utf-8')
+                    version_data = json.loads(content)
+                    if isinstance(version_data, dict) and "versions" in version_data:
+                        remote_versions = version_data.get("versions", [])
+                    elif isinstance(version_data, list):
+                        remote_versions = version_data
+                    else:
+                        continue
+                    result = []
+                    for v in remote_versions:
+                        entry = dict(v)
+                        if "date" in entry and "build_time" not in entry:
+                            entry["build_time"] = entry["date"]
+                        result.append(entry)
+                    result.sort(key=lambda x: x.get("version", ""), reverse=True)
+                    return result
+                except (HTTPError, URLError, Exception):
+                    continue
+            return None
+        except Exception as e:
+            print(f"GitHub API 获取失败: {e}")
+            return None
+
+    def _fetch_remote_via_git(self):
+        """通过 git 命令获取远程版本历史"""
+        try:
+            if not self.is_git_repo():
+                return None
+            r = self._run_git("fetch", "origin", timeout=30)
+            if not r["ok"]:
+                return None
+            show_result = subprocess.run(
+                ["git", "show", f"origin/{GIT_BRANCH}:dev/ver/version.json"],
+                capture_output=True, text=True, cwd=self.dev_dir, timeout=10,
+                startupinfo=self._si(),
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if show_result.returncode != 0:
+                return None
+            data = json.loads(show_result.stdout)
+            remote_versions = data.get("versions", [])
+            result = []
+            for v in remote_versions:
+                entry = dict(v)
+                if "date" in entry and "build_time" not in entry:
+                    entry["build_time"] = entry["date"]
+                result.append(entry)
+            result.sort(key=lambda x: x.get("version", ""), reverse=True)
+            return result
+        except Exception:
+            return None
+
+    def _fetch_remote_via_http(self):
+        """HTTP 直链方式获取远程版本历史（仅公开仓库可用）"""
         try:
             from urllib.request import urlopen, Request
             from urllib.error import URLError, HTTPError
@@ -1408,18 +1513,17 @@ class SoftwareUpdater:
             resp = urlopen(req, timeout=10)
             content = resp.read().decode('utf-8')
             data = json.loads(content)
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
+            if isinstance(data, dict) and "versions" in data:
                 result = []
-                for vname, vinfo in data.items():
-                    entry = dict(vinfo)
-                    entry["name"] = vname
-                    if "version_number" in entry and "version" not in entry:
-                        entry["version"] = entry["version_number"]
+                for v in data["versions"]:
+                    entry = dict(v)
+                    if "date" in entry and "build_time" not in entry:
+                        entry["build_time"] = entry["date"]
                     result.append(entry)
                 result.sort(key=lambda x: x.get("version", ""), reverse=True)
                 return result
+            elif isinstance(data, list):
+                return data
             return []
         except HTTPError as e:
             print(f"远程版本获取失败 (HTTP {e.code}): {e.reason}")
@@ -1430,6 +1534,141 @@ class SoftwareUpdater:
         except Exception as e:
             print(f"远程版本获取失败: {e}")
             return None
+
+    def fetch_remote_commits(self, limit=30):
+        """获取远程Git提交历史 - 双通道：Gitee API → Git命令"""
+        commits = self._fetch_commits_via_gitee_api(limit)
+        if commits is not None:
+            return commits
+        return self.get_git_history(limit)
+
+    def _fetch_commits_via_gitee_api(self, limit=30):
+        """通过 GitHub API 获取提交历史"""
+        try:
+            from urllib.request import urlopen, Request
+            from urllib.error import URLError, HTTPError
+            token = self._get_gitee_token()
+            url = f"{GITEE_API_BASE}/commits?sha={GIT_BRANCH}&per_page={limit}"
+            req = Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            if token:
+                req.add_header('Authorization', f'token {token}')
+            resp = urlopen(req, timeout=15)
+            data = json.loads(resp.read().decode())
+            commits = []
+            for c in data:
+                commit = c.get("commit", {})
+                commits.append({
+                    "hash": c.get("sha", "")[:7],
+                    "message": commit.get("message", "").split("\n")[0][:80],
+                    "author": commit.get("author", {}).get("name", ""),
+                    "time": commit.get("author", {}).get("date", "")[:10],
+                })
+            return commits
+        except Exception as e:
+            print(f"GitHub API 提交历史获取失败: {e}")
+            return None
+
+    def download_update_via_gitee(self, progress_func=None):
+        """通过 GitHub API 下载仓库zip包更新（无需git）"""
+        try:
+            from urllib.request import urlopen, Request
+            from urllib.error import URLError, HTTPError
+            import tempfile
+            import zipfile
+            token = self._get_gitee_token()
+            url = f"{GITEE_API_BASE}/zipball/{GIT_BRANCH}"
+            self.log("正在从 GitHub 下载更新包...", "#FF9800")
+            if progress_func:
+                progress_func(10, "正在下载更新包...")
+            req = Request(url)
+            req.add_header('User-Agent', 'Mozilla/5.0')
+            if token:
+                req.add_header('Authorization', f'token {token}')
+            resp = urlopen(req, timeout=120)
+            total_size = int(resp.headers.get('Content-Length', 0))
+            downloaded = 0
+            chunk_size = 65536
+            zip_data = bytearray()
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                zip_data.extend(chunk)
+                downloaded += len(chunk)
+                if total_size > 0 and progress_func:
+                    pct = int(10 + 50 * downloaded / total_size)
+                    progress_func(pct, f"正在下载... {downloaded // 1024}KB / {total_size // 1024}KB")
+            if not zip_data:
+                self.log("[错误] 下载的更新包为空", "#F44336")
+                return False
+            if progress_func:
+                progress_func(65, "正在解压更新包...")
+            self.log("正在解压更新包...", "#FF9800")
+            temp_dir = os.path.join(self.dev_dir, "temp", "update_tmp")
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            os.makedirs(temp_dir, exist_ok=True)
+            zip_path = os.path.join(temp_dir, "update.zip")
+            with open(zip_path, "wb") as f:
+                f.write(zip_data)
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(temp_dir)
+            os.remove(zip_path)
+            extracted_dirs = [d for d in os.listdir(temp_dir) if os.path.isdir(os.path.join(temp_dir, d))]
+            if not extracted_dirs:
+                self.log("[错误] 解压后未找到内容", "#F44336")
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return False
+            src_dir = os.path.join(temp_dir, extracted_dirs[0])
+            if progress_func:
+                progress_func(75, "正在应用更新...")
+            self.log("正在应用更新...", "#FF9800")
+            protect_patterns = {".env", ".env.local", "projects", "venvs", "api"}
+            for item in os.listdir(src_dir):
+                src_path = os.path.join(src_dir, item)
+                dst_path = os.path.join(self.dev_dir, item)
+                if item in protect_patterns:
+                    if os.path.isdir(src_path) and os.path.isdir(dst_path):
+                        self._merge_protected_dir(src_path, dst_path, protect_patterns)
+                    continue
+                if os.path.isdir(src_path):
+                    if os.path.exists(dst_path):
+                        shutil.rmtree(dst_path, ignore_errors=True)
+                    shutil.copytree(src_path, dst_path)
+                else:
+                    if os.path.exists(dst_path):
+                        os.remove(dst_path)
+                    shutil.copy2(src_path, dst_path)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            if progress_func:
+                progress_func(100, "更新完成")
+            self.log("✓ 更新包已成功应用", "#4CAF50")
+            return True
+        except Exception as e:
+            self.log(f"[错误] 下载更新失败: {e}", "#F44336")
+            temp_dir = os.path.join(self.dev_dir, "temp", "update_tmp")
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return False
+
+    def _merge_protected_dir(self, src, dst, protect_patterns):
+        """合并受保护目录，不覆盖用户数据"""
+        for item in os.listdir(src):
+            src_path = os.path.join(src, item)
+            dst_path = os.path.join(dst, item)
+            if item in protect_patterns:
+                if os.path.isdir(src_path) and os.path.isdir(dst_path):
+                    self._merge_protected_dir(src_path, dst_path, protect_patterns)
+                continue
+            if os.path.isdir(src_path):
+                if os.path.exists(dst_path):
+                    shutil.rmtree(dst_path, ignore_errors=True)
+                shutil.copytree(src_path, dst_path)
+            else:
+                if os.path.exists(dst_path):
+                    os.remove(dst_path)
+                shutil.copy2(src_path, dst_path)
 
     def get_local_version_history(self):
         """获取本地版本历史（返回 list 格式）"""
@@ -2716,7 +2955,7 @@ class BackendBridge(QObject):
                 if main:
                     settings = main.env_manager.read_settings()
                     zhipu_key = (settings.get("ZHIPU_API_KEY", "") or settings.get("API_KEY", "")).strip()
-                    if zhipu_key and len(zhipu_key) > 10:
+                    if zhipu_key and len(zhipu_key) > 10 and not zhipu_key.startswith("sk-zhipu-"):
                         try:
                             backend.add_zhipu_account(base_url, zhipu_key, admin_key, label="auto-synced")
                         except Exception:
@@ -2728,7 +2967,7 @@ class BackendBridge(QObject):
                                 keys_data = json.load(f)
                             if isinstance(keys_data, list):
                                 for item in keys_data:
-                                    if isinstance(item, dict) and item.get("key") and len(item["key"]) > 10:
+                                    if isinstance(item, dict) and item.get("key") and len(item["key"]) > 10 and not item["key"].startswith("sk-zhipu-"):
                                         try:
                                             backend.add_zhipu_account(base_url, item["key"], admin_key, label=item.get("label", "local-synced"))
                                         except Exception:
@@ -2992,13 +3231,14 @@ class BackendBridge(QObject):
                         env_overrides["API_MODEL"] = zhipu_model
                         env_overrides["API_KEY"] = zhipu_key
                     else:
-                        main.log_signal.emit(f"[代理] 智谱API直连模式(OpenAI兼容) 模型={zhipu_model} 目标={zhipu_base}", "#2196F3")
+                        main.log_signal.emit(f"[代理] 智谱API直连模式(OpenAI兼容代理) 模型={zhipu_model} 目标={zhipu_base}", "#2196F3")
                         env_overrides["MODEL_PROVIDER"] = "api"
                         env_overrides["API_BASE_URL"] = zhipu_base
                         env_overrides["API_MODEL"] = zhipu_model
                         env_overrides["API_KEY"] = zhipu_key
+                        env_overrides["API_OPENAI_COMPAT"] = "1"
                         env_overrides["ANTHROPIC_API_KEY"] = zhipu_key
-                        env_overrides["ANTHROPIC_BASE_URL"] = zhipu_base
+                        env_overrides["ANTHROPIC_AUTH_TOKEN"] = zhipu_key
                         env_overrides["ANTHROPIC_MODEL"] = zhipu_model
                 else:
                     api_base = (settings.get("API_BASE_URL", "") or "http://127.0.0.1:7777").strip()
@@ -3921,7 +4161,6 @@ class MainWindow(QMainWindow):
         self.status_signal.connect(self._update_status)
         self.result_ready_signal.connect(self._on_result_ready)
         self.workspace_choose_requested.connect(self._choose_workspace_dialog)
-        self._remote_ver_signal.connect(self._on_remote_ver_fetched)
         self.voice_result_signal.connect(self._on_voice_result)
 
         # 关闭信号检测：每 500ms 检查是否有更新版本要求本实例退出
@@ -4320,124 +4559,114 @@ class MainWindow(QMainWindow):
         return page
 
     def _create_update_page(self):
-        """创建软件更新页面 - 版本历史管理"""
+        """创建软件更新页面 - 标签页架构（参考云集智能文件清理专家）"""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setSpacing(8)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
 
-        top_bar = QHBoxLayout()
-        title = QLabel("🔄 软件更新")
+        top_bar_widget = QWidget()
+        top_bar_widget.setStyleSheet("background-color: #1e1e1e;")
+        top_bar = QHBoxLayout(top_bar_widget)
+        top_bar.setContentsMargins(12, 8, 12, 8)
+
+        title = QLabel("🔄 软件更新与版本管理")
         title.setFont(QFont("Microsoft YaHei", 13, QFont.Weight.Bold))
-        title.setStyleSheet("color: #1565C0; border: none;")
+        title.setStyleSheet("color: #E0E0E0; border: none; background: transparent;")
         top_bar.addWidget(title)
+
+        ver_label = QLabel(f"v{VERSION}")
+        ver_label.setFont(QFont("Consolas", 11))
+        ver_label.setStyleSheet("color: #666; border: none; background: transparent;")
+        top_bar.addWidget(ver_label)
+
         top_bar.addStretch()
 
-        self.btn_check_update = QPushButton("🔍 检查更新")
-        self.btn_check_update.setStyleSheet("""
-            QPushButton { background-color: #1565C0; border: 2px solid #1976D2; border-radius: 6px; padding: 8px 16px; font-size: 12px; color: white; }
-            QPushButton:hover { background-color: #1976D2; }
-        """)
-        self.btn_check_update.clicked.connect(self._on_update)
-        top_bar.addWidget(self.btn_check_update)
+        self._ver_status_label = QLabel("")
+        self._ver_status_label.setFont(QFont("Microsoft YaHei", 11))
+        self._ver_status_label.setStyleSheet("color: #888; border: none; background: transparent;")
+        top_bar.addWidget(self._ver_status_label)
 
-        self.btn_pull_update = QPushButton("📥 更新资源包")
-        self.btn_pull_update.setStyleSheet("""
-            QPushButton { background-color: #2E7D32; border: 2px solid #388E3C; border-radius: 6px; padding: 8px 16px; font-size: 12px; color: white; }
+        btn_check_remote = QPushButton("🔄 检查远程更新")
+        btn_check_remote.setStyleSheet("""
+            QPushButton { background-color: #333; border: 1px solid #444; border-radius: 4px; padding: 6px 14px; font-size: 12px; color: #ccc; }
+            QPushButton:hover { background-color: #CC0000; border-color: #E00000; color: #fff; }
+        """)
+        btn_check_remote.clicked.connect(self._check_remote_versions)
+        top_bar.addWidget(btn_check_remote)
+
+        layout.addWidget(top_bar_widget)
+
+        tab_bar = QHBoxLayout()
+        tab_bar.setContentsMargins(10, 0, 10, 0)
+        tab_bar.setSpacing(4)
+        tab_bar_widget = QWidget()
+        tab_bar_widget.setFixedHeight(44)
+        tab_bar_widget.setStyleSheet("background-color: #1e1e1e;")
+        tab_bar_widget.setLayout(tab_bar)
+
+        self._ver_tab_stable_btn = QPushButton("📦 EXE稳定版")
+        self._ver_tab_stable_btn.setFixedWidth(160)
+        self._ver_tab_stable_btn.setFixedHeight(34)
+        self._ver_tab_stable_btn.setStyleSheet("""
+            QPushButton { background-color: #2E7D32; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; color: #fff; }
             QPushButton:hover { background-color: #388E3C; }
-            QPushButton:disabled { background-color: #1a1a1a; border-color: #333; color: #555; }
         """)
-        self.btn_pull_update.clicked.connect(self._do_pull_update)
-        self.btn_pull_update.setEnabled(False)
-        top_bar.addWidget(self.btn_pull_update)
+        self._ver_tab_stable_btn.clicked.connect(lambda: self._switch_ver_tab("stable"))
+        tab_bar.addWidget(self._ver_tab_stable_btn)
 
-        refresh_btn = QPushButton("🔄 刷新")
-        refresh_btn.setStyleSheet("""
-            QPushButton { background-color: #2D2D2D; border: 1px solid #424242; border-radius: 4px; padding: 8px 12px; font-size: 12px; color: #F0F0F0; }
-            QPushButton:hover { background-color: #424242; border-color: #555; }
+        self._ver_tab_git_btn = QPushButton("🔀 Git开发版")
+        self._ver_tab_git_btn.setFixedWidth(160)
+        self._ver_tab_git_btn.setFixedHeight(34)
+        self._ver_tab_git_btn.setStyleSheet("""
+            QPushButton { background-color: #CC0000; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; color: #fff; }
+            QPushButton:hover { background-color: #E00000; }
         """)
-        refresh_btn.clicked.connect(lambda: self._fetch_and_refresh_ver_list())
-        top_bar.addWidget(refresh_btn)
+        self._ver_tab_git_btn.clicked.connect(lambda: self._switch_ver_tab("git"))
+        tab_bar.addWidget(self._ver_tab_git_btn)
 
-        layout.addLayout(top_bar)
+        tab_bar.addStretch()
 
-        current_frame = QFrame()
-        current_frame.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px; } QLabel { border: none; background: transparent; }")
-        current_layout = QVBoxLayout(current_frame)
-        current_layout.setSpacing(4)
+        self._ver_expand_btn = QPushButton("📋 全部展开")
+        self._ver_expand_btn.setFixedWidth(100)
+        self._ver_expand_btn.setFixedHeight(30)
+        self._ver_expand_btn.setStyleSheet("""
+            QPushButton { background-color: #333; border: none; border-radius: 4px; font-size: 11px; color: #ccc; }
+            QPushButton:hover { background-color: #CC0000; color: #fff; }
+        """)
+        self._ver_expand_btn.clicked.connect(self._toggle_expand_all)
+        tab_bar.addWidget(self._ver_expand_btn)
 
-        self.update_info_label = QLabel("点击「检查更新」查看最新版本")
-        self.update_info_label.setStyleSheet("color: #ccc; font-size: 12px;")
-        self.update_info_label.setWordWrap(True)
-        current_layout.addWidget(self.update_info_label)
+        layout.addWidget(tab_bar_widget)
 
-        layout.addWidget(current_frame)
+        self._ver_scroll = QScrollArea()
+        self._ver_scroll.setWidgetResizable(True)
+        self._ver_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._ver_scroll.setStyleSheet("QScrollArea { background-color: #1a1a1a; border: none; }")
 
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background-color: #333;")
-        sep.setMaximumHeight(1)
-        layout.addWidget(sep)
+        self._ver_scroll_container = QWidget()
+        self._ver_scroll_container.setStyleSheet("background-color: #1a1a1a;")
+        self._ver_scroll_layout = QVBoxLayout(self._ver_scroll_container)
+        self._ver_scroll_layout.setSpacing(0)
+        self._ver_scroll_layout.setContentsMargins(10, 6, 10, 6)
 
-        list_label = QLabel("版本历史")
-        list_label.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        list_label.setStyleSheet("color: #888; border: none;")
-        layout.addWidget(list_label)
+        self._ver_scroll.setWidget(self._ver_scroll_container)
+        layout.addWidget(self._ver_scroll, 1)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
-
-        self.ver_list_container = QWidget()
-        self.ver_list_container.setStyleSheet("background-color: transparent; border: none;")
-        self.ver_list_layout = QVBoxLayout(self.ver_list_container)
-        self.ver_list_layout.setSpacing(6)
-        self.ver_list_layout.setContentsMargins(4, 4, 4, 4)
-
-        scroll.setWidget(self.ver_list_container)
-        layout.addWidget(scroll, 1)
+        self._ver_stable_data = []
+        self._ver_git_data = []
+        self._ver_current_version = VERSION
+        self._ver_active_tab = "stable"
+        self._ver_info_text = "点击「🔄 检查远程更新」获取远程仓库最新版本"
+        self._ver_expanded = False
+        self._ver_info_label = None
+        self._ver_stable_container = None
+        self._ver_git_container = None
 
         self.update_log_text = QTextEdit()
         self.update_log_text.setReadOnly(True)
         self.update_log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: none; font-family: Consolas, monospace; font-size: 11px; }")
         self.update_log_text.hide()
-
-        # Git历史记录面板
-        git_section = QFrame()
-        git_section.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #333; border-radius: 8px; }")
-        git_layout = QVBoxLayout(git_section)
-        git_layout.setSpacing(8)
-        git_layout.setContentsMargins(12, 10, 12, 10)
-        
-        git_header = QHBoxLayout()
-        git_title = QLabel("🔀 Git 版本切换")
-        git_title.setFont(QFont("Microsoft YaHei", 11, QFont.Weight.Bold))
-        git_title.setStyleSheet("color: #fff; border: none;")
-        git_header.addWidget(git_title)
-        git_header.addStretch()
-        
-        git_refresh_btn = QPushButton("刷新历史")
-        git_refresh_btn.setStyleSheet("""
-            QPushButton { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; padding: 6px 12px; font-size: 11px; color: #aaa; }
-            QPushButton:hover { background-color: #3a3a3a; color: #fff; }
-        """)
-        git_refresh_btn.clicked.connect(self._refresh_git_history)
-        git_header.addWidget(git_refresh_btn)
-        git_layout.addLayout(git_header)
-        
-        self.git_history_container = QWidget()
-        self.git_history_layout = QVBoxLayout(self.git_history_container)
-        self.git_history_layout.setSpacing(4)
-        self.git_history_layout.setContentsMargins(0, 0, 0, 0)
-        
-        git_scroll = QScrollArea()
-        git_scroll.setWidgetResizable(True)
-        git_scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
-        git_scroll.setWidget(self.git_history_container)
-        git_layout.addWidget(git_scroll)
-        
-        layout.addWidget(git_section)
 
         return page
 
@@ -4453,14 +4682,10 @@ class MainWindow(QMainWindow):
         self.btn_settings_nav.setChecked(index == 4)
         self.page_stack.setCurrentIndex(actual_page)
 
-        # 切换到部署维护页面时刷新环境状态
         if index == 1:
             self._refresh_deploy_env_status()
-        # 切换到软件更新页面时刷新稳定版列表
         if index == 2:
-            self._fetch_and_refresh_ver_list()
-            self._refresh_git_history()
-        # 切换到项目管理或系统设置时，通过JS切换前端视图
+            self._render_active_tab()
         if index in (0, 3, 4):
             nav_name = {0: "chat", 3: "project", 4: "settings"}.get(index, "chat")
             try:
@@ -4468,115 +4693,559 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _switch_ver_tab(self, tab):
+        if tab == self._ver_active_tab:
+            return
+        self._ver_active_tab = tab
+        if tab == "stable":
+            self._ver_tab_stable_btn.setStyleSheet("""
+                QPushButton { background-color: #2E7D32; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; color: #fff; }
+                QPushButton:hover { background-color: #388E3C; }
+            """)
+            self._ver_tab_git_btn.setStyleSheet("""
+                QPushButton { background-color: #CC0000; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; color: #fff; }
+                QPushButton:hover { background-color: #E00000; }
+            """)
+        else:
+            self._ver_tab_git_btn.setStyleSheet("""
+                QPushButton { background-color: #2E7D32; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; color: #fff; }
+                QPushButton:hover { background-color: #388E3C; }
+            """)
+            self._ver_tab_stable_btn.setStyleSheet("""
+                QPushButton { background-color: #CC0000; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; color: #fff; }
+                QPushButton:hover { background-color: #E00000; }
+            """)
+        self._render_active_tab()
+
+    def _render_active_tab(self):
+        if not hasattr(self, '_ver_scroll_layout') or self._ver_scroll_layout is None:
+            return
+        while self._ver_scroll_layout.count():
+            item = self._ver_scroll_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+        if self._ver_active_tab == "stable":
+            self._render_stable_tab()
+        else:
+            self._render_git_tab()
+
+    def _toggle_expand_all(self):
+        self._ver_expanded = not self._ver_expanded
+        if self._ver_expanded:
+            self._ver_expand_btn.setText("📋 全部折叠")
+            self._ver_expand_btn.setStyleSheet("""
+                QPushButton { background-color: #2E7D32; border: none; border-radius: 4px; font-size: 11px; color: #fff; }
+                QPushButton:hover { background-color: #388E3C; }
+            """)
+        else:
+            self._ver_expand_btn.setText("📋 全部展开")
+            self._ver_expand_btn.setStyleSheet("""
+                QPushButton { background-color: #333; border: none; border-radius: 4px; font-size: 11px; color: #ccc; }
+                QPushButton:hover { background-color: #CC0000; color: #fff; }
+            """)
+        self._render_active_tab()
+
+    def _render_stable_tab(self):
+        info_frame = QFrame()
+        info_frame.setStyleSheet("QFrame { background-color: #1e1e1e; border: 1px solid #333; border-radius: 6px; } QLabel { border: none; background: transparent; } QPushButton { border: none; }")
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setContentsMargins(12, 8, 12, 8)
+        info_header = QHBoxLayout()
+        self._ver_info_label = QLabel(self._ver_info_text)
+        self._ver_info_label.setFont(QFont("Microsoft YaHei", 11))
+        self._ver_info_label.setStyleSheet("color: #888; border: none; background: transparent;")
+        self._ver_info_label.setWordWrap(True)
+        info_header.addWidget(self._ver_info_label)
+        info_header.addStretch()
+        self._btn_pull_update = QPushButton("📥 更新资源包")
+        self._btn_pull_update.setFixedHeight(28)
+        self._btn_pull_update.setEnabled(False)
+        self._btn_pull_update.setStyleSheet("""
+            QPushButton { background-color: #2E7D32; border: none; border-radius: 4px; padding: 4px 14px; font-size: 12px; color: #fff; }
+            QPushButton:hover { background-color: #388E3C; }
+            QPushButton:disabled { background-color: #1a1a1a; color: #555; }
+        """)
+        self._btn_pull_update.clicked.connect(self._do_pull_update)
+        if getattr(self, '_has_remote_update', False):
+            self._btn_pull_update.setEnabled(True)
+        info_header.addWidget(self._btn_pull_update)
+        info_layout.addLayout(info_header)
+        self._ver_scroll_layout.addWidget(info_frame)
+
+        self._ver_stable_container = QWidget()
+        self._ver_stable_container.setStyleSheet("background-color: transparent;")
+        stable_layout = QVBoxLayout(self._ver_stable_container)
+        stable_layout.setSpacing(4)
+        stable_layout.setContentsMargins(0, 4, 0, 0)
+        self._render_stable_versions(self._ver_stable_data, self._ver_current_version, stable_layout)
+        self._ver_scroll_layout.addWidget(self._ver_stable_container)
+        self._ver_scroll_layout.addStretch()
+
+    def _render_git_tab(self):
+        git_header = QWidget()
+        git_header.setStyleSheet("background-color: transparent;")
+        git_header_layout = QHBoxLayout(git_header)
+        git_header_layout.setContentsMargins(4, 6, 4, 2)
+        git_title = QLabel("🔀 Git 版本切换")
+        git_title.setFont(QFont("Microsoft YaHei", 12, QFont.Weight.Bold))
+        git_title.setStyleSheet("color: #42A5F5; border: none; background: transparent;")
+        git_header_layout.addWidget(git_title)
+        git_header_layout.addStretch()
+        git_refresh_btn = QPushButton("刷新历史")
+        git_refresh_btn.setFixedHeight(24)
+        git_refresh_btn.setStyleSheet("""
+            QPushButton { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; padding: 4px 12px; font-size: 11px; color: #aaa; }
+            QPushButton:hover { background-color: #3a3a3a; color: #fff; }
+        """)
+        git_refresh_btn.clicked.connect(self._refresh_git_history)
+        git_header_layout.addWidget(git_refresh_btn)
+        self._ver_scroll_layout.addWidget(git_header)
+
+        self._ver_git_container = QWidget()
+        self._ver_git_container.setStyleSheet("background-color: transparent;")
+        self.git_history_layout = QVBoxLayout(self._ver_git_container)
+        self.git_history_layout.setSpacing(4)
+        self.git_history_layout.setContentsMargins(0, 0, 0, 0)
+        self._render_git_history(self._ver_git_data)
+        self._ver_scroll_layout.addWidget(self._ver_git_container)
+        self._ver_scroll_layout.addStretch()
+
+    def _load_all_versions(self):
+        if hasattr(self, '_ver_status_label') and self._ver_status_label:
+            self._ver_status_label.setText("加载中...")
+        threading.Thread(target=self._do_load_all_versions, daemon=True).start()
+
+    def _do_load_all_versions(self):
+        stable_exes = self.updater.list_stable_exes()
+        exe_versions = {e["version"]: e for e in stable_exes}
+        local_versions = self.updater.get_local_version_history()
+        git_commits = self.updater.get_git_history(30)
+        current_version = VERSION
+        local_ver_set = set()
+        all_versions = []
+        import re
+        for v in local_versions:
+            ver = v.get("version", v.get("version_number", ""))
+            m = re.search(r'v?(\d+\.\d+\.\d+\.\d+)', ver)
+            ver_num = m.group(1) if m else ver
+            if not ver_num:
+                continue
+            local_ver_set.add(ver_num)
+            all_versions.append({
+                "version": ver_num,
+                "name": v.get("name", f"v{ver_num}"),
+                "changes": v.get("changes", []),
+                "build_time": v.get("build_time", ""),
+                "git_commit": v.get("git_commit", ""),
+                "available": ver_num in exe_versions,
+                "exe_info": exe_versions.get(ver_num),
+                "is_remote_new": False,
+            })
+        for ver, exe in exe_versions.items():
+            if ver not in local_ver_set:
+                all_versions.append({
+                    "version": ver,
+                    "name": exe["filename"],
+                    "changes": [],
+                    "build_time": "",
+                    "git_commit": "",
+                    "available": True,
+                    "exe_info": exe,
+                    "is_remote_new": False,
+                })
+        all_versions.sort(key=lambda x: x["version"], reverse=True)
+        self._ver_stable_data = all_versions
+        self._ver_git_data = git_commits
+        self._ver_current_version = current_version
+        QTimer.singleShot(0, self._render_active_tab)
+        if hasattr(self, '_ver_status_label') and self._ver_status_label:
+            QTimer.singleShot(0, lambda: self._ver_status_label.setText(f"稳定版 {len(all_versions)} 个 | Git提交 {len(git_commits)} 条"))
+
+    def _check_remote_versions(self):
+        if hasattr(self, '_ver_status_label') and self._ver_status_label:
+            self._ver_status_label.setText("正在检查远程更新...")
+        threading.Thread(target=self._do_check_remote, daemon=True).start()
+
+    def _do_check_remote(self):
+        try:
+            remote_versions = self.updater.fetch_remote_version_history()
+            if remote_versions is None:
+                raise Exception("无法获取远程版本信息（Gitee API/Git/HTTP均不可用）")
+            stable_exes = self.updater.list_stable_exes()
+            exe_versions = {e["version"]: e for e in stable_exes}
+            git_commits = self.updater.fetch_remote_commits(30)
+            if git_commits is None:
+                git_commits = self.updater.get_git_history(30)
+            import re
+            current_version = VERSION
+            local_ver_set = set()
+            all_versions = []
+            for v in remote_versions:
+                ver = v.get("version", v.get("version_number", ""))
+                m = re.search(r'v?(\d+\.\d+\.\d+\.\d+)', ver)
+                ver_num = m.group(1) if m else ver
+                if not ver_num or ver_num in local_ver_set:
+                    continue
+                local_ver_set.add(ver_num)
+                is_current = (ver_num == current_version)
+                all_versions.append({
+                    "version": ver_num,
+                    "name": v.get("name", f"v{ver_num}"),
+                    "changes": v.get("changes", []),
+                    "build_time": v.get("build_time", v.get("date", "")),
+                    "git_commit": v.get("git_commit", ""),
+                    "available": ver_num in exe_versions,
+                    "exe_info": exe_versions.get(ver_num),
+                    "is_remote_new": not is_current,
+                })
+            for ver, exe in exe_versions.items():
+                if ver not in local_ver_set:
+                    all_versions.append({
+                        "version": ver,
+                        "name": exe["filename"],
+                        "changes": [],
+                        "build_time": "",
+                        "git_commit": "",
+                        "available": True,
+                        "exe_info": exe,
+                        "is_remote_new": False,
+                    })
+            all_versions.sort(key=lambda x: x["version"], reverse=True)
+            remote_latest = all_versions[0]["version"] if all_versions else ""
+            has_update = remote_latest and remote_latest != VERSION
+            if has_update:
+                self._ver_info_text = f"🆕 发现新版本 v{remote_latest}，点击「📥 更新资源包」获取"
+                self._has_remote_update = True
+            else:
+                self._ver_info_text = "✅ 已是最新版本"
+                self._has_remote_update = False
+            self._ver_stable_data = all_versions
+            self._ver_git_data = git_commits
+            self._ver_current_version = current_version
+            QTimer.singleShot(0, self._render_active_tab)
+            if hasattr(self, '_ver_status_label') and self._ver_status_label:
+                QTimer.singleShot(0, lambda: self._ver_status_label.setText(f"稳定版 {len(all_versions)} 个 | Git提交 {len(git_commits)} 条"))
+        except Exception as e:
+            if hasattr(self, '_ver_status_label') and self._ver_status_label:
+                QTimer.singleShot(0, lambda: self._ver_status_label.setText(f"检查失败: {e}"))
+
     def _refresh_git_history(self):
         """刷新Git历史记录"""
-        if not hasattr(self, 'git_history_layout'):
+        git_commits = self.updater.get_git_history(30)
+        self._ver_git_data = git_commits
+        if self._ver_active_tab == "git":
+            self._render_active_tab()
+
+    def _render_git_history(self, git_commits):
+        if not hasattr(self, 'git_history_layout') or self.git_history_layout is None:
             return
-        
-        # 清空现有内容
         while self.git_history_layout.count():
             item = self.git_history_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        
         if not self.updater.is_git_repo():
             no_git = QLabel("当前不是 Git 仓库，无法使用 Git 版本切换")
             no_git.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
             no_git.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.git_history_layout.addWidget(no_git)
             return
-        
-        # 获取当前commit
-        current_commit = self.updater.get_current_commit()
-        
-        # 获取git历史
-        commits = self.updater.get_git_history(30)
-        
-        if not commits:
+        if not git_commits:
             no_commits = QLabel("暂无 Git 提交记录")
             no_commits.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
             no_commits.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.git_history_layout.addWidget(no_commits)
             return
-        
-        for commit in commits:
-            self._create_git_commit_card(commit, commit["hash"] == current_commit)
+        current_commit = self.updater.get_current_commit()
+        expanded = self._ver_expanded
+        for commit in git_commits:
+            is_current = (commit["hash"] == current_commit)
+            card = QFrame()
+            card.setObjectName("gitCommitCard")
+            if is_current:
+                card.setStyleSheet("""
+                    #gitCommitCard { background-color: #152015; border: 1px solid #1f3a1f; border-radius: 6px; }
+                    #gitCommitCard:hover { background-color: #1a2a1a; border-color: #2a4a2a; }
+                    QLabel { border: none; background: transparent; }
+                    QPushButton { border: none; }
+                """)
+            else:
+                card.setStyleSheet("""
+                    #gitCommitCard { background-color: #161616; border: 1px solid #2a2a2a; border-radius: 6px; }
+                    #gitCommitCard:hover { background-color: #1c1c1c; border-color: #3a3a3a; }
+                    QLabel { border: none; background: transparent; }
+                    QPushButton { border: none; }
+                """)
+            cl = QVBoxLayout(card)
+            cl.setSpacing(3)
+            cl.setContentsMargins(10, 6, 10, 6)
+            header = QHBoxLayout()
+            header.setSpacing(8)
+            hash_label = QLabel(commit["hash"])
+            hash_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+            hash_label.setStyleSheet(f"color: {'#4CAF50' if is_current else '#42A5F5'};")
+            header.addWidget(hash_label)
+            time_label = QLabel(commit.get("time", ""))
+            time_label.setFont(QFont("Consolas", 9))
+            time_label.setStyleSheet("color: #666;")
+            header.addWidget(time_label)
+            header.addStretch()
+            if is_current:
+                current_tag = QLabel("● 当前")
+                current_tag.setFont(QFont("Microsoft YaHei", 10))
+                current_tag.setStyleSheet("color: #4CAF50;")
+                header.addWidget(current_tag)
+            else:
+                switch_btn = QPushButton("切换")
+                switch_btn.setFixedWidth(50)
+                switch_btn.setFixedHeight(22)
+                switch_btn.setStyleSheet("""
+                    QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; font-size: 11px; color: #aaa; }
+                    QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #fff; }
+                """)
+                switch_btn.clicked.connect(lambda checked, h=commit["hash"]: self._switch_git_commit(h))
+                header.addWidget(switch_btn)
+            toggle_text = "▼" if expanded else "▶"
+            toggle_btn = QPushButton(toggle_text)
+            toggle_btn.setFixedWidth(24)
+            toggle_btn.setFixedHeight(22)
+            card_bg = "#152015" if is_current else "#161616"
+            toggle_btn.setStyleSheet(f"""
+                QPushButton {{ background-color: {card_bg}; border: none; border-radius: 3px; font-size: 10px; color: #888; }}
+                QPushButton:hover {{ background-color: #2a2a2a; color: #fff; }}
+            """)
+            toggle_btn.clicked.connect(lambda checked, c=card, d=commit: self._toggle_card_detail(c, d, "git"))
+            header.addWidget(toggle_btn)
+            cl.addLayout(header)
+            if expanded:
+                msg_label = QLabel(commit["message"])
+                msg_label.setFont(QFont("Microsoft YaHei", 10))
+                msg_label.setStyleSheet("color: #ccc;")
+                msg_label.setWordWrap(True)
+                cl.addWidget(msg_label)
+                author_label = QLabel(f"👤 {commit.get('author', '')}")
+                author_label.setFont(QFont("Microsoft YaHei", 9))
+                author_label.setStyleSheet("color: #666;")
+                cl.addWidget(author_label)
+            self.git_history_layout.addWidget(card)
 
-    def _create_git_commit_card(self, commit_info, is_current):
-        """创建Git提交卡片"""
-        commit_hash = commit_info["hash"]
-        message = commit_info["message"]
-        author = commit_info["author"]
-        time = commit_info["time"]
-        
-        card = QFrame()
-        card.setObjectName("gitCommitCard")
-        if is_current:
-            card.setStyleSheet("""
-                #gitCommitCard { background-color: #162016; border: 1px solid #1f3a1f; border-radius: 6px; }
-                #gitCommitCard:hover { background-color: #1a2a1a; border-color: #2a4a2a; }
-                QLabel { border: none; background: transparent; }
-                QPushButton { border: none; }
+    def _render_stable_versions(self, all_versions, current_version, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not all_versions:
+            no_ver = QLabel("暂无稳定版本")
+            no_ver.setStyleSheet("color: #555; padding: 10px; border: none; background: transparent;")
+            no_ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(no_ver)
+            return
+        expanded = self._ver_expanded
+        for v in all_versions:
+            ver = v["version"]
+            is_current = (ver == current_version)
+            is_available = v.get("available", False)
+            is_remote_new = v.get("is_remote_new", False)
+            changes = v.get("changes", [])
+            exe_info = v.get("exe_info")
+            if is_current:
+                card_bg = "#152015"
+                border_color = "#1f3a1f"
+            elif is_remote_new:
+                card_bg = "#161620"
+                border_color = "#1f3a4f"
+            elif is_available:
+                card_bg = "#161616"
+                border_color = "#222"
+            else:
+                card_bg = "#111"
+                border_color = "#1a1a1a"
+            card = QFrame()
+            card.setObjectName("stableCard")
+            card.setStyleSheet(f"""
+                #stableCard {{ background-color: {card_bg}; border: 1px solid {border_color}; border-radius: 6px; }}
+                #stableCard:hover {{ background-color: #1c1c1c; }}
+                QLabel {{ border: none; background: transparent; }}
+                QPushButton {{ border: none; }}
             """)
+            cl = QVBoxLayout(card)
+            cl.setSpacing(3)
+            cl.setContentsMargins(10, 6, 10, 6)
+            header = QHBoxLayout()
+            header.setSpacing(8)
+            ver_color = "#4CAF50" if is_current else ("#42A5F5" if is_remote_new else ("#E0E0E0" if is_available else "#555"))
+            ver_label = QLabel(f"v{ver}")
+            ver_label.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+            ver_label.setStyleSheet(f"color: {ver_color};")
+            header.addWidget(ver_label)
+            build_time = v.get("build_time", "")
+            if build_time:
+                try:
+                    from datetime import datetime as _dt
+                    dt = _dt.fromisoformat(build_time)
+                    date_str = dt.strftime("%Y-%m-%d %H:%M")
+                except:
+                    date_str = build_time[:16]
+                date_label = QLabel(date_str)
+                date_label.setFont(QFont("Consolas", 10))
+                date_label.setStyleSheet("color: #555;")
+                header.addWidget(date_label)
+            if is_remote_new:
+                remote_tag = QLabel("🆕 远程新版本")
+                remote_tag.setFont(QFont("Microsoft YaHei", 10))
+                remote_tag.setStyleSheet("color: #42A5F5;")
+                header.addWidget(remote_tag)
+            elif is_available and exe_info:
+                exe_tag = QLabel("📦 含EXE稳定版")
+                exe_tag.setFont(QFont("Microsoft YaHei", 10))
+                exe_tag.setStyleSheet("color: #FF9800;")
+                header.addWidget(exe_tag)
+                if exe_info.get("size_mb"):
+                    size_label = QLabel(f"{exe_info['size_mb']}MB")
+                    size_label.setFont(QFont("Consolas", 10))
+                    size_label.setStyleSheet("color: #555;")
+                    header.addWidget(size_label)
+            elif not is_available:
+                status_label = QLabel("未提供")
+                status_label.setFont(QFont("Microsoft YaHei", 10))
+                status_label.setStyleSheet("color: #444;")
+                header.addWidget(status_label)
+            header.addStretch()
+            if is_current:
+                current_tag = QLabel("● 当前版本")
+                current_tag.setFont(QFont("Microsoft YaHei", 10))
+                current_tag.setStyleSheet("color: #4CAF50;")
+                header.addWidget(current_tag)
+            elif is_available and exe_info:
+                switch_btn = QPushButton("切换")
+                switch_btn.setFixedWidth(50)
+                switch_btn.setFixedHeight(22)
+                switch_btn.setStyleSheet("""
+                    QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; font-size: 11px; color: #aaa; }
+                    QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #fff; }
+                """)
+                gc = v.get("git_commit", "")
+                switch_btn.clicked.connect(lambda checked, p=exe_info["path"], c=gc: self.updater.switch_to_exe(p, c))
+                header.addWidget(switch_btn)
+            has_detail = bool(changes) or bool(v.get("git_commit", ""))
+            if has_detail:
+                toggle_text = "▼" if expanded else "▶"
+                toggle_btn = QPushButton(toggle_text)
+                toggle_btn.setFixedWidth(24)
+                toggle_btn.setFixedHeight(22)
+                toggle_btn.setStyleSheet(f"""
+                    QPushButton {{ background-color: {card_bg}; border: none; border-radius: 3px; font-size: 10px; color: #888; }}
+                    QPushButton:hover {{ background-color: #2a2a2a; color: #fff; }}
+                """)
+                toggle_btn.clicked.connect(lambda checked, c=card, d=v: self._toggle_card_detail(c, d, "stable"))
+                header.addWidget(toggle_btn)
+            cl.addLayout(header)
+            if expanded and has_detail:
+                detail = QWidget()
+                detail.setStyleSheet("border: none; background: transparent;")
+                dl = QVBoxLayout(detail)
+                dl.setSpacing(2)
+                dl.setContentsMargins(0, 4, 0, 0)
+                git_commit = v.get("git_commit", "")
+                if git_commit:
+                    commit_label = QLabel(f"🔗 commit: {git_commit}")
+                    commit_label.setFont(QFont("Consolas", 9))
+                    commit_label.setStyleSheet("color: #555;")
+                    dl.addWidget(commit_label)
+                if changes:
+                    for ch in changes[:3]:
+                        ch_label = QLabel(f"· {ch}")
+                        ch_label.setFont(QFont("Microsoft YaHei", 10))
+                        ch_label.setStyleSheet("color: #777;")
+                        ch_label.setWordWrap(True)
+                        dl.addWidget(ch_label)
+                    if len(changes) > 3:
+                        more_label = QLabel(f"  +{len(changes)-3}项更多...")
+                        more_label.setFont(QFont("Microsoft YaHei", 10))
+                        more_label.setStyleSheet("color: #444;")
+                        dl.addWidget(more_label)
+                else:
+                    no_ch = QLabel("暂无修改记录")
+                    no_ch.setFont(QFont("Microsoft YaHei", 10))
+                    no_ch.setStyleSheet("color: #3a3a3a;")
+                    dl.addWidget(no_ch)
+                cl.addWidget(detail)
+            layout.addWidget(card)
+
+    def _toggle_card_detail(self, card, data, card_type):
+        cl = card.layout()
+        if cl is None:
+            return
+        for i in range(cl.count()):
+            item = cl.itemAt(i)
+            if item and item.widget() and item.widget().property("_is_detail"):
+                item.widget().deleteLater()
+                for j in range(cl.count()):
+                    h_item = cl.itemAt(j)
+                    if h_item and h_item.layout():
+                        for k in range(h_item.layout().count()):
+                            btn_item = h_item.layout().itemAt(k)
+                            if btn_item and btn_item.widget() and isinstance(btn_item.widget(), QPushButton):
+                                btn_text = btn_item.widget().text()
+                                if btn_text in ("▼", "▶"):
+                                    btn_item.widget().setText("▶")
+                return
+        card_bg = "#152015" if card_type == "stable" and data.get("version") == self._ver_current_version else "#161616"
+        detail = QWidget()
+        detail.setProperty("_is_detail", True)
+        detail.setStyleSheet("border: none; background: transparent;")
+        dl = QVBoxLayout(detail)
+        dl.setSpacing(2)
+        dl.setContentsMargins(0, 4, 0, 0)
+        if card_type == "stable":
+            git_commit = data.get("git_commit", "")
+            if git_commit:
+                commit_label = QLabel(f"🔗 commit: {git_commit}")
+                commit_label.setFont(QFont("Consolas", 9))
+                commit_label.setStyleSheet("color: #555;")
+                dl.addWidget(commit_label)
+            changes = data.get("changes", [])
+            if changes:
+                for ch in changes[:3]:
+                    ch_label = QLabel(f"· {ch}")
+                    ch_label.setFont(QFont("Microsoft YaHei", 10))
+                    ch_label.setStyleSheet("color: #777;")
+                    ch_label.setWordWrap(True)
+                    dl.addWidget(ch_label)
+                if len(changes) > 3:
+                    more_label = QLabel(f"  +{len(changes)-3}项更多...")
+                    more_label.setFont(QFont("Microsoft YaHei", 10))
+                    more_label.setStyleSheet("color: #444;")
+                    dl.addWidget(more_label)
+            else:
+                no_ch = QLabel("暂无修改记录")
+                no_ch.setFont(QFont("Microsoft YaHei", 10))
+                no_ch.setStyleSheet("color: #3a3a3a;")
+                dl.addWidget(no_ch)
         else:
-            card.setStyleSheet("""
-                #gitCommitCard { background-color: #161616; border: 1px solid #2a2a2a; border-radius: 6px; }
-                #gitCommitCard:hover { background-color: #1c1c1c; border-color: #3a3a3a; }
-                QLabel { border: none; background: transparent; }
-                QPushButton { border: none; }
-            """)
-        
-        cl = QVBoxLayout(card)
-        cl.setSpacing(3)
-        cl.setContentsMargins(10, 8, 10, 8)
-        
-        header = QHBoxLayout()
-        header.setSpacing(8)
-        
-        hash_label = QLabel(commit_hash)
-        hash_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        if is_current:
-            hash_label.setStyleSheet("color: #4CAF50;")
-        else:
-            hash_label.setStyleSheet("color: #42A5F5;")
-        header.addWidget(hash_label)
-        
-        time_label = QLabel(time)
-        time_label.setFont(QFont("Consolas", 9))
-        time_label.setStyleSheet("color: #666;")
-        header.addWidget(time_label)
-        
-        header.addStretch()
-        
-        if is_current:
-            current_tag = QLabel("● 当前")
-            current_tag.setFont(QFont("Microsoft YaHei", 9))
-            current_tag.setStyleSheet("color: #4CAF50;")
-            header.addWidget(current_tag)
-        else:
-            switch_btn = QPushButton("切换")
-            switch_btn.setFixedWidth(55)
-            switch_btn.setStyleSheet("""
-                QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; padding: 3px 10px; font-size: 11px; color: #AAA; }
-                QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #FFF; }
-            """)
-            switch_btn.clicked.connect(lambda checked, h=commit_hash: self._switch_git_commit(h))
-            header.addWidget(switch_btn)
-        
-        cl.addLayout(header)
-        
-        msg_label = QLabel(message)
-        msg_label.setFont(QFont("Microsoft YaHei", 10))
-        msg_label.setStyleSheet("color: #ccc;")
-        msg_label.setWordWrap(True)
-        cl.addWidget(msg_label)
-        
-        author_label = QLabel(f"👤 {author}")
-        author_label.setFont(QFont("Microsoft YaHei", 9))
-        author_label.setStyleSheet("color: #666;")
-        cl.addWidget(author_label)
-        
-        self.git_history_layout.addWidget(card)
+            msg_label = QLabel(data["message"])
+            msg_label.setFont(QFont("Microsoft YaHei", 10))
+            msg_label.setStyleSheet("color: #ccc;")
+            msg_label.setWordWrap(True)
+            dl.addWidget(msg_label)
+            author_label = QLabel(f"👤 {data.get('author', '')}")
+            author_label.setFont(QFont("Microsoft YaHei", 9))
+            author_label.setStyleSheet("color: #666;")
+            dl.addWidget(author_label)
+        cl.addWidget(detail)
+        for j in range(cl.count()):
+            h_item = cl.itemAt(j)
+            if h_item and h_item.layout():
+                for k in range(h_item.layout().count()):
+                    btn_item = h_item.layout().itemAt(k)
+                    if btn_item and btn_item.widget() and isinstance(btn_item.widget(), QPushButton):
+                        btn_text = btn_item.widget().text()
+                        if btn_text in ("▼", "▶"):
+                            btn_item.widget().setText("▼")
 
     def _switch_git_commit(self, commit_hash):
         """切换到指定Git提交"""
@@ -4585,6 +5254,34 @@ class MainWindow(QMainWindow):
         if success:
             self._append_log("✓ Git 版本切换成功，请重启应用以加载新资源包", "#4CAF50")
             self._refresh_git_history()
+
+    def _do_pull_update(self):
+        """执行资源包更新 - 双通道：git pull → Gitee API下载"""
+        self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
+        self.updater.progress = lambda p, l: self.progress_signal.emit(p, l)
+        if hasattr(self, '_btn_pull_update') and self._btn_pull_update:
+            self._btn_pull_update.setEnabled(False)
+        self._append_log("正在更新资源包...", "#FF9800")
+
+        def _pull():
+            success = False
+            if self.updater.is_git_repo():
+                self.log_signal.emit("使用 Git 更新...", "#FF9800")
+                success = self.updater.pull_update()
+            if not success:
+                self.log_signal.emit("Git 不可用，使用 Gitee API 下载更新包...", "#FF9800")
+                success = self.updater.download_update_via_gitee(
+                    progress_func=lambda p, l: self.progress_signal.emit(p, l)
+                )
+            if success:
+                self.log_signal.emit("✓ 资源包更新完成", "#4CAF50")
+                self._has_remote_update = False
+                self._ver_info_text = "✅ 已是最新版本"
+            else:
+                self.log_signal.emit("✗ 资源包更新失败", "#F44336")
+            QTimer.singleShot(500, self._check_remote_versions)
+
+        threading.Thread(target=_pull, daemon=True).start()
 
     # ── 环境检查与自动加载 ──
     def _auto_check_and_load(self):
@@ -4669,129 +5366,6 @@ class MainWindow(QMainWindow):
             self.electron_status_lbl.setText("✓ 已安装" if installed else "✗ 未安装")
             self.electron_status_lbl.setStyleSheet(f"color: {'#4CAF50' if installed else '#F44336'}; font-size: 11px; border: none;")
 
-    def _refresh_ver_list(self, remote_versions=None):
-        """刷新软件更新页面的版本历史列表"""
-        if not hasattr(self, 'ver_list_layout'):
-            return
-
-        while self.ver_list_layout.count():
-            item = self.ver_list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        local_versions = self.updater.get_local_version_history()
-
-        stable_exes = self.updater.list_stable_exes()
-        exe_versions = {}
-        for exe in stable_exes:
-            exe_versions[exe["version"]] = exe
-
-        current_version = ""
-        if hasattr(sys, 'frozen'):
-            import re
-            m = re.search(r'v(\d+\.\d+\.\d+\.\d+)', os.path.basename(sys.executable))
-            if m:
-                current_version = m.group(1)
-
-        local_ver_set = set()
-        all_versions = []
-
-        for v in local_versions:
-            ver = v.get("version", v.get("version_number", ""))
-            import re as _re
-            m = _re.search(r'v?(\d+\.\d+\.\d+\.\d+)', ver)
-            ver_num = m.group(1) if m else ver
-            if not ver_num:
-                continue
-            local_ver_set.add(ver_num)
-            all_versions.append({
-                "version": ver_num,
-                "name": v.get("name", f"v{ver_num}"),
-                "changes": v.get("changes", []),
-                "build_time": v.get("build_time", ""),
-                "git_commit": v.get("git_commit", ""),
-                "available": ver_num in exe_versions,
-                "exe_info": exe_versions.get(ver_num),
-                "is_remote_new": False,
-            })
-
-        if remote_versions:
-            for v in remote_versions:
-                ver = v.get("version", v.get("version_number", ""))
-                import re as _re2
-                m = _re2.search(r'v?(\d+\.\d+\.\d+\.\d+)', ver)
-                ver_num = m.group(1) if m else ver
-                if not ver_num:
-                    continue
-                if ver_num in local_ver_set:
-                    continue
-                all_versions.append({
-                    "version": ver_num,
-                    "name": v.get("name", f"v{ver_num}"),
-                    "changes": v.get("changes", []),
-                    "build_time": v.get("build_time", ""),
-                    "git_commit": v.get("git_commit", ""),
-                    "available": ver_num in exe_versions,
-                    "exe_info": exe_versions.get(ver_num),
-                    "is_remote_new": True,
-                })
-
-        for ver, exe in exe_versions.items():
-            if ver not in local_ver_set:
-                all_versions.append({
-                    "version": ver,
-                    "name": exe["filename"],
-                    "changes": [],
-                    "build_time": "",
-                    "git_commit": "",
-                    "available": True,
-                    "exe_info": exe,
-                    "is_remote_new": False,
-                })
-
-        all_versions.sort(key=lambda x: x["version"], reverse=True)
-
-        if not all_versions:
-            no_ver = QLabel("暂无版本历史记录")
-            no_ver.setStyleSheet("color: #555; padding: 20px; border: none; background: transparent;")
-            no_ver.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.ver_list_layout.addWidget(no_ver)
-            return
-
-        for v in all_versions:
-            self._create_version_card(v, v["version"] == current_version)
-
-    def _fetch_and_refresh_ver_list(self):
-        """后台获取远程版本信息并刷新列表"""
-        if hasattr(self, '_fetching_remote') and self._fetching_remote:
-            return
-        self._fetching_remote = True
-
-        self.update_info_label.setText("⏳ 正在获取远程版本信息...")
-
-        def _do_fetch():
-            remote = self.updater.fetch_remote_version_history()
-            self._fetching_remote = False
-            self._remote_ver_signal.emit(remote)
-
-        t = threading.Thread(target=_do_fetch, daemon=True)
-        t.start()
-
-    def _on_remote_ver_fetched(self, remote_versions):
-        """远程版本信息获取完成"""
-        if remote_versions is None:
-            self.update_info_label.setText("⚠️ 无法获取远程版本信息（网络不可达）")
-            self._refresh_ver_list(remote_versions=None)
-        else:
-            local_versions = self.updater.get_local_version_history()
-            new_versions = self.updater.compare_versions(local_versions, remote_versions)
-            if new_versions:
-                names = ", ".join(f"v{v.get('version', v.get('version_number', '?'))}" for v in new_versions[:3])
-                self.update_info_label.setText(f"🆕 发现 {len(new_versions)} 个远程新版本: {names}")
-            else:
-                self.update_info_label.setText("✅ 已是最新版本")
-            self._refresh_ver_list(remote_versions=remote_versions)
-
     def _on_voice_result(self, text: str):
         """语音识别结果回调"""
         self._pending_voice_result = text
@@ -4800,151 +5374,6 @@ class MainWindow(QMainWindow):
             self.web_view.page().runJavaScript(f"if(window.setVoiceResult) window.setVoiceResult({escaped});")
         except Exception:
             pass
-
-    def _create_version_card(self, version_info, is_current):
-        """创建版本卡片"""
-        ver = version_info["version"]
-        is_available = version_info.get("available", False)
-        is_remote_new = version_info.get("is_remote_new", False)
-        changes = version_info.get("changes", [])
-        build_time = version_info.get("build_time", "")
-        exe_info = version_info.get("exe_info")
-
-        card = QFrame()
-        card.setObjectName("verCard")
-        if is_current:
-            card.setStyleSheet("""
-                #verCard { background-color: #162016; border: 1px solid #1f3a1f; border-radius: 8px; }
-                #verCard:hover { background-color: #1a2a1a; border-color: #2a4a2a; }
-                QLabel { border: none; background: transparent; }
-                QWidget { border: none; background: transparent; }
-                QPushButton { border: none; }
-            """)
-        elif is_remote_new:
-            card.setStyleSheet("""
-                #verCard { background-color: #161620; border: 1px solid #1f3a4f; border-radius: 8px; }
-                #verCard:hover { background-color: #1a1a2a; border-color: #2a4a6a; }
-                QLabel { border: none; background: transparent; }
-                QWidget { border: none; background: transparent; }
-                QPushButton { border: none; }
-            """)
-        elif is_available:
-            card.setStyleSheet("""
-                #verCard { background-color: #161616; border: 1px solid #222; border-radius: 8px; }
-                #verCard:hover { background-color: #1c1c1c; border-color: #333; }
-                QLabel { border: none; background: transparent; }
-                QWidget { border: none; background: transparent; }
-                QPushButton { border: none; }
-            """)
-        else:
-            card.setStyleSheet("""
-                #verCard { background-color: #111; border: 1px solid #1a1a1a; border-radius: 8px; }
-                #verCard:hover { background-color: #161616; border-color: #222; }
-                QLabel { border: none; background: transparent; }
-                QWidget { border: none; background: transparent; }
-                QPushButton { border: none; }
-            """)
-
-        cl = QVBoxLayout(card)
-        cl.setSpacing(4)
-        cl.setContentsMargins(14, 10, 14, 10)
-
-        header = QHBoxLayout()
-        header.setSpacing(8)
-
-        ver_label = QLabel(f"v{ver}")
-        ver_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        if is_current:
-            ver_label.setStyleSheet("color: #4CAF50;")
-        elif is_remote_new:
-            ver_label.setStyleSheet("color: #42A5F5;")
-        elif not is_available:
-            ver_label.setStyleSheet("color: #555;")
-        else:
-            ver_label.setStyleSheet("color: #E0E0E0;")
-        header.addWidget(ver_label)
-
-        if build_time:
-            try:
-                from datetime import datetime as _dt
-                dt = _dt.fromisoformat(build_time)
-                date_str = dt.strftime("%Y-%m-%d %H:%M")
-            except:
-                date_str = build_time[:16]
-            date_label = QLabel(date_str)
-            date_label.setFont(QFont("Consolas", 9))
-            date_label.setStyleSheet("color: #555;")
-            header.addWidget(date_label)
-
-        header.addStretch()
-
-        if is_remote_new:
-            remote_tag = QLabel("🆕 远程新版本")
-            remote_tag.setFont(QFont("Microsoft YaHei", 9))
-            remote_tag.setStyleSheet("color: #42A5F5;")
-            header.addWidget(remote_tag)
-        elif is_available and exe_info:
-            exe_tag = QLabel("📦 含EXE稳定版")
-            exe_tag.setFont(QFont("Microsoft YaHei", 9))
-            exe_tag.setStyleSheet("color: #FF9800;")
-            header.addWidget(exe_tag)
-            if exe_info.get("size_mb"):
-                size_label = QLabel(f"{exe_info['size_mb']}MB")
-                size_label.setFont(QFont("Consolas", 9))
-                size_label.setStyleSheet("color: #555;")
-                header.addWidget(size_label)
-        elif not is_available:
-            status_label = QLabel("未提供")
-            status_label.setFont(QFont("Microsoft YaHei", 9))
-            status_label.setStyleSheet("color: #444;")
-            header.addWidget(status_label)
-
-        if is_current:
-            current_tag = QLabel("● 当前版本")
-            current_tag.setFont(QFont("Microsoft YaHei", 9))
-            current_tag.setStyleSheet("color: #4CAF50;")
-            header.addWidget(current_tag)
-        elif is_available and exe_info:
-            switch_btn = QPushButton("切换")
-            switch_btn.setFixedWidth(55)
-            switch_btn.setStyleSheet("""
-                QPushButton { background-color: #1e1e1e; border: 1px solid #2a2a2a; border-radius: 4px; padding: 3px 10px; font-size: 11px; color: #AAA; }
-                QPushButton:hover { background-color: #2a2a2a; border-color: #3a3a3a; color: #FFF; }
-            """)
-            gc = version_info.get("git_commit", "")
-            switch_btn.clicked.connect(lambda checked, p=exe_info["path"], c=gc: self.updater.switch_to_exe(p, c))
-            header.addWidget(switch_btn)
-
-        cl.addLayout(header)
-
-        detail = QWidget()
-        detail.setStyleSheet("border: none; background: transparent;")
-        dl = QVBoxLayout(detail)
-        dl.setSpacing(2)
-        dl.setContentsMargins(0, 4, 0, 0)
-
-        git_commit = version_info.get("git_commit", "")
-        if git_commit:
-            commit_label = QLabel(f"🔗 commit: {git_commit}")
-            commit_label.setFont(QFont("Consolas", 8))
-            commit_label.setStyleSheet("color: #555;")
-            dl.addWidget(commit_label)
-
-        if changes:
-            for ch in changes:
-                ch_label = QLabel(f"· {ch}")
-                ch_label.setFont(QFont("Microsoft YaHei", 9))
-                ch_label.setStyleSheet("color: #777;")
-                ch_label.setWordWrap(True)
-                dl.addWidget(ch_label)
-        else:
-            no_ch = QLabel("暂无修改记录")
-            no_ch.setFont(QFont("Microsoft YaHei", 9))
-            no_ch.setStyleSheet("color: #3a3a3a;")
-            dl.addWidget(no_ch)
-
-        cl.addWidget(detail)
-        self.ver_list_layout.addWidget(card)
 
     # ── 日志 ──
     def _append_log(self, message: str, color: str):
@@ -5170,72 +5599,6 @@ class MainWindow(QMainWindow):
         t.start()
 
     # ── 软件更新 ──
-    def _on_update(self):
-        """检查更新"""
-        self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
-
-        if not self.updater.is_git_repo():
-            self.log_signal.emit("当前不是 Git 仓库，无法检查更新", "#FF9800")
-            self.update_info_label.setText("<span style='color:#F44336'>当前不是 Git 仓库，无法检查更新</span>")
-            return
-
-        self.btn_check_update.setEnabled(False)
-        self.update_info_label.setText("正在检查更新...")
-
-        def _check():
-            result = self.updater.check_update()
-            self.update_info_signal.emit(json.dumps(result))
-
-        t = threading.Thread(target=_check, daemon=True)
-        t.start()
-
-        try:
-            self.update_info_signal.disconnect(self._on_update_result)
-        except:
-            pass
-        self.update_info_signal.connect(self._on_update_result)
-
-    def _on_update_result(self, info_json: str):
-        """更新检查结果回调"""
-        self.btn_check_update.setEnabled(True)
-        try:
-            info = json.loads(info_json)
-        except:
-            return
-
-        local = info.get("local", "unknown")
-        remote = info.get("remote", "unknown")
-        has_update = info.get("has_update", False)
-        error = info.get("error", "")
-
-        if error:
-            self.update_info_label.setText(f"<b>本地版本:</b> {local} | <b>远程版本:</b> {remote}<br><span style='color:#FF9800'>{error}</span>")
-        elif has_update:
-            self.update_info_label.setText(f"<b>本地版本:</b> {local} | <b>远程版本:</b> <span style='color:#4CAF50'>{remote}</span><br><span style='color:#4CAF50'>发现资源包更新！</span>")
-            self.btn_pull_update.setEnabled(True)
-        else:
-            self.update_info_label.setText(f"<b>本地版本:</b> {local} | <b>远程版本:</b> {remote}<br>资源包已是最新版本")
-            self.btn_pull_update.setEnabled(False)
-
-    def _do_pull_update(self):
-        """执行资源包更新"""
-        self.updater.log = lambda msg, color="#ccc": self.log_signal.emit(msg, color)
-        self.updater.progress = lambda p, l: self.progress_signal.emit(p, l)
-        self.btn_pull_update.setEnabled(False)
-        self.btn_check_update.setEnabled(False)
-
-        def _pull():
-            if self.updater.pull_update():
-                self.log_signal.emit("✓ 资源包更新完成", "#4CAF50")
-            else:
-                self.log_signal.emit("✗ 资源包更新失败", "#F44336")
-            self.btn_check_update.setEnabled(True)
-            # 更新后重新检查版本
-            QTimer.singleShot(500, self._on_update)
-
-        t = threading.Thread(target=_pull, daemon=True)
-        t.start()
-
     # ── 关闭 ──
     def _check_shutdown_signal(self):
         """检测是否有更新版本的实例要求本实例退出"""
@@ -5249,6 +5612,18 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if hasattr(sys, '_MEIPASS'):
+        os.environ['QTWEBENGINEPROCESS_PATH'] = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'bin', 'QtWebEngineProcess.exe')
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--disable-gpu'
+        if not os.environ.get('QTWEBENGINE_RESOURCES_PATH'):
+            res_path = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'resources')
+            if os.path.isdir(res_path):
+                os.environ['QTWEBENGINE_RESOURCES_PATH'] = res_path
+        if not os.environ.get('QTWEBENGINE_LOCALES_PATH'):
+            loc_path = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'translations', 'qtwebengine_locales')
+            if os.path.isdir(loc_path):
+                os.environ['QTWEBENGINE_LOCALES_PATH'] = loc_path
+
     _ensure_single_instance()
 
     try:
