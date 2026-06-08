@@ -107,3 +107,37 @@ table {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* 2026-06-08 TASK-2.6 引入：iOS / 移动端全局 safe-area 处理 */
+html {
+  /* 允许 background 延伸到 safe-area 之外 */
+  background: var(--bg-primary);
+}
+
+/* iOS 平滑滚动 + 弹性滚动 */
+html, body {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+/* iOS 触摸元素高亮关闭（更接近原生 app 体验） */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* iOS 输入框默认圆角去除 */
+input, textarea, select, button {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  border-radius: 0;
+}
+
+/* iOS safe-area 工具类 */
+.safe-top { padding-top: var(--safe-top); }
+.safe-bottom { padding-bottom: var(--safe-bottom); }
+.safe-left { padding-left: var(--safe-left); }
+.safe-right { padding-right: var(--safe-right); }
+.safe-x { padding-left: var(--safe-left); padding-right: var(--safe-right); }
+.safe-y { padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); }
+.safe-all { padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left); }
