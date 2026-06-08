@@ -1,0 +1,1656 @@
+[
+  {
+    "version": "2026.05.18.2348",
+    "name": "云集智能编程工作站v2026.05.18.2348",
+    "changes": [
+      "修复输入框中文拼音输入法",
+      "修复QHBoxLayout崩溃",
+      "改用onefile打包"
+    ],
+    "build_time": "2026-05-18T23:50:27.854914",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.1226",
+    "name": "云集智能编程工作站v2026.05.18.1226",
+    "changes": [
+      "Gitee API三通道更新",
+      "支持私有仓库Token认证",
+      "修复version_history.json旧格式兼容",
+      "下载zip包更新无需git"
+    ],
+    "build_time": "2026-05-18T12:27:34.643503",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.1026",
+    "name": "云集智能编程工作站v2026.05.18.1026",
+    "changes": [
+      "三通道版本更新(Gitee API/Git/HTTP)",
+      "无需安装git即可检查和下载更新",
+      "Gitee API下载zip包更新",
+      "保护用户数据(.env/venvs/projects)",
+      "GITEE_TOKEN配置"
+    ],
+    "build_time": "2026-05-18T10:27:44.933514",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0909",
+    "name": "云集智能编程工作站v2026.05.18.0909",
+    "changes": [
+      "更新页面聚焦远程版本",
+      "移除本地版本历史显示",
+      "添加更新资源包按钮",
+      "检查远程更新后可一键git pull"
+    ],
+    "build_time": "2026-05-18T09:10:10.092215",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0903",
+    "name": "云集智能编程工作站v2026.05.18.0903",
+    "changes": [
+      "软件更新页面重构",
+      "标签页架构(EXE稳定版/Git开发版)",
+      "远程版本检查改用git命令",
+      "卡片展开/折叠",
+      "全部展开/折叠按钮",
+      "version.json版本管理",
+      "构建脚本自动更新version.json"
+    ],
+    "build_time": "2026-05-18T09:04:27.491932",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0817",
+    "name": "云集智能编程工作站v2026.05.18.0817",
+    "changes": [
+      "三目录架构重构",
+      "修复sk-zhipu-伪Key过滤",
+      "修复.env路径",
+      "修复ProjectManager.DATA_ROOT",
+      "修复图标路径",
+      "UV/BUN缓存重定向到temp",
+      "日志路径修复"
+    ],
+    "build_time": "2026-05-18T08:17:55.047391",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0633",
+    "name": "云集智能编程工作站v2026.05.18.0633",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T06:34:04.162721",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0535",
+    "name": "云集智能编程工作站v2026.05.18.0535",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T05:36:11.392249",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0441",
+    "name": "云集智能编程工作站v2026.05.18.0441",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T04:42:28.086665",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0427",
+    "name": "云集智能编程工作站v2026.05.18.0427",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T04:28:07.140699",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0355",
+    "name": "云集智能编程工作站v2026.05.18.0355",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T03:56:44.472810",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0133",
+    "name": "云集智能编程工作站v2026.05.18.0133",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T01:34:19.800580",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.18.0121",
+    "name": "云集智能编程工作站v2026.05.18.0121",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-18T01:22:01.266385",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.17.0905",
+    "name": "云集智能编程工作站v2026.05.17.0905",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-17T09:07:09.651941",
+    "git_commit": "3a0f361"
+  },
+  {
+    "version": "2026.05.17.0552",
+    "name": "云集智能编程工作站v2026.05.17.0552",
+    "changes": [
+      "修复API启动卡顿",
+      "修复智谱账户持久化",
+      "新增部署维护界面",
+      "主题简化为暗黑/明亮"
+    ],
+    "build_time": "2026-05-17T05:57:03.137119",
+    "git_commit": "3a0f361"
+  },
+  {
+    "version": "2026.05.17.0055",
+    "name": "云集智能编程工作站v2026.05.17.0055",
+    "changes": [
+      "修复sleep函数未定义问题"
+    ],
+    "build_time": "2026-05-17T00:58:26.562918",
+    "git_commit": "aff1fec"
+  },
+  {
+    "version": "2026.05.16.1102",
+    "name": "云集智能编程工作站v2026.05.16.1102",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-16T11:04:42.925086",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.16.0925",
+    "name": "云集智能编程工作站v2026.05.16.0925",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-16T09:27:27.273584",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.16.0824",
+    "name": "云集智能编程工作站v2026.05.16.0824",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-16T08:26:33.491288",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.16.0631",
+    "name": "云集智能编程工作站v2026.05.16.0631",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-16T06:33:01.835167",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.16.0609",
+    "name": "云集智能编程工作站v2026.05.16.0609",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-16T06:10:28.071785",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.16.0518",
+    "name": "云集智能编程工作站v2026.05.16.0518",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-16T05:19:38.986521",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.16.0134",
+    "name": "云集智能编程工作站v2026.05.16.0134",
+    "changes": [
+      "快捷模型显示具体模型名;429错误友好提示;环境检测和部署维护按钮;终端工具栏优化;自动滚动开关"
+    ],
+    "build_time": "2026-05-16T01:35:56.912032",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.15.2149",
+    "name": "云集智能编程工作站v2026.05.15.2149",
+    "changes": [
+      "修复右键菜单中文化",
+      "修复中文输入法IME",
+      "修复智谱API持久化"
+    ],
+    "build_time": "2026-05-15T21:50:20.283512",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.1317",
+    "name": "云集智能编程工作站v2026.05.15.1317",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T13:19:27.062790",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.1306",
+    "name": "云集智能编程工作站v2026.05.15.1306",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T13:08:20.259424",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.1048",
+    "name": "云集智能编程工作站v2026.05.15.1048",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T10:51:41.697162",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0814",
+    "name": "云集智能编程工作站v2026.05.15.0814",
+    "changes": [
+      "修复IME输入法",
+      "修复API页面闪动",
+      "修复智谱持久化"
+    ],
+    "build_time": "2026-05-15T08:15:32.834563",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0701",
+    "name": "云集智能编程工作站v2026.05.15.0701",
+    "changes": [
+      "修复IME输入法无法使用",
+      "修复API页面闪动无法切换千问智谱"
+    ],
+    "build_time": "2026-05-15T07:02:16.721354",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0546",
+    "name": "云集智能编程工作站v2026.05.15.0546",
+    "changes": [
+      "修复输入框中文拼音输入法无法使用的问题"
+    ],
+    "build_time": "2026-05-15T05:47:42.554626",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0424",
+    "name": "云集智能编程工作站v2026.05.15.0424",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T04:26:09.273449",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0419",
+    "name": "云集智能编程工作站v2026.05.15.0419",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T04:20:56.013007",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0414",
+    "name": "云集智能编程工作站v2026.05.15.0414",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T04:15:40.512227",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0409",
+    "name": "云集智能编程工作站v2026.05.15.0409",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T04:10:27.768387",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0309",
+    "name": "云集智能编程工作站v2026.05.15.0309",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-15T03:10:09.364699",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0206",
+    "name": "云集智能编程工作站v2026.05.15.0206",
+    "changes": [
+      "多API互不干扰:API_SOURCE字段隔离千问和智谱"
+    ],
+    "build_time": "2026-05-15T02:07:51.611609",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0141",
+    "name": "云集智能编程工作站v2026.05.15.0141",
+    "changes": [
+      "fix-qwen-model-list"
+    ],
+    "build_time": "2026-05-15T01:42:28.454905",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0136",
+    "name": "云集智能编程工作站v2026.05.15.0136",
+    "changes": [
+      "修复千问模型列表显示智谱模型的bug"
+    ],
+    "build_time": "2026-05-15T01:37:12.822748",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0116",
+    "name": "云集智能编程工作站v2026.05.15.0116",
+    "changes": [
+      "修复智谱API持久化和Key同步机制",
+      "添加智谱API Key直接输入框",
+      "修复zhipu2api key pool回退机制",
+      "修复applySettings意外重置apiSource"
+    ],
+    "build_time": "2026-05-15T01:18:06.501880",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0053",
+    "name": "云集智能编程工作站v2026.05.15.0053",
+    "changes": [
+      "修复智谱API无法对话问题：1.自动同步API Key到zhipu2api key pool",
+      "2.Electron chat:send添加智谱路由逻辑",
+      "3.添加addZhipuAccount IPC桥接"
+    ],
+    "build_time": "2026-05-15T00:53:58.247505",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.15.0022",
+    "name": "云集智能编程工作站v2026.05.15.0022",
+    "changes": [
+      "修复设置持久化问题：1.callBackend桥接Electron desktopApi",
+      "2.扩展SETTINGS_KEYS支持API/Zhipu配置",
+      "3.完善localStorage持久化所有UI状态",
+      "4.实现设置变化自动保存到.env",
+      "5.Electron模式支持API/Zhipu模型列表",
+      "6.添加Electron delta/status事件监听"
+    ],
+    "build_time": "2026-05-15T00:23:27.219564",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.14.1408",
+    "name": "云集智能编程工作站v2026.05.14.1408",
+    "changes": [
+      "fix:zhipu2api区分余额不足(402)和频率限制(429),余额不足不重试",
+      "fix:智谱API错误码1113返回402而非429避免CLI无意义重试10次",
+      "fix:前端模型选择联动-右栏选zhipuModel自动更新左栏快捷模型按钮",
+      "fix:backend.py余额不足友好提示'模型余额不足请充值'"
+    ],
+    "build_time": "2026-05-14T14:10:37.547605",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.14.1329",
+    "name": "云集智能编程工作站v2026.05.14.1329",
+    "changes": [
+      "CRITICAL-FIX:_anthropic_stream缩进错误导致Python语法错误zhipu2api无法启动",
+      "fix:async-for循环体缺少4空格缩进",
+      "fix:整个_anthropic_stream函数重写确保缩进正确"
+    ],
+    "build_time": "2026-05-14T13:31:43.603321",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.14.1258",
+    "name": "云集智能编程工作站v2026.05.14.1258",
+    "changes": [
+      "fix:loadLocalSettings空字符串不覆盖.env已有值(apiKey/zhipuApiKey等敏感字段)",
+      "fix:空数组和空对象不覆盖已有qwenAccounts",
+      "fix:settings恢复跳过空字符串值"
+    ],
+    "build_time": "2026-05-14T12:59:59.906943",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.14.1250",
+    "name": "云集智能编程工作站v2026.05.14.1250",
+    "changes": [
+      "fix:流式429重试切换key而非直接返回error",
+      "fix:429-cooldown15s→30s加重试间隔2s",
+      "fix:前端429提示限制显示次数避免刷屏(只显示前2次+最后1次)",
+      "fix:stream_chat和anthropic_stream统一429重试逻辑"
+    ],
+    "build_time": "2026-05-14T12:52:16.949526",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.14.1215",
+    "name": "云集智能编程工作站v2026.05.14.1215",
+    "changes": [
+      "fix:智谱工具调用修复-代理模式走Anthropic格式原生工具支持",
+      "fix:zhipu2api chat_completions消息转换保留tool_calls/tool_call_id",
+      "fix:zhipu2api anthropic_to_openai消息转换tool_result用role=tool格式",
+      "feat:智谱代理/直连自动区分"
+    ],
+    "build_time": "2026-05-14T12:16:46.381413",
+    "git_commit": "d7b35cb"
+  },
+  {
+    "version": "2026.05.14.1150",
+    "name": "云集智能编程工作站v2026.05.14.1150",
+    "changes": [
+      "fix:localStorage持久化修复-applySettings后加载避免覆盖",
+      "feat:settings和modelConfigs纳入持久化",
+      "feat:zhipuApiChecked/terminalExpanded/terminalDebug持久化",
+      "fix:watch监听去除computed和重复项"
+    ],
+    "build_time": "2026-05-14T11:53:09.198483",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.1140",
+    "name": "云集智能编程工作站v2026.05.14.1140",
+    "changes": [
+      "fix:智谱API 429重试逻辑和key切换",
+      "feat:停止/发送按钮统一设计(蓝色停止)",
+      "feat:快捷模型自动检测激活模型",
+      "feat:所有输入和设置localStorage持久化",
+      "feat:运行日志框滚动/展开/调试/清空/复制/保存功能"
+    ],
+    "build_time": "2026-05-14T11:42:08.469206",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0841",
+    "name": "云集智能编程工作站v2026.05.14.0841",
+    "changes": [
+      "修复千问切换状态丢失;统一千问智谱UI模板;增大字体提高可读性;服务状态持久化"
+    ],
+    "build_time": "2026-05-14T08:43:46.476638",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0830",
+    "name": "云集智能编程工作站v2026.05.14.0830",
+    "changes": [
+      "恢复进度条设计;服务状态持久化;快捷模型分类显示与激活状态判断;支持两边同时启动"
+    ],
+    "build_time": "2026-05-14T08:32:00.087352",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0804",
+    "name": "云集智能编程工作站v2026.05.14.0804",
+    "changes": [
+      "模式切换增加问号气泡说明;统一千问智谱API Key添加UI;去除一键启动改为启动服务"
+    ],
+    "build_time": "2026-05-14T08:06:43.902034",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0744",
+    "name": "云集智能编程工作站v2026.05.14.0744",
+    "changes": [
+      "快捷模型切换功能;去除自动启动服务;支持两边同时运行;模型设置面板;多用户数据分级架构"
+    ],
+    "build_time": "2026-05-14T07:46:28.486120",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0713",
+    "name": "云集智能编程工作站v2026.05.14.0713",
+    "changes": [
+      "多用户数据分级架构",
+      "公共数据与用户私密数据隔离",
+      "支持未来登录功能",
+      "Python缓存重定向到temp",
+      "修复TypeScript报错"
+    ],
+    "build_time": "2026-05-14T07:15:26.226138",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0401",
+    "name": "云集智能编程工作站v2026.05.14.0354",
+    "changes": [
+      "API服务注册表+按模型名自动路由",
+      "一键启动全部服务",
+      "服务类型识别",
+      "旧虚拟环境迁移",
+      "三目录架构修正",
+      "PYTHONDONTWRITEBYTECODE子进程传递"
+    ],
+    "build_time": "2026-05-14T04:25:18.782864",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.14.0354",
+    "name": "云集智能编程工作站v2026.05.14.0354",
+    "changes": [
+      "API服务注册表+按模型名自动路由",
+      "一键启动全部服务",
+      "服务类型识别",
+      "旧虚拟环境迁移",
+      "三目录架构修正",
+      "PYTHONDONTWRITEBYTECODE子进程传递"
+    ],
+    "build_time": "2026-05-14T03:57:21.282639",
+    "git_commit": "9f7cc19"
+  },
+  {
+    "version": "2026.05.13.1325",
+    "name": "云集智能编程工作站v2026.05.13.1325",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-13T13:26:27.337049",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.13.1320",
+    "name": "云集智能编程工作站v2026.05.13.1320",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-13T13:21:54.882442",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.13.1300",
+    "name": "云集智能编程工作站v2026.05.13.1300",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-13T13:01:18.693487",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.13.1255",
+    "name": "云集智能编程工作站v2026.05.13.1255",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-13T12:56:59.163504",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.13.1209",
+    "name": "云集智能编程工作站v2026.05.13.1209",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-13T12:10:07.689019",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.13.1045",
+    "name": "云集智能编程工作站v2026.05.13.1045",
+    "changes": [
+      "三目录纯净整合包架构改造: app/(只读代码)+data/(用户数据)+temp/(临时文件)"
+    ],
+    "build_time": "2026-05-13T10:47:02.887318",
+    "git_commit": ""
+  },
+  {
+    "version": "2026.05.13.0659",
+    "name": "云集智能编程工作站v2026.05.13.0659",
+    "changes": [
+      "数据目录改名：~/.yunji/projects/  ~/.yunji/data/"
+    ],
+    "build_time": "2026-05-13T07:00:53.605541",
+    "git_commit": "6e356b6"
+  },
+  {
+    "version": "2026.05.13.0625",
+    "name": "云集智能编程工作站v2026.05.13.0625",
+    "changes": [
+      "数据路径与工作区路径分离：AI数据存~/.yunji/projects/不污染用户目录"
+    ],
+    "build_time": "2026-05-13T06:27:53.327608",
+    "git_commit": "6e356b6"
+  },
+  {
+    "version": "2026.05.13.0319",
+    "name": "云集智能编程工作站v2026.05.13.0319",
+    "changes": [
+      "修复CLI跳过API代理的问题",
+      "改为SDK直连zhipu2api",
+      "设置ANTHROPIC_BASE_URL和ANTHROPIC_MODEL"
+    ],
+    "build_time": "2026-05-13T03:21:13.658824",
+    "git_commit": "b723443"
+  },
+  {
+    "version": "2026.05.13.0132",
+    "name": "云集智能编程工作站v2026.05.13.0132",
+    "changes": [
+      "修复旧版zhipu2api未重启",
+      "添加版本检查和强制杀进程重启机制"
+    ],
+    "build_time": "2026-05-13T01:34:42.632373",
+    "git_commit": "b723443"
+  },
+  {
+    "version": "2026.05.13.0111",
+    "name": "云集智能编程工作站v2026.05.13.0111",
+    "changes": [
+      "修复智谱GLM-5.1推理模型reasoning_content字段未处理",
+      "支持reasoning_content转text_delta",
+      "修复key池为空时认证拒绝"
+    ],
+    "build_time": "2026-05-13T01:14:14.070953",
+    "git_commit": "b723443"
+  },
+  {
+    "version": "2026.05.12.2211",
+    "name": "云集智能编程工作站v2026.05.12.2211",
+    "changes": [
+      "单实例控制优化",
+      "同版本同路径激活已运行窗口",
+      "同版本不同路径通知旧实例退出",
+      "命名共享内存存储EXE路径"
+    ],
+    "build_time": "2026-05-12T22:13:09.565176",
+    "git_commit": "b723443"
+  },
+  {
+    "version": "2026.05.12.2207",
+    "name": "云集智能编程工作站v2026.05.12.2207",
+    "changes": [
+      "修复API一键启动获取Key失败",
+      "fetch_zhipu_api_key返回格式与前端期望不匹配",
+      "fetch_api_key增加详细错误信息",
+      "create_zhipu_api_key格式修正"
+    ],
+    "build_time": "2026-05-12T22:09:00.271073",
+    "git_commit": "b723443"
+  },
+  {
+    "version": "2026.05.12.2142",
+    "name": "云集智能编程工作站v2026.05.12.2142",
+    "changes": [
+      "单实例控制:命名互斥体+命名事件替代psutil暴力kill",
+      "同版本提示已运行避免重复启动",
+      "不同版本通过命名事件优雅退出",
+      "关闭信号检测定时器",
+      "清理互斥体和事件句柄"
+    ],
+    "build_time": "2026-05-12T21:44:32.029641",
+    "git_commit": "b723443"
+  },
+  {
+    "version": "2026.05.12.1944",
+    "name": "云集智能编程工作站v2026.05.12.1944",
+    "changes": [
+      "单实例控制:命名互斥体+命名事件替代psutil暴力kill",
+      "同版本提示已运行",
+      "不同版本优雅退出"
+    ],
+    "build_time": "2026-05-12T19:50:15.479976",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.1026",
+    "name": "云集智能编程工作站v2026.05.12.1026",
+    "changes": [
+      "修复zhipu2api空key池时直接使用API代理传递的key",
+      "支持无key池直接转发",
+      "杀掉旧zhipu2api进程"
+    ],
+    "build_time": "2026-05-12T10:29:01.371346",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.1010",
+    "name": "云集智能编程工作站v2026.05.12.1010",
+    "changes": [
+      "修复zhipu2api空key池直接拒绝请求",
+      "改为使用API代理传递的key直接转发"
+    ],
+    "build_time": "2026-05-12T10:13:07.720646",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0932",
+    "name": "云集智能编程工作站v2026.05.12.0932",
+    "changes": [
+      "修复智谱认证失败Not_logged_in",
+      "添加ANTHROPIC_API_KEY环境变量让SDK识别Key"
+    ],
+    "build_time": "2026-05-12T09:34:53.374504",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0911",
+    "name": "云集智能编程工作站v2026.05.12.0911",
+    "changes": [
+      "修复zhipu2api服务未自动启动",
+      "添加QWebEngineProfile持久化存储",
+      "智谱Key后端文件存储",
+      "发送前自动检查服务状态"
+    ],
+    "build_time": "2026-05-12T09:13:34.139959",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0827",
+    "name": "云集智能编程工作站v2026.05.12.0827",
+    "changes": [
+      "修复智谱API模型名验证失败",
+      "使用API代理转发而非SDK直连",
+      "去掉API_BASE_URL的/v1后缀"
+    ],
+    "build_time": "2026-05-12T08:30:01.586663",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0813",
+    "name": "云集智能编程工作站v2026.05.12.0813",
+    "changes": [
+      "修复发送消息时配置未同步到后端的问题",
+      "添加saveSettingsQuiet自动同步"
+    ],
+    "build_time": "2026-05-12T08:16:04.295860",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0754",
+    "name": "云集智能编程工作站v2026.05.12.0754",
+    "changes": [
+      "修复智谱API双重/v1路径问题",
+      "修复智谱认证支持上游key",
+      "添加ANTHROPIC_MODEL环境变量",
+      "设置项实时持久化",
+      "按钮样式优化"
+    ],
+    "build_time": "2026-05-12T07:56:44.128439",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0743",
+    "name": "云集智能编程工作站v2026.05.12.0743",
+    "changes": [
+      "发送按钮改为文字按钮风格",
+      "保持分隔线设计"
+    ],
+    "build_time": "2026-05-12T07:46:25.082474",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0658",
+    "name": "云集智能编程工作站v2026.05.12.0658",
+    "changes": [
+      "修复智谱API空文本响应",
+      "添加Anthropic兼容端点",
+      "重新设计发送按钮风格"
+    ],
+    "build_time": "2026-05-12T07:01:24.665505",
+    "git_commit": "d126333"
+  },
+  {
+    "version": "2026.05.12.0635",
+    "name": "云集智能编程工作站v2026.05.12.0635",
+    "changes": [
+      "修复智谱模式仍走千问代理",
+      "修复MACRO.VERSION未定义导致CLI崩溃"
+    ],
+    "build_time": "2026-05-12T06:37:17.587594",
+    "git_commit": "354aa32"
+  },
+  {
+    "version": "2026.05.12.0601",
+    "name": "云集智能编程工作站v2026.05.12.0601",
+    "changes": [
+      "问号气泡提示替换静态说明",
+      "智谱Key本地存储不依赖代理服务",
+      "修复添加Key无反应"
+    ],
+    "build_time": "2026-05-12T06:03:56.732076",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0551",
+    "name": "云集智能编程工作站v2026.05.12.0551",
+    "changes": [
+      "修复智谱添加Key无反应:代理未启动时直接保存Key用于直连官方API"
+    ],
+    "build_time": "2026-05-12T05:53:36.035762",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0528",
+    "name": "云集智能编程工作站v2026.05.12.0528",
+    "changes": [
+      "智谱添加登录窗口:邮箱+密码登录Z.ai自动获取API Key"
+    ],
+    "build_time": "2026-05-12T05:30:28.437390",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0503",
+    "name": "云集智能编程工作站v2026.05.12.0503",
+    "changes": [
+      "修复智谱注册链接:Z.ai打开chat页面(有Login入口)",
+      "国内版打开登录页"
+    ],
+    "build_time": "2026-05-12T05:05:59.584159",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0418",
+    "name": "云集智能编程工作站v2026.05.12.0418",
+    "changes": [
+      "修复外部链接无法打开浏览器:通过Bridge调用webbrowser.open"
+    ],
+    "build_time": "2026-05-12T04:20:45.187427",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0404",
+    "name": "云集智能编程工作站v2026.05.12.0404",
+    "changes": [
+      "智谱注册改为引导式:一键打开Z.ai注册页面",
+      "添加Key时自动验证有效性"
+    ],
+    "build_time": "2026-05-12T04:07:32.337285",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0340",
+    "name": "云集智能编程工作站v2026.05.12.0340",
+    "changes": [
+      "修复智谱自动注册:服务未启动时自动启动",
+      "修复错误信息为空"
+    ],
+    "build_time": "2026-05-12T03:43:03.996712",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0314",
+    "name": "云集智能编程工作站v2026.05.12.0314",
+    "changes": [
+      "智谱自动注册(Z.ai海外版+临时邮箱)",
+      "注册进度实时显示"
+    ],
+    "build_time": "2026-05-12T03:16:11.192576",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0242",
+    "name": "云集智能编程工作站v2026.05.12.0242",
+    "changes": [
+      "智谱API统一设计:一键启动+账户池+Key轮换",
+      "zhipu2api代理服务"
+    ],
+    "build_time": "2026-05-12T02:44:54.019486",
+    "git_commit": "b2666aa"
+  },
+  {
+    "version": "2026.05.12.0208",
+    "name": "云集智能编程工作站v2026.05.12.0208",
+    "changes": [
+      "去除冗余模型信息区",
+      "去除模型名称输入框",
+      "右键菜单中文化"
+    ],
+    "build_time": "2026-05-12T02:10:34.929881",
+    "git_commit": "4fb5209"
+  },
+  {
+    "version": "2026.05.12.0149",
+    "name": "云集智能编程工作站v2026.05.12.0149",
+    "changes": [
+      "侧边栏恢复模型配置+账户管理",
+      "移除重复系统设置按钮",
+      "API源切换下移独立区域"
+    ],
+    "build_time": "2026-05-12T01:51:39.866584",
+    "git_commit": "f14a942"
+  },
+  {
+    "version": "2026.05.12.0104",
+    "name": "云集智能编程工作站v2026.05.12.0104",
+    "changes": [
+      "侧边栏大幅精简",
+      "去除与系统设置重复的功能",
+      "API源二级Tab切换",
+      "新建/停止按钮移至发送栏",
+      "智谱GLM集成"
+    ],
+    "build_time": "2026-05-12T01:06:43.151219",
+    "git_commit": "f14a942"
+  },
+  {
+    "version": "2026.05.12.0004",
+    "name": "云集智能编程工作站v2026.05.12.0004",
+    "changes": [
+      "API模式二级Tab重构",
+      "千问智谱共用配置页面",
+      "侧边栏精简优化",
+      "新建/停止按钮移至发送栏",
+      "新增GLM-5.1/GLM-4.7等16个智谱模型",
+      "支持未来扩展更多API源"
+    ],
+    "build_time": "2026-05-12T00:07:02.188136",
+    "git_commit": "f14a942"
+  },
+  {
+    "version": "2026.05.11.2351",
+    "name": "云集智能编程工作站v2026.05.11.2351",
+    "changes": [
+      "API模式重构：智谱集成API源",
+      "侧边栏精简优化",
+      "新建/停止按钮移至发送栏",
+      "新增GLM-5.1/GLM-4.7等16个模型",
+      "支持未来扩展更多API源"
+    ],
+    "build_time": "2026-05-11T23:53:07.260560",
+    "git_commit": "f14a942"
+  },
+  {
+    "version": "2026.05.11.2324",
+    "name": "云集智能编程工作站v2026.05.11.2324",
+    "changes": [
+      "智谱GLM API集成",
+      "新增GLM-5.1/GLM-4.7-Flash等16个模型",
+      "运行模式新增智谱选项",
+      "支持智谱官方API直连"
+    ],
+    "build_time": "2026-05-11T23:26:49.996497",
+    "git_commit": "b70b76e"
+  },
+  {
+    "version": "2026.05.11.1944",
+    "name": "云集智能编程工作站v2026.05.11.1944",
+    "changes": [
+      "P0-P3全面核对修复版：清理未使用变量",
+      "修复语音识别信号连接",
+      "69个前后端接口全部对齐验证"
+    ],
+    "build_time": "2026-05-11T19:46:11.495354",
+    "git_commit": "a69cd5a"
+  },
+  {
+    "version": "2026.05.11.1447",
+    "name": "云集智能编程工作站v2026.05.11.1447",
+    "changes": [
+      "P3远期愿景：插件扩展系统(安装/管理/执行Python插件)",
+      "语音交互(语音输入识别+朗读输出)",
+      "离线模式增强(本地模型缓存/断网可用/对话记忆模板缓存)"
+    ],
+    "build_time": "2026-05-11T14:48:59.244698",
+    "git_commit": "a69cd5a"
+  },
+  {
+    "version": "2026.05.11.1234",
+    "name": "云集智能编程工作站v2026.05.11.1234",
+    "changes": [
+      "P5阶段：主题系统(暗黑/浅色/蓝色/绿色4种配色)",
+      "桌面通知(AI回复完成提醒)",
+      "对话搜索增强(全文搜索+高亮跳转)",
+      "文件浏览器(项目文件树)",
+      "系统托盘图标"
+    ],
+    "build_time": "2026-05-11T12:35:55.518486",
+    "git_commit": "a69cd5a"
+  },
+  {
+    "version": "2026.05.11.1114",
+    "name": "云集智能编程工作站v2026.05.11.1114",
+    "changes": [
+      "P4阶段：终端集成(嵌入终端面板+命令执行+cd目录跟踪)",
+      "Git集成(状态/提交/日志查看)",
+      "代码片段库(保存/管理/快速插入)"
+    ],
+    "build_time": "2026-05-11T11:16:46.437060",
+    "git_commit": "a69cd5a"
+  },
+  {
+    "version": "2026.05.11.1005",
+    "name": "云集智能编程工作站v2026.05.11.1005",
+    "changes": [
+      "修复顶部导航栏激活状态显示问题"
+    ],
+    "build_time": "2026-05-11T10:07:03.647655",
+    "git_commit": "7f5ec51"
+  },
+  {
+    "version": "2026.05.11.0847",
+    "name": "云集智能编程工作站v2026.05.11.0847",
+    "changes": [
+      "P3阶段：顶部导航新增项目管理+系统设置栏目",
+      "设置页面改为内嵌式(非弹窗)",
+      "修复下拉框白色背景BUG",
+      "版本历史展示",
+      "项目卡片式管理"
+    ],
+    "build_time": "2026-05-11T08:58:41.985453",
+    "git_commit": "7f5ec51"
+  },
+  {
+    "version": "2026.05.11.0726",
+    "name": "云集智能编程工作站v2026.05.11.0726",
+    "changes": [
+      "P3阶段：系统设置页面(6大分类:通用/模型/账户/记忆/项目/高级)",
+      "卡片式布局+左侧导航",
+      "专业级设置界面",
+      "工具栏设置按钮+斜杠命令/settings"
+    ],
+    "build_time": "2026-05-11T07:29:00.032473",
+    "git_commit": "7f5ec51"
+  },
+  {
+    "version": "2026.05.11.0701",
+    "name": "云集智能编程工作站v2026.05.11.0701",
+    "changes": [
+      "P2阶段：智能记忆系统增强(四类记忆+去重合并+相关度搜索)",
+      "代码模板库(16个预置模板+自定义模板+项目脚手架)",
+      "实时预览面板(iframe嵌入预览)",
+      "多步骤任务编排(任务添加/状态/执行)",
+      "AI协作模式(规划-编码-审查/结对编程/纯审查)"
+    ],
+    "build_time": "2026-05-11T07:04:07.593845",
+    "git_commit": "61575d4"
+  },
+  {
+    "version": "2026.05.11.0627",
+    "name": "云集智能编程工作站v2026.05.11.0627",
+    "changes": [
+      "修复JS运行时错误(TDZ)",
+      "运行服务页面正常显示",
+      "JS控制台调试日志"
+    ],
+    "build_time": "2026-05-11T06:30:56.772757",
+    "git_commit": "caa58d7"
+  },
+  {
+    "version": "2026.05.11.0615",
+    "name": "云集智能编程工作站v2026.05.11.0615",
+    "changes": [
+      "调试JS控制台输出",
+      "修复运行服务页面显示问题"
+    ],
+    "build_time": "2026-05-11T06:18:42.239874",
+    "git_commit": "caa58d7"
+  },
+  {
+    "version": "2026.05.11.0600",
+    "name": "云集智能编程工作站v2026.05.11.0600",
+    "changes": [
+      "P0+P1功能更新",
+      "对话搜索/标题/删除/重命名",
+      "项目记忆库管理(CLAUDE.md)",
+      "6种开发角色预设",
+      "消息重发/编辑/分支",
+      "上下文窗口可视化",
+      "快捷指令系统(/compact等)",
+      "对话导出(Markdown/JSON)",
+      "API模型高级参数(TopP/频率惩罚)",
+      "文件变更追踪",
+      "三级工具审批模式",
+      "5种项目工作流模板",
+      "修复workspace路径问题",
+      "修复Glob超时问题"
+    ],
+    "build_time": "2026-05-11T06:04:06.302896",
+    "git_commit": "caa58d7"
+  },
+  {
+    "version": "2026.05.11.0217",
+    "name": "云集智能编程工作站v2026.05.11.0217",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-11T02:20:18.360896",
+    "git_commit": "f0b0190"
+  },
+  {
+    "version": "2026.05.11.0122",
+    "name": "云集智能编程工作站v2026.05.11.0122",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-11T01:24:27.622888",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.11.0104",
+    "name": "云集智能编程工作站v2026.05.11.0104",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-11T01:07:29.091681",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.11.0041",
+    "name": "云集智能编程工作站v2026.05.11.0041",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-11T00:44:31.167488",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.11.0002",
+    "name": "云集智能编程工作站v2026.05.11.0002",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-11T00:04:39.716457",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.2331",
+    "name": "云集智能编程工作站v2026.05.10.2331",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T23:33:20.128399",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.2139",
+    "name": "云集智能编程工作站v2026.05.10.2139",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T21:41:05.505060",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.2030",
+    "name": "云集智能编程工作站v2026.05.10.2030",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T20:32:20.338934",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.2010",
+    "name": "云集智能编程工作站v2026.05.10.2010",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T20:12:20.069770",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.1958",
+    "name": "云集智能编程工作站v2026.05.10.1958",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T19:59:59.782342",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.1947",
+    "name": "云集智能编程工作站v2026.05.10.1947",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T19:49:19.064118",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.1918",
+    "name": "云集智能编程工作站v2026.05.10.1918",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T19:20:18.225619",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0426",
+    "name": "云集智能编程工作站v2026.05.10.0426",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T04:27:55.387797",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0422",
+    "name": "云集智能编程工作站v2026.05.10.0422",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T04:24:00.088994",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0407",
+    "name": "云集智能编程工作站v2026.05.10.0407",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T04:08:52.893320",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0231",
+    "name": "云集智能编程工作站v2026.05.10.0231",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T02:33:31.555192",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0227",
+    "name": "云集智能编程工作站v2026.05.10.0227",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T02:29:04.448494",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0150",
+    "name": "云集智能编程工作站v2026.05.10.0150",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T01:52:22.390776",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.10.0018",
+    "name": "云集智能编程工作站v2026.05.10.0018",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-10T00:19:48.505084",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.2036",
+    "name": "云集智能编程工作站v2026.05.09.2036",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T20:38:55.911099",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.1930",
+    "name": "云集智能编程工作站v2026.05.09.1930",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T19:32:30.838254",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.1915",
+    "name": "云集智能编程工作站v2026.05.09.1915",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T19:17:38.828726",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.1807",
+    "name": "云集智能编程工作站v2026.05.09.1807",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T18:09:53.417556",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.1727",
+    "name": "云集智能编程工作站v2026.05.09.1727",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T17:29:31.156422",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0825",
+    "name": "云集智能编程工作站v2026.05.09.0825",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T08:28:00.737446",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0814",
+    "name": "云集智能编程工作站v2026.05.09.0814",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T08:17:11.620535",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0753",
+    "name": "云集智能编程工作站v2026.05.09.0753",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T07:54:47.025615",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0744",
+    "name": "云集智能编程工作站v2026.05.09.0744",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T07:46:44.708030",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0653",
+    "name": "云集智能编程工作站v2026.05.09.0653",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T06:56:46.456107",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0644",
+    "name": "云集智能编程工作站v2026.05.09.0644",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T06:47:14.485799",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0613",
+    "name": "云集智能编程工作站v2026.05.09.0613",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T06:15:35.275212",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0607",
+    "name": "云集智能编程工作站v2026.05.09.0607",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T06:09:24.267200",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.09.0520",
+    "name": "云集智能编程工作站v2026.05.09.0520",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-09T05:22:29.879502",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.08.0802",
+    "name": "云集智能编程工作站v2026.05.08.0802",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-08T08:04:41.091598",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.08.0712",
+    "name": "云集智能编程工作站v2026.05.08.0712",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-08T07:15:07.286191",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.08.0651",
+    "name": "云集智能编程工作站v2026.05.08.0651",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-08T06:54:12.911437",
+    "git_commit": "1a1078d"
+  },
+  {
+    "version": "2026.05.08.0603",
+    "name": "云集智能编程工作站v2026.05.08.0603",
+    "changes": [
+      "前端集成到EXE (QWebEngineView替代Electron)",
+      "统一终端架构，部署维护成为EXE内置功能",
+      "QWebChannel替代Electron IPC",
+      "backend.py替代main.cjs后端逻辑"
+    ],
+    "build_time": "2026-05-08T06:05:48.882597",
+    "git_commit": "1a1078d"
+  }
+]
