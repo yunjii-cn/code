@@ -27,6 +27,22 @@
 /dev/backup/
 /dev/.git.bak/
 /dev/.git.backup/
+# ── dev/ 下的 EXE 构建目录（云集智能编程工作站-v* / _internal/，不推送）──
+/dev/云集智能编程工作站-v*/
+/dev/debug_build*/
+# ── dev/ 根的调试和临时文件（不推送）──
+/dev/debug_err*.txt
+/dev/debug_out*.txt
+/dev/test_stderr.txt
+/dev/test_stdout.txt
+/dev/.yunji.lock
+# ── dev/ 根的开发辅助脚本（不推送，本地使用）──
+/dev/运行Web开发-静默.vbs
+/dev/运行Web开发.bat
+/dev/运行桌面版.bat
+/dev/run_dev.bat
+/dev/start-web-test.bat
+/dev/test-web-exe.bat
 
 # ── dev/ 根目录下的构建产物和运行时文件（不推送）──
 /dev/icon.ico
