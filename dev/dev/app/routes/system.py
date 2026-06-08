@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict
 
 from services.config_service import ConfigService
+from platformkit.shared import git_core
 
 router = APIRouter(prefix="/api/system", tags=["系统信息/设置"])
 config_service = ConfigService()
@@ -91,6 +92,52 @@ async def get_git_status(project_path: str = Query(..., description="项目路�
 async def git_commit(project_path: str = Query(..., description="项目路径"), message: str = Query(..., description="提交信息")):
     """Git提交"""
     return await config_service.git_commit(project_path, message)
+
+
+# 2026-06-08 TASK-2.2 引入：DiffView 增强
+class RestoreFileRequest(BaseModel):
+    project_path: str = Field(..., description="项目根路径")
+    file_path: str = Field(..., description="相对文件路径")
+    staged: bool = Field(False, description="True=仅取消暂存，False=完全回退到 HEAD")
+
+
+@router.post("/git/file/restore")
+async def git_restore_file(req: RestoreFileRequest):
+    """单文件回退到 HEAD（git restore）。
+
+    Args:
+        staged: True=仅取消暂存（git restore --staged），False=完全回退（git restore）
+    """
+    res = git_core.restore_file(req.project_path, req.file_path, staged=req.staged)
+    if not res["ok"]:
+        return res
+    return res
+
+
+@router.get("/git/file/diff")
+async def git_file_diff(
+    project_path: str = Query(..., description="项目根路径"),
+    file_path: str = Query(..., description="相对文件路径"),
+    staged: bool = Query(False, description="True=已暂存，False=未暂存"),
+    context_lines: int = Query(3, ge=0, le=50),
+):
+    """获取单个文件的 diff（带行号信息的增强格式）。
+
+    Returns:
+        {
+            "ok": True,
+            "data": {
+                "file": str,
+                "raw": str,
+                "hunks": [{oldStart, oldLines, newStart, newLines, header, lines: [...]}],
+                "stats": {additions, deletions}
+            }
+        }
+    """
+    res = git_core.get_file_diff(project_path, file_path, staged=staged, context_lines=context_lines)
+    if not res["ok"]:
+        return res
+    return res
 
 
 @router.get("/git/log")

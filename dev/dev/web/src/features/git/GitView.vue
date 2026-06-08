@@ -22,6 +22,11 @@ const diffOutput = ref('')
 const diffLoading = ref(false)
 const diffMode = ref<'unstaged' | 'staged'>('unstaged')
 
+// 2026-06-08 TASK-2.2 引入：DiffView 增强
+const diffSearchKeyword = ref('')
+const showRestoreConfirm = ref(false)
+const restoreTargetFile = ref('')
+
 const showCommitArea = ref(false)
 
 const selectedCommit = ref<typeof gitLog.value[0] | null>(null)
@@ -155,6 +160,48 @@ async function loadStagedDiff() {
     diffOutput.value = `获取差异失败: ${e.message}`
   } finally {
     diffLoading.value = false
+  }
+}
+
+// 2026-06-08 TASK-2.2 引入：DiffView 增强 - 单文件回退
+async function restoreSingleFile(file: string, stagedOnly: boolean = false) {
+  const project = projectStore.activeProject
+  if (!project) return
+  try {
+    actionLoading.value = `restore-${file}`
+    const res: any = await systemApi.restoreFile(project.path, file, stagedOnly)
+    if (res?.ok !== false && !res?.error) {
+      showToast(stagedOnly ? '已取消暂存' : '已回退文件')
+      showRestoreConfirm.value = false
+      restoreTargetFile.value = ''
+      await loadGitStatus()
+    } else {
+      showToast(`回退失败: ${res?.error || '未知错误'}`)
+    }
+  } catch (e: any) {
+    showToast(`回退失败: ${e.message}`)
+  } finally {
+    actionLoading.value = ''
+  }
+}
+
+function confirmRestore(file: string) {
+  restoreTargetFile.value = file
+  showRestoreConfirm.value = true
+}
+
+// 2026-06-08 TASK-2.2 引入：搜索高亮（把 keyword 包成高亮 HTML）
+function highlightText(text: string, keyword: string): string {
+  if (!keyword || !keyword.trim()) return text
+  try {
+    const safe = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+    const pattern = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+    return safe.replace(pattern, (m) => `<mark class="diff-search-mark">${m}</mark>`)
+  } catch {
+    return text
   }
 }
 
@@ -554,23 +601,56 @@ onMounted(async () => {
         </div>
         <van-button size="mini" plain @click="showDiff = false">关闭</van-button>
       </div>
+      <!-- 2026-06-08 TASK-2.2 引入：DiffView 增强 - 搜索框 + 单文件回退工具栏 -->
+      <div class="diff-toolbar">
+        <van-field
+          v-model="diffSearchKeyword"
+          placeholder="在 diff 中搜索..."
+          class="dark-field diff-search-field"
+          clearable
+        />
+      </div>
       <div class="diff-content">
         <van-loading v-if="diffLoading" color="var(--accent)" vertical>加载中...</van-loading>
         <template v-else-if="diffOutput">
           <div v-if="diffOutput === '无未暂存的更改' || diffOutput === '无已暂存的更改'" class="empty-hint">{{ diffOutput }}</div>
-          <div v-else class="diff-lines">
-            <div
-              v-for="(line, i) in parseDiffLines(diffOutput)"
-              :key="i"
-              class="diff-line"
-              :class="line.type"
-            >
-              <pre>{{ line.text }}</pre>
+          <div v-else class="diff-files">
+            <div v-for="(fileBlock, fi) in diffOutput.split(/^diff --git /m).filter(Boolean)" :key="fi" class="diff-file-block">
+              <div class="diff-file-header">
+                <span class="diff-file-name">{{ (fileBlock.split('\n')[0] || '').replace(/^a\//, '').replace(/\sb\/.*$/, '') }}</span>
+                <van-button size="mini" plain type="danger" @click="confirmRestore((fileBlock.split('\n')[0] || '').replace(/^a\//, '').replace(/\sb\/.*$/, ''))">回退</van-button>
+              </div>
+              <div class="diff-lines">
+                <div
+                  v-for="(line, i) in parseDiffLines(fileBlock)"
+                  :key="i"
+                  class="diff-line"
+                  :class="line.type"
+                >
+                  <pre v-html="highlightText(line.text, diffSearchKeyword)" />
+                </div>
+              </div>
             </div>
           </div>
         </template>
       </div>
     </van-popup>
+
+    <!-- 2026-06-08 TASK-2.2 引入：单文件回退确认对话框 -->
+    <van-dialog
+      v-model:show="showRestoreConfirm"
+      title="确认回退文件"
+      show-cancel-button
+      :style="{ width: '85vw', maxWidth: '420px' }"
+    >
+      <div class="restore-confirm">
+        <p>即将把 <code>{{ restoreTargetFile }}</code> 回退到 HEAD 版本。</p>
+        <p class="warn">未提交的本地修改将丢失，且无法恢复！</p>
+      </div>
+      <template #footer>
+        <van-button size="small" type="danger" :loading="actionLoading === 'restore-' + restoreTargetFile" @click="restoreSingleFile(restoreTargetFile, false)">确认回退</van-button>
+      </template>
+    </van-dialog>
 
     <van-popup v-model:show="showCommitDetail" round position="bottom" class="detail-popup" :style="{ height: '70%' }">
       <div class="popup-header">
@@ -982,6 +1062,70 @@ onMounted(async () => {
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* 2026-06-08 TASK-2.2 引入：DiffView 增强 - 工具栏 + 文件块 + 搜索高亮 */
+.diff-toolbar {
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.diff-search-field {
+  background: var(--bg-card);
+  border-radius: 6px;
+  padding: 2px 10px;
+}
+.diff-files {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.diff-file-block {
+  background: var(--bg-card);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.diff-file-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.diff-file-name {
+  font-family: 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+:deep(.diff-search-mark) {
+  background: #FFEB3B;
+  color: #000;
+  padding: 0 2px;
+  border-radius: 2px;
+}
+.restore-confirm {
+  padding: 12px 16px;
+}
+.restore-confirm p {
+  margin: 8px 0;
+  font-size: 13px;
+}
+.restore-confirm code {
+  font-family: 'Consolas', monospace;
+  background: rgba(255,255,255,0.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+.restore-confirm .warn {
+  color: #F44336;
+  font-size: 12px;
 }
 
 .diff-line {

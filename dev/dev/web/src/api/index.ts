@@ -213,6 +213,19 @@ export const systemApi = {
   getGitLog: (projectPath: string) =>
     api.get('/system/git/log', { params: { project_path: projectPath } }),
 
+  // 2026-06-08 TASK-2.2 引入：DiffView 增强
+  getFileDiff: (projectPath: string, filePath: string, staged: boolean = false, contextLines: number = 3) =>
+    api.get('/system/git/file/diff', {
+      params: { project_path: projectPath, file_path: filePath, staged, context_lines: contextLines },
+    }),
+
+  restoreFile: (projectPath: string, filePath: string, staged: boolean = false) =>
+    api.post('/system/git/file/restore', {
+      project_path: projectPath,
+      file_path: filePath,
+      staged,
+    }),
+
   getFileTree: (projectPath: string) =>
     api.get('/system/file-tree', { params: { project_path: projectPath } }),
 

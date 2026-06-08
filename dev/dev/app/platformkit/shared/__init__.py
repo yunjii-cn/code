@@ -44,6 +44,7 @@ from .model_utils import (
     guess_tool_support_by_name,
 )
 from . import github_core
+from . import git_core
 
 __all__ = [
     "MODEL_KEYS",
@@ -57,4 +58,5 @@ __all__ = [
     "normalize_model_entries",
     "guess_tool_support_by_name",
     "github_core",
+    "git_core",
 ]
