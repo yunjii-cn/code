@@ -79,4 +79,10 @@ __all__ = [
     "KnowledgeStrength",
     "STRENGTH_THRESHOLDS",
     "STRENGTH_WEIGHTS",
+    # 2026-06-09 TASK-3.4 引入：主动感知引擎
+    "ResponsiveEngine",
+    "Notification",
+    "NotificationAction",
+    "NotificationType",
+    "Severity",
 ]
