@@ -53,6 +53,12 @@ export const aiApi = {
 
   listSlashCommands: () =>
     api.get('/ai/slash-commands'),
+
+  // 2026-06-08 TASK-2.5 引入：语音转录（Whisper 云端 API）
+  transcribe: (formData: FormData) =>
+    api.post('/ai/transcribe', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
 }
 
 export const envApi = {

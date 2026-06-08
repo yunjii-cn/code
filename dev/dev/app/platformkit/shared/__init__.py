@@ -45,6 +45,7 @@ from .model_utils import (
 )
 from . import github_core
 from . import git_core
+from . import whisper_core
 
 __all__ = [
     "MODEL_KEYS",
@@ -59,4 +60,5 @@ __all__ = [
     "guess_tool_support_by_name",
     "github_core",
     "git_core",
+    "whisper_core",
 ]

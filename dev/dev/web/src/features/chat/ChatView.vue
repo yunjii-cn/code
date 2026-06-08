@@ -107,6 +107,196 @@ function handleImagePaste(e: ClipboardEvent) {
   }
 }
 
+// 2026-06-08 TASK-2.5 引入：语音听写（Whisper 云端 API + Hold-to-talk + 实时波形）
+const isRecording = ref(false)
+const isTranscribing = ref(false)
+const recordingDurationMs = ref(0)
+const audioLevels = ref<number[]>(new Array(12).fill(0))
+let mediaRecorder: MediaRecorder | null = null
+let audioStream: MediaStream | null = null
+let audioContext: AudioContext | null = null
+let analyser: AnalyserNode | null = null
+let animFrameId: number | null = null
+let recordingStartTime = 0
+let recordingChunks: BlobPart[] = []
+let recordingMimeType = ''
+let releaseOnStopTimer: number | null = null
+
+async function startRecording() {
+  if (isRecording.value || isTranscribing.value) return
+  // 检查浏览器支持
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('当前环境不支持麦克风（仅 HTTPS / localhost / 桌面 WebView 可用）')
+    return
+  }
+  if (typeof MediaRecorder === 'undefined') {
+    showToast('浏览器不支持 MediaRecorder')
+    return
+  }
+  try {
+    audioStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 16000,
+      },
+    })
+    // 选最佳支持的 MIME
+    const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
+    let picked = ''
+    for (const c of candidates) {
+      if (MediaRecorder.isTypeSupported(c)) { picked = c; break }
+    }
+    recordingMimeType = picked || ''
+    mediaRecorder = picked
+      ? new MediaRecorder(audioStream, { mimeType: picked })
+      : new MediaRecorder(audioStream)
+    recordingChunks = []
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recordingChunks.push(e.data)
+    }
+    mediaRecorder.onstop = () => {
+      handleRecordingStop()
+    }
+    mediaRecorder.onerror = (e: any) => {
+      showToast(`录音错误: ${e?.error?.message || '未知'}`)
+      cleanupRecording()
+    }
+    // 实时波形分析
+    audioContext = new (window.AudioContext || (window as any).webkitAudioContext)()
+    const source = audioContext.createMediaStreamSource(audioStream)
+    analyser = audioContext.createAnalyser()
+    analyser.fftSize = 256
+    source.connect(analyser)
+    const dataArray = new Uint8Array(analyser.frequencyBinCount)
+    const updateLevels = () => {
+      if (!analyser) return
+      analyser.getByteFrequencyData(dataArray)
+      const barCount = 12
+      const step = Math.floor(dataArray.length / barCount)
+      const levels: number[] = []
+      for (let i = 0; i < barCount; i++) {
+        let sum = 0
+        for (let j = 0; j < step; j++) {
+          sum += dataArray[i * step + j]
+        }
+        const avg = sum / step / 255
+        levels.push(Math.min(1, avg * 1.8))
+      }
+      audioLevels.value = levels
+      animFrameId = requestAnimationFrame(updateLevels)
+    }
+    mediaRecorder.start(100)  // 100ms 一片，方便快速停止时也有数据
+    recordingStartTime = Date.now()
+    isRecording.value = true
+    recordingDurationMs.value = 0
+    // 时长计时
+    const tick = () => {
+      if (isRecording.value) {
+        recordingDurationMs.value = Date.now() - recordingStartTime
+        releaseOnStopTimer = window.setTimeout(tick, 100)
+      }
+    }
+    tick()
+    updateLevels()
+  } catch (e: any) {
+    showToast(`无法启动录音: ${e?.message || e}`)
+    cleanupRecording()
+  }
+}
+
+function stopRecording(sendToServer: boolean) {
+  if (!isRecording.value || !mediaRecorder) return
+  try {
+    if (mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop()
+    }
+    isRecording.value = false
+    if (animFrameId) cancelAnimationFrame(animFrameId)
+    if (releaseOnStopTimer) clearTimeout(releaseOnStopTimer)
+    if (!sendToServer) {
+      // 取消：不转录，但清资源
+      cleanupRecording()
+    }
+  } catch (e: any) {
+    showToast(`停止录音失败: ${e?.message || e}`)
+    cleanupRecording()
+  }
+}
+
+async function handleRecordingStop() {
+  if (recordingChunks.length === 0) {
+    cleanupRecording()
+    showToast('未录到音频')
+    return
+  }
+  const blob = new Blob(recordingChunks, { type: recordingMimeType || 'audio/webm' })
+  const duration = recordingDurationMs.value
+  recordingChunks = []
+  if (blob.size < 1000) {
+    cleanupRecording()
+    showToast('录音太短')
+    return
+  }
+  isTranscribing.value = true
+  try {
+    const ext = blob.type.includes('mp4') ? 'm4a' : (blob.type.includes('ogg') ? 'ogg' : 'webm')
+    const filename = `recording-${Date.now()}.${ext}`
+    const formData = new FormData()
+    formData.append('file', blob, filename)
+    formData.append('language', 'zh')
+    const res: any = await aiApi.transcribe(formData)
+    if (res?.ok && res.text) {
+      const transcript = (res.text as string).trim()
+      if (transcript) {
+        // 追加到 inputText（如已有内容，前面加空格）
+        const sep = inputText.value && !inputText.value.endsWith(' ') ? ' ' : ''
+        inputText.value = inputText.value + sep + transcript
+        showToast(`转录成功 (${duration}ms, ${blob.size} bytes)`)
+      } else {
+        showToast('转录结果为空')
+      }
+    } else {
+      showToast(`转录失败: ${res?.error || '未知错误'}`)
+    }
+  } catch (e: any) {
+    showToast(`转录异常: ${e?.message || e}`)
+  } finally {
+    isTranscribing.value = false
+    cleanupRecording()
+  }
+}
+
+function cleanupRecording() {
+  if (audioStream) {
+    audioStream.getTracks().forEach(t => t.stop())
+    audioStream = null
+  }
+  if (audioContext && audioContext.state !== 'closed') {
+    audioContext.close().catch(() => {})
+  }
+  audioContext = null
+  analyser = null
+  mediaRecorder = null
+  if (animFrameId) {
+    cancelAnimationFrame(animFrameId)
+    animFrameId = null
+  }
+  if (releaseOnStopTimer) {
+    clearTimeout(releaseOnStopTimer)
+    releaseOnStopTimer = null
+  }
+  audioLevels.value = new Array(12).fill(0)
+  recordingDurationMs.value = 0
+}
+
+function formatDuration(ms: number): string {
+  const s = Math.floor(ms / 1000)
+  const tenths = Math.floor((ms % 1000) / 100)
+  return `${s}.${tenths}s`
+}
+
 function handleImageDrop(e: DragEvent) {
   if (!e.dataTransfer) return
   const files = e.dataTransfer.files
@@ -747,6 +937,38 @@ onMounted(async () => {
             multiple
             style="display: none"
             @change="onImageInputChange"
+          />
+          <!-- 2026-06-08 TASK-2.5 引入：语音听写（Hold-to-talk） -->
+          <div
+            v-if="isRecording"
+            class="voice-recording"
+            @touchstart.prevent="startRecording"
+            @mousedown.prevent="startRecording"
+          >
+            <span class="voice-dot" />
+            <div class="voice-waveform">
+              <span
+                v-for="(lv, i) in audioLevels"
+                :key="i"
+                class="voice-bar"
+                :style="{ height: `${Math.max(8, lv * 28)}px` }"
+              />
+            </div>
+            <span class="voice-duration">{{ formatDuration(recordingDurationMs) }}</span>
+            <van-icon name="cross" class="voice-cancel-hint" />
+          </div>
+          <van-icon
+            v-else
+            name="mic-o"
+            class="voice-btn"
+            size="22"
+            :class="{ disabled: isTranscribing }"
+            :loading="isTranscribing"
+            @touchstart.prevent="startRecording"
+            @mousedown.prevent="startRecording"
+            @mouseup.prevent="stopRecording(true)"
+            @mouseleave="stopRecording(true)"
+            @touchend.prevent="stopRecording(true)"
           />
           <van-field
             v-model="inputText"
@@ -1430,6 +1652,75 @@ onMounted(async () => {
   font-size: 10px;
   color: var(--text-muted);
 }
+
+/* 2026-06-08 TASK-2.5 引入：语音按钮 + 录音波形 */
+.voice-btn {
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-bottom: 6px;
+  transition: color 0.15s;
+}
+.voice-btn:hover { color: var(--accent); }
+.voice-btn.disabled { opacity: 0.4; cursor: not-allowed; }
+
+.voice-recording {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: rgba(244, 67, 54, 0.1);
+  border: 1px solid rgba(244, 67, 54, 0.4);
+  border-radius: 16px;
+  flex: 1;
+  min-width: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.voice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #F44336;
+  animation: voice-pulse 1s ease-in-out infinite;
+  flex-shrink: 0;
+}
+@keyframes voice-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+.voice-waveform {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  justify-content: center;
+}
+.voice-bar {
+  display: inline-block;
+  width: 3px;
+  background: linear-gradient(to top, #F44336, #FF7043);
+  border-radius: 2px;
+  transition: height 80ms ease-out;
+  min-height: 4px;
+}
+.voice-duration {
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  color: #F44336;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.voice-cancel-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.voice-cancel-hint:hover { color: #F44336; }
 
 .input-field {
   flex: 1;

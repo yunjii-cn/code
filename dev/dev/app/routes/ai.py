@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from typing import Optional
 from sse_starlette import EventSourceResponse
 
 from services.ai_service import AiService
+from platformkit.shared import whisper_core
 
 router = APIRouter(prefix="/api/ai", tags=["AI对话/模型管理"])
 ai_service = AiService()
