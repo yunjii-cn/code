@@ -2,6 +2,7 @@
 import { ref, computed, nextTick, watch, onMounted } from 'vue'
 import { showConfirmDialog, showToast } from 'vant'
 import { useChatStore } from '@/stores/chat'
+import { aiApi } from '@/api'
 import { useModelStore } from '@/stores/model'
 import { useProjectStore } from '@/stores/project'
 import { useDevice } from '@/composables/useDevice'
@@ -291,10 +292,192 @@ async function handleSend() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  // 2026-06-08 TASK-2.4: Autocomplete 打开时键盘交给它处理
+  if (autocompleteOpen.value && onAutocompleteKeydown(e)) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     handleSend()
   }
+}
+
+// 2026-06-08 TASK-2.4 引入：Composer Autocomplete
+type AutocompleteType = 'file' | 'command' | null
+interface AutocompleteItem {
+  id: string
+  label: string
+  description: string
+  value: string
+  type: 'file' | 'command'
+}
+const autocompleteOpen = ref(false)
+const autocompleteType = ref<AutocompleteType>(null)
+const autocompleteQuery = ref('')
+const autocompleteStart = ref(0)
+const autocompleteIndex = ref(0)
+const autocompleteItems = ref<AutocompleteItem[]>([])
+const autocompleteLoading = ref(false)
+let autocompleteTimer: number | null = null
+
+interface SlashCommand {
+  id: string
+  name: string
+  description: string
+  prompt: string
+}
+let cachedSlashCommands: SlashCommand[] | null = null
+
+async function loadSlashCommands(): Promise<SlashCommand[]> {
+  if (cachedSlashCommands) return cachedSlashCommands
+  try {
+    const res: any = await aiApi.listSlashCommands()
+    if (res?.ok && res.data) {
+      cachedSlashCommands = res.data as SlashCommand[]
+      return cachedSlashCommands
+    }
+  } catch {}
+  return []
+}
+
+function detectTrigger(text: string, cursorPos: number): { type: 'file' | 'command'; start: number; query: string } | null {
+  const before = text.slice(0, cursorPos)
+  // 2026-06-08 TASK-2.4: 用 new RegExp 绕开 TS 6.0 + vue-tsc 3.2 的 regex literal 解析 bug
+  const atRe = new RegExp('(^|[^A-Za-z0-9])@([\\w./-]*)$')
+  const atMatch = before.match(atRe)
+  if (atMatch) {
+    return { type: 'file', start: atMatch.index! + atMatch[1].length, query: atMatch[2] }
+  }
+  const slashRe = new RegExp('(^|\\s)/([\\w-]*)$')
+  const slashMatch = before.match(slashRe)
+  if (slashMatch && slashMatch[1]) {
+    return { type: 'command', start: slashMatch.index! + slashMatch[1].length, query: slashMatch[2] }
+  }
+  return null
+}
+
+async function performAutocompleteSearch(type: 'file' | 'command', query: string) {
+  autocompleteLoading.value = true
+  try {
+    if (type === 'file') {
+      const project = projectStore.activeProject
+      const res: any = await aiApi.searchFiles({
+        workspace_path: project?.path || '',
+        query,
+        limit: 20,
+      })
+      if (res?.ok && Array.isArray(res.data)) {
+        autocompleteItems.value = res.data.map((it: any) => ({
+          id: it.path,
+          label: it.name,
+          description: it.path,
+          value: '@' + it.path + (it.type === 'dir' ? '/' : ''),
+          type: 'file' as const,
+        }))
+      } else {
+        autocompleteItems.value = []
+      }
+    } else {
+      const all = await loadSlashCommands()
+      const q = query.toLowerCase()
+      const filtered = all.filter(c => !q || c.name.toLowerCase().includes(q) || c.description.toLowerCase().includes(q))
+      autocompleteItems.value = filtered.map(c => ({
+        id: c.id,
+        label: c.name,
+        description: c.description,
+        value: c.name + ' ',
+        type: 'command' as const,
+      }))
+    }
+    autocompleteIndex.value = 0
+  } catch (e: any) {
+    autocompleteItems.value = []
+  } finally {
+    autocompleteLoading.value = false
+  }
+}
+
+function scheduleAutocomplete() {
+  if (autocompleteTimer) {
+    window.clearTimeout(autocompleteTimer)
+  }
+  autocompleteTimer = window.setTimeout(() => {
+    const text = inputText.value
+    const cursorPos = (document.activeElement as HTMLTextAreaElement)?.selectionStart ?? text.length
+    const trigger = detectTrigger(text, cursorPos)
+    if (trigger) {
+      autocompleteType.value = trigger.type
+      autocompleteStart.value = trigger.start
+      autocompleteQuery.value = trigger.query
+      autocompleteOpen.value = true
+      performAutocompleteSearch(trigger.type, trigger.query)
+    } else {
+      autocompleteOpen.value = false
+    }
+  }, 150)
+}
+
+function closeAutocomplete() {
+  autocompleteOpen.value = false
+  autocompleteType.value = null
+  autocompleteItems.value = []
+}
+
+function applyAutocompleteItem(item: AutocompleteItem) {
+  if (item.id === 'clear' && item.type === 'command') {
+    if (chatStore.messages.length > 0) {
+      showConfirmDialog({
+        title: '清空对话',
+        message: '确定要清空当前对话吗？',
+      }).then(() => {
+        chatStore.clearChat()
+        showToast('对话已清空')
+      }).catch(() => {})
+    } else {
+      showToast('对话已为空')
+    }
+    inputText.value = ''
+    closeAutocomplete()
+    return
+  }
+  const triggerLen = 1
+  const queryLen = autocompleteQuery.value.length
+  const before = inputText.value.slice(0, autocompleteStart.value)
+  const afterCursor = inputText.value.slice(autocompleteStart.value + triggerLen + queryLen)
+  inputText.value = before + item.value + afterCursor
+  closeAutocomplete()
+  nextTick(() => {
+    const ta = document.querySelector('.input-field textarea') as HTMLTextAreaElement | null
+    if (ta) {
+      ta.focus()
+      const newPos = before.length + item.value.length
+      ta.setSelectionRange(newPos, newPos)
+    }
+  })
+}
+
+function onAutocompleteKeydown(e: KeyboardEvent): boolean {
+  if (!autocompleteOpen.value || autocompleteItems.value.length === 0) return false
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    autocompleteIndex.value = (autocompleteIndex.value + 1) % autocompleteItems.value.length
+    return true
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    autocompleteIndex.value = (autocompleteIndex.value - 1 + autocompleteItems.value.length) % autocompleteItems.value.length
+    return true
+  }
+  if (e.key === 'Enter' || e.key === 'Tab') {
+    e.preventDefault()
+    const item = autocompleteItems.value[autocompleteIndex.value]
+    if (item) applyAutocompleteItem(item)
+    return true
+  }
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    closeAutocomplete()
+    return true
+  }
+  return false
 }
 
 function handleStop() {
@@ -501,6 +684,40 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div v-if="autocompleteOpen" class="autocomplete-popup" :class="{ mobile: isMobile }">
+          <div class="ac-header">
+            <span class="ac-title">
+              {{ autocompleteType === 'file' ? '📁 文件' : '⚡ 命令' }}
+            </span>
+            <span v-if="autocompleteQuery" class="ac-query">@{{ autocompleteQuery }}</span>
+            <span v-else class="ac-query">输入关键字过滤...</span>
+          </div>
+          <van-loading v-if="autocompleteLoading" color="var(--accent)" size="14" />
+          <div v-else-if="autocompleteItems.length === 0" class="ac-empty">无匹配项</div>
+          <div v-else class="ac-list">
+            <div
+              v-for="(item, idx) in autocompleteItems"
+              :key="item.id"
+              class="ac-item"
+              :class="{ active: idx === autocompleteIndex }"
+              @mouseenter="autocompleteIndex = idx"
+              @click="applyAutocompleteItem(item)"
+            >
+              <div class="ac-item-label">
+                <van-icon v-if="item.type === 'file'" name="description" size="14" class="ac-icon" />
+                <van-icon v-else name="flash" size="14" class="ac-icon" />
+                {{ item.label }}
+              </div>
+              <div class="ac-item-desc">{{ item.description }}</div>
+            </div>
+          </div>
+          <div class="ac-hint">
+            <span>↑↓ 选择</span>
+            <span>Enter/Tab 确认</span>
+            <span>Esc 关闭</span>
+          </div>
+        </div>
+
         <div v-if="attachedImages.length > 0" class="image-attachments">
           <div v-for="img in attachedImages" :key="img.id" class="image-thumb">
             <img :src="img.dataUrl" :alt="img.name" class="thumb-img" />
@@ -536,12 +753,13 @@ onMounted(async () => {
             type="textarea"
             :rows="1"
             :autosize="{ maxHeight: 96, minHeight: 40 }"
-            placeholder="输入消息...（支持图片附件：点击📎/拖拽/Ctrl+V 粘贴）"
+            placeholder="输入消息...（支持 @ 文件 / / 命令 / Ctrl+V 图片）"
             class="input-field"
             @keydown="handleKeydown"
             @paste="handleImagePaste"
             @drop="handleImageDrop"
             @dragover.prevent
+            @input="scheduleAutocomplete"
           />
           <van-button
             v-if="chatStore.isStreaming"
@@ -1113,6 +1331,104 @@ onMounted(async () => {
 }
 .thumb-remove:hover {
   background: rgba(244, 67, 54, 0.8);
+}
+
+/* 2026-06-08 TASK-2.4 引入：Composer Autocomplete 弹窗 */
+.autocomplete-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 16px;
+  right: 16px;
+  max-height: 240px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+.autocomplete-popup.mobile {
+  left: 8px;
+  right: 8px;
+  max-height: 50vh;
+}
+.ac-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+.ac-title {
+  color: var(--accent);
+  font-weight: 600;
+}
+.ac-query {
+  color: var(--text-muted);
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  flex: 1;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-empty {
+  text-align: center;
+  padding: 20px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.ac-list {
+  flex: 1;
+  overflow-y: auto;
+}
+.ac-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+.ac-item:hover,
+.ac-item.active {
+  background: var(--bg-secondary);
+  border-left-color: var(--accent);
+}
+.ac-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.ac-icon {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.ac-item-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'Consolas', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-hint {
+  display: flex;
+  gap: 12px;
+  padding: 4px 12px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 .input-field {

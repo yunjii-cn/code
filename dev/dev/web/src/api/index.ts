@@ -46,6 +46,13 @@ export const aiApi = {
 
   checkOllamaHealth: (data: { model_name: string; base_url?: string; timeout_ms?: number }) =>
     api.post('/ai/ollama/health', data),
+
+  // 2026-06-08 TASK-2.4 引入：Composer Autocomplete
+  searchFiles: (params: { workspace_path?: string; query?: string; limit?: number } = {}) =>
+    api.get('/ai/files/search', { params }),
+
+  listSlashCommands: () =>
+    api.get('/ai/slash-commands'),
 }
 
 export const envApi = {
