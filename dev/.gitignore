@@ -1,0 +1,127 @@
+# ============================================
+# 云集智能编程工作站 — 项目根 .gitignore
+# 仓库根目录: e:\软件开发\云集智能编程工作站\
+# AGENTS.md 规则: 不提交 .env / data/users/ / dev/dist/*.exe / app/static/
+# 详见 dev/.gitignore（针对 dev/ 4 目录架构的子规则）
+# ============================================
+
+# ── BAK 备份目录（不推送）──
+/BAK/
+/BAK/**
+
+# ── 顶层临时文件（不推送）──
+/temp_old_*.py
+/temp_old_*.vue
+/old_*.py
+/yunji-dev-guide.zip
+/test_bootstrapper/
+
+# ── dev/ 目录的子规则（4 目录纯净整合包架构）──
+# 推送内容: dev/app/ 源代码, dev/ver/*.exe, dev/.gitignore
+# 不推送: *.exe (开发测试 EXE), _internal/, data/, temp/, app/nodejs/, app/bun/, app/node_modules/, app/.venv/
+# 详细规则见 dev/.gitignore
+
+# ── dev/ 根目录下的 EXE 和 _internal/（不推送）──
+/dev/*.exe
+/dev/_internal/
+/dev/backup/
+
+# ── dev/ 根目录下的构建产物和运行时文件（不推送）──
+/dev/icon.ico
+/dev/icon.png
+
+# ── dev/ 构建历史（不推送）──
+/dev/build/
+/dev/dist/
+/dev/temp/
+
+# ── dev/ 数据目录（不推送）──
+/dev/data/
+
+# ── dev/ app 下的运行时生成物（不推送）──
+/dev/app/.venv/
+/dev/app/.uv_cache/
+/dev/app/.bun_cache/
+/dev/app/.coverage
+/dev/app/.yunji.lock
+/dev/app/__pycache__/
+/dev/app/**/__pycache__/
+/dev/app/cli_debug.log
+/dev/app/version_info.txt
+/dev/app/_deploy_tmp.py
+/dev/app/_test_gitee3.py
+/dev/app/_test_github.py
+/dev/app/test_zhipu_api.py
+/dev/app/debug_err*.txt
+/dev/app/debug_out*.txt
+/dev/app/test_stderr.txt
+/dev/app/test_stdout.txt
+/dev/app/test-web-exe.bat
+/dev/app/start-web-test.bat
+/dev/app/run_dev.bat
+/dev/app/运行Web开发-静默.vbs
+/dev/app/运行Web开发.bat
+/dev/app/运行桌面版.bat
+
+# ── 敏感信息（绝不推送）──
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+**/api_keys.json
+**/api_key.txt
+**/*_token.json
+**/users/
+**/sessions/
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+*.spec
+
+# ── Node / 前端 ──
+node_modules/
+dist/
+.vite/
+*.local
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.windsurf/
+.cursorignore
+.cursorindexingignore
+.cursor/
+
+# ── OS 生成文件 ──
+Thumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ── 日志 ──
+*.log
+logs/
+
+# ── 临时文件 ──
+tmp/
+*.tmp
+*.bak
+*.cache
+*.zip
+*.7z
+*.tar.gz
+*.whl

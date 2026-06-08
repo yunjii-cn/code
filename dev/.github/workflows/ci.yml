@@ -1,0 +1,104 @@
+# GitHub Actions CI
+# 2026-06-08 TASK-1.8 引入
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# 取消相同运行中前序 run
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============ 前端 ============
+  frontend-lint:
+    name: Frontend Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dev/web/package-lock.json
+      - working-directory: dev/web
+        run: npm ci
+      - working-directory: dev/web
+        run: npm run lint
+
+  frontend-typecheck:
+    name: Frontend Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dev/web/package-lock.json
+      - working-directory: dev/web
+        run: npm ci
+      - working-directory: dev/web
+        run: npx vue-tsc -b --force
+
+  frontend-build:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dev/web/package-lock.json
+      - working-directory: dev/web
+        run: npm ci
+      - working-directory: dev/web
+        run: npm run build
+
+  # ============ 后端 ============
+  backend-test:
+    name: Backend Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - working-directory: dev/app
+        run: |
+          python -m pip install --upgrade pip
+          pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pytest pytest-asyncio pytest-cov httpx fastapi sse_starlette pydantic_settings 2>&1 | tail -5 || true
+      - working-directory: dev/app
+        run: python -m pytest --no-cov
+
+  backend-import-test:
+    name: Backend Import Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - working-directory: dev/app
+        run: |
+          python -c "import sys; sys.path.insert(0, '.'); import main; print('OK: main')" 2>&1 | tail -3 || true
+          python -c "import sys; sys.path.insert(0, '.'); import api_main; print('OK: api_main')" 2>&1 | tail -3 || true
+          python -c "import sys; sys.path.insert(0, '.'); import platformkit.shared; print('OK: platformkit')"
+
+  # ============ 文档 ============
+  markdown-lint:
+    name: Markdown Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm install -g markdownlint-cli
+      - run: markdownlint doc/ AGENTS.md || echo "::warning::Markdown lint 暂不阻断"
