@@ -25,6 +25,8 @@
 /dev/*.exe
 /dev/_internal/
 /dev/backup/
+/dev/.git.bak/
+/dev/.git.backup/
 
 # ── dev/ 根目录下的构建产物和运行时文件（不推送）──
 /dev/icon.ico
@@ -37,6 +39,25 @@
 
 # ── dev/ 数据目录（不推送）──
 /dev/data/
+
+# ── build/ 构建产物（所有云集*/YUNJII*/v*/stub-v* 目录 + venv + 旧 EXE，不推送）──
+# 通配：所有云集开头的目录（构建产物 + 版本目录）
+/build/云集*/
+/build/YUNJII*
+/build/stub-v*/
+/build/v*/
+/# ── build/ stub/ 下的 PyInstaller 临时产物（不推送）──
+/build/stub/build/
+# ── build/ 根目录的 EXE 和日志（不推送）──
+/build/*.exe
+/build/stderr.txt
+/build/backup/
+# ── 保留 build/ 下的源码脚本和 stub 配置（spec + icon）──
+!/build/build.py
+!/build/build_stub.py
+!/build/build_web.py
+!/build/stub/icon_64.png
+!/build/stub/云集智能编程工作站.spec
 
 # ── dev/ app 下的运行时生成物（不推送）──
 /dev/app/.venv/
