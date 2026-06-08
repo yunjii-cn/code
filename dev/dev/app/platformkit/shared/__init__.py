@@ -20,10 +20,11 @@
     - ✅ model_utils.py     （Phase 1 收尾：normalize_model_entries + guess_tool_support_by_name）
     - ⏳ types.py            （W2：跨服务共享的 Pydantic 模型）
     - ⏳ workspace_core.py   （W3：项目/工作区核心）
-    - ⏳ knowledge_core.py   （W9：知识系统核心，Phase 3 计划）
+    - ✅ knowledge_core.py  （W9 TASK-3.1：四层知识 + 强度演化）
 
 新代码导入方式:
     from platformkit.shared import MODEL_KEYS, EnvFileManager, fetch_json_with_timeout
+    from platformkit.shared.knowledge_core import KnowledgeEngine, Knowledge, KnowledgeLayer
 
 旧代码兼容:
     from backend import MODEL_KEYS, EnvFileManager, fetch_json_with_timeout  # 仍工作
@@ -46,6 +47,15 @@ from .model_utils import (
 from . import github_core
 from . import git_core
 from . import whisper_core
+from .knowledge_core import (
+    KnowledgeEngine,
+    Knowledge,
+    KnowledgeLayer,
+    KnowledgeScope,
+    KnowledgeStrength,
+    STRENGTH_THRESHOLDS,
+    STRENGTH_WEIGHTS,
+)
 
 __all__ = [
     "MODEL_KEYS",
@@ -61,4 +71,12 @@ __all__ = [
     "github_core",
     "git_core",
     "whisper_core",
+    # 2026-06-09 TASK-3.1 引入：自进化知识系统
+    "KnowledgeEngine",
+    "Knowledge",
+    "KnowledgeLayer",
+    "KnowledgeScope",
+    "KnowledgeStrength",
+    "STRENGTH_THRESHOLDS",
+    "STRENGTH_WEIGHTS",
 ]
