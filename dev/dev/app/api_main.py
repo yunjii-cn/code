@@ -85,7 +85,7 @@ async def lan_auth_middleware(request, call_next):
 _routes_modules = [
     "routes.ai", "routes.env", "routes.project",
     "routes.system", "routes.version", "routes.ws",
-    "routes.github", "routes.knowledge",
+    "routes.github", "routes.knowledge", "routes.responsive",
 ]
 for _mod_name in _routes_modules:
     try:
