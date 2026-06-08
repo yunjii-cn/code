@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 // 2026-06-08 TASK-1.9 引入：设计系统 Toast 挂载
 // 2026-06-09 TASK-2.7 引入：统一通知中心（铃铛 + 未读 badge + 抽屉）
-import { YJToast, YJNotificationCenter, useNotificationStore } from '@shared/components'
+// 2026-06-09 TASK-2.8 引入：命令面板（Ctrl+K）+ 全局快捷键
+import { YJToast, YJNotificationCenter, useNotificationStore, CommandPalette } from '@shared/components'
+import { useGlobalShortcuts } from '@/composables/useGlobalShortcuts'
 
 const router = useRouter()
 const route = useRoute()
@@ -11,6 +13,20 @@ const route = useRoute()
 // 2026-06-09 TASK-2.7：通知中心开关 + 未读数量
 const showNotificationCenter = ref(false)
 const { unreadCount } = useNotificationStore()
+
+// 2026-06-09 TASK-2.8：注册全局快捷键 + 暴露命令面板开关
+const { showCommandPalette } = useGlobalShortcuts()
+
+// 2026-06-09 TASK-2.8：监听 yj:open-notifications 自定义事件，转为打开通知中心
+function onYjOpenNotifications() {
+  showNotificationCenter.value = true
+}
+onMounted(() => {
+  window.addEventListener('yj:open-notifications', onYjOpenNotifications)
+})
+onUnmounted(() => {
+  window.removeEventListener('yj:open-notifications', onYjOpenNotifications)
+})
 
 const navTabs = [
   { name: 'chat', path: '/', icon: 'chat-o' },
@@ -119,6 +135,9 @@ function onTabClick(name: string) {
 
     <!-- 2026-06-09 TASK-2.7 引入：统一通知中心抽屉 -->
     <YJNotificationCenter v-model:show="showNotificationCenter" />
+
+    <!-- 2026-06-09 TASK-2.8 引入：命令面板（Ctrl+K 触发） -->
+    <CommandPalette v-model:show="showCommandPalette" />
 
     <footer class="app-statusbar desktop-only">
       <span class="statusbar-text">云集智能编程工作站</span>

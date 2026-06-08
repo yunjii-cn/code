@@ -12,6 +12,9 @@ export { default as YJNotificationCenter } from './YJNotificationCenter.vue'
 export { useNotificationStore } from './notificationStore'
 export type { NotificationItem } from './notificationStore'
 
+// 2026-06-09 TASK-2.8 引入：命令面板（Ctrl+K 全局快捷键触发）
+export { default as CommandPalette } from './CommandPalette.vue'
+
 // Toast 全局 API 单例（YJToast 挂载时注入）
 export { useToast, setToastApi, clearToastApi } from './toast'
 export type { ToastApi, ToastType } from './toast'
