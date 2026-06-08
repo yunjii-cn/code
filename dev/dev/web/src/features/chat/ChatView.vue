@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, watch, onMounted } from 'vue'
-import { showConfirmDialog } from 'vant'
+import { showConfirmDialog, showToast } from 'vant'
 import { useChatStore } from '@/stores/chat'
 import { useModelStore } from '@/stores/model'
 import { useProjectStore } from '@/stores/project'
@@ -17,6 +17,106 @@ const projectStore = useProjectStore()
 
 const inputText = ref('')
 const messagesContainer = ref<HTMLElement>()
+
+// 2026-06-08 TASK-2.3 引入：图片附件（多模态）
+interface AttachedImage {
+  id: string
+  dataUrl: string
+  name: string
+  size: number
+}
+const attachedImages = ref<AttachedImage[]>([])
+const imageInputRef = ref<HTMLInputElement | null>(null)
+const MAX_IMAGES = 4
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024 // 5MB
+
+function pickImages() {
+  imageInputRef.value?.click()
+}
+
+async function handleImageFiles(files: FileList | File[]) {
+  const list = Array.from(files)
+  for (const file of list) {
+    if (attachedImages.value.length >= MAX_IMAGES) {
+      showToast(`最多 ${MAX_IMAGES} 张图片`)
+      break
+    }
+    if (!file.type.startsWith('image/')) {
+      showToast(`跳过非图片文件: ${file.name}`)
+      continue
+    }
+    if (file.size > MAX_IMAGE_SIZE) {
+      showToast(`图片过大 (${(file.size / 1024 / 1024).toFixed(1)}MB > 5MB): ${file.name}`)
+      continue
+    }
+    try {
+      const dataUrl = await readFileAsDataUrl(file)
+      attachedImages.value.push({
+        id: `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        dataUrl,
+        name: file.name,
+        size: file.size,
+      })
+    } catch (e: any) {
+      showToast(`读取失败: ${e.message}`)
+    }
+  }
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result as string)
+    reader.onerror = () => reject(reader.error || new Error('FileReader error'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function onImageInputChange(e: Event) {
+  const target = e.target as HTMLInputElement
+  if (target.files && target.files.length > 0) {
+    handleImageFiles(target.files)
+    target.value = ''
+  }
+}
+
+function removeImage(id: string) {
+  const idx = attachedImages.value.findIndex(i => i.id === id)
+  if (idx >= 0) attachedImages.value.splice(idx, 1)
+}
+
+function clearImages() {
+  attachedImages.value = []
+}
+
+function handleImagePaste(e: ClipboardEvent) {
+  if (!e.clipboardData) return
+  const items = e.clipboardData.items
+  const files: File[] = []
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]
+    if (it.kind === 'file' && it.type.startsWith('image/')) {
+      const f = it.getAsFile()
+      if (f) files.push(f)
+    }
+  }
+  if (files.length > 0) {
+    e.preventDefault()
+    handleImageFiles(files)
+  }
+}
+
+function handleImageDrop(e: DragEvent) {
+  if (!e.dataTransfer) return
+  const files = e.dataTransfer.files
+  if (files && files.length > 0) {
+    const images = Array.from(files).filter(f => f.type.startsWith('image/'))
+    if (images.length > 0) {
+      e.preventDefault()
+      handleImageFiles(images)
+    }
+  }
+}
 const sidebarCollapsed = ref(false)
 const rightSidebarCollapsed = ref(false)
 const showSessionSheet = ref(false)
@@ -181,9 +281,13 @@ function handleRenameBeforeClose(action: string, done: () => void) {
 async function handleSend() {
   const text = inputText.value.trim()
   if (!text || chatStore.isStreaming) return
+  const images = attachedImages.value.length > 0
+    ? attachedImages.value.map(i => i.dataUrl)
+    : undefined
   inputText.value = ''
+  clearImages()
   scrollToBottom()
-  await chatStore.sendMessage(text)
+  await chatStore.sendMessage(text, images)
 }
 
 function handleKeydown(e: KeyboardEvent) {
@@ -397,6 +501,13 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div v-if="attachedImages.length > 0" class="image-attachments">
+          <div v-for="img in attachedImages" :key="img.id" class="image-thumb">
+            <img :src="img.dataUrl" :alt="img.name" class="thumb-img" />
+            <van-icon name="cross" class="thumb-remove" @click="removeImage(img.id)" />
+          </div>
+        </div>
+
         <div class="input-area">
           <van-icon
             v-if="isMobile"
@@ -405,14 +516,32 @@ onMounted(async () => {
             size="22"
             @click="showSessionSheet = true"
           />
+          <van-icon
+            name="photograph"
+            class="attach-btn"
+            size="22"
+            :class="{ disabled: attachedImages.length >= MAX_IMAGES }"
+            @click="pickImages"
+          />
+          <input
+            ref="imageInputRef"
+            type="file"
+            accept="image/*"
+            multiple
+            style="display: none"
+            @change="onImageInputChange"
+          />
           <van-field
             v-model="inputText"
             type="textarea"
             :rows="1"
             :autosize="{ maxHeight: 96, minHeight: 40 }"
-            placeholder="输入消息..."
+            placeholder="输入消息...（支持图片附件：点击📎/拖拽/Ctrl+V 粘贴）"
             class="input-field"
             @keydown="handleKeydown"
+            @paste="handleImagePaste"
+            @drop="handleImageDrop"
+            @dragover.prevent
           />
           <van-button
             v-if="chatStore.isStreaming"
@@ -928,6 +1057,62 @@ onMounted(async () => {
 
 .session-btn:hover {
   color: var(--accent);
+}
+
+/* 2026-06-08 TASK-2.3 引入：图片附件按钮 + 缩略图 */
+.attach-btn {
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  margin-bottom: 6px;
+  transition: color 0.15s;
+}
+.attach-btn:hover {
+  color: var(--accent);
+}
+.attach-btn.disabled {
+  color: var(--text-muted);
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.image-attachments {
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px 0 16px;
+  background: var(--bg-secondary);
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+}
+.image-thumb {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+.thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 14px;
+  padding: 2px;
+  border-radius: 50%;
+  cursor: pointer;
+  line-height: 1;
+}
+.thumb-remove:hover {
+  background: rgba(244, 67, 54, 0.8);
 }
 
 .input-field {

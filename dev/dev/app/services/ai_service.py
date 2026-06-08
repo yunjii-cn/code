@@ -2554,14 +2554,49 @@ class AiService:
         system_prompt = params.get("system_prompt") or settings.get("SYSTEM_PROMPT", "")
         temperature = params.get("ai_temperature")
         max_tokens = params.get("ai_max_tokens")
+        # 2026-06-08 TASK-2.3 引入：图片附件（base64 数据 URL 列表）
+        raw_images = params.get("images") or []
 
         if not self._proxy_server:
             self._proxy_server = OllamaProxyServer()
 
         queue = asyncio.Queue()
 
+        def _parse_data_url(data_url: str):
+            """把 data URL 拆成 (media_type, base64_data)。失败返回 (None, None)。"""
+            if not isinstance(data_url, str):
+                return None, None
+            if not data_url.startswith("data:"):
+                # 视为已经是 base64 字符串
+                return "image/png", data_url
+            try:
+                head, b64 = data_url.split(",", 1)
+                # head = "data:image/png;base64"
+                media_type = head.split(";")[0].replace("data:", "").strip() or "image/png"
+                return media_type, b64
+            except Exception:
+                return None, None
+
         def _build_anthropic_body():
-            messages = [{"role": "user", "content": prompt}]
+            # 2026-06-08 TASK-2.3: images 转 Anthropic vision blocks
+            if raw_images:
+                content_blocks: list[dict] = []
+                for url in raw_images:
+                    media_type, b64 = _parse_data_url(url)
+                    if not b64:
+                        continue
+                    content_blocks.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type or "image/png",
+                            "data": b64,
+                        },
+                    })
+                content_blocks.append({"type": "text", "text": prompt})
+                messages = [{"role": "user", "content": content_blocks}]
+            else:
+                messages = [{"role": "user", "content": prompt}]
             body = {
                 "model": model or "qwen3:8b",
                 "max_tokens": max_tokens or 4096,
@@ -2690,7 +2725,27 @@ class AiService:
                 messages = []
                 if system_prompt:
                     messages.append({"role": "system", "content": system_prompt})
-                messages.append({"role": "user", "content": prompt})
+                # 2026-06-08 TASK-2.3: images 转 OpenAI vision content blocks
+                if raw_images:
+                    content_blocks: list[dict] = []
+                    for url in raw_images:
+                        if not isinstance(url, str) or not url:
+                            continue
+                        # OpenAI 接受 data URL 或 https URL
+                        if url.startswith("data:") or url.startswith("http"):
+                            content_blocks.append({
+                                "type": "image_url",
+                                "image_url": {"url": url},
+                            })
+                        else:
+                            content_blocks.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{url}"},
+                            })
+                    content_blocks.append({"type": "text", "text": prompt})
+                    messages.append({"role": "user", "content": content_blocks})
+                else:
+                    messages.append({"role": "user", "content": prompt})
                 body = {"model": api_model, "messages": messages, "stream": True}
                 if temperature is not None:
                     body["temperature"] = temperature

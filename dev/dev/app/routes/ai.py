@@ -20,6 +20,11 @@ class ChatRequest(BaseModel):
     ai_max_tokens: Optional[int] = Field(None, ge=1, description="最大token数")
     system_prompt: Optional[str] = Field(None, description="系统提示词")
     auto_approve: Optional[bool] = Field(False, description="自动批准")
+    # 2026-06-08 TASK-2.3 引入：图片附件（多模态）
+    images: Optional[list[str]] = Field(
+        None,
+        description="图片附件列表（base64 数据 URL，如 data:image/png;base64,XXXX）。空列表/None = 无图。",
+    )
 
 
 class StopChatRequest(BaseModel):

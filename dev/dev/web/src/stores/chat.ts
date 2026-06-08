@@ -7,6 +7,8 @@ export interface Message {
   role: 'user' | 'assistant' | 'system'
   content: string
   timestamp: number
+  // 2026-06-08 TASK-2.3 引入：图片附件（base64 数据 URL 列表）
+  images?: string[]
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -18,12 +20,14 @@ export const useChatStore = defineStore('chat', () => {
 
   let abortController: AbortController | null = null
 
-  async function sendMessage(content: string) {
+  async function sendMessage(content: string, images?: string[]) {
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: 'user',
       content,
       timestamp: Date.now(),
+      // 2026-06-08 TASK-2.3 引入：图片附件（base64 数据 URL 列表，渲染时显示缩略图）
+      images: images && images.length > 0 ? images : undefined,
     }
     messages.value.push(userMsg)
 
@@ -45,6 +49,8 @@ export const useChatStore = defineStore('chat', () => {
           model: currentModel.value || undefined,
           provider: currentProvider.value || undefined,
           session_id: currentSessionId.value || undefined,
+          // 2026-06-08 TASK-2.3: 透传图片
+          images: images && images.length > 0 ? images : undefined,
         },
         abortController.signal,
         (chunk: string) => {

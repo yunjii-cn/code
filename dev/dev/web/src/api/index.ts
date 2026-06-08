@@ -25,6 +25,8 @@ export const aiApi = {
     ai_max_tokens?: number
     system_prompt?: string
     auto_approve?: boolean
+    // 2026-06-08 TASK-2.3 引入：图片附件（base64 数据 URL 列表）
+    images?: string[]
   }) => api.post('/ai/chat', data),
 
   stop: (sessionId?: string) =>

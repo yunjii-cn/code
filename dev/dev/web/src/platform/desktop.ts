@@ -12,6 +12,8 @@ export async function chat(
     ai_max_tokens?: number
     system_prompt?: string
     auto_approve?: boolean
+    // 2026-06-08 TASK-2.3 引入：图片附件
+    images?: string[]
   },
   signal: AbortSignal,
   onChunk: (chunk: string) => void,
