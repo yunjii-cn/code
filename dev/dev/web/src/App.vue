@@ -12,6 +12,7 @@ const navTabs = [
   { name: 'env', path: '/env' },
   { name: 'version', path: '/version' },
   { name: 'projects', path: '/projects' },
+  { name: 'github', path: '/github' },
   { name: 'settings', path: '/settings' },
 ]
 
@@ -20,6 +21,7 @@ const labels: Record<string, string> = {
   env: '⚙️ 部署维护',
   version: '📋 软件更新',
   projects: '📁 项目管理',
+  github: '🐙 GitHub',
   settings: '🔧 系统设置',
 }
 

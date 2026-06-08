@@ -39,6 +39,12 @@ const router = createRouter({
       // 2026-06-08 TASK-1.4: 迁移到 feature-sliced
       component: () => import('@features/version'),
     },
+    {
+      path: '/github',
+      name: 'github',
+      // 2026-06-08 TASK-2.1: GitHub 集成模块（Issues / PRs / Ask PR）
+      component: () => import('@features/github'),
+    },
   ],
 })
 

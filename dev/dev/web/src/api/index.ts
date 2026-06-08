@@ -321,4 +321,40 @@ export const versionApi = {
     api.post('/version/download-update', null, { params: { source: source || 'gitee' } }),
 }
 
+// 2026-06-08 TASK-2.1 引入：GitHub 集成 API 客户端
+export const githubApi = {
+  status: () =>
+    api.get('/github/status'),
+
+  repo: (projectPath?: string) =>
+    api.get('/github/repo', { params: { project_path: projectPath || '' } }),
+
+  listIssues: (params: { project_path?: string; state?: string; assignee?: string; author?: string; limit?: number } = {}) =>
+    api.get('/github/issues', { params }),
+
+  getIssue: (issueNumber: number, projectPath?: string) =>
+    api.get(`/github/issues/${issueNumber}`, { params: { project_path: projectPath || '' } }),
+
+  listPrs: (params: { project_path?: string; state?: string; search?: string; limit?: number } = {}) =>
+    api.get('/github/prs', { params }),
+
+  getPr: (prNumber: number, projectPath?: string) =>
+    api.get(`/github/prs/${prNumber}`, { params: { project_path: projectPath || '' } }),
+
+  getPrDiff: (prNumber: number, projectPath?: string) =>
+    api.get(`/github/prs/${prNumber}/diff`, { params: { project_path: projectPath || '' } }),
+
+  getPrFiles: (prNumber: number, projectPath?: string) =>
+    api.get(`/github/prs/${prNumber}/files`, { params: { project_path: projectPath || '' } }),
+
+  listPrComments: (prNumber: number, projectPath?: string) =>
+    api.get(`/github/prs/${prNumber}/comments`, { params: { project_path: projectPath || '' } }),
+
+  createPrComment: (prNumber: number, body: string, projectPath?: string) =>
+    api.post(`/github/prs/${prNumber}/comments`, { body }, { params: { project_path: projectPath || '' } }),
+
+  open: (target: string, projectPath?: string) =>
+    api.post('/github/open', { target }, { params: { project_path: projectPath || '' } }),
+}
+
 export default api

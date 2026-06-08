@@ -43,6 +43,7 @@ from .model_utils import (
     normalize_model_entries,
     guess_tool_support_by_name,
 )
+from . import github_core
 
 __all__ = [
     "MODEL_KEYS",
@@ -55,4 +56,5 @@ __all__ = [
     "fetch_json_with_timeout",
     "normalize_model_entries",
     "guess_tool_support_by_name",
+    "github_core",
 ]
