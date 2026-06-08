@@ -587,4 +587,140 @@ export const agentApi = {
     api.get('/agent/stats', { params: { workspace_path: workspacePath || '' } }),
 }
 
+// 2026-06-09 TASK-3.9 引入：团队模式 Team Workflow API 客户端
+export interface TeamTask {
+  id: string
+  title: string
+  description: string
+  role: 'coordinator' | 'architect' | 'developer' | 'tester' | 'documenter'
+  dependencies: string[]
+  status: 'pending' | 'in_progress' | 'awaiting_approval' | 'approved' | 'rejected' | 'done' | 'failed' | 'skipped'
+  assigned_agent: string | null
+  output: string | null
+  error: string | null
+  file_paths: string[]
+  created_at: number
+  updated_at: number
+  started_at: number | null
+  completed_at: number | null
+}
+
+export interface TeamApproval {
+  id: string
+  task_id: string
+  approver_role: 'coordinator' | 'architect' | 'developer' | 'tester' | 'documenter'
+  reason: string
+  status: 'pending' | 'approved' | 'rejected'
+  decision_comment: string | null
+  requested_at: number
+  decided_at: number | null
+}
+
+export interface TeamSharedContext {
+  key: string
+  value: string
+  source: 'coordinator' | 'architect' | 'developer' | 'tester' | 'documenter'
+  updated_at: number
+}
+
+export interface TeamMessage {
+  id: string
+  role: 'coordinator' | 'architect' | 'developer' | 'tester' | 'documenter'
+  content: string
+  type: 'chat' | 'status' | 'task' | 'approval' | 'review' | 'system'
+  task_id: string | null
+  ts: number
+}
+
+export interface TeamSession {
+  id: string
+  requirement: string
+  status: 'draft' | 'planning' | 'assigned' | 'in_progress' | 'reviewing' | 'arbitrating' | 'done' | 'failed' | 'closed'
+  tasks: TeamTask[]
+  approvals: TeamApproval[]
+  shared_context: TeamSharedContext[]
+  messages: TeamMessage[]
+  created_at: number
+  updated_at: number
+  started_at: number | null
+  completed_at: number | null
+}
+
+export interface TeamStats {
+  total_sessions: number
+  by_status: Record<string, number>
+  total_tasks: number
+  total_approvals: number
+  total_messages: number
+  role_distribution: Record<string, number>
+}
+
+export interface TeamRoleInfo {
+  id: string
+  label: string
+  read_only: boolean
+  allowed: string[] | null
+  denied: string[]
+}
+
+export interface TeamStatus {
+  roles: TeamRoleInfo[]
+  review_pairs: Record<string, string[]>
+  arbitration_pairs: Record<string, string[]>
+  tools: Record<string, string[]>
+}
+
+export const teamApi = {
+  status: (workspacePath?: string) =>
+    api.get('/team/status', { params: { workspace_path: workspacePath || '' } }),
+
+  sessions: (params: { workspace_path?: string; status?: string } = {}) =>
+    api.get('/team/sessions', { params: { ...params, workspace_path: params.workspace_path || '' } }),
+
+  session: (id: string, workspacePath?: string) =>
+    api.get(`/team/sessions/${id}`, { params: { workspace_path: workspacePath || '' } }),
+
+  create: (requirement: string, workspacePath?: string) =>
+    api.post('/team/sessions', { requirement }, { params: { workspace_path: workspacePath || '' } }),
+
+  remove: (id: string, workspacePath?: string) =>
+    api.delete(`/team/sessions/${id}`, { params: { workspace_path: workspacePath || '' } }),
+
+  addTask: (id: string, data: { title: string; description: string; role: string; dependencies?: string[] }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/tasks`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  assignTask: (id: string, taskId: string, agentId: string, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/tasks/${taskId}/assign`, { agent_id: agentId }, { params: { workspace_path: workspacePath || '' } }),
+
+  startTask: (id: string, taskId: string, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/tasks/${taskId}/start`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  completeTask: (id: string, taskId: string, data: { output?: string; file_paths?: string[] }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/tasks/${taskId}/complete`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  failTask: (id: string, taskId: string, error: string, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/tasks/${taskId}/fail`, { error }, { params: { workspace_path: workspacePath || '' } }),
+
+  requestApproval: (id: string, data: { task_id: string; approver_role: string; reason: string }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/approvals`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  decideApproval: (id: string, approvalId: string, data: { approve: boolean; comment?: string }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/approvals/${approvalId}/decide`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  addMessage: (id: string, data: { role: string; content: string; type?: string; task_id?: string }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/messages`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  updateContext: (id: string, data: { key: string; value: string; source: string }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/context`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  checkBoundary: (id: string, data: { role: string; path: string; action?: string }, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/check-boundary`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  close: (id: string, workspacePath?: string) =>
+    api.post(`/team/sessions/${id}/close`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  stats: (workspacePath?: string) =>
+    api.get('/team/stats', { params: { workspace_path: workspacePath || '' } }),
+}
+
 export default api

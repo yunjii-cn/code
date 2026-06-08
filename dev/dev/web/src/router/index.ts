@@ -63,6 +63,12 @@ const router = createRouter({
       // 2026-06-09 TASK-3.8: 独行模式 Code Agent（4 阶段状态机 UI）
       component: () => import('@features/agent'),
     },
+    {
+      path: '/team',
+      name: 'team',
+      // 2026-06-09 TASK-3.10: 团队模式 4-5 Agent 并行（任务看板 / 团队对话流 / Agent 面板）
+      component: () => import('@features/team'),
+    },
   ],
 })
 
