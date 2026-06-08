@@ -51,6 +51,12 @@ const router = createRouter({
       // 2026-06-09 TASK-3.3: 自进化知识面板（四层知识 + 强度演化）
       component: () => import('@features/knowledge'),
     },
+    {
+      path: '/responsive',
+      name: 'responsive',
+      // 2026-06-09 TASK-3.6: 主动感知面板（4 watcher + WebSocket 实时）
+      component: () => import('@features/responsive'),
+    },
   ],
 })
 

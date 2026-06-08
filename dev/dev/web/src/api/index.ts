@@ -440,4 +440,54 @@ export const knowledgeApi = {
     api.post('/knowledge/relevant', { context, top_k: topK }, { params: { workspace_path: workspacePath || '' } }),
 }
 
+// 2026-06-09 TASK-3.6 引入：主动感知 API 客户端
+export interface ResponsiveAction {
+  label: string
+  action: string
+  params: Record<string, unknown>
+}
+
+export interface ResponsiveNotification {
+  id: string
+  type: 'file_change' | 'code_quality' | 'security_risk' | 'progress'
+  severity: 'info' | 'warning' | 'error'
+  title: string
+  description: string
+  file_path?: string | null
+  actions: ResponsiveAction[]
+  created_at: number
+  created_at_iso: string
+  dismissed: boolean
+  source: string
+}
+
+export interface ResponsiveWatcherStatus {
+  last_scan_at: number | null
+}
+
+export interface ResponsiveEngineStatus {
+  running: boolean
+  watchers: Record<string, ResponsiveWatcherStatus>
+}
+
+export const responsiveApi = {
+  status: (workspacePath?: string) =>
+    api.get('/responsive/status', { params: { workspace_path: workspacePath || '' } }),
+
+  start: (workspacePath?: string) =>
+    api.post('/responsive/start', {}, { params: { workspace_path: workspacePath || '' } }),
+
+  stop: (workspacePath?: string) =>
+    api.post('/responsive/stop', {}, { params: { workspace_path: workspacePath || '' } }),
+
+  scan: (scanType: string = 'all', workspacePath?: string) =>
+    api.post('/responsive/scan', { scan_type: scanType }, { params: { workspace_path: workspacePath || '' } }),
+
+  notifications: (params: { workspace_path?: string; type?: string; severity?: string; limit?: number } = {}) =>
+    api.get('/responsive/notifications', { params: { ...params, workspace_path: params.workspace_path || '' } }),
+
+  dismiss: (id: string, workspacePath?: string) =>
+    api.post(`/responsive/notifications/${id}/dismiss`, {}, { params: { workspace_path: workspacePath || '' } }),
+}
+
 export default api
