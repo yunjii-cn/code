@@ -7,6 +7,11 @@ export { default as YJPopover } from './YJPopover.vue'
 export { default as YJToast } from './YJToast.vue'
 export { default as YJPanel } from './YJPanel.vue'
 
+// 2026-06-08 TASK-2.7 引入：统一通知中心
+export { default as YJNotificationCenter } from './YJNotificationCenter.vue'
+export { useNotificationStore } from './notificationStore'
+export type { NotificationItem } from './notificationStore'
+
 // Toast 全局 API 单例（YJToast 挂载时注入）
 export { useToast, setToastApi, clearToastApi } from './toast'
 export type { ToastApi, ToastType } from './toast'
