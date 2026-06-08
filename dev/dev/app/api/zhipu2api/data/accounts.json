@@ -1,0 +1,14 @@
+{
+  "accounts": [
+    {
+      "api_key": "2432e41538364f3684ca543dbef28f15.w6P9ZPTkLfF9Mlrg",
+      "label": "env-key",
+      "valid": true,
+      "status": "valid",
+      "rate_limited_until": 0,
+      "consecutive_failures": 0,
+      "last_used": 0,
+      "total_requests": 0
+    }
+  ]
+}

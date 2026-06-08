@@ -1,0 +1,131 @@
+# ============================================
+# Git管理范围说明
+# ============================================
+# 仓库根目录: dev/
+#
+# 三目录纯净整合包架构：
+#   dev/*.exe      = 开发测试 EXE（gitignore，不推送）
+#   dev/_internal/ = PyInstaller 运行时（gitignore，不推送）
+#   dev/app/       = 应用程序代码（只读，Git管理，推送）
+#   dev/data/      = 用户数据（可写，Git不管理，不推送）
+#   dev/temp/      = 临时文件（可删除，Git不管理，不推送）
+#   dev/ver/*.exe  = 稳定版 EXE（git 跟踪，推送）
+#
+# 推送内容：
+# - app/ 的源代码文件 (main.py, backend.py, desktop/src/, api/, src/, etc.)
+# - ver/*.exe (稳定版 EXE)
+# - .gitignore
+#
+# 不推送：
+# - *.exe            (开发测试 EXE，在 dev/ 根目录)
+# - _internal/       (PyInstaller 运行时 DLL，在 dev/ 根目录)
+# - data/            (用户数据：.env, projects, sessions, api数据, .venv)
+# - temp/            (临时文件：logs, cache, debug)
+# - app/nodejs/      (Node.js 运行时，~190MB，部署维护安装)
+# - app/bun/         (Bun 运行时，~104MB，部署维护安装)
+# - app/node_modules/(npm 依赖，~500MB，部署维护安装)
+# ============================================
+
+# ── dev/ 根目录下的 EXE 和 _internal/（不推送）──
+/*.exe
+/_internal/
+
+# ── dev/ 根目录下的构建产物和运行时文件（不推送）──
+/icon.ico
+/icon.png
+/backup/
+
+# ── ver/ 下的稳定 EXE 要推送 ──
+!ver/*.exe
+
+# ── 版本切换批处理脚本（本地临时文件）──
+_switch_version.bat
+
+# ── 版本数据缓存（本地运行时生成）──
+ver/version_cache.json
+ver/app_core_v*.zip
+
+# ── 引导启动器（构建产物）──
+bootstrapper_云集智能编程工作站.exe
+
+# ── build/ 目录（PyInstaller 工作目录，不推送）──
+/build/
+
+# ── data/ 用户数据目录（不推送）──
+/data/
+
+# ── temp/ 临时文件目录（不推送）──
+/temp/
+
+# ── 运行时环境（由部署维护功能自动安装，不推送）──
+app/nodejs/
+app/bun/
+app/node_modules/
+app/python/
+app/env_install_status.json
+
+# ── app/ 下的运行时生成物（不推送）──
+app/.venv/
+app/.uv_cache/
+app/.bun_cache/
+app/__pycache__/
+app/**/__pycache__/
+app/cli_debug.log
+app/version_info.txt
+
+# ── 敏感信息 ──
+app/.env
+app/.env.*
+!app/.env.example
+app/api/zhipu2api/data/api_keys.json
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+*.spec
+
+# ── IDE / 编辑器 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.windsurf/
+.cursorignore
+.cursorindexingignore
+
+# ── OS 生成文件 ──
+Thumbs.db
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ── 日志 ──
+*.log
+logs/
+
+# ── 临时文件 ──
+tmp/
+*.tmp
+*.bak
+*.cache
+
+# ── 大型压缩包 ──
+*.zip
+*.7z
+*.tar.gz
+*.whl
+
+# ── 修复脚本（开发临时文件）──
+app/fix_all_bundle_imports.cjs
+app/fix_bundle_imports.cjs
+app/fix_bundle_imports_v2.cjs
+app/fix_bundle_imports_v3.cjs

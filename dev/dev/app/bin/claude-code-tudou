@@ -1,0 +1,1317 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync, readFileSync } from "node:fs";
+import http from "node:http";
+import https from "node:https";
+
+const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const isRecoveryMode = process.env.CLAUDE_CODE_FORCE_RECOVERY_CLI === "1";
+const entrypoint = isRecoveryMode
+  ? "./src/localRecoveryCli.ts"
+  : "./src/entrypoints/cli.tsx";
+
+const args = process.argv.slice(2);
+
+// ── 读取 .env 文件中的配置 ──
+function readDotEnv() {
+  const envPath = resolve(rootDir, ".env");
+  if (!existsSync(envPath)) return {};
+  const content = readFileSync(envPath, "utf-8");
+  const result = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    result[key] = val;
+  }
+  return result;
+}
+
+// ── Anthropic ↔ Ollama 格式转换代理（支持 Tool Calling） ──
+// 将 Anthropic Messages API 格式转换为 Ollama /api/chat 格式，
+// 并将 Ollama 响应（包括 tool_calls）转换回 Anthropic 格式。
+function startOllamaProxy(targetBaseUrl, ollamaModel) {
+  const targetUrl = new URL(targetBaseUrl);
+  const model = ollamaModel || "qwen3:8b";
+
+  const proxyServer = http.createServer((req, res) => {
+    if (req.method === "POST" && req.url?.startsWith("/v1/messages")) {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        let bodyStr = Buffer.concat(chunks).toString("utf-8");
+        let anthropicBody;
+
+        try {
+          anthropicBody = JSON.parse(bodyStr);
+        } catch {
+          res.writeHead(400);
+          res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON" } }));
+          return;
+        }
+
+        let ollamaMessages = [];
+        let systemPrompt = "";
+        if (typeof anthropicBody.system === "string") {
+          systemPrompt = anthropicBody.system;
+        } else if (Array.isArray(anthropicBody.system)) {
+          systemPrompt = anthropicBody.system
+            .map((b) => (b.type === "text" ? b.text : ""))
+            .filter(Boolean)
+            .join("\n");
+        }
+
+        if (Array.isArray(anthropicBody.messages)) {
+          for (const msg of anthropicBody.messages) {
+            if (msg.role === "user") {
+              const toolResults = [];
+              const textParts = [];
+              if (Array.isArray(msg.content)) {
+                for (const block of msg.content) {
+                  if (block.type === "tool_result") toolResults.push(block);
+                  else if (block.type === "text") textParts.push(block.text);
+                }
+              } else if (typeof msg.content === "string") {
+                textParts.push(msg.content);
+              }
+
+              for (const tr of toolResults) {
+                const content = typeof tr.content === "string"
+                  ? tr.content
+                  : Array.isArray(tr.content)
+                    ? tr.content.map(b => b.type === "text" ? b.text : "").filter(Boolean).join("\n")
+                    : "";
+                ollamaMessages.push({
+                  role: "tool",
+                  name: tr.tool_use_id || "unknown",
+                  content: content || "(no output)",
+                });
+              }
+
+              const text = textParts.filter(Boolean).join("\n");
+              if (text) ollamaMessages.push({ role: "user", content: text });
+
+            } else if (msg.role === "assistant") {
+              const toolCalls = [];
+              const textParts = [];
+              if (Array.isArray(msg.content)) {
+                for (const block of msg.content) {
+                  if (block.type === "tool_use") toolCalls.push(block);
+                  else if (block.type === "text") textParts.push(block.text);
+                }
+              } else if (typeof msg.content === "string") {
+                textParts.push(msg.content);
+              }
+
+              const assistantMsg = { role: "assistant", content: "" };
+              const ollamaToolCalls = [];
+
+              const text = textParts.filter(Boolean).join("\n");
+              if (text) assistantMsg.content = text;
+
+              for (const tc of toolCalls) {
+                let args = {};
+                if (tc.input) {
+                  args = typeof tc.input === "string" ? JSON.parse(tc.input) : tc.input;
+                }
+                ollamaToolCalls.push({
+                  function: {
+                    name: tc.name,
+                    arguments: args,
+                  },
+                });
+              }
+
+              if (ollamaToolCalls.length > 0) {
+                assistantMsg.tool_calls = ollamaToolCalls;
+              }
+              ollamaMessages.push(assistantMsg);
+            }
+          }
+        }
+
+        const ollamaTools = [];
+        if (Array.isArray(anthropicBody.tools)) {
+          for (const tool of anthropicBody.tools) {
+            if (tool.type === "custom") continue;
+            ollamaTools.push({
+              type: "function",
+              function: {
+                name: tool.name,
+                description: tool.description || "",
+                parameters: tool.input_schema || { type: "object", properties: {} },
+              },
+            });
+          }
+        }
+
+        const MAX_MESSAGES = 30;
+        if (ollamaMessages.length > MAX_MESSAGES) {
+          ollamaMessages = ollamaMessages.slice(-MAX_MESSAGES);
+        }
+
+        const stream = anthropicBody.stream === true;
+
+        const ollamaBody = {
+          model: model,
+          messages: ollamaMessages,
+          stream: stream,
+          options: {
+            num_ctx: 65536,
+          },
+        };
+        if (systemPrompt) {
+          ollamaBody.system = systemPrompt;
+        }
+        const aiLang = (process.env.AI_LANGUAGE || "").trim().toLowerCase();
+        if (aiLang === "zh") {
+          const langSuffix = "\n\n重要：你必须始终使用中文（简体中文）回答所有问题。即使用户用英文提问，也请用中文回答。";
+          ollamaBody.system = (ollamaBody.system || "") + langSuffix;
+        } else if (aiLang === "ja") {
+          const langSuffix = "\n\n重要：すべての質問に日本語で回答してください。";
+          ollamaBody.system = (ollamaBody.system || "") + langSuffix;
+        } else if (aiLang === "ko") {
+          const langSuffix = "\n\n중요: 모든 질문에 한국어로 답변해 주세요.";
+          ollamaBody.system = (ollamaBody.system || "") + langSuffix;
+        }
+        const useNativeTools = (process.env.OLLAMA_NATIVE_TOOLS || "").trim() === "1";
+        if (ollamaTools.length > 0 && useNativeTools) {
+          ollamaBody.tools = ollamaTools;
+        } else if (ollamaTools.length > 0) {
+          const toolDescs = ollamaTools.map((t) => {
+            const p = JSON.stringify(t.function.parameters || {});
+            return "- " + t.function.name + ": " + (t.function.description || "") + " Params: " + p;
+          }).join("\n");
+          const BT = String.fromCharCode(96);
+          const aiLang2 = aiLang;
+          let toolPrompt;
+          if (aiLang2 === "zh") {
+            toolPrompt = "\n\n你可以使用以下工具。调用工具时，请用 " + BT + BT + BT + " 标签包裹JSON块，格式如下：\n" + BT + BT + BT + '\n{"name": "工具名称", "arguments": {"参数": "值"}}\n' + BT + BT + BT + "\n你可以调用多个工具。每次调用后，等待下一条用户消息中的 <tool_result> 标签返回结果。\n可用工具：\n" + toolDescs;
+          } else {
+            toolPrompt = "\n\nYou have access to the following tools. To call a tool, output a JSON block enclosed in " + BT + BT + BT + " tags like this:\n" + BT + BT + BT + '\n{"name": "tool_name", "arguments": {"param": "value"}}\n' + BT + BT + BT + "\nYou can call multiple tools. After each tool call, wait for the result in the next user message enclosed in <tool_result> tags.\nAvailable tools:\n" + toolDescs;
+          }
+          ollamaBody.system = (ollamaBody.system || "") + toolPrompt;
+        }
+
+        const envTemp = (process.env.AI_TEMPERATURE || "").trim();
+        const envMaxTokens = (process.env.AI_MAX_TOKENS || "").trim();
+        if (envTemp) {
+          try { ollamaBody.options.temperature = parseFloat(envTemp); } catch {}
+        }
+        if (envMaxTokens) {
+          try { ollamaBody.options.num_predict = parseInt(envMaxTokens, 10); } catch {}
+        }
+
+        const ollamaBodyStr = JSON.stringify(ollamaBody);
+
+        sendToOllama(ollamaBody, ollamaTools, ollamaBodyStr, stream, res, false);
+      });
+    } else {
+      res.writeHead(404);
+      res.end(JSON.stringify({ error: "Not found" }));
+    }
+  });
+
+  function sendToOllama(bodyObj, ollamaTools, bodyStr, stream, res, isRetry) {
+    const proxyOpts = {
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || 11434,
+      path: "/api/chat",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(bodyStr),
+      },
+    };
+
+    const proxyReq = http.request(proxyOpts, (proxyRes) => {
+      if (proxyRes.statusCode !== 200) {
+        const errChunks = [];
+        proxyRes.on("data", (c) => errChunks.push(c));
+        proxyRes.on("end", () => {
+          const errBody = Buffer.concat(errChunks).toString("utf-8");
+
+          if (!isRetry && (errBody.includes("does not support tools") || errBody.includes("does not support tool") || errBody.includes("tool calling") || errBody.includes("not supported"))) {
+            const retryBody = { ...bodyObj };
+            delete retryBody.tools;
+            if (ollamaTools.length > 0) {
+              const toolDescs = ollamaTools.map((t) => {
+                const p = JSON.stringify(t.function.parameters || {});
+                return "- " + t.function.name + ": " + (t.function.description || "") + " Params: " + p;
+              }).join("\n");
+              const BT = String.fromCharCode(96);
+              const aiLang2 = (process.env.AI_LANGUAGE || "").trim().toLowerCase();
+              let toolPrompt;
+              if (aiLang2 === "zh") {
+                toolPrompt = "\n\n你可以使用以下工具。调用工具时，请用 " + BT + BT + BT + " 标签包裹JSON块，格式如下：\n" + BT + BT + BT + '\n{"name": "工具名称", "arguments": {"参数": "值"}}\n' + BT + BT + BT + "\n你可以调用多个工具。每次调用后，等待下一条用户消息中的 <tool_result> 标签返回结果。\n可用工具：\n" + toolDescs;
+              } else {
+                toolPrompt = "\n\nYou have access to the following tools. To call a tool, output a JSON block enclosed in " + BT + BT + BT + " tags like this:\n" + BT + BT + BT + '\n{"name": "tool_name", "arguments": {"param": "value"}}\n' + BT + BT + BT + "\nYou can call multiple tools. After each tool call, wait for the result in the next user message enclosed in <tool_result> tags.\nAvailable tools:\n" + toolDescs;
+              }
+              retryBody.system = (retryBody.system || "") + toolPrompt;
+            }
+            sendToOllama(retryBody, [], JSON.stringify(retryBody), stream, res, true);
+            return;
+          }
+
+          if (!isRetry && proxyRes.statusCode === 500 && ollamaTools.length > 0) {
+            const retryBody = { ...bodyObj };
+            delete retryBody.tools;
+            if (ollamaTools.length > 0) {
+              const toolDescs = ollamaTools.map((t) => {
+                const p = JSON.stringify(t.function.parameters || {});
+                return "- " + t.function.name + ": " + (t.function.description || "") + " Params: " + p;
+              }).join("\n");
+              const BT = String.fromCharCode(96);
+              const aiLang2 = (process.env.AI_LANGUAGE || "").trim().toLowerCase();
+              let toolPrompt;
+              if (aiLang2 === "zh") {
+                toolPrompt = "\n\n你可以使用以下工具。调用工具时，请用 " + BT + BT + BT + " 标签包裹JSON块，格式如下：\n" + BT + BT + BT + '\n{"name": "工具名称", "arguments": {"参数": "值"}}\n' + BT + BT + BT + "\n你可以调用多个工具。每次调用后，等待下一条用户消息中的 <tool_result> 标签返回结果。\n可用工具：\n" + toolDescs;
+              } else {
+                toolPrompt = "\n\nYou have access to the following tools. To call a tool, output a JSON block enclosed in " + BT + BT + BT + " tags like this:\n" + BT + BT + BT + '\n{"name": "tool_name", "arguments": {"param": "value"}}\n' + BT + BT + BT + "\nYou can call multiple tools. After each tool call, wait for the result in the next user message enclosed in <tool_result> tags.\nAvailable tools:\n" + toolDescs;
+              }
+              retryBody.system = (retryBody.system || "") + toolPrompt;
+            }
+            sendToOllama(retryBody, [], JSON.stringify(retryBody), stream, res, true);
+            return;
+          }
+
+          res.writeHead(proxyRes.statusCode, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            type: "error",
+            error: { type: proxyRes.statusCode === 500 ? "api_error" : "invalid_request_error", message: `Ollama error (${proxyRes.statusCode}): ${errBody.substring(0, 500)}` },
+          }));
+        });
+        return;
+      }
+
+      if (stream) {
+        handleStreamResponse(proxyRes, res, model, isRetry, useNativeTools);
+      } else {
+        handleNonStreamResponse(proxyRes, res, model, isRetry, useNativeTools);
+      }
+    });
+
+    proxyReq.on("error", (err) => {
+      if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: `Proxy connection error: ${err.message}` },
+      }));
+    });
+
+    proxyReq.write(bodyStr);
+    proxyReq.end();
+  }
+
+  function handleStreamResponse(proxyRes, res, model, isRetry, useNativeTools) {
+    const msgId = `msg_${Date.now().toString(36)}`;
+    let sentMessageStart = false;
+    let contentBlockIndex = 0;
+    let currentToolUseIndex = 0;
+    let hasToolCalls = false;
+    let fullContent = "";
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let textBlockStarted = false;
+    let textBlockClosed = false;
+
+    if (isRetry) {
+      const respChunks = [];
+      proxyRes.setEncoding("utf-8");
+      proxyRes.on("data", (chunk) => {
+        respChunks.push(chunk);
+        const lines = chunk.split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed.prompt_eval_count) inputTokens = parsed.prompt_eval_count;
+            if (parsed.eval_count) outputTokens = parsed.eval_count;
+          } catch {}
+        }
+      });
+      proxyRes.on("end", () => {
+        for (const chunk of respChunks) {
+          const lines = chunk.split("\n");
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const parsed = JSON.parse(trimmed);
+              if (parsed.message?.content) fullContent += parsed.message.content;
+            } catch {}
+          }
+        }
+
+        const toolCalls = parseToolCallsFromText(fullContent);
+        let cleanContent = removeToolCallBlocksFromText(fullContent);
+
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+        res.write("event: message_start\ndata: " + JSON.stringify({
+          type: "message_start",
+          message: { id: msgId, type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0 } },
+        }) + "\n\n");
+
+        let cbIndex = 0;
+        if (cleanContent.trim()) {
+          res.write("event: content_block_start\ndata: " + JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }) + "\n\n");
+          res.write("event: content_block_delta\ndata: " + JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: cleanContent } }) + "\n\n");
+          res.write("event: content_block_stop\ndata: " + JSON.stringify({ type: "content_block_stop", index: 0 }) + "\n\n");
+          cbIndex = 1;
+        }
+
+        for (let i = 0; i < toolCalls.length; i++) {
+          const tc = toolCalls[i];
+          const toolUseId = "toolu_" + Date.now().toString(36) + "_" + i;
+          res.write("event: content_block_start\ndata: " + JSON.stringify({ type: "content_block_start", index: cbIndex, content_block: { type: "tool_use", id: toolUseId, name: tc.name, input: {} } }) + "\n\n");
+          res.write("event: content_block_delta\ndata: " + JSON.stringify({ type: "content_block_delta", index: cbIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(tc.arguments) } }) + "\n\n");
+          res.write("event: content_block_stop\ndata: " + JSON.stringify({ type: "content_block_stop", index: cbIndex }) + "\n\n");
+          cbIndex++;
+        }
+
+        if (cbIndex === 0) {
+          res.write("event: content_block_start\ndata: " + JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }) + "\n\n");
+          res.write("event: content_block_stop\ndata: " + JSON.stringify({ type: "content_block_stop", index: 0 }) + "\n\n");
+        }
+
+        const stopReason = toolCalls.length > 0 ? "tool_use" : "end_turn";
+        res.write("event: message_delta\ndata: " + JSON.stringify({ type: "message_delta", delta: { stop_reason, stop_sequence: null }, usage: { output_tokens: outputTokens || fullContent.length } }) + "\n\n");
+        res.write("event: message_stop\ndata: " + JSON.stringify({ type: "message_stop" }) + "\n\n");
+        res.end();
+      });
+      return;
+    }
+
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+
+    function sendSSE(event, data) {
+      try {
+        res.write("event: " + event + "\ndata: " + JSON.stringify(data) + "\n\n");
+      } catch (e) {}
+    }
+
+    function finishStream(stopReason) {
+      if (textBlockStarted && !textBlockClosed) {
+        sendSSE("content_block_stop", { type: "content_block_stop", index: 0 });
+        textBlockClosed = true;
+      }
+      if (!hasToolCalls && !textBlockStarted) {
+        sendSSE("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+        if (fullContent) {
+          sendSSE("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: fullContent } });
+        }
+        sendSSE("content_block_stop", { type: "content_block_stop", index: 0 });
+      }
+      if (!useNativeTools && !hasToolCalls && fullContent) {
+        const textToolCalls = parseToolCallsFromText(fullContent);
+        if (textToolCalls.length > 0) {
+          for (let i = 0; i < textToolCalls.length; i++) {
+            const tc = textToolCalls[i];
+            const toolUseId = "toolu_" + Date.now().toString(36) + "_" + i;
+            sendSSE("content_block_start", { type: "content_block_start", index: contentBlockIndex, content_block: { type: "tool_use", id: toolUseId, name: tc.name, input: {} } });
+            sendSSE("content_block_delta", { type: "content_block_delta", index: contentBlockIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(tc.arguments || {}) } });
+            sendSSE("content_block_stop", { type: "content_block_stop", index: contentBlockIndex });
+            contentBlockIndex++;
+          }
+          hasToolCalls = true;
+        }
+      }
+      sendSSE("message_delta", { type: "message_delta", delta: { stop_reason: hasToolCalls ? "tool_use" : (stopReason || "end_turn"), stop_sequence: null }, usage: { output_tokens: outputTokens || fullContent.length } });
+      sendSSE("message_stop", { type: "message_stop" });
+    }
+
+    proxyRes.setEncoding("utf-8");
+    let buffer = "";
+
+    proxyRes.on("data", (chunk) => {
+      try {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        let ollamaChunk;
+        try { ollamaChunk = JSON.parse(trimmed); } catch { continue; }
+
+        if (ollamaChunk.prompt_eval_count) inputTokens = ollamaChunk.prompt_eval_count;
+        if (ollamaChunk.eval_count) outputTokens = ollamaChunk.eval_count;
+
+        if (!sentMessageStart) {
+          sendSSE("message_start", {
+            type: "message_start",
+            message: { id: msgId, type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0 } },
+          });
+          sentMessageStart = true;
+        }
+
+        if (ollamaChunk.message?.content) {
+          if (!hasToolCalls) {
+            fullContent += ollamaChunk.message.content;
+            if (!useNativeTools) {
+              const cleaned = ollamaChunk.message.content
+                .replace(/\`\`\`(?:json)?\s*\n?/g, "")
+                .replace(/\`\`\`/g, "");
+              if (cleaned.trim()) {
+                if (!textBlockStarted) {
+                  sendSSE("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+                  textBlockStarted = true;
+                }
+                sendSSE("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: cleaned } });
+              }
+            } else {
+              if (!textBlockStarted) {
+                sendSSE("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+                textBlockStarted = true;
+              }
+              sendSSE("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: ollamaChunk.message.content } });
+            }
+          }
+        }
+
+        if (ollamaChunk.message?.tool_calls && ollamaChunk.message.tool_calls.length > 0) {
+          if (textBlockStarted && !textBlockClosed && !hasToolCalls) {
+            sendSSE("content_block_stop", { type: "content_block_stop", index: 0 });
+            textBlockClosed = true;
+            contentBlockIndex = 1;
+          }
+          hasToolCalls = true;
+          for (const tc of ollamaChunk.message.tool_calls) {
+            const toolUseId = "toolu_" + Date.now().toString(36) + "_" + currentToolUseIndex;
+            const toolName = tc.function?.name || "unknown";
+            const toolInput = tc.function?.arguments || {};
+            sendSSE("content_block_start", { type: "content_block_start", index: contentBlockIndex, content_block: { type: "tool_use", id: toolUseId, name: toolName, input: {} } });
+            sendSSE("content_block_delta", { type: "content_block_delta", index: contentBlockIndex, delta: { type: "input_json_delta", partial_json: JSON.stringify(toolInput) } });
+            sendSSE("content_block_stop", { type: "content_block_stop", index: contentBlockIndex });
+            contentBlockIndex++;
+            currentToolUseIndex++;
+          }
+        }
+
+        if (ollamaChunk.done) {
+          const doneReason = ollamaChunk.done_reason || "";
+          const stopReason = hasToolCalls ? "tool_use" : (doneReason === "length" ? "max_tokens" : "end_turn");
+          finishStream(stopReason);
+        }
+      }
+      } catch (streamErr) {
+        console.error("[Stream Error]", streamErr.message || streamErr);
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ type: "error", error: { type: "api_error", message: `Stream processing error: ${streamErr.message || String(streamErr)}` } }));
+        } else {
+          try { finishStream("end_turn"); } catch {} 
+          try { res.end(); } catch {}
+        }
+      }
+    });
+
+    proxyRes.on("end", () => {
+      if (!sentMessageStart) {
+        sendSSE("message_start", {
+          type: "message_start",
+          message: { id: msgId, type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+        });
+        sentMessageStart = true;
+      }
+      finishStream("end_turn");
+      res.end();
+    });
+  }
+
+  function parseToolCallsFromText(text) {
+    const calls = [];
+    const patterns = [
+      /\`\`\`(?:json)?\s*\n?([\s\S]*?)\n?\`\`\`/g,
+      /\{\s*"name"\s*:\s*"([^"]+)"\s*,\s*"arguments"\s*:\s*(\{[^}]*\})\s*\}/g,
+    ];
+    const seen = new Set();
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        let jsonStr = match[1] || match[0];
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.name && typeof parsed.name === "string") {
+            const key = parsed.name + ":" + JSON.stringify(parsed.arguments || {});
+            if (!seen.has(key)) {
+              seen.add(key);
+              calls.push({ name: parsed.name, arguments: parsed.arguments || {} });
+            }
+          }
+        } catch {
+          try {
+            if (match[1]) {
+              const inner = JSON.parse(match[1]);
+              if (inner.name && typeof inner.name === "string") {
+                const key = inner.name + ":" + JSON.stringify(inner.arguments || {});
+                if (!seen.has(key)) {
+                  seen.add(key);
+                  calls.push({ name: inner.name, arguments: inner.arguments || {} });
+                }
+              }
+            }
+          } catch {}
+        }
+      }
+    }
+    return calls;
+  }
+
+  function removeToolCallBlocksFromText(text) {
+    let result = text.replace(/\`\`\`(?:json)?\s*\n?[\s\S]*?\n?\`\`\`/g, (match) => {
+      const inner = match.replace(/^\`\`\`(?:json)?\s*\n?/, "").replace(/\n?\`\`\`$/, "");
+      try {
+        const parsed = JSON.parse(inner);
+        if (parsed.name && parsed.arguments) return "";
+      } catch {}
+      return match;
+    });
+    result = result.replace(/\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\}/g, "");
+    result = result.replace(/\n{3,}/g, "\n\n").trim();
+    return result;
+  }
+
+  function handleNonStreamResponse(proxyRes, res, model, isRetry, useNativeTools) {
+    const respChunks = [];
+    proxyRes.on("data", (c) => respChunks.push(c));
+    proxyRes.on("end", () => {
+      let fullContent = "";
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let toolCalls = [];
+      const respText = Buffer.concat(respChunks).toString("utf-8");
+
+      for (const line of respText.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const chunk = JSON.parse(trimmed);
+          if (chunk.message?.content) fullContent += chunk.message.content;
+          if (chunk.message?.tool_calls) {
+            for (const tc of chunk.message.tool_calls) {
+              toolCalls.push(tc);
+            }
+          }
+          if (chunk.prompt_eval_count) inputTokens = chunk.prompt_eval_count;
+          if (chunk.eval_count) outputTokens = chunk.eval_count;
+        } catch {}
+      }
+
+      if ((isRetry || !useNativeTools) && toolCalls.length === 0 && fullContent) {
+        const parsedCalls = parseToolCallsFromText(fullContent);
+        for (const pc of parsedCalls) {
+          toolCalls.push({ function: { name: pc.name, arguments: pc.arguments } });
+        }
+        if (toolCalls.length > 0) {
+          fullContent = removeToolCallBlocksFromText(fullContent);
+        }
+      }
+
+      const content = [];
+      if (fullContent) content.push({ type: "text", text: fullContent });
+
+      let toolUseIndex = 0;
+      for (const tc of toolCalls) {
+        content.push({
+          type: "tool_use",
+          id: `toolu_${Date.now().toString(36)}_${toolUseIndex}`,
+          name: tc.function?.name || "unknown",
+          input: tc.function?.arguments || {},
+        });
+        toolUseIndex++;
+      }
+
+      if (content.length === 0) content.push({ type: "text", text: "" });
+
+      const stopReason = toolCalls.length > 0 ? "tool_use" : "end_turn";
+
+      const anthropicResponse = {
+        id: `msg_${Date.now().toString(36)}`,
+        type: "message",
+        role: "assistant",
+        content: content,
+        model: model,
+        stop_reason: stopReason,
+        stop_sequence: null,
+        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      };
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(anthropicResponse));
+    });
+  }
+
+  return new Promise((resolve) => {
+    proxyServer.listen(0, "127.0.0.1", () => {
+      const proxyPort = proxyServer.address().port;
+      process.on("exit", () => { try { proxyServer.close(); } catch {} });
+      process.on("uncaughtException", (err) => {
+        console.error("[Proxy Error]", err.message || err);
+      });
+      resolve(proxyPort);
+    });
+  });
+}
+
+// ── API 透传代理 ──
+// 将 Anthropic Messages API 请求直接透传到目标 API 服务
+// 目标服务（如 qwen2API）已实现 /anthropic/v1/messages 兼容端点
+function startApiProxy(targetBaseUrl, apiModel, apiKey) {
+  const targetUrl = new URL(targetBaseUrl);
+  const model = apiModel || "qwen3.6-plus";
+
+  const proxyServer = http.createServer((req, res) => {
+    if (req.method === "POST" && req.url?.startsWith("/v1/messages")) {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const bodyStr = Buffer.concat(chunks).toString("utf-8");
+        let anthropicBody;
+        try {
+          anthropicBody = JSON.parse(bodyStr);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON" } }));
+          return;
+        }
+
+        anthropicBody.model = model;
+
+        const aiLang = (process.env.AI_LANGUAGE || "").trim().toLowerCase();
+        if (aiLang === "zh") {
+          const langSuffix = "\n\n重要：你必须始终使用中文（简体中文）回答所有问题。即使用户用英文提问，也请用中文回答。";
+          if (typeof anthropicBody.system === "string") {
+            anthropicBody.system += langSuffix;
+          } else if (Array.isArray(anthropicBody.system)) {
+            const lastBlock = anthropicBody.system[anthropicBody.system.length - 1];
+            if (lastBlock && lastBlock.type === "text") {
+              lastBlock.text += langSuffix;
+            } else {
+              anthropicBody.system.push({ type: "text", text: langSuffix });
+            }
+          } else {
+            anthropicBody.system = langSuffix;
+          }
+        }
+
+        const forwardBody = JSON.stringify(anthropicBody);
+
+        const proxyOpts = {
+          hostname: targetUrl.hostname,
+          port: targetUrl.port || 7777,
+          path: "/anthropic/v1/messages",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(forwardBody),
+            "anthropic-version": "2023-06-01",
+          },
+        };
+        if (apiKey) {
+          proxyOpts.headers["x-api-key"] = apiKey;
+          proxyOpts.headers["Authorization"] = `Bearer ${apiKey}`;
+        }
+
+        const proxyReq = http.request(proxyOpts, (proxyRes) => {
+          if (proxyRes.statusCode === 500) {
+            const errChunks = [];
+            proxyRes.on("data", (c) => errChunks.push(c));
+            proxyRes.on("end", () => {
+              let errBody = Buffer.concat(errChunks).toString("utf-8");
+              let errMsg = "上游服务 500 错误";
+              try {
+                const parsed = JSON.parse(errBody);
+                errMsg = parsed?.error?.message || parsed?.detail || parsed?.error || errMsg;
+              } catch {}
+              if (errMsg.includes("account") || errMsg.includes("Account") || errMsg.includes("activation") || errMsg.includes("队列已满")) {
+                errMsg = "上游账户不可用（可能未激活或已失效），请在设置中注册新账户或添加有效 Token";
+              }
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                type: "error",
+                error: { type: "api_error", message: errMsg },
+              }));
+            });
+          } else if (anthropicBody.stream) {
+            res.writeHead(proxyRes.statusCode, {
+              "Content-Type": proxyRes.headers["content-type"] || "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+            });
+            proxyRes.pipe(res);
+          } else {
+            res.writeHead(proxyRes.statusCode, { "Content-Type": "application/json" });
+            proxyRes.pipe(res);
+          }
+        });
+
+        proxyReq.on("error", (err) => {
+          if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message: `API proxy connection error: ${err.message}` },
+          }));
+        });
+
+        proxyReq.write(forwardBody);
+        proxyReq.end();
+      });
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    }
+  });
+
+  return new Promise((resolve) => {
+    proxyServer.listen(0, "127.0.0.1", () => {
+      const proxyPort = proxyServer.address().port;
+      process.on("exit", () => { try { proxyServer.close(); } catch {} });
+      process.on("uncaughtException", (err) => {
+        console.error("[API Proxy Error]", err.message || err);
+      });
+      resolve(proxyPort);
+    });
+  });
+}
+
+// ── OpenAI 兼容代理 ──
+// 将 Anthropic Messages API 请求转换为 OpenAI Chat Completions API 格式，
+// 并将 OpenAI 响应转换回 Anthropic 格式。用于直连智谱等 OpenAI 兼容 API。
+function startOpenAiCompatProxy(targetBaseUrl, apiModel, apiKey) {
+  const targetUrl = new URL(targetBaseUrl);
+  const model = apiModel || "glm-4.7-flash";
+  const isHttps = targetUrl.protocol === "https:";
+  const httpModule = isHttps ? https : http;
+  const basePath = targetUrl.pathname.replace(/\/+$/, "");
+
+  function convertAnthropicToOpenAi(body) {
+    const messages = [];
+
+    if (typeof body.system === "string" && body.system) {
+      messages.push({ role: "system", content: body.system });
+    } else if (Array.isArray(body.system)) {
+      const sysText = body.system.map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n");
+      if (sysText) messages.push({ role: "system", content: sysText });
+    }
+
+    if (Array.isArray(body.messages)) {
+      for (const msg of body.messages) {
+        if (msg.role === "user") {
+          const toolResults = [];
+          const textParts = [];
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block.type === "tool_result") toolResults.push(block);
+              else if (block.type === "text") textParts.push(block.text);
+            }
+          } else if (typeof msg.content === "string") {
+            textParts.push(msg.content);
+          }
+
+          for (const tr of toolResults) {
+            const content = typeof tr.content === "string"
+              ? tr.content
+              : Array.isArray(tr.content)
+                ? tr.content.map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n")
+                : "";
+            messages.push({
+              role: "tool",
+              tool_call_id: tr.tool_use_id || "unknown",
+              content: content || "(no output)",
+            });
+          }
+
+          const text = textParts.filter(Boolean).join("\n");
+          if (text) messages.push({ role: "user", content: text });
+
+        } else if (msg.role === "assistant") {
+          const toolCalls = [];
+          const textParts = [];
+          if (Array.isArray(msg.content)) {
+            for (const block of msg.content) {
+              if (block.type === "tool_use") toolCalls.push(block);
+              else if (block.type === "text" && block.text) textParts.push(block.text);
+            }
+          } else if (typeof msg.content === "string" && msg.content) {
+            textParts.push(msg.content);
+          }
+
+          const assistantMsg = { role: "assistant", content: null };
+          const openaiToolCalls = [];
+
+          const text = textParts.join("\n");
+          if (text) assistantMsg.content = text;
+
+          for (const tc of toolCalls) {
+            openaiToolCalls.push({
+              id: tc.id || `call_${Date.now().toString(36)}`,
+              type: "function",
+              function: {
+                name: tc.name,
+                arguments: typeof tc.input === "string" ? tc.input : JSON.stringify(tc.input || {}),
+              },
+            });
+          }
+
+          if (openaiToolCalls.length > 0) {
+            assistantMsg.tool_calls = openaiToolCalls;
+          }
+
+          messages.push(assistantMsg);
+        }
+      }
+    }
+
+    const tools = [];
+    if (Array.isArray(body.tools)) {
+      for (const tool of body.tools) {
+        tools.push({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description || "",
+            parameters: tool.input_schema || { type: "object", properties: {} },
+          },
+        });
+      }
+    }
+
+    const openaiBody = {
+      model: model,
+      messages: messages,
+      stream: body.stream === true,
+    };
+
+    if (tools.length > 0) openaiBody.tools = tools;
+    if (body.max_tokens) openaiBody.max_tokens = body.max_tokens;
+    if (body.temperature !== undefined && body.temperature !== null) openaiBody.temperature = body.temperature;
+
+    return openaiBody;
+  }
+
+  const proxyServer = http.createServer((req, res) => {
+    if (req.method === "POST" && req.url?.startsWith("/v1/messages")) {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const bodyStr = Buffer.concat(chunks).toString("utf-8");
+        let anthropicBody;
+        try {
+          anthropicBody = JSON.parse(bodyStr);
+        } catch {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON" } }));
+          return;
+        }
+
+        const aiLang = (process.env.AI_LANGUAGE || "").trim().toLowerCase();
+        if (aiLang === "zh") {
+          const langSuffix = "\n\n重要：你必须始终使用中文（简体中文）回答所有问题。即使用户用英文提问，也请用中文回答。";
+          if (typeof anthropicBody.system === "string") {
+            anthropicBody.system += langSuffix;
+          } else if (Array.isArray(anthropicBody.system)) {
+            const lastBlock = anthropicBody.system[anthropicBody.system.length - 1];
+            if (lastBlock && lastBlock.type === "text") {
+              lastBlock.text += langSuffix;
+            } else {
+              anthropicBody.system.push({ type: "text", text: langSuffix });
+            }
+          } else {
+            anthropicBody.system = langSuffix;
+          }
+        }
+
+        const openaiBody = convertAnthropicToOpenAi(anthropicBody);
+        const forwardBody = JSON.stringify(openaiBody);
+
+        const proxyOpts = {
+          hostname: targetUrl.hostname,
+          port: targetUrl.port || (isHttps ? 443 : 80),
+          path: basePath + "/chat/completions",
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(forwardBody),
+            "Authorization": `Bearer ${apiKey}`,
+          },
+        };
+
+        const proxyReq = httpModule.request(proxyOpts, (proxyRes) => {
+          if (proxyRes.statusCode !== 200) {
+            const errChunks = [];
+            proxyRes.on("data", (c) => errChunks.push(c));
+            proxyRes.on("end", () => {
+              const errBody = Buffer.concat(errChunks).toString("utf-8");
+              let errMsg = `API error (${proxyRes.statusCode})`;
+              try {
+                const parsed = JSON.parse(errBody);
+                errMsg = parsed?.error?.message || parsed?.error?.type || parsed?.message || errMsg;
+              } catch {}
+              res.writeHead(proxyRes.statusCode >= 400 ? proxyRes.statusCode : 502, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({
+                type: "error",
+                error: { type: proxyRes.statusCode === 401 ? "authentication_error" : "api_error", message: errMsg },
+              }));
+            });
+            return;
+          }
+
+          if (openaiBody.stream) {
+            handleOpenAiStream(proxyRes, res, model);
+          } else {
+            handleOpenAiNonStream(proxyRes, res, model);
+          }
+        });
+
+        proxyReq.on("error", (err) => {
+          if (!res.headersSent) res.writeHead(502, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message: `Connection error: ${err.message}` },
+          }));
+        });
+
+        proxyReq.write(forwardBody);
+        proxyReq.end();
+      });
+    } else {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Not found" }));
+    }
+  });
+
+  function handleOpenAiNonStream(proxyRes, res, model) {
+    const chunks = [];
+    proxyRes.on("data", (c) => chunks.push(c));
+    proxyRes.on("end", () => {
+      try {
+        const openaiResp = JSON.parse(Buffer.concat(chunks).toString("utf-8"));
+        const choice = openaiResp.choices?.[0];
+        const message = choice?.message || {};
+        const content = [];
+
+        if (message.content) {
+          content.push({ type: "text", text: message.content });
+        }
+
+        if (Array.isArray(message.tool_calls)) {
+          for (const tc of message.tool_calls) {
+            let input = {};
+            try { input = JSON.parse(tc.function.arguments || "{}"); } catch {}
+            content.push({
+              type: "tool_use",
+              id: tc.id || `toolu_${Date.now().toString(36)}`,
+              name: tc.function.name,
+              input: input,
+            });
+          }
+        }
+
+        const stopReason = choice?.finish_reason === "tool_calls" ? "tool_use"
+          : choice?.finish_reason === "length" ? "max_tokens"
+          : "end_turn";
+
+        const anthropicResp = {
+          id: `msg_${Date.now().toString(36)}`,
+          type: "message",
+          role: "assistant",
+          content: content.length > 0 ? content : [{ type: "text", text: "" }],
+          model: model,
+          stop_reason: stopReason,
+          stop_sequence: null,
+          usage: {
+            input_tokens: openaiResp.usage?.prompt_tokens || 0,
+            output_tokens: openaiResp.usage?.completion_tokens || 0,
+          },
+        };
+
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(anthropicResp));
+      } catch (e) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: `Failed to parse response: ${e.message}` },
+        }));
+      }
+    });
+  }
+
+  function handleOpenAiStream(proxyRes, res, model) {
+    const msgId = `msg_${Date.now().toString(36)}`;
+    let sentMessageStart = false;
+    let contentBlockIndex = 0;
+    let textBlockStarted = false;
+    let textBlockClosed = false;
+    let currentToolStarted = false;
+    let outputTokens = 0;
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+
+    function sendSSE(event, data) {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    }
+
+    function ensureMessageStart() {
+      if (!sentMessageStart) {
+        sendSSE("message_start", {
+          type: "message_start",
+          message: {
+            id: msgId,
+            type: "message",
+            role: "assistant",
+            content: [],
+            model: model,
+            stop_reason: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
+          },
+        });
+        sentMessageStart = true;
+      }
+    }
+
+    function closeTextBlock() {
+      if (textBlockStarted && !textBlockClosed) {
+        sendSSE("content_block_stop", { type: "content_block_stop", index: contentBlockIndex });
+        textBlockClosed = true;
+        contentBlockIndex++;
+      }
+    }
+
+    function closeToolBlock() {
+      if (currentToolStarted) {
+        sendSSE("content_block_stop", { type: "content_block_stop", index: contentBlockIndex });
+        contentBlockIndex++;
+        currentToolStarted = false;
+      }
+    }
+
+    let buffer = "";
+    proxyRes.setEncoding("utf-8");
+    proxyRes.on("data", (chunk) => {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+        const data = trimmed.slice(6);
+        if (data === "[DONE]") {
+          closeTextBlock();
+          closeToolBlock();
+          sendSSE("message_delta", {
+            type: "message_delta",
+            delta: { stop_reason: currentToolStarted ? "tool_use" : "end_turn", stop_sequence: null },
+            usage: { output_tokens: outputTokens },
+          });
+          sendSSE("message_stop", { type: "message_stop" });
+          res.end();
+          return;
+        }
+
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta;
+          const finishReason = parsed.choices?.[0]?.finish_reason;
+
+          if (!delta && !finishReason) continue;
+
+          ensureMessageStart();
+
+          if (delta?.content) {
+            if (!textBlockStarted) {
+              sendSSE("content_block_start", {
+                type: "content_block_start",
+                index: contentBlockIndex,
+                content_block: { type: "text", text: "" },
+              });
+              textBlockStarted = true;
+            }
+            sendSSE("content_block_delta", {
+              type: "content_block_delta",
+              index: contentBlockIndex,
+              delta: { type: "text_delta", text: delta.content },
+            });
+            outputTokens++;
+          }
+
+          if (delta?.tool_calls) {
+            for (const tc of delta.tool_calls) {
+              if (tc.id) {
+                closeTextBlock();
+                currentToolStarted = true;
+                sendSSE("content_block_start", {
+                  type: "content_block_start",
+                  index: contentBlockIndex,
+                  content_block: { type: "tool_use", id: tc.id, name: tc.function?.name || "", input: {} },
+                });
+              }
+              if (tc.function?.arguments) {
+                sendSSE("content_block_delta", {
+                  type: "content_block_delta",
+                  index: contentBlockIndex,
+                  delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+                });
+              }
+            }
+            outputTokens++;
+          }
+
+          if (finishReason) {
+            closeTextBlock();
+            closeToolBlock();
+            const stopReason = finishReason === "tool_calls" ? "tool_use"
+              : finishReason === "length" ? "max_tokens"
+              : "end_turn";
+            sendSSE("message_delta", {
+              type: "message_delta",
+              delta: { stop_reason: stopReason, stop_sequence: null },
+              usage: { output_tokens: outputTokens },
+            });
+            sendSSE("message_stop", { type: "message_stop" });
+            res.end();
+            return;
+          }
+        } catch {}
+      }
+    });
+
+    proxyRes.on("end", () => {
+      if (!res.writableEnded) {
+        ensureMessageStart();
+        closeTextBlock();
+        closeToolBlock();
+        sendSSE("message_delta", {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn", stop_sequence: null },
+          usage: { output_tokens: outputTokens },
+        });
+        sendSSE("message_stop", { type: "message_stop" });
+        res.end();
+      }
+    });
+  }
+
+  return new Promise((resolve) => {
+    proxyServer.listen(0, "127.0.0.1", () => {
+      const proxyPort = proxyServer.address().port;
+      process.on("exit", () => { try { proxyServer.close(); } catch {} });
+      process.on("uncaughtException", (err) => {
+        console.error("[OpenAI Compat Proxy Error]", err.message || err);
+      });
+      resolve(proxyPort);
+    });
+  });
+}
+
+// ── 主流程（异步） ──
+async function main() {
+  const dotEnv = readDotEnv();
+  const modelProvider = (process.env.MODEL_PROVIDER || dotEnv.MODEL_PROVIDER || "").toLowerCase();
+  const isOllamaMode = modelProvider === "ollama";
+  const isApiMode = modelProvider === "api";
+  const hasExternalProxy = !!process.env.ANTHROPIC_BASE_URL;
+
+  if (isOllamaMode && !hasExternalProxy) {
+    const ollamaBaseUrl = process.env.OLLAMA_BASE_URL || dotEnv.OLLAMA_BASE_URL || "http://127.0.0.1:11434";
+    const ollamaModel = process.env.OLLAMA_MODEL || dotEnv.OLLAMA_MODEL || "qwen3:8b";
+    const proxyPort = await startOllamaProxy(ollamaBaseUrl.trim(), ollamaModel.trim());
+    process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+    process.env.ANTHROPIC_API_KEY = "ollama-local";
+    process.env.ANTHROPIC_AUTH_TOKEN = "ollama-local";
+    process.env.ANTHROPIC_MODEL = ollamaModel.trim();
+  }
+
+  if (isApiMode && !hasExternalProxy) {
+    const apiBaseUrl = process.env.API_BASE_URL || dotEnv.API_BASE_URL || "http://127.0.0.1:7777";
+    const apiModel = process.env.API_MODEL || dotEnv.API_MODEL || "qwen3.6-plus";
+    const apiKey = process.env.API_KEY || dotEnv.API_KEY || "";
+    const isOpenAiCompat = (process.env.API_OPENAI_COMPAT || dotEnv.API_OPENAI_COMPAT || "").trim() === "1";
+
+    if (isOpenAiCompat) {
+      const proxyPort = await startOpenAiCompatProxy(apiBaseUrl.trim(), apiModel.trim(), apiKey.trim());
+      process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+      process.env.ANTHROPIC_API_KEY = apiKey.trim() || "openai-compat-local";
+      process.env.ANTHROPIC_AUTH_TOKEN = apiKey.trim() || "openai-compat-local";
+      process.env.ANTHROPIC_MODEL = apiModel.trim();
+      process.stdout.write(`[OPENAI-COMPAT-PROXY] Started on port ${proxyPort}, forwarding to ${apiBaseUrl.trim()}/chat/completions, model=${apiModel.trim()}\n`);
+      process.stdout.write(`[OPENAI-COMPAT-PROXY] ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL}\n`);
+    } else {
+      const proxyPort = await startApiProxy(apiBaseUrl.trim(), apiModel.trim(), apiKey.trim());
+      process.env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${proxyPort}`;
+      process.env.ANTHROPIC_API_KEY = apiKey.trim() || "api-local";
+      process.env.ANTHROPIC_AUTH_TOKEN = apiKey.trim() || "api-local";
+      process.env.ANTHROPIC_MODEL = apiModel.trim();
+      process.stdout.write(`[API-PROXY] Started on port ${proxyPort}, forwarding to ${apiBaseUrl.trim()}/anthropic/v1/messages, model=${apiModel.trim()}\n`);
+      process.stdout.write(`[API-PROXY] ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL}\n`);
+    }
+  }
+
+  function findBun() {
+    const bunDir = resolve(rootDir, "bun");
+    const localBunPath = resolve(bunDir, "bun-windows-x64", "bun.exe");
+    if (existsSync(localBunPath)) return localBunPath;
+    return null;
+  }
+
+  function findNode() {
+    const nodeDir = resolve(rootDir, "nodejs");
+    const localNodePath = resolve(nodeDir, "node-v24.11.1-win-x64", "node.exe");
+    if (existsSync(localNodePath)) return localNodePath;
+    return "node";
+  }
+
+  const childEnv = { ...process.env };
+
+  function startWithNode() {
+    const nodePath = findNode();
+    const nodeChild = spawn(
+      nodePath,
+      ["--env-file=.env", "--no-warnings", "--import", "tsx", entrypoint, ...args],
+      { cwd: rootDir, stdio: "inherit", windowsHide: true, env: childEnv }
+    );
+    nodeChild.on("exit", (code, signal) => {
+      if (signal) { process.kill(process.pid, signal); return; }
+      process.exit(code ?? 0);
+    });
+    nodeChild.on("error", (err) => {
+      console.error(`Failed to start Node.js: ${err.message}`);
+      console.error("Please run 'scripts/1、install-env.ps1' to install dependencies.");
+      process.exit(1);
+    });
+  }
+
+  const bunPath = findBun();
+  if (bunPath) {
+    const bunChild = spawn(bunPath, ["--env-file=.env", entrypoint, ...args], {
+      cwd: rootDir, stdio: "inherit", windowsHide: true, env: childEnv,
+    });
+    bunChild.on("exit", (code, signal) => {
+      if (signal) { process.kill(process.pid, signal); return; }
+      process.exit(code ?? 0);
+    });
+    bunChild.on("error", (err) => {
+      console.error(`Failed to start Bun: ${err.message}`);
+      console.error("Falling back to Node.js...");
+      startWithNode();
+    });
+  } else {
+    startWithNode();
+  }
+}
+
+main();

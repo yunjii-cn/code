@@ -1,0 +1,143 @@
+/* tokens.css — 2026-06-08 TASK-1.9 引入
+ * 云集智能编程工作站 — 设计系统令牌
+ * 暗黑卡片式风格（与现有产品一致）
+ * 规则：所有颜色 / 间距 / 字号必须从 CSS 变量取，禁止硬编码
+ */
+
+/* ============ 颜色：5 层级体系 ============ */
+:root {
+  /* Background — 背景色阶 */
+  --bg-primary: #0d0d0d; /* 主背景 */
+  --bg-secondary: #1a1a1a; /* 二级背景（侧栏） */
+  --bg-card: #1e1e1e; /* 卡片背景 */
+  --bg-card-hover: #252525; /* 卡片悬停 */
+  --bg-card-active: #2a2a2a; /* 卡片激活 */
+  --bg-input: #1e1e1e; /* 输入框 */
+  --bg-overlay: rgba(0, 0, 0, 0.6); /* 遮罩 */
+
+  /* Border — 边框色阶 */
+  --border: #2a2a2a; /* 默认边框 */
+  --border-light: #333; /* 浅边框 */
+  --border-strong: #444; /* 强边框 */
+  --border-accent: #3b82f6; /* 强调边框 */
+
+  /* Text — 文本色阶 */
+  --text-primary: #f0f0f0; /* 主文本 */
+  --text-secondary: #c0c0c0; /* 次要文本 */
+  --text-muted: #888; /* 弱化文本 */
+  --text-disabled: #555; /* 禁用文本 */
+  --text-inverse: #0d0d0d; /* 反色文本（用于亮色按钮） */
+
+  /* Accent — 主色调（蓝） */
+  --accent: #3b82f6; /* 主 */
+  --accent-2: #60a5fa; /* 浅 */
+  --accent-3: #93c5fd; /* 更浅 */
+  --accent-dark: #2563eb; /* 深 */
+  --accent-darker: #1d4ed8; /* 更深 */
+  --accent-light: rgba(59, 130, 246, 0.12); /* 极浅背景 */
+  --accent-lighter: rgba(59, 130, 246, 0.06);
+  --accent-border: rgba(59, 130, 246, 0.4);
+
+  /* Success — 成功色（绿） */
+  --success: #4caf50;
+  --success-2: #66bb6a;
+  --success-3: #81c784;
+  --success-dark: #388e3c;
+  --success-darker: #2e7d32;
+  --success-light: rgba(76, 175, 80, 0.12);
+  --success-lighter: rgba(76, 175, 80, 0.06);
+  --success-border: rgba(76, 175, 80, 0.4);
+
+  /* Warning — 警告色（橙） */
+  --warning: #ff9800;
+  --warning-2: #ffa726;
+  --warning-3: #ffb74d;
+  --warning-dark: #f57c00;
+  --warning-darker: #ef6c00;
+  --warning-light: rgba(255, 152, 0, 0.12);
+  --warning-lighter: rgba(255, 152, 0, 0.06);
+  --warning-border: rgba(255, 152, 0, 0.4);
+
+  /* Danger — 危险色（红） */
+  --danger: #e53935;
+  --danger-2: #ef5350;
+  --danger-3: #f44336;
+  --danger-dark: #c62828;
+  --danger-darker: #b71c1c;
+  --danger-light: rgba(229, 57, 53, 0.12);
+  --danger-lighter: rgba(229, 57, 53, 0.06);
+  --danger-border: rgba(229, 57, 53, 0.4);
+
+  /* Info — 信息色（青） */
+  --info: #00bcd4;
+  --info-2: #26c6da;
+  --info-3: #4dd0e1;
+  --info-dark: #0097a7;
+  --info-darker: #006064;
+  --info-light: rgba(0, 188, 212, 0.12);
+  --info-border: rgba(0, 188, 212, 0.4);
+}
+
+/* ============ 间距：8 进制体系 ============ */
+:root {
+  --space-1: 4px; /* 4 - 极小 */
+  --space-2: 8px; /* 8 */
+  --space-3: 12px; /* 12 */
+  --space-4: 16px; /* 16 - 默认 */
+  --space-5: 20px; /* 20 */
+  --space-6: 24px; /* 24 - 卡片 */
+  --space-7: 32px; /* 32 - 大块 */
+  --space-8: 40px; /* 40 */
+  --space-9: 48px; /* 48 - 巨块 */
+  --space-10: 64px; /* 64 */
+}
+
+/* ============ 字号：阶梯体系 ============ */
+:root {
+  --font-xs: 12px; /* 极小（辅助说明） */
+  --font-sm: 13px; /* 小（次要信息） */
+  --font-base: 14px; /* 默认（正文） */
+  --font-md: 16px; /* 中（强调） */
+  --font-lg: 18px; /* 大（小标题） */
+  --font-xl: 20px; /* 特大（页面标题） */
+  --font-2xl: 24px; /* 二级标题 */
+  --font-3xl: 32px; /* 大标题 */
+  --font-mono: 'Consolas', 'Monaco', 'Courier New', monospace; /* 代码字体 */
+}
+
+/* ============ 圆角 ============ */
+:root {
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+}
+
+/* ============ 阴影（暗黑系） ============ */
+:root {
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+/* ============ 动效 ============ */
+:root {
+  --transition-fast: 150ms ease;
+  --transition-base: 200ms ease;
+  --transition-slow: 300ms ease;
+}
+
+/* ============ Z-Index 层级 ============ */
+:root {
+  --z-base: 1;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-fixed: 300;
+  --z-modal-backdrop: 1000;
+  --z-modal: 1001;
+  --z-popover: 1100;
+  --z-toast: 2000;
+  --z-tooltip: 2100;
+}

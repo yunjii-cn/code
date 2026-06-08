@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">云集智能编程工作站</string>
+    <string name="title_activity_main">云集智能编程工作站</string>
+    <string name="package_name">com.yunjii.code</string>
+    <string name="custom_url_scheme">com.yunjii.code</string>
+</resources>
