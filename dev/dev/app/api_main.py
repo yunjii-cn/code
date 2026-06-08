@@ -86,7 +86,7 @@ _routes_modules = [
     "routes.ai", "routes.env", "routes.project",
     "routes.system", "routes.version", "routes.ws",
     "routes.github", "routes.knowledge", "routes.responsive",
-    "routes.agent",
+    "routes.agent", "routes.team",
 ]
 for _mod_name in _routes_modules:
     try:

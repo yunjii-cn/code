@@ -22,6 +22,7 @@
     - ⏳ workspace_core.py   （W3：项目/工作区核心）
     - ✅ knowledge_core.py  （W9 TASK-3.1：四层知识 + 强度演化）
     - ✅ durable_store.py  （W11 TASK-3.7：6 文件持久化 + AGENTS 读取）
+    - ✅ team_core.py      （W12 TASK-3.9：5 角色 + 边界治理 + 工具可见性）
 
 新代码导入方式:
     from platformkit.shared import MODEL_KEYS, EnvFileManager, fetch_json_with_timeout
