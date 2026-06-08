@@ -57,6 +57,12 @@ const router = createRouter({
       // 2026-06-09 TASK-3.6: 主动感知面板（4 watcher + WebSocket 实时）
       component: () => import('@features/responsive'),
     },
+    {
+      path: '/agent',
+      name: 'agent',
+      // 2026-06-09 TASK-3.8: 独行模式 Code Agent（4 阶段状态机 UI）
+      component: () => import('@features/agent'),
+    },
   ],
 })
 

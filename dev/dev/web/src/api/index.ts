@@ -490,4 +490,101 @@ export const responsiveApi = {
     api.post(`/responsive/notifications/${id}/dismiss`, {}, { params: { workspace_path: workspacePath || '' } }),
 }
 
+// 2026-06-09 TASK-3.8 引入：独行模式 Code Agent API 客户端
+export interface AgentPlanStep {
+  id: string
+  description: string
+  status: 'pending' | 'approved' | 'rejected' | 'executing' | 'done' | 'failed' | 'skipped'
+  tool_calls: Array<{ name: string; args: Record<string, unknown>; result: string; ts: number }>
+  result: string | null
+  reject_reason: string | null
+  approved_at: number | null
+  executed_at: number | null
+}
+
+export interface AgentDiffEntry {
+  step_id: string
+  file_path: string
+  added_lines: number
+  removed_lines: number
+  summary: string
+}
+
+export interface AgentLearningEntry {
+  layer: 'L1' | 'L2' | 'L3' | 'L4'
+  content: string
+  step_id: string | null
+  source: string
+}
+
+export interface AgentSession {
+  id: string
+  requirement: string
+  status: 'draft' | 'planned' | 'approved' | 'executing' | 'done' | 'failed' | 'learning' | 'closed'
+  plan: AgentPlanStep[]
+  diffs: AgentDiffEntry[]
+  learnings: AgentLearningEntry[]
+  created_at: number
+  updated_at: number
+  started_at: number | null
+  completed_at: number | null
+}
+
+export interface AgentStats {
+  total_sessions: number
+  by_status: Record<string, number>
+  total_learnings: number
+  total_diffs: number
+}
+
+export const agentApi = {
+  sessions: (params: { workspace_path?: string; status?: string } = {}) =>
+    api.get('/agent/sessions', { params: { ...params, workspace_path: params.workspace_path || '' } }),
+
+  session: (id: string, workspacePath?: string) =>
+    api.get(`/agent/sessions/${id}`, { params: { workspace_path: workspacePath || '' } }),
+
+  create: (requirement: string, workspacePath?: string) =>
+    api.post('/agent/sessions', { requirement }, { params: { workspace_path: workspacePath || '' } }),
+
+  remove: (id: string, workspacePath?: string) =>
+    api.delete(`/agent/sessions/${id}`, { params: { workspace_path: workspacePath || '' } }),
+
+  setPlan: (id: string, text: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/plan`, { text }, { params: { workspace_path: workspacePath || '' } }),
+
+  appendStep: (id: string, description: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/append-step`, { description }, { params: { workspace_path: workspacePath || '' } }),
+
+  approveStep: (id: string, stepId: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/steps/${stepId}/approve`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  rejectStep: (id: string, stepId: string, reason: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/steps/${stepId}/reject`, { reason }, { params: { workspace_path: workspacePath || '' } }),
+
+  startStep: (id: string, stepId: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/steps/${stepId}/start`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  completeStep: (id: string, stepId: string, resultSummary: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/steps/${stepId}/complete`, { result_summary: resultSummary }, { params: { workspace_path: workspacePath || '' } }),
+
+  failStep: (id: string, stepId: string, error: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/steps/${stepId}/fail`, { error }, { params: { workspace_path: workspacePath || '' } }),
+
+  recordTool: (id: string, stepId: string, data: { name: string; args: Record<string, unknown>; result: string }, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/steps/${stepId}/tool`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  recordDiff: (id: string, data: { step_id: string; file_path: string; added_lines?: number; removed_lines?: number; summary?: string }, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/diff`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  addLearning: (id: string, data: { layer: string; content: string; step_id?: string }, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/learnings`, data, { params: { workspace_path: workspacePath || '' } }),
+
+  close: (id: string, workspacePath?: string) =>
+    api.post(`/agent/sessions/${id}/close`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  stats: (workspacePath?: string) =>
+    api.get('/agent/stats', { params: { workspace_path: workspacePath || '' } }),
+}
+
 export default api
