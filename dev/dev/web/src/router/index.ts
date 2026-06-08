@@ -45,6 +45,12 @@ const router = createRouter({
       // 2026-06-08 TASK-2.1: GitHub 集成模块（Issues / PRs / Ask PR）
       component: () => import('@features/github'),
     },
+    {
+      path: '/knowledge',
+      name: 'knowledge',
+      // 2026-06-09 TASK-3.3: 自进化知识面板（四层知识 + 强度演化）
+      component: () => import('@features/knowledge'),
+    },
   ],
 })
 

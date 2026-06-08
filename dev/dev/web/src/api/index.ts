@@ -385,4 +385,59 @@ export const githubApi = {
     api.post('/github/open', { target }, { params: { project_path: projectPath || '' } }),
 }
 
+// 2026-06-09 TASK-3.3 引入：知识管理 API 客户端
+export interface KnowledgeItem {
+  id: string
+  content: string
+  layer: 'L1' | 'L2' | 'L3' | 'L4'
+  strength: 'weak' | 'medium' | 'strong'
+  scope: 'project' | 'global'
+  confirm_count: number
+  source?: string | null
+  created_at: number
+  updated_at: number
+}
+
+export interface KnowledgeStats {
+  total: number
+  by_layer: Record<string, number>
+  by_strength: Record<string, number>
+  by_scope: Record<string, number>
+}
+
+export const knowledgeApi = {
+  list: (params: { workspace_path?: string; layer?: string; strength?: string; scope?: string } = {}) =>
+    api.get('/knowledge/list', { params }),
+
+  stats: (workspacePath?: string) =>
+    api.get('/knowledge/stats', { params: { workspace_path: workspacePath || '' } }),
+
+  get: (id: string, workspacePath?: string) =>
+    api.get(`/knowledge/${id}`, { params: { workspace_path: workspacePath || '' } }),
+
+  add: (data: {
+    content: string
+    layer: string
+    scope?: string
+    strength?: string
+    source?: string
+  }, workspacePath?: string) =>
+    api.post('/knowledge', data, { params: { workspace_path: workspacePath || '' } }),
+
+  remove: (id: string, workspacePath?: string) =>
+    api.delete(`/knowledge/${id}`, { params: { workspace_path: workspacePath || '' } }),
+
+  confirm: (id: string, forceStrong: boolean = false, workspacePath?: string) =>
+    api.post(`/knowledge/${id}/confirm`, { force_strong: forceStrong }, { params: { workspace_path: workspacePath || '' } }),
+
+  deny: (id: string, workspacePath?: string) =>
+    api.post(`/knowledge/${id}/deny`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  promote: (id: string, workspacePath?: string) =>
+    api.post(`/knowledge/${id}/promote`, {}, { params: { workspace_path: workspacePath || '' } }),
+
+  relevant: (context: string, topK: number = 5, workspacePath?: string) =>
+    api.post('/knowledge/relevant', { context, top_k: topK }, { params: { workspace_path: workspacePath || '' } }),
+}
+
 export default api
