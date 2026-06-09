@@ -23,6 +23,8 @@
     - ✅ knowledge_core.py  （W9 TASK-3.1：四层知识 + 强度演化）
     - ✅ durable_store.py  （W11 TASK-3.7：6 文件持久化 + AGENTS 读取）
     - ✅ team_core.py      （W12 TASK-3.9：5 角色 + 边界治理 + 工具可见性）
+    - ✅ daemon_core.py    （W13 TASK-4.1：PID/状态/配置 + start/stop/status）
+    - ✅ tailscale_core.py （W13 TASK-4.2：Tailscale 探测 + 配对码 + 远程 URL）
 
 新代码导入方式:
     from platformkit.shared import MODEL_KEYS, EnvFileManager, fetch_json_with_timeout

@@ -723,4 +723,63 @@ export const teamApi = {
     api.get('/team/stats', { params: { workspace_path: workspacePath || '' } }),
 }
 
+// 2026-06-09 TASK-4.2 引入：Tailscale 远程访问 API 客户端
+export interface TailscaleInfo {
+  status: 'unknown' | 'not_installed' | 'installed_stopped' | 'running_logged_out' | 'running_online' | 'error'
+  installed: boolean
+  running: boolean
+  logged_in: boolean
+  online: boolean
+  ipv4: string | null
+  ipv6: string | null
+  hostname: string | null
+  tailnet: string | null
+  account: string | null
+  error: string | null
+  detected_at: number
+  raw_output: string | null
+}
+
+export interface PairingCode {
+  value: string
+  generated_at: number
+  ttl_seconds: number
+}
+
+export interface RemoteAccessHint {
+  primary_url: string | null
+  backup_urls: string[]
+  pairing_code: string | null
+  note: string | null
+  requires_token: boolean
+}
+
+export interface TailscaleSummary {
+  tailscale: TailscaleInfo
+  platform: string
+  lan_ip: string | null
+  remote_hint: RemoteAccessHint
+  pairing_code: PairingCode
+}
+
+export const tailscaleApi = {
+  status: (useCache = true) =>
+    api.get('/tailscale/status', { params: { use_cache: useCache } }),
+
+  remoteHint: (port = 18080, includeCode = true, regenerate = false) =>
+    api.get('/tailscale/remote-hint', {
+      params: { port, include_code: includeCode, regenerate },
+    }),
+
+  regenerateCode: (ttlSeconds = 3600) =>
+    api.post('/tailscale/pairing/regenerate', null, {
+      params: { ttl_seconds: ttlSeconds },
+    }),
+
+  verifyCode: (code: string) =>
+    api.post('/tailscale/pairing/verify', { code }),
+
+  summary: () => api.get('/tailscale/summary'),
+}
+
 export default api

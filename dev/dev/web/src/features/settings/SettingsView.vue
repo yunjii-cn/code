@@ -5,6 +5,7 @@ import { systemApi, versionApi } from '@/api'
 import { useChatStore } from '@/stores/chat'
 import { useModelStore } from '@/stores/model'
 import { useDevice } from '@/composables/useDevice'
+import TailscaleSettings from './components/TailscaleSettings.vue'
 
 const chatStore = useChatStore()
 const modelStore = useModelStore()
@@ -351,6 +352,10 @@ onMounted(async () => {
             </div>
             <van-button :loading="checkingUpdate" size="small" type="primary" plain @click="checkUpdate" style="margin-top:8px">检查更新</van-button>
           </div>
+        </div>
+
+        <div v-if="activeSection === 'remote'" class="section">
+          <TailscaleSettings />
         </div>
 
         <div class="save-area">
