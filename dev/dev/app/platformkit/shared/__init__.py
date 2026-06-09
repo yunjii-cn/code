@@ -87,4 +87,13 @@ __all__ = [
     "NotificationAction",
     "NotificationType",
     "Severity",
+    # 2026-06-09 TASK-4.1 引入：独立 Daemon 模式
+    "DaemonManager",
+    "DaemonConfig",
+    "DaemonState",
+    "DaemonStatus",
+    "default_daemon_dir",
+    "default_log_file",
+    "get_local_ip",
+    "format_uptime",
 ]
