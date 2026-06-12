@@ -1,0 +1,81 @@
+# 云集 Web - tier.yaml
+
+```yaml
+product: 云集 Web (Yunji Web)
+generation: 2
+tech_stack: FastAPI + Vue 3 + pywebview + Capacitor
+status: in_development
+
+tiers:
+  Free:
+    name: 云集 Web 免费版
+    price: 0
+    currency: CNY
+    features:
+      - 浏览器 + PWA 访问
+      - 本地 Ollama
+      - 限 5 项目
+      - 1 设备
+      - 跨端访问（手机/电脑/平板）
+    limits:
+      - 5 项目
+      - 1 设备
+      - 仅本地 AI
+    monetization: 流量入口 / 体验版
+
+  Pro:
+    name: 云集 Web Pro
+    price: 9.9
+    currency: CNY
+    period: month
+    Free_plus:
+      - 云端 AI（Claude / OpenRouter / 智谱）
+      - ¥10 等值算力 / 月
+      - 无限项目
+      - 多端同步
+      - 优先支持
+    new_user_bonus:
+      - amount: 30
+      - currency: CNY
+      - note: 注册送 ¥30 体验金
+    overage:
+      - mode: pay_as_you_go
+      - unit: token
+      - description: 用多少付多少
+    monetization: 订阅 + token 抽成 + 模型返佣
+
+  Flagship:
+    name: 云集 Web Flagship
+    price: 99
+    currency: CNY
+    period: month
+    Pro_plus:
+      - ¥150 等值算力 / 用户 / 月
+      - 5 角色团队模式
+      - Yjs 实时协作
+      - 知识引擎
+      - 主动感知
+      - API 访问
+    note: 与产品 3（云集旗舰）功能对等
+```
+
+## 功能差异表
+
+| 功能 | Free | Pro ¥9.9 | Flagship ¥99 |
+|------|:---:|:---:|:---:|
+| 跨端访问 | ✅ | ✅ | ✅ |
+| 本地 Ollama | ✅ | ✅ | ✅ |
+| 云端 AI | ❌ | ✅ | ✅ |
+| 项目数 | 5 | ∞ | ∞ |
+| 设备数 | 1 | ∞ | ∞ |
+| 算力额度 | 0 | ¥10/月 | ¥150/月 |
+| 团队协作 | ❌ | ❌ | ✅ |
+| 知识引擎 | ❌ | ❌ | ✅ |
+| 主动感知 | ❌ | ❌ | ✅ |
+| Yjs 协作 | ❌ | ❌ | ✅ |
+| API 访问 | ❌ | ❌ | ✅ |
+
+## 升级路径
+
+Free → Pro：**¥9.9/月**（云端 AI + 算力）
+Pro → Flagship：**¥99/月**（团队 + 协作 + 知识）

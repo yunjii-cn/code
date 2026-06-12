@@ -1,0 +1,12 @@
+# .prettierignore
+# 2026-06-08 TASK-1.5 引入
+
+dist
+node_modules
+dev
+*.min.*
+package-lock.json
+.vscode
+.idea
+coverage
+*.log

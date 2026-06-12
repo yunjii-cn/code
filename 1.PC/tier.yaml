@@ -1,0 +1,67 @@
+# 云集桌面 - tier.yaml（功能差异定义）
+
+> 当前只做 Free 版。Pro 版（未来）放在这里规划。
+
+```yaml
+product: 云集桌面 (Yunji Desktop)
+generation: 1
+tech_stack: PyQt6
+status: in_development
+
+tiers:
+  Free:
+    name: 云集桌面
+    price: 0
+    currency: CNY
+    features:
+      - 永久免费
+      - PyQt6 桌面 EXE
+      - 100% 本地运行
+      - Ollama 一键对接
+      - 无限项目
+      - 无限设备
+      - 离线可用
+      - 零遥测
+      - 零注册
+      - GitHub 开源（AGPL-3.0）
+    limits:
+      - 无团队协作
+      - 无云同步
+      - 无云端 AI（除非自配 API key）
+      - 无手机端
+    monetization: 捐赠 / GitHub Sponsor
+
+  Pro_Future:
+    name: 云集桌面 Pro
+    price: 99
+    currency: CNY
+    period: month
+    features_Free_plus:
+      - 云端 AI 一键用（Claude / OpenRouter）
+      - 优先更新
+      - 商业授权
+      - 去除"非商业使用"标识
+      - 邮件技术支持
+    monetization: 订阅
+    status: planned
+```
+
+## 功能差异表
+
+| 功能 | Free | Pro（未来） |
+|------|:---:|:---:|
+| 本地 Ollama | ✅ | ✅ |
+| PyQt6 桌面 EXE | ✅ | ✅ |
+| 无限项目 | ✅ | ✅ |
+| 离线运行 | ✅ | ✅ |
+| 开源 | ✅ | ✅ |
+| 云端 AI 一键用 | ❌ | ✅ |
+| 商业授权 | ❌ | ✅ |
+| 优先支持 | ❌ | ✅ |
+
+## 不做什么
+
+- ❌ 团队协作（→ 升级到云集旗舰）
+- ❌ 多端同步（→ 升级到云集 Web）
+- ❌ 移动端（→ 升级到云集 Web）
+- ❌ 私有化部署服务（→ 企业服务单独议价）

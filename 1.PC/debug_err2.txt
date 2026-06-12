@@ -1,0 +1,22 @@
+[pywebview] pythonnet cannot be loaded
+Traceback (most recent call last):
+  File "webview\platforms\winforms.py", line 14, in <module>
+  File "pyimod02_importers.py", line 457, in exec_module
+  File "clr.py", line 5, in <module>
+ModuleNotFoundError: No module named 'pythonnet'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "webview\guilib.py", line 74, in import_winforms
+  File "pyimod02_importers.py", line 457, in exec_module
+  File "webview\platforms\winforms.py", line 17, in <module>
+  File "pyimod02_importers.py", line 457, in exec_module
+  File "clr.py", line 5, in <module>
+ModuleNotFoundError: No module named 'pythonnet'
+Traceback (most recent call last):
+  File "api_main.py", line 257, in <module>
+  File "api_main.py", line 252, in main
+  File "webview\__init__.py", line 248, in start
+  File "webview\guilib.py", line 135, in initialize
+webview.errors.WebViewException: You must have pythonnet installed in order to use pywebview.

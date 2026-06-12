@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  512x512 Maskable 图标
+  设计：80% 安全区（中心），20% 边距可被系统遮罩
+  PWA maskable 规范要求所有重要内容都在 80% 圆内
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgM" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="50%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+  <!-- 满铺背景（不透明） -->
+  <rect x="0" y="0" width="512" height="512" fill="url(#bgM)"/>
+  <!-- 中心 80% 安全区：204.8 到 307.2 (中心 256 ± 51.2) -->
+  <text x="256" y="298" text-anchor="middle" font-family="system-ui, -apple-system, sans-serif" font-size="160" font-weight="800" fill="#fff">YJ</text>
+</svg>

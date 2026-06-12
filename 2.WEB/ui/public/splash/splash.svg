@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  splash.svg — PWA 启动屏
+  2026-06-09 TASK-4.3 引入
+  - 背景：#0d0d0d（与主应用一致）
+  - 居中：logo SVG（与 icon-512.svg 一致）
+  - 底部：app 名称 + 副标题
+  - 安全区：四周 80px 留白（避免 iOS 刘海遮挡）
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 750 1334" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d0d0d" />
+      <stop offset="100%" stop-color="#0a0a1a" />
+    </linearGradient>
+    <linearGradient id="logoGlow" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="rgba(66,165,245,0.3)" />
+      <stop offset="100%" stop-color="rgba(66,165,245,0)" />
+    </linearGradient>
+    <radialGradient id="bgGlow" cx="0.5" cy="0.45" r="0.6">
+      <stop offset="0%" stop-color="rgba(66,165,245,0.08)" />
+      <stop offset="100%" stop-color="rgba(0,0,0,0)" />
+    </radialGradient>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="750" height="1334" fill="url(#bg)" />
+  <rect width="750" height="1334" fill="url(#bgGlow)" />
+
+  <!-- Logo 容器 -->
+  <g transform="translate(245 477)">
+    <!-- 卡片背景 -->
+    <rect width="260" height="260" rx="56" fill="#1a1a2e" stroke="rgba(66,165,245,0.3)" stroke-width="2" />
+    <rect x="-20" y="-20" width="300" height="300" rx="76" fill="url(#logoGlow)" opacity="0.4" />
+
+    <!-- Logo 主体（与 icon 一致） -->
+    <g transform="translate(45 45)">
+      <path d="M 0 0 L 80 0 L 90 30 L 80 165 L 0 165 Z"
+            fill="none" stroke="#42a5f5" stroke-width="6" stroke-linejoin="round" />
+      <path d="M 30 30 L 30 135 L 60 135 L 60 30 Z"
+            fill="rgba(66,165,245,0.15)" stroke="#42a5f5" stroke-width="4" />
+      <circle cx="100" cy="45" r="14" fill="#42a5f5" />
+      <line x1="92" y1="55" x2="108" y2="55" stroke="#42a5f5" stroke-width="3" stroke-linecap="round" />
+      <line x1="100" y1="47" x2="100" y2="63" stroke="#42a5f5" stroke-width="3" stroke-linecap="round" />
+    </g>
+  </g>
+
+  <!-- App 名称 -->
+  <text x="375" y="820"
+        font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="44"
+        font-weight="600"
+        fill="#e0e0e0"
+        text-anchor="middle">
+    云集智能编程工作站
+  </text>
+
+  <!-- 副标题 -->
+  <text x="375" y="870"
+        font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        font-size="22"
+        font-weight="400"
+        fill="#666"
+        text-anchor="middle">
+    AI 驱动的智能编程伙伴
+  </text>
+
+  <!-- 加载指示器（三个点 + 错时动画） -->
+  <g transform="translate(335 920)">
+    <circle cx="0" cy="0" r="6" fill="#42a5f5" opacity="0.3">
+      <animate attributeName="opacity" values="0.3;1;0.3" dur="1.2s" begin="0s" repeatCount="indefinite" />
+    </circle>
+    <circle cx="40" cy="0" r="6" fill="#42a5f5" opacity="0.3">
+      <animate attributeName="opacity" values="0.3;1;0.3" dur="1.2s" begin="0.2s" repeatCount="indefinite" />
+    </circle>
+    <circle cx="80" cy="0" r="6" fill="#42a5f5" opacity="0.3">
+      <animate attributeName="opacity" values="0.3;1;0.3" dur="1.2s" begin="0.4s" repeatCount="indefinite" />
+    </circle>
+  </g>
+</svg>

@@ -1,0 +1,40 @@
+# 构建产物
+dist/
+build/
+*.exe
+*.zip
+_internal/
+
+# 运行时
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# 依赖
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+
+# 环境
+.env
+.env.local
+*.log
+
+# 临时文件
+temp/
+temp_old_*
+*.tmp
+
+# 历史归档（不提交大文件）
+BAK/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 数据目录（用户运行时产生）
+data/

@@ -1,0 +1,86 @@
+# 云集旗舰 - tier.yaml
+
+```yaml
+product: 云集旗舰 (Yunji Flagship)
+generation: 3
+tech_stack: FastAPI + Vue 3 + Platformkit + Daemon + Yjs
+status: in_development
+
+tiers:
+  Business:
+    name: 云集旗舰 Business
+    price: 99
+    currency: CNY
+    period: month
+    per_user: true
+    quota:
+      - amount: 150
+        currency: CNY
+        note: ¥150 等值算力 / 用户 / 月
+    features:
+      - 全部 Pro 功能
+      - 5 角色团队模式
+      - Yjs 实时协作
+      - 4 层知识引擎
+      - 4 类主动感知
+      - Platformkit 全模块
+      - Daemon + Tailscale
+      - 多端跨平台
+      - 优先支持
+    monetization: 订阅
+
+  Enterprise:
+    name: 云集旗舰 Enterprise（企业打包）
+    price: 199
+    currency: CNY
+    period: month
+    per_user: true
+    min_users: 5
+    Business_plus:
+      - 私有化部署咨询
+      - SSO 单点登录
+      - 审计日志
+      - 多租户
+      - 定制开发
+      - 7×24 支持
+      - SLA 保障
+    monetization: 订阅 + 服务费
+```
+
+## 功能差异表
+
+| 功能 | Pro ¥9.9 | Business ¥99 | Enterprise ¥199 |
+|------|:---:|:---:|:---:|
+| 全部产品 2 功能 | ❌ | ✅ | ✅ |
+| 算力额度 | ¥10 | ¥150 | ¥150 |
+| 5 角色团队 | ❌ | ✅ | ✅ |
+| Yjs 协作 | ❌ | ✅ | ✅ |
+| 知识引擎 | ❌ | ✅ | ✅ |
+| 主动感知 | ❌ | ✅ | ✅ |
+| Daemon | ❌ | ✅ | ✅ |
+| 私有化部署 | ❌ | ❌ | ✅ |
+| SSO | ❌ | ❌ | ✅ |
+| 审计日志 | ❌ | ❌ | ✅ |
+| 多租户 | ❌ | ❌ | ✅ |
+| 7×24 支持 | ❌ | ❌ | ✅ |
+
+## 升级路径
+
+产品 1 Free → 产品 2 Pro：¥9.9/月
+产品 2 Pro → 产品 3 Business：¥99/月
+产品 3 Business → Enterprise：¥199/月
+企业服务（私有化 / 定制 / 培训）：**单独议价**
+
+## 定价对照（与竞品）
+
+| 档位 | 云集 | Cursor | GitHub Copilot |
+|------|------|--------|---------------|
+| 免费 | ¥0 | $0 | $0 |
+| Pro | **¥9.9** | $20/月 | $10/月 |
+| Business | **¥99** | $40/月 | $19/月 |
+| 企业 | **¥199** | 议价 | $39/月 |
+
+**优势**：
+- 比 Cursor 便宜 66-93%
+- 比 Copilot 便宜 28-86%
+- 唯一内置团队 5 角色 + 知识演化
