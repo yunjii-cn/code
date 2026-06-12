@@ -68,85 +68,20 @@ type ModelConfig = {
   systemPrompt: string;
 };
 
-let _backend: any = null;
-let _backendType: "qt" | "electron" | null = null;
-
-async function getBackend(): Promise<any> {
-  if (_backend) return _backend;
-
-  if (typeof (window as any).desktopApi !== "undefined") {
-    _backendType = "electron";
-    _backend = (window as any).desktopApi;
-    return _backend;
+function getBackend(): any {
+  if ((window as any).pywebview?.api) {
+    return (window as any).pywebview.api;
   }
-
-  if (typeof (window as any).QWebChannel !== "undefined") {
-    return new Promise((resolve) => {
-      new (window as any).QWebChannel(
-        (window as any).qt.webChannelTransport,
-        (channel: any) => {
-          _backendType = "qt";
-          _backend = channel.objects.backend;
-          resolve(_backend);
-        }
-      );
-    });
+  if ((window as any).desktopApi) {
+    return (window as any).desktopApi;
   }
-
-  console.warn("No backend available (neither Electron desktopApi nor Qt QWebChannel)");
+  console.warn("No backend available");
   return null;
 }
 
-const ELECTRON_METHOD_MAP: Record<string, string> = {
-  getState: "getState",
-  sendMessage: "sendMessage",
-  stopMessage: "stopMessage",
-  newSession: "newSession",
-  getWorkspace: "getWorkspace",
-  chooseWorkspace: "chooseWorkspace",
-  getSettings: "getSettings",
-  saveSettings: "saveSettings",
-  clearModelSettings: "clearModelSettings",
-  listModels: "listModels",
-  addZhipuAccount: "addZhipuAccount",
-};
-
 async function callBackend(method: string, ...args: any[]): Promise<any> {
-  const backend = await getBackend();
-  if (!backend) {
-    console.warn("[callBackend] backend not available, method:", method);
-    return null;
-  }
-
-  if (_backendType === "electron") {
-    const mappedMethod = ELECTRON_METHOD_MAP[method];
-    if (!mappedMethod || typeof backend[mappedMethod] !== "function") {
-      console.warn("[callBackend] Electron method not mapped:", method);
-      return null;
-    }
-    try {
-      let result;
-      if (args.length === 0) {
-        result = await backend[mappedMethod]();
-      } else if (args.length === 1) {
-        let parsed = args[0];
-        if (typeof parsed === "string") {
-          try { parsed = JSON.parse(parsed); } catch {}
-        }
-        result = await backend[mappedMethod](parsed);
-      } else {
-        result = await backend[mappedMethod](...args);
-      }
-      if (typeof result === "string") {
-        try { return JSON.parse(result); } catch { return result; }
-      }
-      return result;
-    } catch (e) {
-      console.error("[callBackend] Electron error:", method, e);
-      return null;
-    }
-  }
-
+  const backend = getBackend();
+  if (!backend) return null;
   try {
     const result = await backend[method](...args);
     if (typeof result === "string") {
@@ -3080,7 +3015,7 @@ async function loadLocalSettings() {
   let data: any = null;
   try {
     const backend = await getBackend();
-    if (backend && _backendType === "qt") {
+    if (backend) {
       const rawResult = await backend.loadAppData();
       console.log("[loadLocalSettings] raw loadAppData type:", typeof rawResult, "preview:", typeof rawResult === "string" ? rawResult.substring(0, 100) : JSON.stringify(rawResult).substring(0, 100));
       if (typeof rawResult === "string" && rawResult.length > 2) {
@@ -3394,180 +3329,107 @@ onMounted(async () => {
 
   addMessage("assistant", "选择模型并配置参数，打开项目目录后即可下达编码任务。");
 
-  const backend = await getBackend();
-
-  if (_backendType === "electron" && backend) {
-    backend.onDelta((payload: any) => {
-      try {
-        if (!payload?.text) return;
-        const target = messages.value.find((m) => m.id === currentAssistantId.value);
-        if (target) {
-          let newText = payload.text;
-          const isLoginPrompt =
-            newText.trim() === "Not logged in · Please run /login" ||
-            newText.trim() === "Not logged in · Run /login";
-          if (isLoginPrompt) return;
-          if (newText.includes("Not logged in")) {
-            newText = newText
-              .replace(/Not logged in · Please run \/login/g, "")
-              .replace(/Not logged in · Run \/login/g, "")
-              .trim();
-            if (!newText) return;
-          }
-          if (newText.startsWith("\x00TOOL\x00")) {
-            const statusLine = newText.slice(5);
-            target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
-            const writeMatch = statusLine.match(/写入文件|Write.*?✅\s*(.+)/);
-            const editMatch = statusLine.match(/编辑文件|Edit.*?✅\s*(.+)/);
-            if (writeMatch) trackFileChange("Write", writeMatch[1].trim(), "create");
-            else if (editMatch) trackFileChange("Edit", editMatch[1].trim(), "modify");
-          } else {
-            if (target.text === "" && newText.trim() === "") return;
-            if (target.toolStatus) target.toolStatus = "";
-            target.text += newText;
-          }
+  // ── pywebview 信号处理：Python 通过 evaluate_js 调用这些全局函数 ──
+  (window as any).onDelta = (jsonStr: string) => {
+    try {
+      const payload = typeof jsonStr === "string" ? JSON.parse(jsonStr) : jsonStr;
+      if (!payload?.text) return;
+      const target = messages.value.find((m) => m.id === currentAssistantId.value);
+      if (target) {
+        let newText = payload.text;
+        const isLoginPrompt =
+          newText.trim() === "Not logged in · Please run /login" ||
+          newText.trim() === "Not logged in · Run /login";
+        if (isLoginPrompt) return;
+        if (newText.includes("Not logged in")) {
+          newText = newText
+            .replace(/Not logged in · Please run \/login/g, "")
+            .replace(/Not logged in · Run \/login/g, "")
+            .trim();
+          if (!newText) return;
         }
-      } catch {}
-    });
-
-    backend.onStatus((payload: any) => {
-      try {
-        if (payload && typeof payload.busy === "boolean") {
-          isBusy.value = payload.busy;
-          if (!payload.busy) {
-            if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
-            if (currentAssistantId.value) {
-              const checkId = currentAssistantId.value;
-              setTimeout(() => {
-                const target = messages.value.find((m) => m.id === checkId);
-                if (target && !target.text.trim() && !target.toolStatus?.trim()) {
-                  target.text = "[模型未返回文本]";
-                }
-              }, 500);
-              const target = messages.value.find((m) => m.id === currentAssistantId.value);
-              if (target && messageStartTime.value > 0) {
-                target.completedAt = new Date().toLocaleString("zh-CN");
-                target.durationMs = Date.now() - messageStartTime.value;
-                target.tokens = Math.max(1, Math.round(target.text.length / 2));
-              }
-              messageStartTime.value = 0;
-            }
-            saveCurrentConversation();
-            processQueue();
-          }
+        if (newText.startsWith("\x00TOOL\x00")) {
+          const statusLine = newText.slice(5);
+          target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
+          const writeMatch = statusLine.match(/写入文件|Write.*?✅\s*(.+)/);
+          const editMatch = statusLine.match(/编辑文件|Edit.*?✅\s*(.+)/);
+          if (writeMatch) trackFileChange("Write", writeMatch[1].trim(), "create");
+          else if (editMatch) trackFileChange("Edit", editMatch[1].trim(), "modify");
+        } else {
+          if (target.text === "" && newText.trim() === "") return;
+          if (target.toolStatus) target.toolStatus = "";
+          target.text += newText;
         }
-      } catch {}
-    });
-  } else if (backend) {
-    backend.deltaReceived.connect((jsonStr: string) => {
-      try {
-        const payload = JSON.parse(jsonStr);
-        if (!payload?.text) return;
-        const target = messages.value.find((m) => m.id === currentAssistantId.value);
-        if (target) {
-          let newText = payload.text;
-          const isLoginPrompt = 
-            newText.trim() === "Not logged in · Please run /login" ||
-            newText.trim() === "Not logged in · Run /login";
-          if (isLoginPrompt) {
-            return;
-          }
-          if (newText.includes("Not logged in")) {
-            newText = newText
-              .replace(/Not logged in · Please run \/login/g, "")
-              .replace(/Not logged in · Run \/login/g, "")
-              .trim();
-            if (!newText) {
-              return;
-            }
-          }
-          if (newText.startsWith("\x00TOOL\x00")) {
-            const statusLine = newText.slice(5);
-            target.toolStatus = (target.toolStatus || "") + statusLine + "\n";
-            const writeMatch = statusLine.match(/写入文件|Write.*?✅\s*(.+)/);
-            const editMatch = statusLine.match(/编辑文件|Edit.*?✅\s*(.+)/);
-            const bashMatch = statusLine.match(/执行命令|Bash.*?✅/);
-            if (writeMatch) {
-              trackFileChange("Write", writeMatch[1].trim(), "create");
-            } else if (editMatch) {
-              trackFileChange("Edit", editMatch[1].trim(), "modify");
-            }
-          } else {
-            if (target.text === "" && newText.trim() === "") return;
-            if (target.toolStatus) target.toolStatus = "";
-            target.text += newText;
-          }
-        }
-      } catch {}
-    });
-
-    backend.statusReceived.connect((jsonStr: string) => {
-      try {
-        const payload = JSON.parse(jsonStr);
-        if (payload && typeof payload.busy === "boolean") {
-          isBusy.value = payload.busy;
-          if (!payload.busy) {
-            if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
-            if (currentAssistantId.value) {
-              const checkId = currentAssistantId.value;
-              setTimeout(() => {
-                const target = messages.value.find((m) => m.id === checkId);
-                if (target && !target.text.trim() && !target.toolStatus?.trim()) {
-                  target.text = "[模型未返回文本]";
-                }
-              }, 500);
-              const target = messages.value.find((m) => m.id === currentAssistantId.value);
-              if (target && messageStartTime.value > 0) {
-                target.completedAt = new Date().toLocaleString("zh-CN");
-                target.durationMs = Date.now() - messageStartTime.value;
-                target.tokens = Math.max(1, Math.round(target.text.length / 2));
-              }
-              messageStartTime.value = 0;
-            }
-            saveCurrentConversation();
-            processQueue();
-          }
-        }
-      } catch {}
-    });
-
-    backend.modelsLoaded.connect((jsonStr: string) => {
-      try {
-        const payload = JSON.parse(jsonStr);
-        loadingModels.value = false;
-        if (payload?.action === "pull_complete") {
-          pullingModel.value = "";
-          showNotice(`${displayName(payload.model)} 下载完成`, "ok");
-          detectModels();
-          return;
-        }
-        if (payload?.action === "pull_failed") {
-          pullingModel.value = "";
-          showNotice(`${displayName(payload.model)} 下载失败: ${payload.error}`, "warn");
-          return;
-        }
-        if (!payload || !payload.ok) {
-          showNotice(payload?.error || "模型列表加载失败", "warn");
-          return;
-        }
-        cloudModels.value = payload.models || [];
-        const broken = cloudModels.value.filter((m: ModelInfo) => m.loadable === false);
-        const source = (payload.models?.[0]?.provider) || "ollama";
-        if (source === "api") {
-          apiModels.value = payload.models || [];
-        } else if (source === "zhipu") {
-          zhipuModels.value = payload.models || [];
-        }
-        const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : source === "api" ? " API" : source === "zhipu" ? " 智谱" : " Ollama";
-        let msg = `已加载 ${cloudModels.value.length} 个${label}模型`;
-        if (broken.length > 0) msg += `，${broken.length}个损坏`;
-        showNotice(msg, broken.length > 0 ? "warn" : "ok");
-      } catch (e) {
-        console.error("[modelsLoaded] parse error:", e);
-        loadingModels.value = false;
       }
-    });
-  }
+    } catch {}
+  };
+
+  (window as any).onStatus = (jsonStr: string) => {
+    try {
+      const payload = typeof jsonStr === "string" ? JSON.parse(jsonStr) : jsonStr;
+      if (payload && typeof payload.busy === "boolean") {
+        isBusy.value = payload.busy;
+        if (!payload.busy) {
+          if (busyTimeoutId) { clearTimeout(busyTimeoutId); busyTimeoutId = null; }
+          if (currentAssistantId.value) {
+            const checkId = currentAssistantId.value;
+            setTimeout(() => {
+              const target = messages.value.find((m) => m.id === checkId);
+              if (target && !target.text.trim() && !target.toolStatus?.trim()) {
+                target.text = "[模型未返回文本]";
+              }
+            }, 500);
+            const target = messages.value.find((m) => m.id === currentAssistantId.value);
+            if (target && messageStartTime.value > 0) {
+              target.completedAt = new Date().toLocaleString("zh-CN");
+              target.durationMs = Date.now() - messageStartTime.value;
+              target.tokens = Math.max(1, Math.round(target.text.length / 2));
+            }
+            messageStartTime.value = 0;
+          }
+          saveCurrentConversation();
+          processQueue();
+        }
+      }
+    } catch {}
+  };
+
+  (window as any).onModelsLoaded = (jsonStr: string) => {
+    try {
+      const payload = typeof jsonStr === "string" ? JSON.parse(jsonStr) : jsonStr;
+      loadingModels.value = false;
+      if (payload?.action === "pull_complete") {
+        pullingModel.value = "";
+        showNotice(`${displayName(payload.model)} 下载完成`, "ok");
+        detectModels();
+        return;
+      }
+      if (payload?.action === "pull_failed") {
+        pullingModel.value = "";
+        showNotice(`${displayName(payload.model)} 下载失败: ${payload.error}`, "warn");
+        return;
+      }
+      if (!payload || !payload.ok) {
+        showNotice(payload?.error || "模型列表加载失败", "warn");
+        return;
+      }
+      cloudModels.value = payload.models || [];
+      const broken = cloudModels.value.filter((m: ModelInfo) => m.loadable === false);
+      const source = (payload.models?.[0]?.provider) || "ollama";
+      if (source === "api") {
+        apiModels.value = payload.models || [];
+      } else if (source === "zhipu") {
+        zhipuModels.value = payload.models || [];
+      }
+      const label = source === "openrouter" ? " OpenRouter" : source === "anthropic" ? " Anthropic" : source === "api" ? " API" : source === "zhipu" ? " 智谱" : " Ollama";
+      let msg = `已加载 ${cloudModels.value.length} 个${label}模型`;
+      if (broken.length > 0) msg += `，${broken.length}个损坏`;
+      showNotice(msg, broken.length > 0 ? "warn" : "ok");
+    } catch (e) {
+      console.error("[modelsLoaded] parse error:", e);
+      loadingModels.value = false;
+    }
+  };
 
   // 初始化完成，启用后端自动保存
   _backendSaveReady = true;

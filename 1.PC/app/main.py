@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-云集智能编程工作站 - 统一启动器 v3.0
+云集智能编程工作站 - 统一启动器 v3.1
 所有功能内嵌在一个 EXE 中，不再依赖 Electron
 
 架构:
-- PyQt6 + QWebEngineView 替代 Electron
-- QWebChannel 替代 Electron IPC (preload.cjs)
+- PyQt6 + Edge WebView2 (pywebview) 替代 Electron/QWebEngine
+- pywebview js_api 替代 QWebChannel IPC
 - backend.py 提供 Ollama 代理 / CLI 管理 / 配置管理
-- Vue 前端通过 QWebChannel 与 Python 通信
+- Vue 前端通过 window.pywebview.api 与 Python 通信
 - 部署维护只是 EXE 的一个功能模块
 """
 
@@ -52,9 +52,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl, QPropertyAnimation, pyqtProperty, QRectF
 from PyQt6.QtGui import QFont, QIcon, QColor, QPixmap, QPainter, QLinearGradient, QPalette
-from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWebEngineCore import QWebEnginePage
-from PyQt6.QtWebChannel import QWebChannel
+
+try:
+    import webview
+    WEBVIEW_AVAILABLE = True
+except ImportError:
+    WEBVIEW_AVAILABLE = False
 
 from PyQt6.QtCore import QObject
 
@@ -104,32 +107,14 @@ MENU_TRANSLATIONS = {
 }
 
 
-class ChineseWebView(QWebEngineView):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.customContextMenuRequested.connect(self._show_translated_menu)
+class BackendBridge:
+    """暴露给前端 JS 的 Python 对象，通过 pywebview js_api 暴露"""
 
-    def _show_translated_menu(self, pos):
-        try:
-            page = self.page()
-            if page is None:
-                return
-            menu = page.createStandardContextMenu()
-            if menu is None:
-                return
-            for action in menu.actions():
-                text = action.text()
-                if text in MENU_TRANSLATIONS:
-                    action.setText(MENU_TRANSLATIONS[text])
-                else:
-                    for en, zh in MENU_TRANSLATIONS.items():
-                        if en in text:
-                            text = text.replace(en, zh)
-                    action.setText(text)
-            menu.exec(self.mapToGlobal(pos))
-        except Exception:
-            pass
+    def __init__(self, parent=None):
+        self._app_ref = None  # 由 MainWindow 设置
+
+    def _get_main(self):
+        return self._app_ref
 
 # 导入后端模块
 import backend
@@ -1714,23 +1699,16 @@ class SoftwareUpdater:
         return new_versions
 
 
-# ── QWebChannel 桥接对象 (替代 Electron preload.cjs) ──
-class BackendBridge(QObject):
-    """暴露给前端 JS 的 Python 对象，替代 Electron 的 desktopApi"""
-
-    # 信号：前端通过 onDelta/onStatus/onModelsLoaded 连接
-    deltaReceived = pyqtSignal(str)   # JSON string: {"text": "..."}
-    statusReceived = pyqtSignal(str)  # JSON string: {"busy": true, ...}
-    modelsLoaded = pyqtSignal(str)    # JSON string: {"ok": true, "models": [...]}
+# ── pywebview js_api 桥接对象 (替代 QWebChannel) ──
+class BackendBridge:
+    """暴露给前端 JS 的 Python 对象，通过 pywebview js_api 暴露"""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
         self._app_ref = None  # 由 MainWindow 设置
 
     def _get_main(self):
         return self._app_ref
 
-    @pyqtSlot()
     def frontendReady(self):
         main = self._get_main()
         if main and hasattr(main, '_finish_splash'):
@@ -1738,7 +1716,6 @@ class BackendBridge(QObject):
 
     # ── 用户管理 API (多用户登录架构) ──
 
-    @pyqtSlot(result=str)
     def getCurrentUser(self):
         """获取当前用户信息"""
         main = self._get_main()
@@ -1750,7 +1727,6 @@ class BackendBridge(QObject):
             "is_default": main.current_user_id == "default"
         })
 
-    @pyqtSlot(result=str)
     def listUsers(self):
         """列出所有用户目录"""
         main = self._get_main()
@@ -1767,7 +1743,6 @@ class BackendBridge(QObject):
             users.append({"id": "default", "name": "本地用户"})
         return json.dumps(users)
 
-    @pyqtSlot(str, result=bool)
     def switchUser(self, user_id: str):
         """切换用户 - 重新初始化 ProjectManager 和相关组件"""
         main = self._get_main()
@@ -1811,14 +1786,12 @@ class BackendBridge(QObject):
 
     # ── 项目管理 API ──
 
-    @pyqtSlot(result=str)
     def listProjects(self):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.list_projects())
 
-    @pyqtSlot(result=str)
     def getActiveProject(self):
         main = self._get_main()
         if not main:
@@ -1826,7 +1799,6 @@ class BackendBridge(QObject):
         proj = main.project_mgr.get_active_project()
         return json.dumps(proj)
 
-    @pyqtSlot(str, str, result=str)
     def createProject(self, name: str, workspace_path: str):
         main = self._get_main()
         if not main:
@@ -1836,7 +1808,6 @@ class BackendBridge(QObject):
         main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
-    @pyqtSlot(str, result=str)
     def switchProject(self, project_id: str):
         main = self._get_main()
         if not main:
@@ -1847,14 +1818,12 @@ class BackendBridge(QObject):
             main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
-    @pyqtSlot(str, str, result=bool)
     def renameProject(self, project_id: str, new_name: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.rename_project(project_id, new_name)
 
-    @pyqtSlot(str, result=bool)
     def deleteProject(self, project_id: str):
         main = self._get_main()
         if not main:
@@ -1865,7 +1834,6 @@ class BackendBridge(QObject):
             main.current_workspace = main.app_dir
         return result
 
-    @pyqtSlot(str, str, str, result=str)
     def updateProject(self, project_id: str, new_name: str, new_workspace_path: str):
         main = self._get_main()
         if not main:
@@ -1875,21 +1843,18 @@ class BackendBridge(QObject):
             main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
-    @pyqtSlot(str, result=str)
     def getDefaultProjectPath(self, name: str):
         main = self._get_main()
         if not main:
             return ""
         return main.project_mgr.get_default_path(name)
 
-    @pyqtSlot(str, result=str)
     def listConversations(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.list_conversations(project_id))
 
-    @pyqtSlot(str, str, result=str)
     def loadConversation(self, project_id: str, session_id: str):
         main = self._get_main()
         if not main:
@@ -1897,14 +1862,12 @@ class BackendBridge(QObject):
         msgs = main.project_mgr.load_conversation(project_id, session_id)
         return json.dumps(msgs)
 
-    @pyqtSlot(str, str, str, result=bool)
     def copyConversation(self, source_project_id: str, session_id: str, target_project_id: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.copy_conversation(source_project_id, session_id, target_project_id)
 
-    @pyqtSlot(str, result=str)
     def getProjectContext(self, project_id: str):
         main = self._get_main()
         if not main:
@@ -1912,7 +1875,6 @@ class BackendBridge(QObject):
         ctx = main.project_mgr.get_project_context(project_id)
         return json.dumps(ctx)
 
-    @pyqtSlot(str, str, str, result=bool)
     def saveConversation(self, project_id: str, session_id: str, messages_json: str):
         main = self._get_main()
         if not main:
@@ -1923,84 +1885,72 @@ class BackendBridge(QObject):
             msgs = []
         return main.project_mgr.save_conversation(project_id, session_id, msgs)
 
-    @pyqtSlot(str, str, result=str)
     def searchConversations(self, project_id: str, keyword: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.search_conversations(project_id, keyword))
 
-    @pyqtSlot(str, str, result=bool)
     def deleteConversation(self, project_id: str, session_id: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.delete_conversation(project_id, session_id)
 
-    @pyqtSlot(str, str, str, result=bool)
     def renameConversation(self, project_id: str, session_id: str, new_title: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.rename_conversation(project_id, session_id, new_title)
 
-    @pyqtSlot(str, result=str)
     def getClaudeMd(self, project_id: str):
         main = self._get_main()
         if not main:
             return ""
         return main.project_mgr.get_claude_md(project_id)
 
-    @pyqtSlot(str, str, result=bool)
     def saveClaudeMd(self, project_id: str, content: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_claude_md(project_id, content)
 
-    @pyqtSlot(result=str)
     def getGlobalClaudeMd(self):
         main = self._get_main()
         if not main:
             return ""
         return main.project_mgr.get_global_claude_md()
 
-    @pyqtSlot(str, result=bool)
     def saveGlobalClaudeMd(self, content: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_global_claude_md(content)
 
-    @pyqtSlot(str, result=str)
     def listMemories(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.list_memories(project_id))
 
-    @pyqtSlot(str, str, str, str, result=bool)
     def saveMemory(self, project_id: str, filename: str, content: str, mem_type: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_memory(project_id, filename, content, mem_type)
 
-    @pyqtSlot(str, str, result=bool)
     def deleteMemory(self, project_id: str, filename: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.delete_memory(project_id, filename)
 
-    @pyqtSlot(str, str, result=str)
     def searchMemories(self, project_id: str, keyword: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.search_memories(project_id, keyword))
 
-    @pyqtSlot(str, str, result=str)
     def autoExtractMemories(self, project_id: str, messages_json: str):
         main = self._get_main()
         if not main:
@@ -2011,21 +1961,18 @@ class BackendBridge(QObject):
             msgs = []
         return json.dumps(main.project_mgr.auto_extract_memories(project_id, msgs))
 
-    @pyqtSlot(str, result=str)
     def getMemoryStats(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps({"total": 0, "by_type": {}, "total_size": 0})
         return json.dumps(main.project_mgr.get_memory_stats(project_id))
 
-    @pyqtSlot(str, str, result=str)
     def getRelevantMemories(self, project_id: str, query: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.get_relevant_memories(project_id, query))
 
-    @pyqtSlot(str, result=str)
     def listProjectTemplates(self, category: str):
         templates = [
             {"id": "react-app", "name": "React 应用", "desc": "React + TypeScript + Vite", "category": "frontend", "prompt": "创建一个 React + TypeScript + Vite 项目，包含基本路由和状态管理", "scaffold": True},
@@ -2055,14 +2002,12 @@ class BackendBridge(QObject):
             templates = templates + custom
         return json.dumps(templates)
 
-    @pyqtSlot(str, str, str, str, str, result=bool)
     def saveCustomTemplate(self, name: str, category: str, desc: str, prompt: str, files: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_custom_template(name, category, desc, prompt, files)
 
-    @pyqtSlot(str, result=bool)
     def deleteCustomTemplate(self, template_id: str):
         main = self._get_main()
         if not main:
@@ -2072,7 +2017,6 @@ class BackendBridge(QObject):
     def _get_app_data_path(self) -> str:
         return os.path.join(self.user_dir, "app_data.json")
 
-    @pyqtSlot(str, result=str)
     def saveAppData(self, data_json: str):
         try:
             data_path = self._get_app_data_path()
@@ -2085,7 +2029,6 @@ class BackendBridge(QObject):
             print(f"[saveAppData] ERROR: {e}")
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(result=str)
     def loadAppData(self):
         try:
             data_path = self._get_app_data_path()
@@ -2100,14 +2043,12 @@ class BackendBridge(QObject):
             print(f"[loadAppData] ERROR: {e}")
             return ""
 
-    @pyqtSlot(str, str, result=str)
     def createProjectFromTemplate(self, project_id: str, template_id: str):
         main = self._get_main()
         if not main:
             return json.dumps({"success": False, "error": "main not available"})
         return json.dumps(main.project_mgr.create_project_from_template(project_id, template_id))
 
-    @pyqtSlot(result=str)
     def getVersionHistory(self):
         vh_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version_history.json")
         if not os.path.exists(vh_path):
@@ -2119,7 +2060,6 @@ class BackendBridge(QObject):
         except Exception:
             return json.dumps([])
 
-    @pyqtSlot(str, str, result=str)
     def runTerminalCommand(self, cmd: str, cwd: str):
         try:
             if not cwd or not os.path.isdir(cwd):
@@ -2148,7 +2088,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"output": str(e), "error": str(e), "cwd": cwd})
 
-    @pyqtSlot(str, result=str)
     def getGitStatus(self, project_path: str):
         try:
             if not project_path or not os.path.isdir(project_path):
@@ -2178,7 +2117,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"error": str(e)})
 
-    @pyqtSlot(str, str, result=str)
     def gitCommit(self, project_path: str, message: str):
         try:
             if not project_path or not message.strip():
@@ -2195,7 +2133,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"error": str(e)})
 
-    @pyqtSlot(str, result=str)
     def getGitLog(self, project_path: str):
         try:
             if not project_path or not os.path.isdir(project_path):
@@ -2221,7 +2158,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"error": str(e)})
 
-    @pyqtSlot(str, result=str)
     def getFileTree(self, project_path: str):
         try:
             if not project_path or not os.path.isdir(project_path):
@@ -2245,7 +2181,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps([])
 
-    @pyqtSlot(str, str, result=bool)
     def showDesktopNotification(self, title: str, body: str):
         try:
             from PyQt6.QtWidgets import QSystemTrayIcon
@@ -2257,7 +2192,6 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
-    @pyqtSlot(str, result=bool)
     def openExternalUrl(self, url: str):
         try:
             import webbrowser
@@ -2276,7 +2210,6 @@ class BackendBridge(QObject):
         """获取插件目录，公共数据"""
         return os.path.join(self.public_dir, "plugins")
 
-    @pyqtSlot(result=str)
     def listPlugins(self):
         plugin_dir = self._get_plugins_dir()
         os.makedirs(plugin_dir, exist_ok=True)
@@ -2299,7 +2232,6 @@ class BackendBridge(QObject):
                 pass
         return json.dumps(result)
 
-    @pyqtSlot(str, result=bool)
     def installPlugin(self, plugin_json: str):
         try:
             meta = json.loads(plugin_json)
@@ -2318,7 +2250,6 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
-    @pyqtSlot(str, result=bool)
     def uninstallPlugin(self, plugin_id: str):
         try:
             plugin_dir = self._get_plugins_dir()
@@ -2332,7 +2263,6 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
-    @pyqtSlot(str, str, result=str)
     def executePlugin(self, plugin_id: str, input_data: str):
         plugin_dir = self._get_plugins_dir()
         code_path = os.path.join(plugin_dir, plugin_id, "index.js")
@@ -2348,7 +2278,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"error": str(e)})
 
-    @pyqtSlot(str, result=bool)
     def startVoiceInput(self, language: str):
         try:
             main = self._get_main()
@@ -2374,7 +2303,6 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
-    @pyqtSlot(str, result=bool)
     def speakText(self, text: str):
         try:
             def _speak():
@@ -2396,7 +2324,6 @@ class BackendBridge(QObject):
         """获取模型目录，公共数据 (所有用户共享)"""
         return os.path.join(self.public_dir, "models")
 
-    @pyqtSlot(result=str)
     def getOfflineModels(self):
         # 模型是公共数据，所有用户共享
         models_dir = self._get_models_dir()
@@ -2410,7 +2337,6 @@ class BackendBridge(QObject):
                     models.append({"name": fname, "path": fpath, "size_mb": round(size_mb, 1)})
         return json.dumps(models)
 
-    @pyqtSlot(str, result=bool)
     def downloadModel(self, url: str):
         try:
             # 模型是公共数据，所有用户共享
@@ -2431,9 +2357,39 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
-    # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
+        # ── pywebview JS通知辅助方法 ──
+    def _notify_delta(self, data: str):
+        main = self._get_main()
+        if main and hasattr(main, '_webview_window') and main._webview_window:
+            try:
+                main._webview_window.evaluate_js(
+                    "if(window.onDelta) window.onDelta(" + data + ");"
+                )
+            except Exception:
+                pass
 
-    @pyqtSlot(result=str)
+    def _notify_status(self, data: str):
+        main = self._get_main()
+        if main and hasattr(main, '_webview_window') and main._webview_window:
+            try:
+                main._webview_window.evaluate_js(
+                    "if(window.onStatus) window.onStatus(" + data + ");"
+                )
+            except Exception:
+                pass
+
+    def _notify_models(self, data: str):
+        main = self._get_main()
+        if main and hasattr(main, '_webview_window') and main._webview_window:
+            try:
+                main._webview_window.evaluate_js(
+                    "if(window.onModelsLoaded) window.onModelsLoaded(" + data + ");"
+                )
+            except Exception:
+                pass
+
+    # ── 前端可调用方法 (通过 pywebview js_api 暴露) ──
+
     def getState(self):
         """获取应用状态"""
         main = self._get_main()
@@ -2461,7 +2417,6 @@ class BackendBridge(QObject):
             "activeProjectId": main.active_project_id,
         })
 
-    @pyqtSlot(result=str)
     def newSession(self):
         main = self._get_main()
         if not main:
@@ -2472,7 +2427,6 @@ class BackendBridge(QObject):
         main.started_sessions.discard(main.active_session_id)
         return json.dumps({"sessionId": main.active_session_id})
 
-    @pyqtSlot(str, result=str)
     def sendMessage(self, payload_json: str):
         """发送消息给 AI"""
         main = self._get_main()
@@ -2497,7 +2451,7 @@ class BackendBridge(QObject):
                     pass
             main.is_busy = False
             main.active_proc = None
-            self.statusReceived.emit(json.dumps({"busy": False}))
+            self._notify_status(json.dumps({"busy": False}))
 
         prompt = (payload.get("prompt") or "").strip()
         if not prompt:
@@ -2527,14 +2481,13 @@ class BackendBridge(QObject):
             main.current_workspace = payload["workspace_path"]
 
         main.is_busy = True
-        self.statusReceived.emit(json.dumps({"busy": True}))
+        self._notify_status(json.dumps({"busy": True}))
 
         t = threading.Thread(target=self._run_cli, args=(prompt, model, provider, settings), daemon=True)
         t.start()
 
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
 
-    @pyqtSlot(result=str)
     def selectDirectory(self):
         try:
             from PyQt6.QtWidgets import QFileDialog
@@ -2551,7 +2504,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(str, result=bool)
     def openInExplorer(self, path: str):
         try:
             import subprocess
@@ -2562,7 +2514,6 @@ class BackendBridge(QObject):
         except Exception:
             return False
 
-    @pyqtSlot(result=str)
     def stopMessage(self):
         main = self._get_main()
         if not main or not main.is_busy:
@@ -2576,16 +2527,14 @@ class BackendBridge(QObject):
 
         main.is_busy = False
         main.active_session_id = _uuid()
-        self.statusReceived.emit(json.dumps({"busy": False}))
+        self._notify_status(json.dumps({"busy": False}))
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
 
-    @pyqtSlot(result=str)
     def getWorkspace(self):
         main = self._get_main()
         path = main.current_workspace if main else ""
         return json.dumps({"path": path})
 
-    @pyqtSlot(result=str)
     def chooseWorkspace(self):
         """由 Python 端弹出文件夹选择对话框"""
         main = self._get_main()
@@ -2595,14 +2544,12 @@ class BackendBridge(QObject):
         main.workspace_choose_requested.emit()
         return json.dumps({"ok": True, "path": main.current_workspace})
 
-    @pyqtSlot(result=str)
     def getSettings(self):
         main = self._get_main()
         if not main:
             return json.dumps({})
         return json.dumps(main.env_manager.read_settings())
 
-    @pyqtSlot(str, result=str)
     def saveSettings(self, payload_json: str):
         main = self._get_main()
         if not main:
@@ -2614,7 +2561,6 @@ class BackendBridge(QObject):
         result = main.env_manager.write_settings(payload)
         return json.dumps(result)
 
-    @pyqtSlot(result=str)
     def clearModelSettings(self):
         main = self._get_main()
         if not main:
@@ -2622,7 +2568,6 @@ class BackendBridge(QObject):
         result = main.env_manager.clear_model_settings()
         return json.dumps(result)
 
-    @pyqtSlot(str, result=str)
     def listModels(self, payload_json: str):
         """获取模型列表（在后台线程中执行，通过信号返回结果）"""
         try:
@@ -2655,13 +2600,12 @@ class BackendBridge(QObject):
                 result = list_zhipu_models(zhipu_key, zhipu_base, timeout)
             else:
                 result = {"ok": False, "error": "Unsupported source."}
-            self.modelsLoaded.emit(json.dumps(result))
+            self._notify_models(json.dumps(result))
 
         t = threading.Thread(target=_do_load, daemon=True)
         t.start()
         return json.dumps({"ok": True, "loading": True})
 
-    @pyqtSlot(result=str)
     def detectHardware(self):
         """检测硬件信息，用于自动配置推荐"""
         info = {"total_ram": 0, "gpu_name": "", "gpu_vram_gb": 0, "cpu_name": "", "cpu_cores": 0}
@@ -2699,7 +2643,6 @@ class BackendBridge(QObject):
 
         return json.dumps(info)
 
-    @pyqtSlot(str, result=str)
     def deleteModel(self, payload_json: str):
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
@@ -2727,7 +2670,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)[:200]})
 
-    @pyqtSlot(str, result=str)
     def searchOllamaLibrary(self, query: str):
         try:
             q = (query or "").strip()
@@ -2761,7 +2703,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)[:200]})
 
-    @pyqtSlot(str, result=str)
     def pullModel(self, payload_json: str):
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
@@ -2781,15 +2722,14 @@ class BackendBridge(QObject):
                 req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
                 resp = urllib.request.urlopen(req, timeout=600)
                 result = json.loads(resp.read().decode("utf-8"))
-                self.modelsLoaded.emit(json.dumps({"ok": True, "action": "pull_complete", "model": model_name}))
+                self._notify_models(json.dumps({"ok": True, "action": "pull_complete", "model": model_name}))
             except Exception as e:
-                self.modelsLoaded.emit(json.dumps({"ok": False, "action": "pull_failed", "model": model_name, "error": str(e)[:200]}))
+                self._notify_models(json.dumps({"ok": False, "action": "pull_failed", "model": model_name, "error": str(e)[:200]}))
 
         t = threading.Thread(target=_do_pull, daemon=True)
         t.start()
         return json.dumps({"ok": True, "loading": True, "action": "pulling", "model": model_name})
 
-    @pyqtSlot(result=str)
     def recommendModels(self):
         hw = json.loads(self.detectHardware())
         total_ram_gb = (hw.get("total_ram", 0) or 0) / (1024 ** 3)
@@ -2815,7 +2755,6 @@ class BackendBridge(QObject):
                 unique.append(r)
         return json.dumps({"ok": True, "models": unique, "hardware": hw})
 
-    @pyqtSlot(str, result=str)
     def fetchApiKey(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2826,14 +2765,12 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"fetchApiKey异常: {e}"})
 
-    @pyqtSlot(result=str)
     def listApiServices(self):
         try:
             return json.dumps({"ok": True, "services": backend.list_api_services()})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(str, result=str)
     def getApiServiceInfo(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2842,7 +2779,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(str, result=str)
     def stopServiceByPort(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2853,7 +2789,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(result=str)
     def startAllApiServices(self):
         try:
             result = backend.start_all_api_services()
@@ -2861,7 +2796,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(result=str)
     def listAllModels(self):
         try:
             result = backend.list_all_models()
@@ -2869,7 +2803,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
-    @pyqtSlot(str, result=str)
     def startQwen2Api(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2881,7 +2814,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwen2Api异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def stopQwen2Api(self, payload: str = ""):
         try:
             base_url = ""
@@ -2896,7 +2828,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"stopQwen2Api异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def checkApiService(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2906,7 +2837,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"checkApiService异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def addQwenAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2918,7 +2848,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"addQwenAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def listQwenAccounts(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2929,7 +2858,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listQwenAccounts异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def deleteQwenAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2941,7 +2869,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"deleteQwenAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def startZhipu2Api(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2978,7 +2905,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startZhipu2Api异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def stopZhipu2Api(self, payload: str = ""):
         try:
             base_url = ""
@@ -2993,7 +2919,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"stopZhipu2Api异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def addZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3006,7 +2931,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"addZhipuAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def listZhipuAccounts(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3017,7 +2941,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listZhipuAccounts异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def deleteZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3029,7 +2952,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"deleteZhipuAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def validateZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3041,7 +2963,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"validateZhipuAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def fetchZhipuApiKey(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3052,7 +2973,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"fetchZhipuApiKey异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def createZhipuApiKey(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3063,7 +2983,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"createZhipuApiKey异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def startZhipuRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3074,7 +2993,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startZhipuRegister异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def pollZhipuRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3085,7 +3003,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollZhipuRegister异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def loginZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3098,7 +3015,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"loginZhipuAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def setStickyAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3110,7 +3026,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"setStickyAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def clearStickyAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3121,7 +3036,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"clearStickyAccount异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def startQwenLogin(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3134,7 +3048,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwenLogin异常: {e}"})
 
-    @pyqtSlot(result=str)
     def pollQwenLogin(self):
         try:
             result = backend.poll_qwen_login()
@@ -3142,7 +3055,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollQwenLogin异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def startQwenRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3156,7 +3068,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwenRegister异常: {e}"})
 
-    @pyqtSlot(result=str)
     def pollQwenRegister(self):
         try:
             result = backend.poll_qwen_register()
@@ -3164,7 +3075,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollQwenRegister异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def checkZhipuApi(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3175,7 +3085,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"checkZhipuApi异常: {e}"})
 
-    @pyqtSlot(str, result=str)
     def listZhipuModels(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3186,7 +3095,6 @@ class BackendBridge(QObject):
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listZhipuModels异常: {e}"})
 
-    @pyqtSlot(result=str)
     def checkEnvironment(self):
         try:
             result = backend.check_environment()
@@ -3278,7 +3186,7 @@ class BackendBridge(QObject):
             system_prompt = self._build_system_prompt(settings, main.current_workspace)
 
             def _on_delta(text):
-                self.deltaReceived.emit(json.dumps({"text": text}))
+                self._notify_delta(json.dumps({"text": text}))
 
             result = main.cli_runner.run(
                 prompt=prompt,
@@ -3305,7 +3213,7 @@ class BackendBridge(QObject):
                 main.started_sessions.add(main.active_session_id)
                 result_text = result.get("text", "").strip()
                 if result_text and not result.get("streamed"):
-                    self.deltaReceived.emit(json.dumps({"text": result_text}))
+                    self._notify_delta(json.dumps({"text": result_text}))
             else:
                 cli_sid = result.get("cliSessionId", "")
                 if cli_sid and cli_sid != main.active_session_id:
@@ -3314,19 +3222,19 @@ class BackendBridge(QObject):
                 err = result.get("error", "")[:200]
                 main.log_signal.emit(f"[CLI 错误] {err}", "#F44336")
                 if err and not result.get("text"):
-                    self.deltaReceived.emit(json.dumps({"text": f"❌ {err}"}))
+                    self._notify_delta(json.dumps({"text": f"❌ {err}"}))
 
             main.result_ready_signal.emit(json.dumps(result))
         except Exception as e:
             main.log_signal.emit(f"[线程异常] {e}", "#F44336")
-            self.deltaReceived.emit(json.dumps({"text": f"❌ 线程异常: {str(e)[:200]}"}))
+            self._notify_delta(json.dumps({"text": f"❌ 线程异常: {str(e)[:200]}"}))
             main.result_ready_signal.emit(json.dumps({"ok": False, "error": str(e)}))
         finally:
             import time as _time
             _time.sleep(0.3)
             main.is_busy = False
             main.active_proc = None
-            self.statusReceived.emit(json.dumps({"busy": False}))
+            self._notify_status(json.dumps({"busy": False}))
 
 
     @staticmethod
@@ -4292,35 +4200,71 @@ class MainWindow(QMainWindow):
     # ── 页面创建 ──
 
     def _create_home_page(self):
-        """创建首页 - 运行服务（QWebEngineView）"""
+        """创建首页 - 启动界面（pywebview Edge WebView2）"""
         page = QWidget()
         page_layout = QVBoxLayout(page)
-        page_layout.setSpacing(0)
-        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(16)
+        page_layout.setContentsMargins(40, 40, 40, 40)
 
-        # QWebEngineView 加载 Vue 前端
-        self.web_view = ChineseWebView()
-        profile = self.web_view.page().profile()
-        # Web存储路径: 用户级数据 (跟随用户隔离)
-        storage_path = os.path.join(self.user_dir, "webdata")
-        os.makedirs(storage_path, exist_ok=True)
-        profile.setPersistentStoragePath(storage_path)
-        profile.setHttpCacheMaximumSize(50 * 1024 * 1024)
-        self.web_view.setStyleSheet("background-color: #0d0d0d;")
-
-        self.web_view.page().setBackgroundColor(QColor("#0d0d0d"))
-
-        self.web_view.loadFinished.connect(self._on_web_load_finished)
-        self.web_view.page().javaScriptConsoleMessage = self._on_js_console
-
-        # QWebChannel 桥接
-        self.channel = QWebChannel()
+        # pywebview API 桥接对象
         self.bridge = BackendBridge()
         self.bridge._app_ref = self
-        self.channel.registerObject("backend", self.bridge)
-        self.web_view.page().setWebChannel(self.channel)
 
-        page_layout.addWidget(self.web_view, 1)
+        # 状态标签
+        self.home_status = QLabel("🟢 就绪")
+        self.home_status.setStyleSheet("color: #4CAF50; font-size: 24px; font-weight: bold; border: none;")
+        self.home_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        page_layout.addWidget(self.home_status)
+
+        # 启动按钮
+        launch_btn = QPushButton("🚀 启动云集桌面")
+        launch_btn.setStyleSheet("""
+            QPushButton {
+                background: #3b82f6; border: none; border-radius: 12px;
+                color: white; font-size: 18px; font-weight: bold;
+                padding: 20px 60px; min-height: 60px;
+            }
+            QPushButton:hover { background: #2563eb; }
+        """)
+        launch_btn.clicked.connect(self._launch_webview)
+        page_layout.addWidget(launch_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # 提示文字
+        hint = QLabel("使用 Edge WebView2 内核，体积仅 2MB\n首次启动自动部署环境，后续秒开")
+        hint.setStyleSheet("color: #666; font-size: 13px; border: none;")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        page_layout.addWidget(hint)
+
+        page_layout.addStretch()
+
+    def _launch_webview(self):
+        """启动 pywebview 独立窗口，加载 Vue 前端"""
+        if not WEBVIEW_AVAILABLE:
+            QMessageBox.critical(self, "错误", "pywebview 未安装，请运行 pip install pywebview")
+            return
+
+        dist_path = os.path.join(self.app_dir, "desktop", "dist", "index.html")
+        if not os.path.exists(dist_path):
+            QMessageBox.warning(self, "前端未构建", "请先在「部署维护」中构建前端")
+            return
+
+        self._update_status("🔄 正在启动...")
+        self.home_status.setText("🔄 正在启动...")
+
+        def _run_webview():
+            w = webview.create_window(
+                "云集桌面", url=dist_path,
+                js_api=self.bridge,
+                width=1280, height=860,
+                confirm_close=True,
+            )
+            self._webview_window = w
+            webview.start()
+
+        # 在后台线程启动 webview（它有自己的事件循环）
+        t = threading.Thread(target=_run_webview, daemon=False)
+        t.start()
+        self._update_status("🟢 已启动")
 
         # 底部日志面板（默认折叠）
         self.log_panel = QFrame()
@@ -4689,7 +4633,7 @@ class MainWindow(QMainWindow):
         if index in (0, 3, 4):
             nav_name = {0: "chat", 3: "project", 4: "settings"}.get(index, "chat")
             try:
-                self.web_view.page().runJavaScript(f"if(window.switchNav) window.switchNav('{nav_name}');")
+                self.web_view.evaluate_js(f"if(window.switchNav) window.switchNav('{nav_name}');")
             except Exception:
                 pass
 
@@ -5299,11 +5243,9 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=_check, daemon=True)
         t.start()
 
-    def _on_web_load_finished(self, ok: bool):
-        if ok:
-            self.web_view.setVisible(True)
-            if self._splash and self._splash.isVisible():
-                self._splash.set_progress(0.95, "正在渲染界面...")
+    def _on_web_load_finished(self):
+        if self._splash and self._splash.isVisible():
+            self._splash.set_progress(0.95, "正在渲染界面...")
 
     def _finish_splash(self):
         if self._splash and self._splash.isVisible():
@@ -5319,17 +5261,12 @@ class MainWindow(QMainWindow):
             self._splash = None
 
     def _load_frontend(self):
-        """加载 Vue 前端到 QWebEngineView"""
+        """检查前端是否已构建并更新状态（pywebview 由 _launch_webview 按需启动）"""
         dist_path = os.path.join(self.app_dir, "desktop", "dist", "index.html")
-
         if not os.path.exists(dist_path):
             self._update_status("✗ 前端未构建")
             self.log_signal.emit("[错误] 前端未构建，请先运行部署维护", "#F44336")
             return
-
-        # 使用 file:// URL 加载
-        url = QUrl.fromLocalFile(dist_path)
-        self.web_view.load(url)
         self._update_status("🟢 就绪")
 
         # 更新环境状态栏
@@ -5371,7 +5308,7 @@ class MainWindow(QMainWindow):
         self._pending_voice_result = text
         try:
             escaped = json.dumps(text)
-            self.web_view.page().runJavaScript(f"if(window.setVoiceResult) window.setVoiceResult({escaped});")
+            self.web_view.evaluate_js(f"if(window.setVoiceResult) window.setVoiceResult({escaped});")
         except Exception:
             pass
 
@@ -5612,18 +5549,6 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    if hasattr(sys, '_MEIPASS'):
-        os.environ['QTWEBENGINEPROCESS_PATH'] = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'bin', 'QtWebEngineProcess.exe')
-        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--disable-gpu'
-        if not os.environ.get('QTWEBENGINE_RESOURCES_PATH'):
-            res_path = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'resources')
-            if os.path.isdir(res_path):
-                os.environ['QTWEBENGINE_RESOURCES_PATH'] = res_path
-        if not os.environ.get('QTWEBENGINE_LOCALES_PATH'):
-            loc_path = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'translations', 'qtwebengine_locales')
-            if os.path.isdir(loc_path):
-                os.environ['QTWEBENGINE_LOCALES_PATH'] = loc_path
-
     _ensure_single_instance()
 
     try:
