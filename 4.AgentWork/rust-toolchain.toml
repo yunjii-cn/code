@@ -1,0 +1,12 @@
+# 云集智能体工作台 (AgentWork) - Rust 工具链锁定
+# 锁版本确保所有开发者和 CI 用同一 Rust 版本
+
+[toolchain]
+channel = "1.78.0"
+components = [
+    "rustfmt",
+    "clippy",
+    "rust-analyzer",
+    "rust-src",
+]
+profile = "minimal"

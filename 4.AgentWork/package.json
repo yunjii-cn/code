@@ -1,0 +1,35 @@
+{
+  "name": "agentwork",
+  "version": "0.1.0",
+  "private": true,
+  "description": "云集智能体工作台 (AgentWork) - Git-Native AI Agent Workbench",
+  "author": "Yunji AI <agentwork@yunji.ai>",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  },
+  "scripts": {
+    "dev:desktop": "pnpm --filter @aw/desktop dev",
+    "dev:web": "pnpm --filter @aw/web dev",
+    "dev:cli": "pnpm --filter @aw/cli dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\"",
+    "test:e2e": "playwright test",
+    "clean": "pnpm -r exec rm -rf dist build .next out node_modules/.cache",
+    "verify": "pnpm format:check && pnpm lint && pnpm test"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.0",
+    "@types/node": "^20.12.0",
+    "typescript": "^5.5.0"
+  },
+  "packageManager": "pnpm@9.0.0",
+  "workspaces": [
+    "apps/*",
+    "platformkit/packages/*"
+  ]
+}
