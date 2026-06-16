@@ -1,0 +1,458 @@
+# 云集智能体工作台 - 商业模式
+# version: 1.0
+# updated: 2026-06-17
+# status: 草案 v1.0，待 M5 商业化前调整
+
+# ============================================================
+# 产品信息
+# ============================================================
+product:
+  code_name: "AW"
+  code_name_expansion: "AI-Work (3 字母简称)"
+  chinese_name: "云集智能体工作台"
+  english_name: "AgentWork"
+  abbreviation: "AW"
+  tagline: "AI Agent Workbench"
+  tagline_long: "Git-Native AI Agent Workbench"
+  positioning: "Enterprise / 商务旗舰"
+  target_audience: "5-500 人研发团队 / 上市公司工程效能团队"
+  launch_date_target: "2026-11 (GA) / 2026-09 (Beta)"
+  website: "https://agentwork.yunji.ai"  # 筹备中
+  contact_email: "agentwork@yunji.ai"
+  github_org: "yunji/agentwork"  # 仓库用品牌名 agentwork 而非简称 aw
+  gitee_org: "yunji/agentwork"
+  cli_command: "aw"  # CLI 命令用简称
+  crate_prefix: "aw"  # crate 用简称
+  npm_scope: "@aw"  # npm scope 用简称
+
+# 命名约定：
+#   - 品牌/对外：使用 "AgentWork"（避免与 AWS 混淆）
+#   - 机器/技术标识符：使用 "aw"（CLI、crate、commit scope、npm scope）
+#   - 中文：使用 "云集智能体工作台"
+
+# ============================================================
+# 技术差异化（核心卖点）
+# ============================================================
+differentiation:
+  - id: "git_native"
+    title: "Git-Native 工作流"
+    description: "Agent 任务结果以 PR 形式交付，可审计、可回放、可回滚"
+    competitors_weakness: "Copilot/Devin 任务结果需手动 git 操作，Cursor 不支持"
+    
+  - id: "open_source"
+    title: "开源 Apache 2.0"
+    description: "核心代码完全开源，企业可自部署、可审计"
+    competitors_weakness: "Devin 完全闭源，Cursor 闭源，Copilot 闭源"
+    
+  - id: "mcp_standard"
+    title: "MCP 标准协议"
+    description: "工具接入基于 Model Context Protocol，生态丰富"
+    competitors_weakness: "Cursor 使用私有协议，工具接入受限"
+    
+  - id: "tauri_desktop"
+    title: "Tauri 2 桌面"
+    description: "安装包 < 10MB（vs Electron 100MB+），内存占用 1/5"
+    competitors_weakness: "Devin 仅 Web，Cursor 仅编辑器插件"
+    
+  - id: "skills_market"
+    title: "Skills 市场"
+    description: "可复用任务模板，团队/社区共享，持续积累"
+    competitors_weakness: "Copilot 提示词市场弱，无版本管理"
+    
+  - id: "sandbox_security"
+    title: "Docker 沙箱 + 审计"
+    description: "Agent 执行环境完全隔离，每次操作全审计"
+    competitors_weakness: "Devin 云端沙箱黑盒，Cursor 无沙箱"
+
+# ============================================================
+# 商业档位
+# ============================================================
+tiers:
+  # ----------------------------------------------------------
+  - id: "community"
+    name: "Community"
+    chinese_name: "社区版"
+    price: 0
+    currency: "CNY"
+    period: "lifetime"
+    target: "个人开发者 / 学习者 / 学生"
+    positioning: "获客 + 品牌建设"
+    features:
+      includes:
+        - "✅ 本地桌面端（Windows/macOS/Linux）"
+        - "✅ 完整 Git 集成（clone/commit/PR）"
+        - "✅ MCP 协议支持"
+        - "✅ 5 个内置 Skills"
+        - "✅ 社区支持（GitHub Issues）"
+        - "✅ 永久免费升级"
+      excludes:
+        - "❌ 云同步"
+        - "❌ Skills 市场下载"
+        - "❌ 发布 Skills"
+        - "❌ 团队协作"
+        - "❌ 审计日志"
+        - "❌ 沙箱执行"
+        - "❌ 优先支持"
+    license: "Apache 2.0"
+
+  # ----------------------------------------------------------
+  - id: "pro"
+    name: "Pro"
+    chinese_name: "专业版"
+    price: 99
+    currency: "CNY"
+    period: "month"
+    target: "独立开发者 / 2-5 人小团队"
+    positioning: "现金流 + 个人付费"
+    features:
+      includes:
+        - "✅ Community 全部功能"
+        - "✅ 云同步（配置 + 历史）"
+        - "✅ Skills 市场（下载 + 评分）"
+        - "✅ 发布 Skills（社区可见）"
+        - "✅ 100 次/月 Agent 任务"
+        - "✅ 优先支持（48h 响应）"
+        - "✅ 邮件技术支持"
+      excludes:
+        - "❌ 团队协作空间"
+        - "❌ 共享 Skills 库"
+        - "❌ 审计日志"
+        - "❌ RBAC 角色权限"
+        - "❌ SSO 单点登录"
+        - "❌ 沙箱执行"
+        - "❌ 私有模型"
+    license: "商业授权（个人）"
+    yearly_discount: "10%（即 ¥1068/年，节省 ¥120）"
+
+  # ----------------------------------------------------------
+  - id: "team"
+    name: "Team"
+    chinese_name: "团队版"
+    price: 299
+    currency: "CNY"
+    period: "month"
+    per_seat: true
+    min_seats: 3
+    target: "5-50 人研发团队"
+    positioning: "主力档位"
+    features:
+      includes:
+        - "✅ Pro 全部功能"
+        - "✅ 团队协作空间（共享任务、评论）"
+        - "✅ 共享 Skills 库（团队私有）"
+        - "✅ 审计日志（180 天保留）"
+        - "✅ 1000 次/月/席位 Agent 任务"
+        - "✅ 角色权限（Owner/Admin/Member/Viewer）"
+        - "✅ SSO（OAuth 2.1, OIDC, SAML）"
+        - "✅ 优先支持（24h 响应）"
+        - "✅ 工单支持（中文）"
+      excludes:
+        - "❌ 私有化部署"
+        - "❌ 沙箱执行（Docker 隔离）"
+        - "❌ 永久审计日志"
+        - "❌ 自定义私有 LLM"
+        - "❌ SLA 保障"
+        - "❌ 7x24 专属支持"
+    license: "商业授权（团队）"
+    yearly_discount: "15%（即 ¥3048/年/席位，节省 ¥540）"
+
+  # ----------------------------------------------------------
+  - id: "enterprise"
+    name: "Enterprise"
+    chinese_name: "企业版"
+    price: 999
+    currency: "CNY"
+    period: "month"
+    per_seat: true
+    min_seats: 10
+    custom_pricing: true
+    target: "50+ 人企业 / 上市公司 / 金融/政府"
+    positioning: "高客单价"
+    features:
+      includes:
+        - "✅ Team 全部功能"
+        - "✅ 私有化部署（On-premise）"
+        - "✅ 沙箱执行（Docker + gVisor 隔离）"
+        - "✅ 审计日志（永久保留 + 司法鉴定）"
+        - "✅ 无限 Agent 任务"
+        - "✅ 自定义私有 LLM（Qwen/DeepSeek/智谱）"
+        - "✅ SLA 保障（99.9% 在线率）"
+        - "✅ 7x24 专属支持（中文+英文）"
+        - "✅ 商业授权（可定制条款）"
+        - "✅ 定制开发（按需报价）"
+        - "✅ 培训（onboarding + 进阶）"
+        - "✅ 安全审计报告（等保、ISO 27001）"
+      excludes: []  # 没有更高级别
+    license: "商业授权（企业）"
+    yearly_discount: "20%（即 ¥9590/年/席位，节省 ¥2398）"
+
+# ============================================================
+# 企业服务（独立议价，不进 tier.yaml）
+# ============================================================
+enterprise_services:
+  - id: "private_deployment"
+    name: "私有化部署"
+    chinese_name: "私有化部署"
+    pricing: "面议 (10万-100万+)"
+    pricing_factors:
+      - "用户规模"
+      - "硬件配置"
+      - "集成复杂度"
+      - "SLA 等级"
+    typical_deal_size: "30万-80万"
+
+  - id: "commercial_license"
+    name: "商业授权"
+    chinese_name: "商业授权"
+    pricing: "面议 (5万-50万/年)"
+    pricing_factors:
+      - "公司规模"
+      - "使用范围"
+      - "授权期限"
+    typical_deal_size: "10万-30万/年"
+
+  - id: "training"
+    name: "培训服务"
+    chinese_name: "培训"
+    pricing: "面议 (1万-5万/次)"
+    pricing_factors:
+      - "培训时长"
+      - "参与人数"
+      - "定制程度"
+    typical_deal_size: "2万-3万/次"
+
+  - id: "sla_enhanced"
+    name: "SLA 增强"
+    chinese_name: "SLA 增强"
+    pricing: "面议"
+    pricing_factors:
+      - "可用性目标 (99.9% / 99.95% / 99.99%)"
+      - "响应时间 (1h / 30min / 15min)"
+      - "恢复时间 (RTO/RPO)"
+    typical_deal_size: "5万-20万/年"
+
+  - id: "custom_development"
+    name: "定制开发"
+    chinese_name: "定制开发"
+    pricing: "面议 (按人天)"
+    pricing_factors:
+      - "需求复杂度"
+      - "工期"
+      - "团队规模"
+    typical_rate: "3000-8000 元/人天"
+
+# ============================================================
+# 竞品分析
+# ============================================================
+competition:
+  direct_competitors:
+    - name: "GitHub Copilot Workspace"
+      vendor: "Microsoft / GitHub"
+      pricing: "$19/月 (Pro) / $39/月 (Business)"
+      weakness: "闭源、不支持本地、无 MCP、无 Skills 市场"
+      our_advantage: "开源 + 本地 + MCP + Skills"
+      
+    - name: "Cursor"
+      vendor: "Anysphere"
+      pricing: "$20/月 (Pro) / $40/月 (Business)"
+      weakness: "编辑器插件形态、闭源、需云端、无 PR 自动生成"
+      our_advantage: "完整 IDE 替代 + 开源 + PR 自动化"
+      
+    - name: "Devin"
+      vendor: "Cognition AI"
+      pricing: "$500/月 (Team)"
+      weakness: "完全闭源、云端、$500 高价、沙箱黑盒"
+      our_advantage: "Apache 2.0 开源 + 本地 + 价格低 5x"
+      
+    - name: "OpenHands Cloud"
+      vendor: "All Hands AI"
+      pricing: "$0 (自部署) / 商业云定价 TBD"
+      weakness: "云端为主、本地体验弱、Skills 市场未成熟"
+      our_advantage: "Tauri 2 本地优先 + Skills 先行"
+
+  adjacent_competitors:
+    - name: "WorkBuddy"
+      vendor: "OpenClaw 社区"
+      pricing: "开源"
+      weakness: "成熟度低，无 Skills 市场"
+      our_advantage: "商业化 + Skills + 企业服务"
+
+  # ----------------------------------------------------------
+  # 参考项目（reference_projects）
+  # 业界成熟的同方向项目，我们借鉴架构/工程实践
+  # 但不做竞品（赛道不同或定位不同）
+  # ----------------------------------------------------------
+  reference_projects:
+    - name: "UI-TARS-desktop"
+      vendor: "字节跳动 (bytedance)"
+      github: "https://github.com/bytedance/UI-TARS-desktop"
+      license: "Apache-2.0"
+      stars: "34K+ (2026-05 数据 34,238)"
+      commits: 1109
+      branches: 275
+      tags: 547
+      first_release: "2025-01-21"
+      category: "架构参考 / Monorepo 模板"
+      positioning: "GUI Agent 桌面 + 通用 Agent 栈 (Agent TARS CLI/Web)"
+      tech_stack:
+        - "TypeScript 5"
+        - "pnpm workspace + Turbo"
+        - "Electron (桌面) / CLI + Web UI"
+        - "MCP 协议集成"
+        - "多模态 (Vision-Language Model)"
+      monorepo_structure:
+        apps: "apps/ui-tars (桌面)"
+        packages: "packages/* (共享 SDK)"
+        multimodal: "multimodal/ (多模态核心)"
+        infra: "infra/ (基础设施 / 发布工程)"
+        rfcs: "rfcs/ (设计文档)"
+        examples: "examples/ (示例项目)"
+        docs: "docs/ (用户文档)"
+      what_we_learn:
+        - "✅ Monorepo 布局：apps/ + packages/ + 多个领域目录（multimodal/infra），分类清晰"
+        - "✅ MCP 集成模式：MCP 作为核心依赖，工具生态可扩展"
+        - "✅ Turbo + pnpm workspace：构建缓存加速 CI"
+        - "✅ rfcs/ 目录：所有 RFC 设计文档独立管理，便于追溯决策"
+        - "✅ 多个 apps 共享 packages：代码复用最大化"
+        - "⚠️ 注意：他们用 Electron，我们用 Tauri 2（避免重复 Electron 体积问题）"
+        - "⚠️ 赛道差异：他们做 GUI Agent（操控电脑），我们做 Git-Native 代码 Agent（写代码提 PR）"
+      threat_level: "🟢 低（同开源 Apache 2.0，赛道垂直差异化，潜在生态互操作）"
+      partnership_potential: "可探索：MCP 工具互认、SDK 互相引用、联合发布 Skills"
+      related_projects:
+        - name: "UI-TARS (模型层)"
+          github: "https://github.com/bytedance/UI-TARS"
+          note: "UI-TARS-desktop 的视觉语言模型基座"
+        - name: "Agent TARS"
+          github: "UI-TARS-desktop 仓库内"
+          note: "通用多模态 Agent 栈 (CLI + Web UI)"
+
+  market_size:
+    tam: "全球 3000 万开发者 × $20/月 ≈ $7.2B/年"
+    sam: "中国 800 万开发者 × ¥99/月 ≈ 95 亿/年"
+    som: "3 年目标 1% 市场 ≈ 1 亿/年"
+
+# ============================================================
+# 12 周路线图（与 AGENTS.md 同步）
+# ============================================================
+roadmap:
+  - milestone: "M0"
+    date: "2026-06"
+    goal: "仓库初始化 + 团队对齐"
+    deliverables:
+      - "AGENTS.md / README.md / tier.yaml"
+      - "Git 仓库 + CI 通"
+      - "团队对齐会"
+      
+  - milestone: "M1"
+    date: "2026-07 上"
+    goal: "Tauri 桌面骨架 + Git 集成"
+    deliverables:
+      - "Tauri 2 桌面骨架"
+      - "libgit2 clone/commit/PR 跑通"
+      - "本地 SQLite 存储"
+      - "5 个基础 UI 页面"
+      
+  - milestone: "M2"
+    date: "2026-07 下"
+    goal: "Agent Runtime + MCP Bridge"
+    deliverables:
+      - "OpenHands Runtime 集成"
+      - "MCP Bridge 独立进程"
+      - "3 个内置 MCP 工具 (read/write/bash)"
+      - "简单 Agent 任务跑通"
+      
+  - milestone: "M3"
+    date: "2026-08 上"
+    goal: "Skills 市场 v1"
+    deliverables:
+      - "5 个内置 Skills"
+      - "Skills 注册中心"
+      - "Skills 热加载"
+      - "桌面端 Skills 管理 UI"
+      
+  - milestone: "M4"
+    date: "2026-08 下"
+    goal: "沙箱 + 安全审计"
+    deliverables:
+      - "Docker 沙箱镜像"
+      - "gVisor 集成"
+      - "审计日志系统"
+      - "网络隔离策略"
+      
+  - milestone: "M5"
+    date: "2026-09"
+    goal: "内部 Beta"
+    deliverables:
+      - "100 个内部用户"
+      - "Bug 修复 + 性能优化"
+      - "Pro 档位定价上线"
+      
+  - milestone: "M6"
+    date: "2026-10"
+    goal: "公开 Beta"
+    deliverables:
+      - "1000 个外部用户"
+      - "Skills 市场公测"
+      - "团队版功能上线"
+      
+  - milestone: "M7"
+    date: "2026-11"
+    goal: "GA 1.0"
+    deliverables:
+      - "付费用户 100+"
+      - "企业版 SaaS 上线"
+      - "完整文档 + 培训"
+      
+  - milestone: "M8"
+    date: "2026-12"
+    goal: "企业版私有化"
+    deliverables:
+      - "私有化部署跑通"
+      - "SLA 99.9% 保障"
+      - "首个企业客户签约"
+
+# ============================================================
+# 财务预测（保守）
+# ============================================================
+financial_projection:
+  - year: 2026
+    revenue_rmb: 0
+    paying_users: 0
+    note: "Beta 阶段，全部免费"
+    
+  - year: 2027
+    revenue_rmb: 5000000  # 500 万
+    paying_users: 200
+    breakdown:
+      pro: 100  # ¥99 × 100 × 12 = 11.9 万
+      team: 50  # ¥299 × 50 × 3 席位 × 12 = 53.8 万
+      enterprise: 5  # ¥999 × 5 × 10 席位 × 12 = 60 万
+      services: 350  # 私有化 + 培训 ≈ 350 万
+    note: "企业服务为主，订阅为辅"
+    
+  - year: 2028
+    revenue_rmb: 30000000  # 3000 万
+    paying_users: 2000
+    note: "规模化阶段"
+    
+  - year: 2029
+    revenue_rmb: 100000000  # 1 亿
+    paying_users: 10000
+    note: "市场领先"
+
+# ============================================================
+# 变更历史
+# ============================================================
+changelog:
+  - version: "1.0"
+    date: "2026-06-17"
+    author: "Trae"
+    changes:
+      - "初始草案"
+      - "项目简称定为 AW（机器标识符：CLI/crate/npm scope）"
+      - "正式品牌名定为 AgentWork（对外：仓库/官网/商标/营销）"
+      - "中文名定为'云集智能体工作台'"
+      - "定义 5 类企业服务"
+      - "竞品分析 (Copilot/Cursor/Devin/OpenHands)"
+      - "12 周路线图"
+      - "3 年财务预测"
