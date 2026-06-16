@@ -1,33 +1,47 @@
 @echo off
-title YunJi Desktop
+chcp 65001 >nul 2>&1
+title Yunji Smart Workstation - Desktop
 
-set "HERE=%~dp0"
-cd /d "%HERE%"
+echo ============================================
+echo   Yunji Smart Workstation - Dev Mode
+echo ============================================
+echo.
 
-echo.
-echo ============================================================
-echo   YunJi Desktop (Free) - Starting...
-echo ============================================================
-echo.
+cd /d "%~dp0"
 
 if not exist "app\main.py" (
-    echo   [ERROR] main.py not found
+    echo [ERROR] app\main.py not found
     pause
     exit /b 1
 )
 
-cd "app"
+if not exist "data" mkdir data
+if not exist "temp" mkdir temp
 
-if not exist "uv\uv.exe" (
-    echo   uv not found. Run: 一键环境部署.bat
-    pause
-    exit /b 1
+set "UV=%~dp0app\uv\uv.exe"
+set "VENV=%~dp0data\.venv"
+
+if not exist "%VENV%\Scripts\python.exe" (
+    echo [INFO] Creating venv...
+    "%UV%" venv "%VENV%" --python 3.13
+    if %ERRORLEVEL% NEQ 0 (
+        echo [ERROR] Failed to create venv
+        pause
+        exit /b 1
+    )
+    echo [INFO] Installing dependencies...
+    "%UV%" pip --python "%VENV%\Scripts\python.exe" install PyQt6 pywebview psutil qtwebview2
 )
 
-echo   Starting...
-"uv\uv.exe" run main.py
+echo [INFO] Starting...
+echo.
 
-if errorlevel 1 (
-    echo   Start failed ^(code %errorlevel%^)
+cd /d "%~dp0app"
+"%VENV%\Scripts\python.exe" main.py
+
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERROR] Exit code: %ERRORLEVEL%
+    cd /d "%~dp0"
     pause
 )

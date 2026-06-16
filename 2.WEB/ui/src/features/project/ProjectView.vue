@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import { useChatStore } from '@/stores/chat'
@@ -82,6 +82,23 @@ async function loadProjects() {
     await projectStore.loadConversations(projectStore.activeProject.id)
   }
 }
+
+// 2026-06-16 修复：自动选中第一个项目（避免空状态）
+watch(
+  () => projectStore.projects,
+  (list) => {
+    if (!selectedProjectId.value && list.length > 0) {
+      const first = projectStore.activeProject || list[0]
+      if (first) {
+        selectedProjectId.value = first.id
+        if (!projectStore.activeProject) {
+          projectStore.switchProject(first.id)
+        }
+      }
+    }
+  },
+  { immediate: true }
+)
 
 async function handleSelectProject(projectId: string) {
   selectedProjectId.value = projectId

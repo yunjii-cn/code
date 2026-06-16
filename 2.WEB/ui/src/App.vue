@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 // 2026-06-08 TASK-1.9 引入：设计系统 Toast 挂载
 // 2026-06-09 TASK-2.7 引入：统一通知中心（铃铛 + 未读 badge + 抽屉）
@@ -36,6 +36,19 @@ const { showCommandPalette } = useGlobalShortcuts()
 function onYjOpenNotifications() {
   showNotificationCenter.value = true
 }
+
+// 2026-06-16 修复：路由切换时滚动到顶部，让用户能看到新页面的内容
+watch(
+  () => route.path,
+  () => {
+    nextTick(() => {
+      const main = document.querySelector('.app-content')
+      if (main) {
+        main.scrollTo({ top: 0, behavior: 'smooth' })
+      }
+    })
+  }
+)
 onMounted(() => {
   window.addEventListener('yj:open-notifications', onYjOpenNotifications)
 })
@@ -66,9 +79,19 @@ const labels: Record<string, string> = {
 // 2026-06-10 TASK-2.6：mobileLabels 已废弃（mobile tab 移到 MobileShell.vue）
 
 const activeTab = computed(() => {
-  // 2026-06-09 TASK-2.7：notifications 不是真实路由，路由层不会匹配到
-  const found = navTabs.find((t) => t.path === route.path)
-  return found?.name || 'chat'
+  // 2026-06-16 修复：activeTab 匹配逻辑增强
+  // 处理根路径 / 的边界情况：route.path 可能是 '/' 或 ''
+  // 使用 startsWith 处理子路由（如 /projects/123）
+  const currentPath = route.path || '/'
+  // 优先精确匹配
+  const exact = navTabs.find((t) => t.path === currentPath)
+  if (exact) return exact.name
+  // 其次按前缀匹配（仅对 projects/settings/env/version/github 等非根路径）
+  const prefix = navTabs.find(
+    (t) => t.path !== '/' && t.path !== '__notifications__' && currentPath.startsWith(t.path)
+  )
+  if (prefix) return prefix.name
+  return 'chat'
 })
 
 function onTabClick(name: string) {
@@ -79,7 +102,16 @@ function onTabClick(name: string) {
     showNotificationCenter.value = true
     return
   }
-  router.push(tab.path)
+  // 2026-06-16：避免重复点击同一路由触发无意义的导航
+  if (route.path === tab.path) {
+    // 即使是当前路由，也滚动到顶部，提示用户已经切换过
+    const main = document.querySelector('.app-content')
+    if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
+    return
+  }
+  router.push(tab.path).catch((err) => {
+    console.warn('[App] 路由跳转失败:', err)
+  })
 }
 </script>
 
@@ -277,13 +309,14 @@ export default {}
   border: none;
   border-bottom: 3px solid transparent;
   border-radius: 0;
-  padding: 4px 14px 6px;
+  padding: 6px 14px 8px;
   font-size: 12px;
   font-weight: normal;
   cursor: pointer;
-  transition: color 0.15s, background-color 0.15s;
+  transition: color 0.15s, background-color 0.15s, border-color 0.15s;
   white-space: nowrap;
   font-family: inherit;
+  position: relative;
 }
 
 .nav-tab:hover {
@@ -293,11 +326,13 @@ export default {}
 
 .nav-tab--active {
   color: #fff;
+  background-color: rgba(59, 130, 246, 0.08);
   border-bottom-color: #3b82f6;
+  font-weight: 600;
 }
 
 .nav-tab--active:hover {
-  background-color: #252525;
+  background-color: rgba(59, 130, 246, 0.12);
 }
 
 .app-content {

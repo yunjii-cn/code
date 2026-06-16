@@ -1,11 +1,12 @@
 {
     "brand_name": "云集智能编程工作站",
     "paths": {
-        "dev": "dev",
+        "dev": "1.PC",
         "app": "app",
         "dist": "dist",
         "ver": "ver",
         "build": "build",
-        "web": "web"
+        "web": "web",
+        "lock_file": ".yunji.lock"
     }
 }

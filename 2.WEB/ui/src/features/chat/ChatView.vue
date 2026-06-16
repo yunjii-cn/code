@@ -707,14 +707,28 @@ function toggleRightSidebar() {
 }
 
 onMounted(async () => {
+  // 2026-06-16 修复：任务对话栏目空白
+  // 原来没有 loadProjects()，导致 activeProject 为 null，
+  // 进而 loadConversations() 不被调用，conversations 始终为空
+  if (!projectStore.projects.length) {
+    try {
+      await projectStore.loadProjects()
+    } catch (e) {
+      console.warn('[ChatView] 加载项目列表失败:', e)
+    }
+  } else if (projectStore.activeProject) {
+    // 已有项目列表但可能未加载该项目的会话
+    try {
+      await projectStore.loadConversations(projectStore.activeProject.id)
+    } catch (e) {
+      console.warn('[ChatView] 加载会话失败:', e)
+    }
+  }
   await modelStore.fetchProviders()
   if (modelStore.currentProvider) {
     await modelStore.fetchModels()
   }
   chatStore.switchModel(modelStore.currentProvider, modelStore.currentModel)
-  if (projectStore.activeProject) {
-    await projectStore.loadConversations(projectStore.activeProject.id)
-  }
 })
 </script>
 
@@ -725,12 +739,14 @@ onMounted(async () => {
         <van-icon name="bars" class="sidebar-toggle" @click="toggleSidebar" />
         <div class="model-selectors">
           <div class="selector" @click="showProviderPicker = true">
-            <span>{{ currentProviderName }}</span>
-            <van-icon name="arrow-down" size="12" />
+            <van-icon name="cluster-o" class="selector-icon" />
+            <span class="selector-text" :title="currentProviderName">{{ currentProviderName }}</span>
+            <van-icon name="arrow-down" size="12" class="selector-arrow" />
           </div>
           <div class="selector" @click="showModelPicker = true">
-            <span>{{ currentModelName }}</span>
-            <van-icon name="arrow-down" size="12" />
+            <van-icon name="fire-o" class="selector-icon" />
+            <span class="selector-text" :title="currentModelName">{{ currentModelName }}</span>
+            <van-icon name="arrow-down" size="12" class="selector-arrow" />
           </div>
         </div>
       </div>
@@ -746,9 +762,10 @@ onMounted(async () => {
     </div>
 
     <div v-else class="top-bar mobile-top">
-      <div class="selector" @click="showModelPicker = true">
-        <span>{{ currentModelName }}</span>
-        <van-icon name="arrow-down" size="12" />
+      <div class="selector mobile-selector" @click="showModelPicker = true">
+        <van-icon name="fire-o" class="selector-icon" />
+        <span class="selector-text" :title="currentModelName">{{ currentModelName }}</span>
+        <van-icon name="arrow-down" size="12" class="selector-arrow" />
       </div>
     </div>
 
@@ -759,6 +776,10 @@ onMounted(async () => {
         :class="{ collapsed: sidebarCollapsed }"
       >
         <div class="sidebar-header">
+          <div class="sidebar-title-row">
+            <span class="sidebar-title">💬 任务对话</span>
+            <span v-if="conversations.length" class="sidebar-count">{{ conversations.length }}</span>
+          </div>
           <van-button size="small" type="primary" block @click="newConversation">
             + 新建对话
           </van-button>
@@ -839,11 +860,18 @@ onMounted(async () => {
 
       <div class="chat-main">
         <div ref="messagesContainer" class="messages">
-          <van-empty
-            v-if="!chatStore.messages.length"
-            description="开始一段对话吧"
-            image="search"
-          />
+          <div v-if="!chatStore.messages.length && !projectStore.activeProject" class="welcome-empty">
+            <van-empty
+              image="search"
+              :description="conversations.length ? '请选择一个对话开始' : '请先到「项目管理」创建一个项目'"
+            />
+          </div>
+          <div v-else-if="!chatStore.messages.length" class="welcome-empty">
+            <van-empty
+              image="search"
+              description="开始一段对话吧"
+            />
+          </div>
           <div
             v-for="(msg, idx) in chatStore.messages"
             :key="msg.id"
@@ -1203,18 +1231,23 @@ onMounted(async () => {
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   min-height: 48px;
+  gap: 12px;
 }
 
 .top-bar-left {
   display: flex;
   align-items: center;
   gap: 16px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .top-bar-right {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .sidebar-toggle {
@@ -1235,24 +1268,64 @@ onMounted(async () => {
 
 .model-selectors {
   display: flex;
-  gap: 12px;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
 .selector {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   background: var(--bg-primary);
+  border: 1px solid var(--border);
   border-radius: 6px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-secondary);
-  transition: background 0.2s;
+  transition: background 0.2s, border-color 0.2s;
+  min-width: 0;
+  max-width: 220px;
+  flex-shrink: 1;
 }
 
 .selector:hover {
   background: var(--bg-card-hover);
+  border-color: var(--accent-border, var(--border));
+  color: var(--accent);
+}
+
+.selector.mobile-selector {
+  max-width: 100%;
+  flex: 1;
+}
+
+.selector-icon {
+  color: var(--text-muted);
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.selector:hover .selector-icon {
+  color: var(--accent);
+}
+
+.selector-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.selector-arrow {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.selector:hover .selector-arrow {
   color: var(--accent);
 }
 
@@ -1289,6 +1362,32 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.sidebar-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+  margin-bottom: 2px;
+}
+
+.sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.3px;
+}
+
+.sidebar-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-card);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-family: 'Consolas', monospace;
+  min-width: 22px;
+  text-align: center;
 }
 
 .search-box {
@@ -1405,6 +1504,19 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+.welcome-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 300px;
+}
+
+.welcome-empty :deep(.van-empty__description) {
+  color: var(--text-muted);
+  font-size: 14px;
 }
 
 .message-row {

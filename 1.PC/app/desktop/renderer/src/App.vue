@@ -118,6 +118,11 @@ const showQuickModelDropdown = ref(false);
 const apiKey = ref("");
 const ollamaBaseUrl = ref("http://127.0.0.1:11434");
 const ollamaModel = ref("");
+// 2026-06-16: Ollama 可选对接状态（按需检测，不强行安装）
+const ollamaStatus = ref<{ installed: boolean; running: boolean; version?: string; installPath?: string; downloadUrl?: string; ollamaUrl?: string; error?: string } | null>(null);
+const ollamaDetectBusy = ref(false);
+const ollamaInstallBusy = ref(false);
+const showOllamaGuide = ref(false);
 const apiHost = ref("127.0.0.1");
 const apiPort = ref("7777");
 const apiBaseUrl = computed(() => {
@@ -380,7 +385,8 @@ const unavailableQuickModels = computed(() => allQuickModels.value.filter(m => !
 watch(runMode, (newMode) => {
   if (newMode === "ollama") {
     cloudModels.value = [];
-    loadCloudModels("ollama");
+    // 2026-06-16: 切换到 Ollama 模式时先做按需检测
+    checkOllamaStatus();
   } else if (newMode === "api") {
     if (apiSource.value === "zhipu") {
       loadZhipuModels();
@@ -638,6 +644,30 @@ const newQuickModelApiSource = ref<"qwen" | "zhipu">("qwen");
 const newQuickModelId = ref("");
 const APP_VERSION = "2026.05.11";
 const activeNav = ref<"chat" | "project" | "version" | "settings">("chat");
+
+// 2026-06-16 修复：补齐缺失的顶部导航栏
+// 之前 activeNav 只能通过 window.switchNav 或 /settings 指令切换，用户无法在 UI 上点击
+// 进入「项目管理」和「版本更新」。新增 navTabs 让 4 个一级入口都能点击切换
+const navTabs = [
+  { key: "chat" as const, label: "运行服务", icon: "🚀", title: "AI 对话、任务编排" },
+  { key: "project" as const, label: "项目管理", icon: "📁", title: "创建和管理项目、加载模板" },
+  { key: "version" as const, label: "版本更新", icon: "📦", title: "查看历史版本" },
+  { key: "settings" as const, label: "系统设置", icon: "⚙️", title: "模型、账户、记忆、插件" },
+];
+function setActiveNav(key: "chat" | "project" | "version" | "settings") {
+  activeNav.value = key;
+  if (key === "version") loadVersionHistory();
+  if (key === "project") loadProjects();
+  if (key === "chat" && activeProject.value) {
+    loadProjectConversations();
+  }
+}
+
+// 2026-06-16 修复：任务对话侧边栏开关（默认开）
+const showConvSidebar = ref(true);
+function toggleConvSidebar() {
+  showConvSidebar.value = !showConvSidebar.value;
+}
 const versionHistory = ref<any[]>([]);
 const showTerminal = ref(false);
 const terminalInput = ref("");
@@ -691,6 +721,10 @@ const SLASH_COMMANDS: Record<string, { name: string; desc: string; action: strin
   preview: { name: "/preview", desc: "预览 Web 项目", action: "preview" },
   task: { name: "/task", desc: "任务编排", action: "task" },
   collab: { name: "/collab", desc: "AI 协作模式", action: "collab" },
+  // 2026-06-16 修复：补齐 /project /version /chat 三个一级入口命令
+  project: { name: "/project", desc: "项目管理", action: "project" },
+  version: { name: "/version", desc: "版本更新", action: "version" },
+  chat: { name: "/chat", desc: "返回运行服务", action: "chat" },
   settings: { name: "/settings", desc: "系统设置", action: "settings" },
   terminal: { name: "/terminal", desc: "打开终端", action: "terminal" },
 };
@@ -1294,8 +1328,32 @@ async function loadConversationHistory(sessionId: string) {
       sessionFileChanges.value = messages.value.flatMap((m: any) => m.fileChanges || []);
     }
   } catch (e) {
-    console.warn("loadConversationHistory failed:", e);
+    console.warn("loadConversationHistory failed:", e)
   }
+}
+
+// 2026-06-16 修复：点击任务对话项时切换当前会话
+async function loadConversation(conv: any) {
+  if (!conv || !conv.id) return;
+  sessionId.value = conv.id;
+  await loadConversationHistory(conv.id);
+  showNotice("已加载对话: " + (conv.title || conv.id.slice(0, 8)), "ok");
+}
+
+// 2026-06-16 修复：格式化对话时间（显示相对时间或短日期）
+function formatConvDate(ts: any): string {
+  if (!ts) return "";
+  const d = typeof ts === "number" ? new Date(ts) : new Date(ts);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffDay = Math.floor(diffMs / 86400000);
+  if (diffDay === 0) {
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+  if (diffDay === 1) return "昨天";
+  if (diffDay < 7) return `${diffDay}天前`;
+  return `${d.getMonth() + 1}-${d.getDate()}`;
 }
 
 async function copyConversationToProject(sessionId: string, targetProjectId: string) {
@@ -1781,8 +1839,21 @@ function executeSlashCommand(cmdKey: string) {
     case "collab":
       showPanel.value = true;
       break;
+    // 2026-06-16 修复：让 /project /version /chat 都能切换一级页面
+    case "project":
+      setActiveNav("project");
+      showNotice("已切换到项目管理", "ok");
+      break;
+    case "version":
+      setActiveNav("version");
+      showNotice("已切换到版本更新", "ok");
+      break;
+    case "chat":
+      setActiveNav("chat");
+      showNotice("已切换到运行服务", "ok");
+      break;
     case "settings":
-      activeNav.value = "settings";
+      setActiveNav("settings");
       break;
     case "terminal":
       showTerminal.value = !showTerminal.value;
@@ -2867,6 +2938,48 @@ function waitForApiService(maxRetries = 30, expectedType = "qwen"): Promise<bool
   });
 }
 
+// 2026-06-16: Ollama 可选对接 — 按需检测 + 引导
+async function checkOllamaStatus(): Promise<void> {
+  ollamaDetectBusy.value = true;
+  try {
+    const result = await callBackend("detectOllama");
+    if (result) {
+      ollamaStatus.value = result;
+      // 关键：未安装或未运行时，自动弹出引导
+      if (!result.installed || !result.running) {
+        showOllamaGuide.value = true;
+      }
+    }
+  } catch (e) {
+    console.warn("checkOllamaStatus failed:", e);
+  } finally {
+    ollamaDetectBusy.value = false;
+  }
+}
+
+async function installOllamaOneClick(): Promise<void> {
+  ollamaInstallBusy.value = true;
+  try {
+    const result = await callBackend("installOllama");
+    if (result) {
+      ollamaStatus.value = result;
+      if (result.installed && result.running) {
+        showOllamaGuide.value = false;
+        // 安装成功，自动加载模型列表
+        await loadCloudModels("ollama");
+      }
+    }
+  } catch (e) {
+    console.error("installOllamaOneClick failed:", e);
+  } finally {
+    ollamaInstallBusy.value = false;
+  }
+}
+
+async function openOllamaDownloadPage(): Promise<void> {
+  await callBackend("openOllamaDownloadPage");
+}
+
 async function loadCloudModels(source: "openrouter" | "anthropic" | "ollama") {
   loadingModels.value = true;
   try {
@@ -3738,10 +3851,65 @@ async function loadOfflineModels() {
 
 <template>
   <div class="page" :data-theme="currentTheme">
-    <main v-if="activeNav === 'chat'" class="workbench" :class="{ single: !showPanel }">
+    <!-- 2026-06-16 修复：补齐顶部主导航 -->
+    <nav class="app-nav">
+      <button
+        v-for="tab in navTabs"
+        :key="tab.key"
+        :class="['app-nav-tab', { active: activeNav === tab.key }]"
+        :title="tab.title"
+        @click="setActiveNav(tab.key)"
+      >
+        <span class="app-nav-icon">{{ tab.icon }}</span>
+        <span class="app-nav-label">{{ tab.label }}</span>
+      </button>
+    </nav>
+    <main v-if="activeNav === 'chat'" class="workbench" :class="{ single: !showPanel, 'with-conv': showConvSidebar }">
+      <!-- 2026-06-16 修复：补齐任务对话侧边栏 -->
+      <aside v-if="showConvSidebar" class="conv-sidebar card">
+        <div class="conv-sidebar-header">
+          <div class="conv-sidebar-title-row">
+            <span class="conv-sidebar-title">💬 任务对话</span>
+            <span v-if="projectConversations.length" class="conv-sidebar-count">{{ projectConversations.length }}</span>
+          </div>
+          <button class="btn-blue" @click="createSession" :disabled="isBusy" style="width: 100%; font-size: 11px; padding: 4px 8px;">+ 新建对话</button>
+        </div>
+        <div v-if="activeProject" class="conv-sidebar-project">
+          <span style="color: var(--text-muted);">当前项目：</span>
+          <span class="conv-sidebar-project-name" :title="activeProject.name">{{ activeProject.name }}</span>
+        </div>
+        <div v-else class="conv-sidebar-empty-tip">
+          <span style="color: var(--text-muted); font-size: 11px;">未选择项目，对话仅作临时保存</span>
+        </div>
+        <div class="conv-list">
+          <div
+            v-for="c in projectConversations"
+            :key="c.id"
+            :class="['conv-item', { active: c.id === sessionId }]"
+            @click="loadConversation(c)"
+            :title="c.title || '未命名对话'"
+          >
+            <div class="conv-item-title">
+              <span class="conv-item-title-text">{{ c.title || "未命名对话" }}</span>
+            </div>
+            <div class="conv-item-meta">
+              <span class="conv-item-date">{{ formatConvDate(c.updated_at || c.created_at) }}</span>
+              <span v-if="c.message_count !== undefined" class="conv-item-count">{{ c.message_count }}条</span>
+            </div>
+          </div>
+          <div v-if="!projectConversations.length" class="conv-list-empty">
+            <div style="font-size: 24px; margin-bottom: 4px;">💬</div>
+            <div style="font-size: 11px; color: var(--text-muted);">暂无对话</div>
+            <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">发送第一条消息后自动保存</div>
+          </div>
+        </div>
+      </aside>
       <section class="chat card">
         <div class="toolbar">
-          <div class="session">会话：{{ sessionId || "未创建" }}</div>
+          <div class="session">
+            <button class="btn-icon-sm" :title="showConvSidebar ? '隐藏任务对话' : '显示任务对话'" @click="toggleConvSidebar">{{ showConvSidebar ? '◀' : '▶' }}</button>
+            <span class="session-text">会话：{{ sessionId || "未创建" }}</span>
+          </div>
           <div class="actions">
             <div v-if="searchResults.length > 0" style="display: flex; align-items: center; gap: 4px; margin-right: 8px;">
               <span style="font-size: 11px; color: var(--accent);">{{ searchIndex + 1 }}/{{ searchResults.length }}</span>
@@ -4116,6 +4284,21 @@ async function loadOfflineModels() {
           <div class="sidebar-section-title">🦙 Ollama
             <span class="help-bubble">?<span class="help-bubble-content">本地模型推理，无需联网<br/><br/>1. 安装 Ollama: ollama.com<br/>2. 启动 Ollama 服务<br/>3. 点击「检测」自动发现可用模型<br/><br/>💡 数据完全本地处理，隐私安全</span></span>
           </div>
+          <!-- 2026-06-16: 状态指示条 -->
+          <div v-if="ollamaStatus" :style="{
+            padding: '6px 8px',
+            marginBottom: '6px',
+            borderRadius: '4px',
+            fontSize: '11px',
+            background: ollamaStatus.installed && ollamaStatus.running ? 'rgba(76, 175, 80, 0.12)' : 'rgba(255, 152, 0, 0.12)',
+            border: '1px solid ' + (ollamaStatus.installed && ollamaStatus.running ? '#4CAF50' : '#FF9800'),
+            color: ollamaStatus.installed && ollamaStatus.running ? '#4CAF50' : '#FF9800'
+          }">
+            <span v-if="ollamaStatus.installed && ollamaStatus.running">✓ 已运行 · v{{ ollamaStatus.version || '?' }}</span>
+            <span v-else-if="ollamaStatus.installed && !ollamaStatus.running">⚠ 已安装但未启动</span>
+            <span v-else>○ 未安装 Ollama（可选用）</span>
+            <button class="btn-icon-sm" @click="checkOllamaStatus" :disabled="ollamaDetectBusy" style="float: right; font-size: 9px;" title="重新检测">🔄</button>
+          </div>
           <div class="sidebar-field">
             <label>服务地址</label>
             <div style="display: flex; gap: 4px; align-items: center;">
@@ -4354,6 +4537,9 @@ async function loadOfflineModels() {
                 <div class="shortcut-row"><span>发送消息</span><kbd>Enter</kbd></div>
                 <div class="shortcut-row"><span>换行</span><kbd>Shift + Enter</kbd></div>
                 <div class="shortcut-row"><span>快捷指令</span><kbd>/</kbd></div>
+                <div class="shortcut-row"><span>运行服务</span><kbd>/chat</kbd></div>
+                <div class="shortcut-row"><span>项目管理</span><kbd>/project</kbd></div>
+                <div class="shortcut-row"><span>版本更新</span><kbd>/version</kbd></div>
                 <div class="shortcut-row"><span>打开设置</span><kbd>/settings</kbd></div>
                 <div class="shortcut-row"><span>压缩上下文</span><kbd>/compact</kbd></div>
                 <div class="shortcut-row"><span>导出对话</span><kbd>/export</kbd></div>
@@ -4707,6 +4893,72 @@ async function loadOfflineModels() {
         </div>
       </div>
     </main>
+
+    <!-- 2026-06-16: Ollama 可选对接引导弹窗（未安装或未运行时弹出） -->
+    <div v-if="showOllamaGuide" class="modal-mask" @click.self="showOllamaGuide = false" style="
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center; z-index: 9999;
+    ">
+      <div class="card" style="
+        max-width: 480px; width: 90%; padding: 24px;
+        background: #1a1a1a; border: 1px solid #333; border-radius: 10px;
+        color: #E0E0E0;
+      ">
+        <div style="font-size: 18px; font-weight: bold; margin-bottom: 12px;">
+          🦙 Ollama 本地大模型未就绪
+        </div>
+        <div v-if="ollamaStatus && !ollamaStatus.installed" style="line-height: 1.7; font-size: 13px; margin-bottom: 16px; color: #BBB;">
+          检测到你的电脑<strong style="color: #FF9800;">尚未安装 Ollama</strong>。Ollama 是一个本地大模型运行时，让你的 AI 跑在本地、<b>数据完全私有</b>。<br/><br/>
+          不用担心：<b>Ollama 是可选项</b>。你也可以使用 ☁️ 云端模式 或 🔗 API 模式。
+        </div>
+        <div v-else-if="ollamaStatus && ollamaStatus.installed && !ollamaStatus.running" style="line-height: 1.7; font-size: 13px; margin-bottom: 16px; color: #BBB;">
+          检测到 Ollama <strong style="color: #4CAF50;">已安装</strong>，但服务<strong style="color: #FF9800;">未启动</strong>。<br/><br/>
+          安装路径：<code style="background:#222;padding:1px 6px;border-radius:3px;">{{ ollamaStatus.installPath || '?' }}</code><br/><br/>
+          请双击桌面/开始菜单的 <b>Ollama</b> 图标启动它，然后再点击「重新检测」。
+        </div>
+        <div v-else style="line-height: 1.7; font-size: 13px; margin-bottom: 16px; color: #BBB;">
+          Ollama 状态异常。
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button
+            v-if="ollamaStatus && !ollamaStatus.installed"
+            class="btn-blue"
+            @click="installOllamaOneClick"
+            :disabled="ollamaInstallBusy"
+            style="flex: 1; min-width: 140px; padding: 10px;"
+          >
+            {{ ollamaInstallBusy ? '⏳ 下载并安装中...' : '🚀 一键下载安装（约 200MB）' }}
+          </button>
+          <button
+            v-if="ollamaStatus && ollamaStatus.installed && !ollamaStatus.running"
+            class="btn-blue"
+            @click="checkOllamaStatus"
+            :disabled="ollamaDetectBusy"
+            style="flex: 1; min-width: 140px; padding: 10px;"
+          >
+            {{ ollamaDetectBusy ? '⏳ 检测中...' : '🔄 重新检测' }}
+          </button>
+          <button
+            class="btn-sm"
+            @click="openOllamaDownloadPage"
+            style="flex: 1; min-width: 100px; padding: 10px; background: #333; color: #ccc; border: 1px solid #444; border-radius: 6px;"
+          >
+            🌐 打开官网下载页
+          </button>
+          <button
+            class="btn-sm"
+            @click="showOllamaGuide = false"
+            style="flex: 1; min-width: 100px; padding: 10px; background: transparent; color: #888; border: 1px solid #333; border-radius: 6px;"
+          >
+            暂不安装
+          </button>
+        </div>
+        <div style="margin-top: 12px; font-size: 11px; color: #666; line-height: 1.5;">
+          💡 安装路径参考：<code style="background:#222;padding:1px 4px;border-radius:3px;">C:\Users\&lt;用户&gt;\AppData\Local\Programs\Ollama</code><br/>
+          📦 安装包来源：<a href="javascript:;" @click="openOllamaDownloadPage" style="color: #2196F3;">ollama.com/download</a>（官方原版，安全可信）
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -4882,6 +5134,198 @@ export default { name: "App" };
   background: var(--bg-primary);
 }
 
+/* 2026-06-16 修复：补齐顶部导航栏样式 */
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  background: var(--bg-card, #1f1416);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.app-nav-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #c7afa0);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+  font-family: inherit;
+  white-space: nowrap;
+}
+
+.app-nav-tab:hover {
+  background: var(--bg-input, rgba(255, 255, 255, 0.05));
+  color: var(--text-primary, #f6e8dc);
+}
+
+.app-nav-tab.active {
+  background: var(--accent-bg, rgba(66, 165, 245, 0.15));
+  color: var(--accent, #42A5F5);
+  font-weight: 600;
+}
+
+.app-nav-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.app-nav-label {
+  font-size: 13px;
+}
+
+/* 2026-06-16 修复：任务对话侧边栏样式 */
+.conv-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.conv-sidebar-header {
+  padding: 10px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.conv-sidebar-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.conv-sidebar-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary, #f6e8dc);
+}
+
+.conv-sidebar-count {
+  font-size: 11px;
+  color: var(--text-muted, #c7afa0);
+  background: var(--bg-input, rgba(255, 255, 255, 0.05));
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-family: Consolas, monospace;
+  min-width: 22px;
+  text-align: center;
+}
+
+.conv-sidebar-project {
+  font-size: 11px;
+  padding: 4px 6px;
+  background: var(--bg-input, rgba(66, 165, 245, 0.08));
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.conv-sidebar-project-name {
+  color: var(--accent, #42A5F5);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.conv-sidebar-empty-tip {
+  padding: 4px 6px;
+  text-align: center;
+}
+
+.conv-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+.conv-item {
+  padding: 8px 10px;
+  border-radius: 5px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: transparent;
+  transition: background-color 0.12s;
+  border: 1px solid transparent;
+  min-width: 0;
+}
+
+.conv-item:hover {
+  background: var(--bg-input, rgba(255, 255, 255, 0.05));
+}
+
+.conv-item.active {
+  background: var(--accent-bg, rgba(66, 165, 245, 0.12));
+  border-color: var(--accent, #42A5F5);
+}
+
+.conv-item-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.conv-item-title-text {
+  font-size: 12px;
+  color: var(--text-primary, #f6e8dc);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.conv-item.active .conv-item-title-text {
+  color: var(--accent, #42A5F5);
+  font-weight: 500;
+}
+
+.conv-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--text-muted, #c7afa0);
+}
+
+.conv-item-date {
+  font-family: Consolas, monospace;
+}
+
+.conv-list-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px 12px;
+}
+
 .flowbar {
   border-radius: 6px;
   border: 1px solid var(--border-color);
@@ -4898,12 +5342,20 @@ export default { name: "App" };
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: 240px 1fr 380px;
   gap: 10px;
 }
 
 .workbench.single {
+  grid-template-columns: 240px 1fr;
+}
+
+.workbench.single:not(.with-conv) {
   grid-template-columns: 1fr;
+}
+
+.workbench:not(.with-conv) {
+  grid-template-columns: 1fr 380px;
 }
 
 .card {
@@ -4927,17 +5379,39 @@ export default { name: "App" };
   align-items: center;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
 }
 
 .session {
   color: var(--text-muted);
   font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.session .session-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
+  align-items: center;
+  max-width: 70%;
+  justify-content: flex-end;
+}
+
+.actions > * {
+  flex-shrink: 0;
 }
 
 .messages {

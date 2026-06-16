@@ -177,7 +177,7 @@ doc/                    根级共享文档
 | 产品 | 命令 | 输出位置 |
 |------|------|----------|
 | 1.PC | `cd 1.PC\app && uv\uv.exe run main.py` | 开发模式 |
-| 1.PC EXE | `cd 1.PC\build && python build.py` | `1.PC/dist/云集桌面-v*/` |
+| 1.PC EXE | `cd 1.PC\build && python build_pc.py` | `1.PC/dist/云集智能编程工作站-v*.exe` (单EXE自部署) |
 | 2.WEB | `cd 2.WEB\api && uv run api_main.py` | 开发模式 |
 | 2.WEB EXE | `cd 2.WEB\build && python build.py` | `2.WEB/dist/云集Web-v*/` |
 | 3.dev | `cd 3.dev\api && uv run api_main.py --flagship` | 开发模式 |
@@ -185,15 +185,15 @@ doc/                    根级共享文档
 
 ### 3.2 EXE 输出位置
 
-- 1.PC EXE → `1.PC/dist/云集桌面-v2026.06.10.HHMM/`
+- 1.PC EXE → `1.PC/dist/云集智能编程工作站-v2026.06.10.HHMM.exe` (单EXE自部署)
 - 2.WEB EXE → `2.WEB/dist/云集Web-v2026.06.10.HHMM/`
 - 3.dev EXE → `3.dev/dist/云集旗舰-v2026.06.10.HHMM/`
 - 统一归档到根 `build_artifacts/`（未来）
 
 ### 3.3 打包模式
 
-- **禁止** `--onefile`（PyQt6 / pywebview DLL 加载失败）
-- **必须** `--onedir`（分散输出）
+- **1.PC 使用 `--onefile`**（单 EXE 自部署，首次运行自动展开目录结构，无 `_internal`）
+- **2.WEB / 3.dev 使用 `--onedir`**（分散输出）
 - PyInstaller + Vite 双轨
 
 ---
@@ -224,6 +224,7 @@ doc/                    根级共享文档
 | 2026-06-10 | 删除 Electron / Ink UI / Claude Code 残留 | Trae |
 | 2026-06-10 | 新建 `启动.bat` / `启动-云集桌面.bat` / `启动-云集Web.bat` / `启动-云集旗舰.bat` / `一键环境部署.bat` | Trae |
 | 2026-06-10 | 新建 3 个产品 README + tier.yaml | Trae |
+| 2026-06-13 | 1.PC 打包模式从 `--onedir` 改为 `--onefile` 自部署，新增 `launcher.py` 入口，`build_pc.py` 重写 | Qoder |
 
 ---
 
