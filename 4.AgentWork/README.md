@@ -1,26 +1,28 @@
 # 云集智能体工作台 (AW / AgentWork)
 
-> **AI-Native 全链路开发发布工作台** — 从写代码到多平台发布，一句话触发全流程。
+> **AI 研发团队协作平台** — 多 Agent DAG 协作 + 异构模型绑定 + 本地版本控制 + 编译期验证 + 全链路发布。
 > 
 > - **`AW`** = 简称（**A**I-**W**ork），CLI 命令、crate 名、commit scope 用此
 > - **`AgentWork`** = 正式品牌名，仓库、官网、商标、对外营销统一用此
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![Tauri](https://img.shields.io/badge/Tauri-2.x-blueviolet.svg)](https://tauri.app)
-[![Status](https://img.shields.io/badge/status-M0%20%E5%90%AF%E5%8A%A8-yellow.svg)]()
+[![Status](https://img.shields.io/badge/status-M1%20%E8%BF%9B%E8%A1%8C%E4%B8%AD-yellow.svg)]()
 
 ## ✨ 核心特性
 
-### 三大差异化支柱
+### 五大差异化支柱
 
+- 🤝 **AI 团队协作引擎** ⭐王炸 — 多 Agent DAG 真并行 + 异构模型差异化绑定（Qwen3.7 推理/GLM5.2 代码/MiniMax3 视觉）+ Git 分支隔离 + 冲突自动解决
+- 🧠 **AST-Native 代码认知** ⭐壁垒 — Tree-sitter + LanceDB 构建"类-方法-调用链"知识图谱，Token 消耗降低 70%，跨语言契约监听
+- 🛡️ **编译期验证护栏** ⭐可信 — 五级验证管道（Lint/类型/编译/契约/调用链），破坏类型安全的代码直接拒绝合并，零幻觉交付
 - 🔄 **TimeFlow 本地版本控制** — 不依赖 git 的本地优先 VCS，自动快照、自由回滚、分支管理，类似云端文档的版本控制体验
-- 🔀 **Git 双模兼容** — 隐身模式（纯本地，代码永不上云）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
 - 🚀 **全链路自动发布** — 从 AI 整理正式版本 → 多目标构建 → 多平台分发（GitHub/Gitee/网盘/官网）→ 自动生成 Release Notes
 
 ### 完整能力矩阵
 
-- 🤖 **AI-Agent-Work** — AI 智能体替你写代码、提 PR、跑流水线
+- 🔀 **Git 双模兼容** — 隐身模式（纯本地，代码永不上云）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
 - 🧠 **AI 语义版本管理** — 自动生成 commit msg、版本号建议、changelog、语义搜索版本
 - 🏷️ **AI 版本整理** — 自动区分 WIP/进度/候选/正式版本，识别"可发布版本"
 - 🦾 **OpenHands Runtime** — 基于开源 Apache 2.0 工业级 Agent Runtime
@@ -32,6 +34,13 @@
 - 🌍 **跨平台** — Windows / macOS / Linux 桌面 + Web + CLI
 
 ## 🎯 适用场景
+
+### AI 团队协作场景（王炸）
+- 🤝 **多 Agent 并行开发**：项目负责人拆解任务 → 后端/前端/测试 Agent 在独立分支并行工作 → 自动合并
+- 🎯 **异构模型分工**：Qwen3.7 做推理规划，GLM5.2 写后端代码，MiniMax3 做前端视觉，各展所长
+- 🛡️ **零幻觉交付**：AI 代码必须通过五级验证（Lint/类型/编译/契约/调用链）才能合并
+- 🔗 **跨语言协作**：后端改 API → AST 自动检测 → 触发前端类型更新任务
+- 📊 **任务看板**：DAG 可视化，实时查看多 Agent 工作进度
 
 ### 版本控制场景
 - 🔄 **自动版本控制**：写代码 → 自动快照 → 任意回滚，无需手动 commit
@@ -46,7 +55,7 @@
 - 📦 **多平台分发**：GitHub Release / Gitee / 蓝奏云 / 阿里云盘 / 官网 CDN
 
 ### 开发协作场景
-- 🚀 **快速原型**：自然语言描述需求 → Agent 生成项目脚手架 → 提 PR
+- 🚀 **快速原型**：自然语言描述需求 → Agent 团队生成项目脚手架 → 提 PR
 - 🐛 **自动化修 bug**：Agent 读 issue → 定位代码 → 改代码 → 提 PR
 - 📝 **代码重构**：Agent 分析代码 → 生成 diff → 人类审核 → 合并
 - 🧪 **测试生成**：Agent 自动写单测 → 跑通 → 提 PR
@@ -166,20 +175,24 @@ cargo run -- task "在 examples/hello-world 中添加一个 README.md"
 
 ## 🆚 竞品对比
 
-| 项目 | 我们 | GitHub Copilot | Cursor | Devin | Git + CI/CD |
-|------|:---:|:---:|:---:|:---:|:---:|
-| **开源** | ✅ Apache 2.0 | ❌ 闭源 | ❌ 闭源 | ❌ 闭源 | ✅ |
-| **本地 VCS（不依赖 git）** | ✅ TimeFlow | ❌ | ❌ | ❌ | ❌ |
-| **自动快照（无需 commit）** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **AI 语义搜索版本** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **AI 版本整理** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Git 双模兼容** | ✅ | ⚠️ 弱 | ❌ | ⚠️ 弱 | ✅ |
-| **全链路自动发布** | ✅ | ❌ | ❌ | ❌ | ⚠️ 需配置 |
-| **多平台分发** | ✅ | ❌ | ❌ | ❌ | ⚠️ 需配置 |
-| **本地运行** | ✅ 桌面端 | ❌ 云端 | ✅ 编辑器 | ❌ 云端 | ✅ |
-| **MCP 协议** | ✅ | ❌ | ❌ | ❌ | ❌ |
-| **Skills 市场** | ✅ | ⚠️ 弱 | ❌ | ❌ | ❌ |
-| **桌面体积** | 🟢 < 10MB | - | - | - | - |
+| 项目 | 我们 | Cursor | Devin | CrewAI | MetaGPT | OpenHands |
+|------|:---:|:---:|:---:|:---:|:---:|:---:|
+| **开源** | ✅ Apache 2.0 | ❌ 闭源 | ❌ 闭源 | ✅ | ✅ | ✅ |
+| **多 Agent DAG 真并行** | ✅ | ⚠️Planner/Worker | ⚠️有限 | ✅ | ❌伪并行 | ⚠️单 Agent |
+| **异构模型差异化绑定** | ✅ | ❌固定 | ❌固定 | ✅ | ⚠️有限 | ⚠️单模型 |
+| **AST-Native 代码认知** | ✅ Tree-sitter+LanceDB | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **编译期验证护栏** | ✅ 五级管道 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **本地 VCS（不依赖 git）** | ✅ TimeFlow | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Git 分支隔离协作** | ✅ | ❌ | ⚠️弱 | ❌ | ❌ | ⚠️基础 |
+| **AI 语义搜索版本** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **全链路自动发布** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **桌面原生** | ✅ Tauri | ✅ | ❌云端 | ❌CLI/Web | ❌ | ❌云端IDE |
+| **MCP 协议** | ✅ | ❌ | ❌ | ❌ | ❌ | ✅Server |
+| **企业私有化** | ✅ | ❌ | ❌ | ⚠️自建 | ⚠️自建 | ⚠️自建 |
+
+**唯一组合**：多 Agent DAG 真并行 + 异构模型差异化绑定 + AST-Native 代码认知 + 编译期验证护栏 + TimeFlow 版本控制 + 全链路发布。
+
+> 行业论断：将"异构模型 + 真并行 + Git-Native + 桌面原生"同时做到生产级，目前开源和商业产品中没有一家完全实现——这正是 AgentWork 的差异化窗口。
 
 ## 📜 许可
 

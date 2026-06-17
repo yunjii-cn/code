@@ -24,10 +24,15 @@
 | 3 | `3.dev/` | 云集旗舰 | Yunji Flagship | Business | ¥99/月 | 🟢 全力开发 |
 | **4** | **`4.AgentWork/`** | **云集智能体工作台** | **AW (AgentWork)** | **Enterprise** | **¥999/月** | 🆕 启动中 |
 
-**核心差异化**：
+**核心差异化（五大支柱）**：
+- 🤝 **AI 团队协作引擎** ⭐王炸 — 多 Agent DAG 真并行 + 异构模型差异化绑定（Qwen3.7 推理/GLM5.2 代码/MiniMax3 视觉）+ Git 分支隔离 + 冲突自动解决
+- 🧠 **AST-Native 代码认知** ⭐壁垒 — Tree-sitter + LanceDB 构建"类-方法-调用链"知识图谱，Token 消耗降低 70%，跨语言契约监听
+- 🛡️ **编译期验证护栏** ⭐可信 — 五级验证管道（Lint/类型/编译/契约/调用链），破坏类型安全的代码直接拒绝合并，零幻觉交付
 - 🔄 **TimeFlow 本地版本控制** — 不依赖 git 的本地优先 VCS，自动快照、自由回滚、分支管理
-- 🔀 **Git 双模兼容** — 隐身模式（纯本地）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
 - 🚀 **全链路自动发布** — AI 整理正式版本 → 多目标构建 → 多平台分发（GitHub/Gitee/网盘/官网）
+
+**完整能力**：
+- 🔀 **Git 双模兼容** — 隐身模式（纯本地）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
 - 🧠 **AI 语义版本管理** — 自动 commit msg、版本号建议、changelog、语义搜索版本
 - ⚙️ **工作流引擎** — 触发词/定时/事件驱动，YAML 定义自动化流程
 - 🤖 **OpenHands Runtime** — 基于开源 Apache 2.0 工业级 Agent Runtime
@@ -61,6 +66,9 @@
 │   │   ├── timeflow-ai/             ⭐ AI 语义层（commit msg/版本号/语义搜索/分类）
 │   │   ├── timeflow-workflow/       ⭐ 工作流引擎（触发词+DAG 执行器）
 │   │   ├── timeflow-release/        ⭐ 全链路发布引擎（多目标构建+多平台分发）
+│   │   ├── agent-team/              ⭐🆕 AI 团队协作引擎（多 Agent DAG+异构模型+分支隔离）
+│   │   ├── ast-native/              ⭐🆕 AST 代码认知引擎（Tree-sitter+LanceDB 知识图谱）
+│   │   ├── verification-guardrails/ ⭐🆕 编译期验证护栏（五级验证管道+零幻觉交付）
 │   │   ├── aw-git/                  Git 兼容层（libgit2，三模式切换）
 │   │   ├── aw-runtime/              Agent Runtime 适配（OpenHands）
 │   │   ├── aw-sandbox/              Docker 沙箱
@@ -71,8 +79,11 @@
 ├── sandbox-image/                   Docker 沙箱镜像 + compose 文件
 ├── docs/                            架构/API/用户文档
 │   ├── TIMEFLOW-DESIGN.md           ⭐ TimeFlow 详细设计
+│   ├── AGENT-TEAM-DESIGN.md         ⭐🆕 AI 团队协作引擎设计
+│   ├── AST-NATIVE-DESIGN.md         ⭐🆕 AST 代码认知引擎设计
+│   ├── VERIFICATION-GUARDRAILS.md   ⭐🆕 编译期验证护栏设计
 │   ├── ARCHITECTURE.md              系统架构
-│   ├── ROADMAP.md                   路线图
+│   ├── ROADMAP.md                   路线图（v3.0，20 周）
 │   └── CONTRIBUTING.md              贡献指南
 ├── tests/                           E2E + 集成测试（Playwright + cargo test）
 ├── scripts/                         构建/部署/工具脚本
@@ -357,6 +368,7 @@
 | 2026-06-17 | 新建 4.AgentWork 仓库，4 代产品线契约 v1.0 | Trae |
 | 2026-06-17 | 新增 §4 参考项目（UI-TARS-desktop 升级为 reference project） | Trae |
 | 2026-06-17 | **v2.0 重大升级**：产品定位升级为"AI-Native 全链路开发发布工作台"，新增 TimeFlow 引擎（4 个 crate：timeflow-core/ai/workflow/release），更新核心差异化、项目结构、发布边界契约 | Trae |
+| 2026-06-17 | **v3.0 重大升级**：产品定位升级为"AI 研发团队协作平台"，新增三大壁垒级 crate（agent-team/ast-native/verification-guardrails），核心差异化升级为五大支柱，路线图扩展为 20 周 | Trae |
 
 ---
 

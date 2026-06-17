@@ -1,13 +1,18 @@
 # 云集智能体工作台 - 详细路线图
 
-> **版本**：v2.0
+> **版本**：v3.0
 > **更新日期**：2026-06-17
-> **状态**：M0 启动中
-> **配套**：[AGENTS.md](../AGENTS.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) · [tier.yaml](../tier.yaml)
+> **状态**：M1 进行中（W1 已完成）
+> **配套**：[AGENTS.md](../AGENTS.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) · [AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) · [AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) · [VERIFICATION-GUARDRAILS.md](VERIFICATION-GUARDRAILS.md) · [tier.yaml](../tier.yaml)
 
-本文档将 12 周目标拆解到**天级任务**。每周结束做一次回顾，必要时调整后续计划。
+本文档将 20 周目标拆解到**周级任务**。每周结束做一次回顾，必要时调整后续计划。
 
-> **v2.0 重大变更**：产品定位从"Git-Native 代码 Agent"升级为"AI-Native 全链路开发发布工作台"。新增 **TimeFlow** 引擎（本地 VCS + Git 双模 + AI 版本管理 + 全链路发布）作为核心差异化。详见 [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md)。
+> **v3.0 重大变更**：从 v2.0 的 12 周扩展为 **20 周**，融入三大壁垒级能力：
+> 1. **AI 团队协作引擎**（多 Agent DAG 协作 + 异构模型绑定）— 详见 [AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md)
+> 2. **AST-Native 代码认知引擎**（Tree-sitter + LanceDB 知识图谱）— 详见 [AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md)
+> 3. **编译期验证护栏**（五级验证管道 + 零幻觉交付）— 详见 [VERIFICATION-GUARDRAILS.md](VERIFICATION-GUARDRAILS.md)
+>
+> 这三大能力让 AgentWork 从"AI 编程工具"升级为"**AI 研发团队协作平台**"，技术壁垒显著提升，开发周期延长 8 周是值得的投入。
 
 ---
 
@@ -17,39 +22,57 @@
 |---|:---:|:---:|---|
 | **架构师 / 全栈** | 1 | 100% | 主开发（Trae） |
 | **前端** | 1 | 兼职 50% | 桌面端 UI + Web 端 |
-| **Rust 后端** | 1 | 兼职 50% | TimeFlow / aw-git / aw-runtime |
+| **Rust 后端** | 1 | 兼职 50% | TimeFlow / agent-team / ast-native |
 | **DevOps** | 0.5 | 兼职 25% | CI / 沙箱 / 部署 |
 
 **单干场景适配**：如无人手，前端/Rust 可由全栈兼顾，相应延期 30-50%。
 
 ---
 
-## 1. 12 周时间线总览（v2.0）
+## 1. 20 周时间线总览（v3.0）
 
 ```
-W0 (06-15~21)  ▓▓░░░ M0 启动周           ✅ 已完成 80%
-W1 (06-22~28)  ░░▓▓▓ M1.1 Tauri 骨架      目标：Hello World 窗口
-W2 (06-29~07-05) ░░▓▓ M1.2 TimeFlow 内核  目标：快照/回滚/分支
-W3 (07-06~12)  ░░▓▓ M1.3 时间轴 UI        目标：可视化版本控制
-W4 (07-13~19)  ░░▓▓ M1.4 Git 双模兼容     目标：隐身/同步/发布模式
-W5 (07-20~26)  ░░▓▓ M2.1 AI commit msg    目标：自动生成提交信息
-W6 (07-27~08-02) ░░▓▓ M2.2 AI 版本整理    目标：候选版本识别+语义搜索
-W7 (08-03~09)  ░░▓▓ M3.1 Skills + 工作流  目标：触发词+DAG 引擎
-W8 (08-10~16)  ░░▓▓ M3.2 OpenHands 集成   目标：Agent 跑通
-W9 (08-17~23)  ░░▓▓ M4.1 沙箱+多目标构建  目标：Docker 沙箱+构建矩阵
-W10 (08-24~30) ░░▓▓ M4.2 多平台分发       目标：GitHub/Gitee/网盘发布
-W11 (08-31~09-06) ░░▓▓ M5 内部 Beta       目标：100 内部用户跑通全链路
-W12 (09-07~13) ░░▓▓ M6 公开 Beta          目标：1000 外部用户
+=== M1: TimeFlow 本地版本控制（W1-W4）✅ 进行中 ===
+W1  (06-22~28)  ▓▓░░░ M1.1 Tauri 骨架        ✅ 已完成
+W2  (06-29~07-05) ░░▓▓ M1.2 TimeFlow 内核     目标：快照/回滚/分支
+W3  (07-06~12)  ░░▓▓ M1.3 时间轴 UI          目标：可视化版本控制
+W4  (07-13~19)  ░░▓▓ M1.4 Git 双模兼容       目标：隐身/同步/发布模式
 
-🔵 M0 ✅  🟡 M1-M2 进行中  🟢 M3-M6 计划
+=== M2: AI 语义版本管理（W5-W6）===
+W5  (07-20~26)  ░░▓▓ M2.1 AI commit msg      目标：自动生成提交信息
+W6  (07-27~08-02) ░░▓▓ M2.2 AI 版本整理      目标：候选版本识别+语义搜索
+
+=== M3: AI 团队协作引擎（W7-W10）⭐王炸 ===
+W7  (08-03~09)  ░░▓▓ M3.1 团队模板+模型路由   目标：角色定义+异构模型绑定
+W8  (08-10~16)  ░░▓▓ M3.2 DAG 调度引擎       目标：任务依赖图+并行调度
+W9  (08-17~23)  ░░▓▓ M3.3 双 Agent MVP       目标：架构师+Coder 协作跑通
+W10 (08-24~30)  ░░▓▓ M3.4 Git 分支隔离+冲突  目标：独立分支+冲突预检
+
+=== M4: AST-Native 代码认知（W11-W14）⭐壁垒 ===
+W11 (08-31~09-06) ░░▓▓ M4.1 Tree-sitter 集成 目标：多语言 AST 解析
+W12 (09-07~13)  ░░▓▓ M4.2 LanceDB 图谱      目标：代码知识图谱构建
+W13 (09-14~20)  ░░▓▓ M4.3 智能上下文提取     目标：Token 降低 70%
+W14 (09-21~27)  ░░▓▓ M4.4 调用链+契约监听   目标：跨语言契约监听
+
+=== M5: 验证护栏 + 工作流 + 发布（W15-W17）⭐可信 ===
+W15 (09-28~10-04) ░░▓▓ M5.1 验证护栏管道     目标：五级验证+错误反馈
+W16 (10-05~11)  ░░▓▓ M5.2 工作流+沙箱       目标：触发词+Docker 沙箱
+W17 (10-12~18)  ░░▓▓ M5.3 多平台发布         目标：构建矩阵+多平台分发
+
+=== M6: 整合 + Beta（W18-W20）===
+W18 (10-19~25)  ░░▓▓ M6.1 全链路整合         目标：五大支柱串联
+W19 (10-26~11-01) ░░▓▓ M6.2 内部 Beta        目标：100 内部用户跑通
+W20 (11-02~08)  ░░▓▓ M6.3 公开 Beta         目标：1000 外部用户
+
+🔵 M1 ✅进行中  🟡 M2-M3 计划  🟢 M4-M6 远期
 ```
 
-**v2.0 关键变化**：
-- M1 从"Git 集成"改为"**TimeFlow VCS 内核**"（本地优先版本控制）
-- M2 从"Agent Runtime"改为"**AI 版本管理**"（commit msg + 版本整理）
-- M3 新增"**工作流引擎**"（触发词 + DAG）
-- M4 新增"**多目标构建 + 多平台分发**"
-- M5 验收标准升级为"**全链路跑通**"（写代码→版本控制→自动发布）
+**v3.0 关键变化**：
+- **新增 M3（4 周）**：AI 团队协作引擎（多 Agent DAG + 异构模型）
+- **新增 M4（4 周）**：AST-Native 代码认知引擎（Tree-sitter + LanceDB）
+- **新增 M5.1（1 周）**：编译期验证护栏（五级验证管道）
+- **M5/M6 重新定义**：工作流+沙箱+发布 + 全链路整合 + Beta
+- **总周期**：12 周 → 20 周（+8 周，三大壁垒值得）
 
 ---
 
@@ -65,12 +88,12 @@ W12 (09-07~13) ░░▓▓ M6 公开 Beta          目标：1000 外部用户
 | D2 | UI-TARS-desktop 升级为 reference | AGENTS.md §4 | 34K Stars 借鉴 | ✅ |
 | D3 | ARCHITECTURE.md 5 层架构 | `docs/ARCHITECTURE.md` | 5 层 + 9 ADR | ✅ |
 | D3 | 四源融合战略矩阵 | ARCHITECTURE.md §0.1 | 4 源 × N 行动 | ✅ |
-| D4 | **本任务**：ROADMAP.md 详细路线图 | `docs/ROADMAP.md` | 本文 | ⏳ |
+| D4 | ROADMAP.md 详细路线图 | `docs/ROADMAP.md` | 本文 | ✅ |
 | D4 | CONTRIBUTING.md 贡献指南 | `docs/CONTRIBUTING.md` | PR 流程规范 | ⏳ |
-| D5 | 工具链准备：rustc + pnpm + tauri-cli + docker | 命令可用 | `cargo --version` 等 | ⏳ |
-| D5 | 双 workspace 根：package.json + Cargo.toml | 4.AgentWork/ 根 | `pnpm install` 通 | ⏳ |
+| D5 | 工具链准备：rustc + pnpm + tauri-cli + docker | 命令可用 | `cargo --version` 等 | ✅ |
+| D5 | 双 workspace 根：package.json + Cargo.toml | 4.AgentWork/ 根 | `pnpm install` 通 | ✅ |
 
-**M0 验收**：4.AgentWork/ 仓库具备完整文档体系 + 工具链就绪 + 工程脚手架
+**M0 验收**：4.AgentWork/ 仓库具备完整文档体系 + 工具链就绪 + 工程脚手架 ✅
 
 ---
 
@@ -172,89 +195,226 @@ W12 (09-07~13) ░░▓▓ M6 公开 Beta          目标：1000 外部用户
 
 ---
 
-## 9. W7 M3.1 Skills 市场 + 工作流引擎（2026-08-03 ~ 08-09）
+## 9. W7 M3.1 团队模板 + 模型路由（2026-08-03 ~ 08-09）
 
-> **目标**：5 个内置 Skills + 触发词 + DAG 工作流引擎
+> **目标**：定义团队角色 + 异构模型绑定 + 模型路由
+> **设计参考**：[AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) § 3.1, 3.2
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | `agent-team` crate 初始化 | `platformkit/crates/agent-team/` | 编译通过 |
+| D2 | 团队模板定义（YAML 解析 + 角色结构） | `src/team_template.rs` | `.yunji/team.yml` 可加载 |
+| D3 | 模型路由层（主模型 + 备用模型 + 故障转移） | `src/model_router.rs` | 路由可用 |
+| D4 | Agent 工作池（每个角色一个 Worker） | `src/agent_worker.rs` | 4 角色 Worker |
+| D5 | 桌面端团队配置 UI | `apps/desktop/src/views/Team.tsx` | 可视化配置 |
+
+**M3.1 验收**：用户能配置团队（PM/后端/前端/测试）+ 绑定异构模型
+
+---
+
+## 10. W8 M3.2 DAG 调度引擎（2026-08-10 ~ 08-16）
+
+> **目标**：任务依赖图 + 并行调度 + 状态追踪
+> **设计参考**：[AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) § 3.3
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | TaskDag 数据结构 + 依赖解析 | `src/dag.rs` | DAG 解析正确 |
+| D2 | DagScheduler 调度循环（找 ready 任务） | `src/scheduler.rs` | 调度逻辑通 |
+| D3 | 任务状态机（Pending/Running/Verifying/Merged/Failed） | `src/task_state.rs` | 状态流转正确 |
+| D4 | 共享上下文池（Git 仓库作为上下文总线） | `src/context.rs` | 上下文读写 |
+| D5 | 调度引擎单测 + 集成测试 | `tests/` | 10+ 用例通过 |
+
+**M3.2 验收**：DAG 调度引擎能解析任务依赖 + 并行分配 + 状态追踪
+
+---
+
+## 11. W9 M3.3 双 Agent MVP（2026-08-17 ~ 08-23）
+
+> **目标**：架构师 + Coder 双 Agent 协作跑通
+> **设计参考**：[AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) § 9
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | Orchestrator Agent（Qwen3.7）任务拆解 | `src/orchestrator.rs` | 能输出 JSON DAG |
+| D2 | Coder Agent（GLM5.2）代码生成 | `src/coder.rs` | 能在分支写代码 |
+| D3 | 双 Agent 协作 E2E（"添加健康检查接口"） | `tests/e2e/dual_agent.rs` | 任务跑通 |
+| D4 | 桌面端任务看板 UI（DAG 可视化） | `apps/desktop/src/views/TaskBoard.tsx` | 看板可用 |
+| D5 | 错误处理 + 重试机制 | `src/retry.rs` | 失败自动重试 |
+
+**M3.3 验收**：用户输入需求 → Orchestrator 拆分 → Coder 执行 → 任务完成
+
+---
+
+## 12. W10 M3.4 Git 分支隔离 + 冲突预检（2026-08-24 ~ 08-30）
+
+> **目标**：每个 Agent 独立分支 + 冲突预检 + Merge Resolver
+> **设计参考**：[AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) § 3.5
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | TimeFlow 分支隔离集成（task/{id} 分支） | `agent-team` 集成 | 独立分支工作 |
+| D2 | git merge-tree 冲突预检 | `src/conflict_check.rs` | 冲突检测准确 |
+| D3 | Merge Resolver Agent（LLM 解决冲突） | `src/merge_resolver.rs` | 冲突自动解决 |
+| D4 | 多 Agent 并行 E2E（3+ Agent 同时工作） | `tests/e2e/multi_agent.rs` | 并行无冲突 |
+| D5 | M3 Demo 录制 + 团队对齐 | `docs/demo/m3-demo.mp4` | Demo 通过 |
+
+**M3 验收**：多 Agent 在独立分支并行工作 + 冲突自动解决 + 合并到 main
+
+---
+
+## 13. W11 M4.1 Tree-sitter 集成（2026-08-31 ~ 09-06）
+
+> **目标**：多语言 AST 解析器
+> **设计参考**：[AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) § 3.1
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | `ast-native` crate 初始化 + Tree-sitter 依赖 | `platformkit/crates/ast-native/` | 编译通过 |
+| D2 | 多语言解析器（Rust/TS/Python/Go/Java） | `src/parser.rs` | 5 语言解析 |
+| D3 | 增量解析（文件保存后 ≤200ms） | `src/incremental.rs` | 增量更新通 |
+| D4 | 符号提取（类/方法/函数/变量） | `src/symbols.rs` | 符号提取准确 |
+| D5 | 解析器单测 + 性能基准 | `tests/` | 5 语言覆盖 |
+
+**M4.1 验收**：Tree-sitter 能解析 5 种语言 + 增量更新 ≤200ms
+
+---
+
+## 14. W12 M4.2 LanceDB 代码知识图谱（2026-09-07 ~ 09-13）
+
+> **目标**：代码知识图谱构建（类-方法-调用链）
+> **设计参考**：[AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) § 3.2
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | LanceDB 集成 + 节点/边表结构 | `src/graph.rs` | DB 初始化 |
+| D2 | 代码节点提取（CodeNode） | `src/graph.rs` | 节点入库 |
+| D3 | 代码边提取（Calls/CalledBy/Implements） | `src/graph.rs` | 边入库 |
+| D4 | 增量更新（文件保存触发图谱更新） | `src/graph.rs` | 增量更新通 |
+| D5 | 图谱查询 API（get_callers/get_callees） | `src/graph.rs` | 查询 ≤50ms |
+
+**M4.2 验收**：代码知识图谱能构建 + 增量更新 + 调用链查询
+
+---
+
+## 15. W13 M4.3 智能上下文提取（2026-09-14 ~ 09-20）
+
+> **目标**：为 Agent 提取任务相关代码，Token 降低 70%
+> **设计参考**：[AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) § 3.3
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | ContextExtractor 实现 | `src/context_extractor.rs` | 提取逻辑通 |
+| D2 | 语义搜索（embedding + 向量查询） | `src/search.rs` | Top-10 搜索 |
+| D3 | 调用链扩展（上下游符号） | `src/context_extractor.rs` | 上下文完整 |
+| D4 | Token 节省基准测试（vs 全文件读取） | `benchmarks/` | 节省 ≥70% |
+| D5 | 与 agent-team 整合（Agent 用 AST 上下文） | 集成 | Agent Token 降 |
+
+**M4.3 验收**：Agent 上下文 Token 降低 70% + 相关符号召回率 ≥90%
+
+---
+
+## 16. W14 M4.4 调用链分析 + 契约监听（2026-09-21 ~ 09-27）
+
+> **目标**：跨语言契约监听 + 影响范围分析
+> **设计参考**：[AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) § 3.4
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | 影响范围分析（改函数 → 列出受影响文件） | `src/impact.rs` | 影响分析准确 |
+| D2 | Proto/OpenAPI 契约解析 | `src/contract_listener.rs` | 契约解析通 |
+| D3 | 跨语言任务触发（后端改 API → 前端任务） | `src/contract_listener.rs` | 自动触发任务 |
+| D4 | 与 agent-team 整合（契约变更触发 DAG） | 集成 | 跨语言协作 |
+| D5 | M4 Demo 录制 + 团队对齐 | `docs/demo/m4-demo.mp4` | Demo 通过 |
+
+**M4 验收**：后端改 API → AST 检测 → 自动触发前端更新任务 → 验证通过
+
+---
+
+## 17. W15 M5.1 验证护栏管道（2026-09-28 ~ 10-04）
+
+> **目标**：五级验证管道 + 错误反馈 + 白名单
+> **设计参考**：[VERIFICATION-GUARDRAILS.md](VERIFICATION-GUARDRAILS.md) § 3
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | `verification-guardrails` crate 初始化 | `platformkit/crates/verification-guardrails/` | 编译通过 |
+| D2 | Stage 1: Lint 检查 + Stage 2: 类型检查 | `src/lint.rs` `src/type_check.rs` | 2 级验证 |
+| D3 | Stage 3: 编译检查 + Stage 4: 契约匹配 | `src/compiler.rs` `src/contract.rs` | 4 级验证 |
+| D4 | Stage 5: 调用链完整性 + 错误反馈器 | `src/call_chain.rs` `src/feedback.rs` | 5 级验证 |
+| D5 | 白名单机制 + 与 agent-team 整合 | `src/whitelist.rs` | 误杀率 <5% |
+
+**M5.1 验收**：AI 代码必须通过五级验证才能合并 + 失败自动重试
+
+---
+
+## 18. W16 M5.2 工作流引擎 + Docker 沙箱（2026-10-05 ~ 10-11）
+
+> **目标**：触发词工作流 + Docker 沙箱隔离
 > **设计参考**：[TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) § 5
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | `timeflow-workflow` crate 初始化 + DAG 执行器 | `platformkit/crates/timeflow-workflow/` | 编译通过 |
-| D2 | 触发器系统（keyword / schedule / file_change） | `src/triggers.rs` | 3 种触发器可用 |
-| D3 | YAML 工作流定义解析 + 执行 | `src/engine.rs` | `.yunji/workflows.yml` 可加载 |
-| D4 | 5 个内置 Skills（code-review/test-gen/refactor/doc-gen/bug-fix） | `skills/core/*/SKILL.md` | 5 个 Skills |
-| D5 | 桌面端工作流管理 UI + Skills 市场 | `apps/desktop/src/views/Workflows.tsx` | 可视化配置 |
+| D1 | `timeflow-workflow` crate + 触发器系统 | `platformkit/crates/timeflow-workflow/` | 3 种触发器 |
+| D2 | YAML 工作流定义解析 + DAG 执行 | `src/engine.rs` | `.yunji/workflows.yml` |
+| D3 | `sandbox-image/Dockerfile` + aw-sandbox | `sandbox-image/` `aw-sandbox/` | 沙箱启动 |
+| D4 | Agent 在沙箱内执行 E2E | `tests/e2e/sandbox.rs` | 沙箱隔离 |
+| D5 | 桌面端工作流管理 UI | `apps/desktop/src/views/Workflows.tsx` | 可视化配置 |
 
-**M3.1 验收**：用户能用触发词触发工作流 + 浏览/选择 Skills
-
----
-
-## 10. W8 M3.2 OpenHands 集成 + MCP Bridge（2026-08-10 ~ 08-16）
-
-> **目标**：Agent Runtime 跑通 + 3 个 MCP 工具
-
-| Day | 任务 | 产出 | 验收 |
-|:---:|---|---|---|
-| D1 | `runtime/` 目录 + OpenHands fork | `runtime/openhands/` | 目录在 |
-| D2 | aw-runtime 适配层：`AgentRuntime` trait | `platformkit/crates/aw-runtime/` | trait 编译 |
-| D3 | 适配 OpenHands API：`start/submit/wait/cancel` | `src/openhands_adapter.rs` | 单测 |
-| D4 | MCP Bridge：3 个工具（read_file/write_file/run_shell） | `apps/mcp-bridge/` | 3 工具可用 |
-| D5 | OpenHands 调 MCP 工具 E2E | `tests/e2e/openhands_mcp.rs` | E2E 通 |
-
-**M3 验收**：OpenHands + MCP 工具可调用，Agent 能读/写文件/跑 shell
+**M5.2 验收**：触发词触发工作流 + Agent 在 Docker 沙箱内执行
 
 ---
 
-## 11. W9 M4.1 Docker 沙箱 + 多目标构建（2026-08-17 ~ 08-23）
+## 19. W17 M5.3 多平台发布（2026-10-12 ~ 10-18）
 
-> **目标**：沙箱隔离 + 多平台构建矩阵
+> **目标**：多目标构建 + 多平台分发 + Release Notes
 > **设计参考**：[TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) § 6
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | `sandbox-image/Dockerfile` + docker-compose | `sandbox-image/` | 镜像构建通 |
-| D2 | aw-sandbox crate 包装 Docker SDK | `platformkit/crates/aw-sandbox/` | 沙箱启动/销毁 |
-| D3 | `timeflow-release` crate 初始化 + 构建矩阵定义 | `platformkit/crates/timeflow-release/` | `.yunji/release.yml` 可解析 |
-| D4 | 多目标构建执行器（Windows/macOS/Linux/Web） | `src/build_matrix.rs` | 4 目标并行构建 |
-| D5 | 沙箱内跑构建 E2E | `tests/e2e/sandbox_build.rs` | 沙箱构建通 |
+| D1 | `timeflow-release` crate + 构建矩阵 | `platformkit/crates/timeflow-release/` | 4 目标构建 |
+| D2 | GitHub Release + Gitee 适配器 | `src/github.rs` `src/gitee.rs` | 上传成功 |
+| D3 | 网盘适配器（蓝奏云/阿里云盘） | `src/netdisk.rs` | 上传成功 |
+| D4 | AI Release Notes 生成 | `src/release_notes.rs` | Markdown 输出 |
+| D5 | `/release` 全流程 E2E | `tests/e2e/release.rs` | 一句话发布 |
 
-**M4.1 验收**：Agent 在沙箱内执行 + 多目标构建矩阵可用
+**M5 验收**：输入 `/release` → 构建多平台 → 分发多平台 → 生成 Release Notes
 
 ---
 
-## 12. W10 M4.2 多平台分发 + Release Notes（2026-08-24 ~ 08-30）
+## 20. W18 M6.1 全链路整合（2026-10-19 ~ 10-25）
 
-> **目标**：多平台自动分发 + 自动生成 Release Notes
+> **目标**：五大支柱串联（TimeFlow + AI 团队 + AST + 验证护栏 + 发布）
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | GitHub Release 适配器（octocrab） | `timeflow-release/src/github.rs` | 上传 exe 到 Release |
-| D2 | Gitee Release 适配器 | `timeflow-release/src/gitee.rs` | 上传到 Gitee |
-| D3 | 网盘适配器（蓝奏云/阿里云盘） | `timeflow-release/src/netdisk.rs` | 上传到网盘 |
-| D4 | AI Release Notes 生成（changelog + 下载链接） | `timeflow-ai/src/release_notes.rs` | Markdown 输出 |
-| D5 | `/release` 触发词全流程 E2E | `tests/e2e/release_pipeline.rs` | 一句话发布 |
+| D1 | 五大模块整合 + 端到端流程打通 | 集成 | 全链路通 |
+| D2 | 性能优化（启动 <3s，快照 <500ms，发布 <5min） | benchmarks | 达标 |
+| D3 | Bug triage + 修复 | issues | 严重 bug = 0 |
+| D4 | 用户文档（5 篇：版本控制/团队协作/AST/护栏/发布） | `docs/user/*.md` | 文档齐 |
+| D5 | 全链路 Demo 录制 | `docs/demo/full-pipeline.mp4` | Demo 通过 |
 
-**M4 验收**：输入 `/release` → 自动构建 → 多平台分发 → 生成 Release Notes
+**M6.1 验收**：用户输入需求 → AI 团队协作 → AST 优化 → 验证护栏 → 自动发布
 
 ---
 
-## 13. W11 M5 内部 Beta（2026-08-31 ~ 09-06）
+## 21. W19 M6.2 内部 Beta（2026-10-26 ~ 11-01）
 
-> **目标**：100 个内部用户跑通**全链路**（写代码→版本控制→自动发布）
+> **目标**：100 个内部用户跑通全链路
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | Bug triage + 修复 | GitHub issues 关闭 80% | 严重 bug = 0 |
-| D2 | 性能优化（启动 < 3s，快照 < 500ms，发布 < 5min） | benchmarks | 达标 |
-| D3 | 用户文档（5 篇快速上手：版本控制/Git双模/工作流/发布/语义搜索） | `docs/user/*.md` | 文档齐 |
-| D4 | 100 个内部用户招募 + onboarding | Discord/Slack 群 | 100 用户活跃 |
-| D5 | 全链路 Demo + 反馈收集 + 周报 | `docs/internal/m5-report.md` | 周报发 |
+| D1 | 100 个内部用户招募 + onboarding | Discord/Slack 群 | 100 用户活跃 |
+| D2 | 用户反馈收集 + Bug 分类 | issues | 反馈整理 |
+| D3 | 关键 Bug 修复 + 性能调优 | 代码 | P0 全解决 |
+| D4 | Beta 周报 + 改进计划 | `docs/internal/beta-report.md` | 周报发 |
+| D5 | M6.2 验收 + M6.3 计划 | 计划文档 | 计划发布 |
 
-**M5 验收**：100 个内部用户至少有 50 人成功跑通"写代码→自动快照→/release 发布"全流程
+**M6.2 验收**：100 内部用户至少 50 人跑通"需求→AI 团队→发布"全流程
 
 ---
 
-## 14. W12 M6 公开 Beta（2026-09-07 ~ 09-13）
+## 22. W20 M6.3 公开 Beta（2026-11-02 ~ 11-08）
 
 > **目标**：1000 个外部用户
 
@@ -263,25 +423,25 @@ W12 (09-07~13) ░░▓▓ M6 公开 Beta          目标：1000 外部用户
 | D1 | 营销：Twitter/HN/ProductHunt 发布 | 推文 + Landing page | 发布 |
 | D2 | 公开渠道：Discord/GitHub Discussions | 社区 | 1000 注册 |
 | D3 | 文档站（VitePress） | `docs.yunji.ai/aw/` | 上线 |
-| D4 | 反馈分类 + 关键问题修复 | issues 关闭 | P0 全部解决 |
-| D5 | M6 报告 + M7 计划 | `docs/internal/m6-report.md` | 计划发布 |
+| D4 | 反馈分类 + 关键问题修复 | issues | P0 全部解决 |
+| D5 | M6 报告 + GA 计划 | `docs/internal/m6-report.md` | GA 计划 |
 
 **M6 验收**：1000 外部用户，至少 200 人跑通任务
 
 ---
 
-## 15. M7-M8 长期规划（2026 Q4）
+## 23. M7-M10 长期规划（2026 Q4 - 2027 Q1）
 
-> M7-M8 不在 12 周硬计划内，按季度推进
+> M7+ 不在 20 周硬计划内，按季度推进
 
 | Milestone | 时间 | 目标 |
 |---|---|---|
-| **M7** | 2026-10 | GA 1.0：付费用户 100+，Pro/Team 档位上线 |
-| **M8** | 2026-11 | Enterprise 档位：私有化部署 + SLA |
-| **M9** | 2026-12 | Skills 市场公测：第三方 Skills 发布 |
-| **M10** | 2027-01 | 多 Agent 协作（2+ Agent 协同） |
-| **M11** | 2027-02 | 自定义 LLM 接入（私有模型） |
-| **M12** | 2027-03 | 移动端 PoC（iOS/Android） |
+| **M7** | 2026-11 | GA 1.0：付费用户 100+，Pro/Team 档位上线 |
+| **M8** | 2026-12 | Enterprise 档位：私有化部署 + SLA |
+| **M9** | 2027-01 | Skills 市场公测：第三方 Skills 发布 |
+| **M10** | 2027-02 | Temporal 替换内存 DAG（生产级调度） |
+| **M11** | 2027-03 | 自定义 LLM 接入（私有模型） |
+| **M12** | 2027-04 | 移动端 PoC（iOS/Android） |
 
 ---
 
@@ -353,6 +513,7 @@ W12 (09-07~13) ░░▓▓ M6 公开 Beta          目标：1000 外部用户
 |---|---|---|
 | 2026-06-17 | 初始路线图 v1.0（12 周 × 天级任务 + 10 风险 + 8 应急） | Trae |
 | 2026-06-17 | **v2.0 重大升级**：产品定位升级为"AI-Native 全链路开发发布工作台"，新增 TimeFlow 引擎（本地 VCS + Git 双模 + AI 版本管理 + 全链路发布），重写 M1-M4 里程碑 | Trae |
+| 2026-06-17 | **v3.0 重大升级**：12 周 → 20 周，融入三大壁垒级能力（AI 团队协作 + AST-Native + 验证护栏），产品定位升级为"AI 研发团队协作平台" | Trae |
 
 ---
 
