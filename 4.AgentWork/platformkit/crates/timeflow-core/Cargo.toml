@@ -1,0 +1,30 @@
+[package]
+name = "timeflow-core"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+description = "TimeFlow 本地版本控制引擎 - 内容寻址存储 + 快照链"
+publish = false
+
+[dependencies]
+# Workspace 共享依赖
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# 内容寻址
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# 配置
+toml = { workspace = true }
+
+# 文件监控（W2 接入）
+# notify = "6.1"

@@ -1,6 +1,6 @@
 # 云集智能体工作台 (AW / AgentWork)
 
-> **AI Agent Workbench** — 让 AI 智能体替你写代码、提 PR、跑流水线。
+> **AI-Native 全链路开发发布工作台** — 从写代码到多平台发布，一句话触发全流程。
 > 
 > - **`AW`** = 简称（**A**I-**W**ork），CLI 命令、crate 名、commit scope 用此
 > - **`AgentWork`** = 正式品牌名，仓库、官网、商标、对外营销统一用此
@@ -12,17 +12,40 @@
 
 ## ✨ 核心特性
 
-- 🤖 **AI-Agent-Work** — AI 智能体替你做工作（Writing / Reviewing / Refactoring / Testing）
-- 🔀 **Git-Native** — Agent 工作流 = PR 提交，可审计、可回放、可回滚
+### 三大差异化支柱
+
+- 🔄 **TimeFlow 本地版本控制** — 不依赖 git 的本地优先 VCS，自动快照、自由回滚、分支管理，类似云端文档的版本控制体验
+- 🔀 **Git 双模兼容** — 隐身模式（纯本地，代码永不上云）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
+- 🚀 **全链路自动发布** — 从 AI 整理正式版本 → 多目标构建 → 多平台分发（GitHub/Gitee/网盘/官网）→ 自动生成 Release Notes
+
+### 完整能力矩阵
+
+- 🤖 **AI-Agent-Work** — AI 智能体替你写代码、提 PR、跑流水线
+- 🧠 **AI 语义版本管理** — 自动生成 commit msg、版本号建议、changelog、语义搜索版本
+- 🏷️ **AI 版本整理** — 自动区分 WIP/进度/候选/正式版本，识别"可发布版本"
 - 🦾 **OpenHands Runtime** — 基于开源 Apache 2.0 工业级 Agent Runtime
 - 🔌 **MCP 标准协议** — 工具接入生态化（vs Cursor 私有协议）
 - 🦀 **Tauri 2 桌面** — Rust + 系统 WebView，体积比 Electron 小 10x
 - 🏪 **Skills 市场** — 可复用任务模板，团队/社区共享
 - 🐳 **Docker 沙箱** — 任务执行环境完全隔离，安全可控
+- ⚙️ **工作流引擎** — 触发词/定时/事件驱动，YAML 定义自动化流程
 - 🌍 **跨平台** — Windows / macOS / Linux 桌面 + Web + CLI
 
 ## 🎯 适用场景
 
+### 版本控制场景
+- 🔄 **自动版本控制**：写代码 → 自动快照 → 任意回滚，无需手动 commit
+- 🔍 **语义搜索版本**："回到我加登录功能的那次" → AI 找到匹配版本
+- 🏷️ **版本整理**：AI 自动区分 WIP/进度/候选/正式版本，识别可发布版本
+- 🔒 **隐私保护**：隐身模式下代码永不上云，企业数据安全
+
+### 自动发布场景
+- 🚀 **一句话发布**：输入 `/release` → 自动构建多平台 → 分发 GitHub/Gitee/网盘
+- 📝 **自动 Release Notes**：AI 汇总 commit 生成 changelog
+- 🏷️ **智能版本号**：基于 Conventional Commits 自动建议 semver
+- 📦 **多平台分发**：GitHub Release / Gitee / 蓝奏云 / 阿里云盘 / 官网 CDN
+
+### 开发协作场景
 - 🚀 **快速原型**：自然语言描述需求 → Agent 生成项目脚手架 → 提 PR
 - 🐛 **自动化修 bug**：Agent 读 issue → 定位代码 → 改代码 → 提 PR
 - 📝 **代码重构**：Agent 分析代码 → 生成 diff → 人类审核 → 合并
@@ -39,9 +62,14 @@
 | **CLI** | Rust 1.78+ + clap 4 |
 | **后端** | Rust + Axum 0.7 + SQLx + PostgreSQL 16 |
 | **数据库（本地）** | SQLite (rusqlite) |
+| **TimeFlow VCS** | 自研内容寻址存储 + 快照链（`timeflow-core` crate） |
+| **Git 兼容层** | libgit2 (git2-rs) |
+| **AI 语义层** | 本地 bge-small + 可选 OpenAI embedding |
+| **工作流引擎** | 自研 DAG 执行器（`timeflow-workflow` crate） |
+| **发布引擎** | 多平台适配器（`timeflow-release` crate） |
 | **Agent Runtime** | OpenHands (Apache 2.0, fork + patch) |
 | **工具协议** | MCP (Model Context Protocol) |
-| **Git 操作** | libgit2 (git2-rs) |
+| **文件监控** | notify (Rust) |
 | **沙箱** | Docker + gVisor |
 
 ## 🚀 快速开始
@@ -89,11 +117,21 @@ cargo run -- task "在 examples/hello-world 中添加一个 README.md"
 │   └── mcp-bridge/      MCP 协议桥
 ├── platformkit/         共享层
 │   ├── crates/          Rust 核心库
+│   │   ├── timeflow-core/      ⭐ 本地 VCS 引擎（内容寻址+快照链）
+│   │   ├── timeflow-ai/        ⭐ AI 语义层（commit msg/版本号/语义搜索）
+│   │   ├── timeflow-workflow/  ⭐ 工作流引擎（触发词+DAG）
+│   │   ├── timeflow-release/   ⭐ 全链路发布引擎（多平台分发）
+│   │   ├── aw-git/             Git 兼容层（libgit2）
+│   │   ├── aw-runtime/         Agent Runtime 适配
+│   │   └── aw-sandbox/         Docker 沙箱
 │   └── packages/        TypeScript 包
 ├── runtime/             OpenHands 集成层
 ├── skills/              Agent Skills 市场
 ├── sandbox-image/       Docker 沙箱镜像
 ├── docs/                文档
+│   ├── TIMEFLOW-DESIGN.md  ⭐ TimeFlow 详细设计
+│   ├── ARCHITECTURE.md     系统架构
+│   └── ROADMAP.md          路线图
 ├── tests/               E2E + 集成测试
 ├── scripts/             构建脚本
 └── examples/            示例项目
@@ -103,15 +141,17 @@ cargo run -- task "在 examples/hello-world 中添加一个 README.md"
 
 ## 🗺️ 路线图
 
-- [x] **M0（2026-06）**：仓库初始化 + 团队对齐
-- [ ] **M1（2026-07 上）**：Tauri 桌面骨架 + Git 集成
-- [ ] **M2（2026-07 下）**：Agent Runtime + MCP Bridge
-- [ ] **M3（2026-08 上）**：Skills 市场 v1
-- [ ] **M4（2026-08 下）**：沙箱 + 安全审计
-- [ ] **M5（2026-09）**：内部 Beta（100 用户）
+- [x] **M0（2026-06）**：仓库初始化 + 团队对齐 + 工具链就绪
+- [ ] **M1（2026-07 上）**：Tauri 桌面骨架 + **TimeFlow VCS 内核**（快照/回滚/分支）
+- [ ] **M2（2026-07 下）**：Git 双模兼容 + AI commit msg 自动生成
+- [ ] **M3（2026-08 上）**：Skills 市场 v1 + **AI 版本整理**（语义搜索/候选版本识别）
+- [ ] **M4（2026-08 下）**：沙箱 + 安全审计 + **工作流引擎**（触发词/DAG）
+- [ ] **M5（2026-09）**：内部 Beta + **全链路发布 MVP**（多目标构建/多平台分发）
 - [ ] **M6（2026-10）**：公开 Beta
 - [ ] **M7（2026-11）**：GA 1.0
 - [ ] **M8（2026-12）**：企业版私有化
+
+详见 [docs/ROADMAP.md](docs/ROADMAP.md) 和 [docs/TIMEFLOW-DESIGN.md](docs/TIMEFLOW-DESIGN.md)。
 
 ## 💰 商业模式
 
@@ -126,14 +166,20 @@ cargo run -- task "在 examples/hello-world 中添加一个 README.md"
 
 ## 🆚 竞品对比
 
-| 项目 | 我们 | GitHub Copilot | Cursor | Devin |
-|------|:---:|:---:|:---:|:---:|
-| **开源** | ✅ Apache 2.0 | ❌ 闭源 | ❌ 闭源 | ❌ 闭源 |
-| **Git-Native** | ✅ PR 即交付 | ⚠️ 弱 | ❌ 无 | ⚠️ 弱 |
-| **本地运行** | ✅ 桌面端 | ❌ 云端 | ✅ 编辑器 | ❌ 云端 |
-| **MCP 协议** | ✅ | ❌ | ❌ | ❌ |
-| **Skills 市场** | ✅ | ⚠️ 弱 | ❌ | ❌ |
-| **桌面体积** | 🟢 < 10MB | - | - | - |
+| 项目 | 我们 | GitHub Copilot | Cursor | Devin | Git + CI/CD |
+|------|:---:|:---:|:---:|:---:|:---:|
+| **开源** | ✅ Apache 2.0 | ❌ 闭源 | ❌ 闭源 | ❌ 闭源 | ✅ |
+| **本地 VCS（不依赖 git）** | ✅ TimeFlow | ❌ | ❌ | ❌ | ❌ |
+| **自动快照（无需 commit）** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **AI 语义搜索版本** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **AI 版本整理** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Git 双模兼容** | ✅ | ⚠️ 弱 | ❌ | ⚠️ 弱 | ✅ |
+| **全链路自动发布** | ✅ | ❌ | ❌ | ❌ | ⚠️ 需配置 |
+| **多平台分发** | ✅ | ❌ | ❌ | ❌ | ⚠️ 需配置 |
+| **本地运行** | ✅ 桌面端 | ❌ 云端 | ✅ 编辑器 | ❌ 云端 | ✅ |
+| **MCP 协议** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| **Skills 市场** | ✅ | ⚠️ 弱 | ❌ | ❌ | ❌ |
+| **桌面体积** | 🟢 < 10MB | - | - | - | - |
 
 ## 📜 许可
 

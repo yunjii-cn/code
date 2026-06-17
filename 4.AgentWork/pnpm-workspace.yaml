@@ -1,0 +1,6 @@
+# AgentWork pnpm workspace 配置
+# https://pnpm.io/workspaces
+
+packages:
+  - "apps/*"
+  - "platformkit/packages/*"

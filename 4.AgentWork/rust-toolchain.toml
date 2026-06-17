@@ -2,7 +2,7 @@
 # 锁版本确保所有开发者和 CI 用同一 Rust 版本
 
 [toolchain]
-channel = "1.78.0"
+channel = "1.88.0"
 components = [
     "rustfmt",
     "clippy",

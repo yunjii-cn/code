@@ -1,11 +1,13 @@
 # 云集智能体工作台 - 详细路线图
 
-> **版本**：v1.0
+> **版本**：v2.0
 > **更新日期**：2026-06-17
 > **状态**：M0 启动中
-> **配套**：[AGENTS.md](file:///e:/软件开发/云集智能编程工作站/4.AgentWork/AGENTS.md) · [ARCHITECTURE.md](file:///e:/软件开发/云集智能编程工作站/4.AgentWork/docs/ARCHITECTURE.md) · [tier.yaml](file:///e:/软件开发/云集智能编程工作站/4.AgentWork/tier.yaml)
+> **配套**：[AGENTS.md](../AGENTS.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) · [tier.yaml](../tier.yaml)
 
 本文档将 12 周目标拆解到**天级任务**。每周结束做一次回顾，必要时调整后续计划。
+
+> **v2.0 重大变更**：产品定位从"Git-Native 代码 Agent"升级为"AI-Native 全链路开发发布工作台"。新增 **TimeFlow** 引擎（本地 VCS + Git 双模 + AI 版本管理 + 全链路发布）作为核心差异化。详见 [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md)。
 
 ---
 
@@ -15,32 +17,39 @@
 |---|:---:|:---:|---|
 | **架构师 / 全栈** | 1 | 100% | 主开发（Trae） |
 | **前端** | 1 | 兼职 50% | 桌面端 UI + Web 端 |
-| **Rust 后端** | 1 | 兼职 50% | aw-git / aw-mcp / aw-runtime |
+| **Rust 后端** | 1 | 兼职 50% | TimeFlow / aw-git / aw-runtime |
 | **DevOps** | 0.5 | 兼职 25% | CI / 沙箱 / 部署 |
 
 **单干场景适配**：如无人手，前端/Rust 可由全栈兼顾，相应延期 30-50%。
 
 ---
 
-## 1. 12 周时间线总览
+## 1. 12 周时间线总览（v2.0）
 
 ```
-W0 (06-15~21)  ▓▓░░░ M0 启动周      ✅ 已完成 60%
-W1 (06-22~28)  ░░▓▓▓ M1.1 Tauri 骨架  目标：Hello World 窗口
-W2 (06-29~07-05) ░░▓▓ M1.2 libgit2    目标：Rust 端 clone/commit
-W3 (07-06~12)  ░░▓▓ M1.3 端到端       目标：桌面端按钮触发 Git
-W4 (07-13~19)  ░░▓▓ M1.4 PR 自动化    目标：M1 Demo
-W5 (07-20~26)  ░░▓▓ M2.1 OpenHands    目标：Agent 跑通
-W6 (07-27~08-02) ░░▓▓ M2.2 MCP Bridge 目标：3 个内置工具
-W7 (08-03~09)  ░░▓▓ M3.1 Skills 基础  目标：5 个内置 Skills
-W8 (08-10~16)  ░░▓▓ M3.2 Skills UI   目标：Skills 管理界面
-W9 (08-17~23)  ░░▓▓ M4.1 Docker 沙箱  目标：沙箱跑通
-W10 (08-24~30) ░░▓▓ M4.2 安全审计     目标：审计 + gVisor
-W11 (08-31~09-06) ░░▓▓ M5 内部 Beta   目标：100 内部用户
-W12 (09-07~13) ░░▓▓ M6 公开 Beta     目标：1000 外部用户
+W0 (06-15~21)  ▓▓░░░ M0 启动周           ✅ 已完成 80%
+W1 (06-22~28)  ░░▓▓▓ M1.1 Tauri 骨架      目标：Hello World 窗口
+W2 (06-29~07-05) ░░▓▓ M1.2 TimeFlow 内核  目标：快照/回滚/分支
+W3 (07-06~12)  ░░▓▓ M1.3 时间轴 UI        目标：可视化版本控制
+W4 (07-13~19)  ░░▓▓ M1.4 Git 双模兼容     目标：隐身/同步/发布模式
+W5 (07-20~26)  ░░▓▓ M2.1 AI commit msg    目标：自动生成提交信息
+W6 (07-27~08-02) ░░▓▓ M2.2 AI 版本整理    目标：候选版本识别+语义搜索
+W7 (08-03~09)  ░░▓▓ M3.1 Skills + 工作流  目标：触发词+DAG 引擎
+W8 (08-10~16)  ░░▓▓ M3.2 OpenHands 集成   目标：Agent 跑通
+W9 (08-17~23)  ░░▓▓ M4.1 沙箱+多目标构建  目标：Docker 沙箱+构建矩阵
+W10 (08-24~30) ░░▓▓ M4.2 多平台分发       目标：GitHub/Gitee/网盘发布
+W11 (08-31~09-06) ░░▓▓ M5 内部 Beta       目标：100 内部用户跑通全链路
+W12 (09-07~13) ░░▓▓ M6 公开 Beta          目标：1000 外部用户
 
 🔵 M0 ✅  🟡 M1-M2 进行中  🟢 M3-M6 计划
 ```
+
+**v2.0 关键变化**：
+- M1 从"Git 集成"改为"**TimeFlow VCS 内核**"（本地优先版本控制）
+- M2 从"Agent Runtime"改为"**AI 版本管理**"（commit msg + 版本整理）
+- M3 新增"**工作流引擎**"（触发词 + DAG）
+- M4 新增"**多目标构建 + 多平台分发**"
+- M5 验收标准升级为"**全链路跑通**"（写代码→版本控制→自动发布）
 
 ---
 
@@ -81,163 +90,167 @@ W12 (09-07~13) ░░▓▓ M6 公开 Beta     目标：1000 外部用户
 
 ---
 
-## 4. W2 M1.2 libgit2 集成（2026-06-29 ~ 07-05）
+## 4. W2 M1.2 TimeFlow VCS 内核（2026-06-29 ~ 07-05）
 
-> **目标**：platformkit/crates/aw-git 跑通 clone + commit
+> **目标**：platformkit/crates/timeflow-core 跑通快照/回滚/分支
+> **设计参考**：[TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) § 3
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | `cargo new --lib aw-git` 初始化 | `platformkit/crates/aw-git/` | 编译通过 |
-| D2 | 加 `git2` 依赖到 Cargo.toml | `Cargo.toml` | `cargo build` 拉依赖 |
-| D3 | 实现 `GitRepo::clone(url, path)` | `src/clone.rs` | 单测通过 |
-| D4 | 实现 `GitRepo::commit(msg, sign)` | `src/commit.rs` | 单测通过 |
-| D5 | 实现 `GitRepo::current_branch()` + `list_branches()` | `src/branch.rs` | 单测 5+ 用例 |
+| D1 | `cargo new --lib timeflow-core` 初始化 | `platformkit/crates/timeflow-core/` | 编译通过 |
+| D2 | 实现内容寻址存储（Blob + Tree） | `src/storage.rs` | SHA-256 哈希 + 去重 |
+| D3 | 实现 Snapshot 链（parent + tree） | `src/snapshot.rs` | 快照创建 + 链式查询 |
+| D4 | 实现 `snapshot()` + `rollback(snap_id)` | `src/operations.rs` | 单测：快照→改文件→回滚 |
+| D5 | 实现 `branch(name)` + `list_snapshots()` | `src/branch.rs` | 单测 5+ 用例 |
 
-**M1.2 验收**：aw-git 库 80% 单元测试覆盖 + 3 个核心 API 可用
+**M1.2 验收**：timeflow-core 库 80% 单元测试覆盖，快照/回滚/分支三大核心 API 可用
 
 ---
 
-## 5. W3 M1.3 端到端（2026-07-06 ~ 07-12）
+## 5. W3 M1.3 时间轴 UI（2026-07-06 ~ 07-12）
 
-> **目标**：桌面端按钮触发 Git 操作
+> **目标**：桌面端可视化版本控制界面
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | 桌面端 Tauri command `clone_repo` 包装 | `apps/desktop/src-tauri/src/commands/git.rs` | 按钮触发 |
-| D2 | 前端按钮：输入 URL → 调 `clone_repo` | `apps/desktop/src/views/TaskList.tsx` | UI 显示进度 |
-| D3 | commit UI：textarea 输入 + 按钮提交 | `apps/desktop/src/views/TaskDetail.tsx` | commit hash 显示 |
-| D4 | 集成测试：clone → 改文件 → commit | `tests/integration/git_e2e.rs` | E2E 通 |
-| D5 | Playwright 桌面端 E2E | `tests/e2e/desktop.spec.ts` | 跨平台 E2E |
+| D1 | 桌面端 Tauri command `snapshot` / `rollback` 包装 | `apps/desktop/src-tauri/src/commands/timeflow.rs` | 命令可调 |
+| D2 | 时间轴组件（垂直时间线 + 快照节点） | `apps/desktop/src/views/Timeline.tsx` | 显示快照列表 |
+| D3 | 快照详情面板（diff 视图 + 元数据） | `apps/desktop/src/views/SnapshotDetail.tsx` | 点击查看 diff |
+| D4 | 回滚按钮 + 确认对话框 | `apps/desktop/src/views/Timeline.tsx` | 一键回滚 |
+| D5 | 文件监控集成（notify）→ 自动快照 | `timeflow-core/src/watcher.rs` | 保存文件自动快照 |
 
-**M1.3 验收**：用户能在桌面端点 2 次按钮完成 clone + commit
+**M1.3 验收**：用户能在桌面端看到时间轴、点击查看 diff、一键回滚
 
 ---
 
-## 6. W4 M1.4 PR 自动化（2026-07-13 ~ 07-19）
+## 6. W4 M1.4 Git 双模兼容（2026-07-13 ~ 07-19）
 
-> **目标**：M1 Demo 跑通（自然语言 → PR）
+> **目标**：隐身/同步/发布三模式 + M1 Demo
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | GitHub API 集成：加 `octocrab` 依赖 | `platformkit/crates/aw-github/` | crate 编译 |
-| D2 | 实现 `create_pr(opts)` + `list_prs()` | `src/pr.rs` | 单测 5+ |
-| D3 | push 实现：`aw-git.push(remote, branch)` | `src/push.rs` | E2E 通 |
-| D4 | 桌面端"提交 PR"按钮（一键） | `apps/desktop/src/views/TaskDetail.tsx` | PR 链接显示 |
-| D5 | M1 Demo 录制 + 内部 demo 给团队 | `docs/demo/m1-demo.mp4` | 团队对齐 |
+| D1 | `aw-git` crate 初始化 + libgit2 集成 | `platformkit/crates/aw-git/` | 编译通过 |
+| D2 | 隐身模式（纯 TimeFlow，不碰 git） | `src/modes/stealth.rs` | 默认模式可用 |
+| D3 | 同步模式（TimeFlow 快照 → git commit 镜像） | `src/modes/sync.rs` | 快照自动转 commit |
+| D4 | 发布模式（只推正式版本到 git） | `src/modes/release.rs` | 候选版本才推 |
+| D5 | M1 Demo 录制：写代码→自动快照→回滚→切模式 | `docs/demo/m1-demo.mp4` | 团队对齐 |
 
-**M1 验收**：用户输入 "fix login bug" → Agent 提 PR → 用户在 GitHub 看到 PR
+**M1 验收**：用户能自动版本控制 + 任意回滚 + 三种模式切换
 
 ---
 
-## 7. W5 M2.1 OpenHands 集成（2026-07-20 ~ 07-26）
+## 7. W5 M2.1 AI commit msg 自动生成（2026-07-20 ~ 07-26）
 
-> **目标**：Agent Runtime 跑通简单任务
+> **目标**：每次快照后 AI 自动生成 Conventional Commits 格式的提交信息
+> **设计参考**：[TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) § 4
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | `runtime/` 目录 + OpenHands fork（git submodule 或直接 clone） | `runtime/openhands/` | 目录在 |
-| D2 | aw-runtime 适配层：`AgentRuntime` trait | `platformkit/crates/aw-runtime/src/lib.rs` | trait 编译 |
+| D1 | `timeflow-ai` crate 初始化 | `platformkit/crates/timeflow-ai/` | 编译通过 |
+| D2 | AI 引擎适配（支持 OpenAI / Ollama 本地） | `src/llm.rs` | 双模式调用 |
+| D3 | diff 提取 + prompt 模板（Conventional Commits） | `src/prompts.rs` | 格式校验通过 |
+| D4 | `generate_commit_msg(diff)` 实现 | `src/commit_msg.rs` | 单测 5+ 用例 |
+| D5 | 集成到快照流程（快照后自动生成 msg） | `timeflow-core` 集成 | 同步模式自动 commit |
+
+**M2.1 验收**：快照后自动生成符合规范的 commit msg，同步模式下自动提交到 git
+
+---
+
+## 8. W6 M2.2 AI 版本整理 + 语义搜索（2026-07-27 ~ 08-02）
+
+> **目标**：AI 自动分类快照 + 语义搜索版本 + 候选版本识别
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | 快照分类（WIP/进度/候选/正式） | `timeflow-ai/src/classify.rs` | AI 分类准确率 > 80% |
+| D2 | Embedding 索引（bge-small 本地 + OpenAI 可选） | `timeflow-ai/src/embedding.rs` | 索引建立 |
+| D3 | 语义搜索 `semantic_search(query)` | `timeflow-ai/src/search.rs` | "回到加登录的版本" 能找到 |
+| D4 | 候选版本识别（编译通过+测试通过+改动充分） | `timeflow-ai/src/candidate.rs` | 自动标记候选版本 |
+| D5 | 桌面端语义搜索 UI + 候选版本提示 | `apps/desktop/src/views/SemanticSearch.tsx` | 搜索框可用 |
+
+**M2 验收**：用户能语义搜索版本 + AI 自动识别可发布版本
+
+---
+
+## 9. W7 M3.1 Skills 市场 + 工作流引擎（2026-08-03 ~ 08-09）
+
+> **目标**：5 个内置 Skills + 触发词 + DAG 工作流引擎
+> **设计参考**：[TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) § 5
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | `timeflow-workflow` crate 初始化 + DAG 执行器 | `platformkit/crates/timeflow-workflow/` | 编译通过 |
+| D2 | 触发器系统（keyword / schedule / file_change） | `src/triggers.rs` | 3 种触发器可用 |
+| D3 | YAML 工作流定义解析 + 执行 | `src/engine.rs` | `.yunji/workflows.yml` 可加载 |
+| D4 | 5 个内置 Skills（code-review/test-gen/refactor/doc-gen/bug-fix） | `skills/core/*/SKILL.md` | 5 个 Skills |
+| D5 | 桌面端工作流管理 UI + Skills 市场 | `apps/desktop/src/views/Workflows.tsx` | 可视化配置 |
+
+**M3.1 验收**：用户能用触发词触发工作流 + 浏览/选择 Skills
+
+---
+
+## 10. W8 M3.2 OpenHands 集成 + MCP Bridge（2026-08-10 ~ 08-16）
+
+> **目标**：Agent Runtime 跑通 + 3 个 MCP 工具
+
+| Day | 任务 | 产出 | 验收 |
+|:---:|---|---|---|
+| D1 | `runtime/` 目录 + OpenHands fork | `runtime/openhands/` | 目录在 |
+| D2 | aw-runtime 适配层：`AgentRuntime` trait | `platformkit/crates/aw-runtime/` | trait 编译 |
 | D3 | 适配 OpenHands API：`start/submit/wait/cancel` | `src/openhands_adapter.rs` | 单测 |
-| D4 | 简单任务跑通："列出仓库所有文件" | 测试用例 | 输出正确 |
-| D5 | 错误恢复：网络中断重试 | `src/retry.rs` | 3 次重试 |
+| D4 | MCP Bridge：3 个工具（read_file/write_file/run_shell） | `apps/mcp-bridge/` | 3 工具可用 |
+| D5 | OpenHands 调 MCP 工具 E2E | `tests/e2e/openhands_mcp.rs` | E2E 通 |
 
-**M2.1 验收**：OpenHands 跑通 1 个简单任务
-
----
-
-## 8. W6 M2.2 MCP Bridge（2026-07-27 ~ 08-02）
-
-> **目标**：3 个内置 MCP tools 可用
-
-| Day | 任务 | 产出 | 验收 |
-|:---:|---|---|---|
-| D1 | `apps/mcp-bridge/` 初始化 | Rust 二进制 | 编译通过 |
-| D2 | MCP 协议实现：stdio JSON-RPC | `mcp-bridge/src/protocol.rs` | 协议通 |
-| D3 | MCP tool 1: `aw-fs.read_file` | `tools/read_file.rs` | 工具可用 |
-| D4 | MCP tool 2: `aw-fs.write_file` + 3: `aw-shell.run` | `tools/{write_file,run}.rs` | 3 工具 |
-| D5 | OpenHands 调 MCP 工具的 E2E 测试 | `tests/e2e/openhands_mcp.rs` | E2E 通 |
-
-**M2 验收**：OpenHands + 3 个 MCP 工具可调用，Agent 能读/写文件/跑 shell
+**M3 验收**：OpenHands + MCP 工具可调用，Agent 能读/写文件/跑 shell
 
 ---
 
-## 9. W7 M3.1 Skills 基础（2026-08-03 ~ 08-09）
+## 11. W9 M4.1 Docker 沙箱 + 多目标构建（2026-08-17 ~ 08-23）
 
-> **目标**：5 个内置 Skills 可加载
+> **目标**：沙箱隔离 + 多平台构建矩阵
+> **设计参考**：[TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) § 6
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | `skills/core/code-review/` Skill 定义 | `code-review/SKILL.md` + `main.py` | 加载通 |
-| D2 | 4 个其他 Skills: test-gen/refactor/doc-gen/bug-fix | `skills/core/*/SKILL.md` | 5 个 Skills |
-| D3 | `skills/registry.json` 注册表 | `registry.json` | 5 个条目 |
-| D4 | Skills 加载机制（aw-core 读 registry） | `platformkit/crates/aw-core/src/skill.rs` | 加载通 |
-| D5 | Skills 单测：5 个 Skills 都能加载 | 单测 | 5/5 通 |
+| D1 | `sandbox-image/Dockerfile` + docker-compose | `sandbox-image/` | 镜像构建通 |
+| D2 | aw-sandbox crate 包装 Docker SDK | `platformkit/crates/aw-sandbox/` | 沙箱启动/销毁 |
+| D3 | `timeflow-release` crate 初始化 + 构建矩阵定义 | `platformkit/crates/timeflow-release/` | `.yunji/release.yml` 可解析 |
+| D4 | 多目标构建执行器（Windows/macOS/Linux/Web） | `src/build_matrix.rs` | 4 目标并行构建 |
+| D5 | 沙箱内跑构建 E2E | `tests/e2e/sandbox_build.rs` | 沙箱构建通 |
 
-**M3.1 验收**：5 个内置 Skills 在程序中可枚举和加载
+**M4.1 验收**：Agent 在沙箱内执行 + 多目标构建矩阵可用
 
 ---
 
-## 10. W8 M3.2 Skills UI（2026-08-10 ~ 08-16）
+## 12. W10 M4.2 多平台分发 + Release Notes（2026-08-24 ~ 08-30）
 
-> **目标**：桌面端 Skills 管理界面
-
-| Day | 任务 | 产出 | 验收 |
-|:---:|---|---|---|
-| D1 | 桌面端 Skills 列表页面 | `apps/desktop/src/views/Skills.tsx` | 显示 5 个 |
-| D2 | Skills 详情页：参数配置 | `Skills/[id].tsx` | 路由通 |
-| D3 | Skills 市场 v1：本地浏览 | `views/SkillsMarket.tsx` | 本地列表 |
-| D4 | Skills 热加载测试 | `tests/integration/skill_reload.rs` | 改文件自动加载 |
-| D5 | Skills 创建向导（用户自定义） | `views/SkillCreate.tsx` | 流程通 |
-
-**M3 验收**：用户能浏览/选择/创建 Skills
-
----
-
-## 11. W9 M4.1 Docker 沙箱（2026-08-17 ~ 08-23）
-
-> **目标**：Agent 在沙箱内执行
+> **目标**：多平台自动分发 + 自动生成 Release Notes
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
-| D1 | `sandbox-image/Dockerfile`（基于 ubuntu 22.04） | `Dockerfile` | 镜像构建通 |
-| D2 | docker-compose.yml（资源限制 + 网络隔离） | `docker-compose.yml` | compose up 通 |
-| D3 | aw-sandbox crate 包装 Docker SDK | `platformkit/crates/aw-sandbox/` | crate 编译 |
-| D4 | 沙箱启动/销毁/状态查询 | `src/lifecycle.rs` | 单元测试 |
-| D5 | 沙箱内跑 Agent 任务 E2E | `tests/e2e/sandbox.rs` | Agent 在沙箱跑通 |
+| D1 | GitHub Release 适配器（octocrab） | `timeflow-release/src/github.rs` | 上传 exe 到 Release |
+| D2 | Gitee Release 适配器 | `timeflow-release/src/gitee.rs` | 上传到 Gitee |
+| D3 | 网盘适配器（蓝奏云/阿里云盘） | `timeflow-release/src/netdisk.rs` | 上传到网盘 |
+| D4 | AI Release Notes 生成（changelog + 下载链接） | `timeflow-ai/src/release_notes.rs` | Markdown 输出 |
+| D5 | `/release` 触发词全流程 E2E | `tests/e2e/release_pipeline.rs` | 一句话发布 |
 
-**M4.1 验收**：Agent 在隔离沙箱内执行，文件改动不污染主机
-
----
-
-## 12. W10 M4.2 安全审计（2026-08-24 ~ 08-30）
-
-> **目标**：审计日志 + gVisor
-
-| Day | 任务 | 产出 | 验收 |
-|:---:|---|---|---|
-| D1 | `aw-log` crate（结构化审计日志） | `platformkit/crates/aw-log/` | 编译通 |
-| D2 | 所有 Agent 操作埋点 | 各模块集成 | 日志完整 |
-| D3 | gVisor (runsc) 集成 | `sandbox-image/gvisor/` | runsc 配置 |
-| D4 | 网络隔离（egress proxy + 域名白名单） | `infra/egress-proxy/` | 阻断外网 |
-| D5 | 沙箱 + 审计 E2E | `tests/e2e/sandbox_audit.rs` | E2E 通 |
-
-**M4 验收**：所有 Agent 操作有审计，沙箱有 gVisor 隔离
+**M4 验收**：输入 `/release` → 自动构建 → 多平台分发 → 生成 Release Notes
 
 ---
 
 ## 13. W11 M5 内部 Beta（2026-08-31 ~ 09-06）
 
-> **目标**：100 个内部用户跑通
+> **目标**：100 个内部用户跑通**全链路**（写代码→版本控制→自动发布）
 
 | Day | 任务 | 产出 | 验收 |
 |:---:|---|---|---|
 | D1 | Bug triage + 修复 | GitHub issues 关闭 80% | 严重 bug = 0 |
-| D2 | 性能优化（启动 < 3s，操作 < 500ms） | benchmarks | 达标 |
-| D3 | 用户文档（5 篇快速上手） | `docs/user/*.md` | 文档齐 |
+| D2 | 性能优化（启动 < 3s，快照 < 500ms，发布 < 5min） | benchmarks | 达标 |
+| D3 | 用户文档（5 篇快速上手：版本控制/Git双模/工作流/发布/语义搜索） | `docs/user/*.md` | 文档齐 |
 | D4 | 100 个内部用户招募 + onboarding | Discord/Slack 群 | 100 用户活跃 |
-| D5 | 反馈收集 + 周报 | `docs/internal/m5-report.md` | 周报发 |
+| D5 | 全链路 Demo + 反馈收集 + 周报 | `docs/internal/m5-report.md` | 周报发 |
 
-**M5 验收**：100 个内部用户至少有 50 人成功跑过 1 个 Agent 任务
+**M5 验收**：100 个内部用户至少有 50 人成功跑通"写代码→自动快照→/release 发布"全流程
 
 ---
 
@@ -339,6 +352,7 @@ W12 (09-07~13) ░░▓▓ M6 公开 Beta     目标：1000 外部用户
 | 日期 | 变更 | 作者 |
 |---|---|---|
 | 2026-06-17 | 初始路线图 v1.0（12 周 × 天级任务 + 10 风险 + 8 应急） | Trae |
+| 2026-06-17 | **v2.0 重大升级**：产品定位升级为"AI-Native 全链路开发发布工作台"，新增 TimeFlow 引擎（本地 VCS + Git 双模 + AI 版本管理 + 全链路发布），重写 M1-M4 里程碑 | Trae |
 
 ---
 

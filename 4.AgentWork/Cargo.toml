@@ -3,10 +3,17 @@
 # 详细架构见 docs/ARCHITECTURE.md
 resolver = "2"
 members = [
-    "platformkit/crates/*",
-    "apps/cli",
+    "platformkit/crates/timeflow-core",
     "apps/desktop/src-tauri",
-    "apps/mcp-bridge",
+    # 以下成员将在后续里程碑创建:
+    # "platformkit/crates/timeflow-ai",
+    # "platformkit/crates/timeflow-workflow",
+    # "platformkit/crates/timeflow-release",
+    # "platformkit/crates/aw-git",
+    # "platformkit/crates/aw-runtime",
+    # "platformkit/crates/aw-sandbox",
+    # "apps/cli",
+    # "apps/mcp-bridge",
 ]
 exclude = [
     "target",
@@ -18,7 +25,7 @@ exclude = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
+rust-version = "1.85"
 authors = ["Yunji AI <agentwork@yunji.ai>"]
 license = "Apache-2.0"
 repository = "https://github.com/yunji/agentwork"

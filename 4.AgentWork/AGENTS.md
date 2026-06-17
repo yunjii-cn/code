@@ -25,11 +25,17 @@
 | **4** | **`4.AgentWork/`** | **云集智能体工作台** | **AW (AgentWork)** | **Enterprise** | **¥999/月** | 🆕 启动中 |
 
 **核心差异化**：
-- 🔀 **Git-Native** — Agent 工作流 = PR 提交，可审计、可回放、可回滚
+- 🔄 **TimeFlow 本地版本控制** — 不依赖 git 的本地优先 VCS，自动快照、自由回滚、分支管理
+- 🔀 **Git 双模兼容** — 隐身模式（纯本地）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
+- 🚀 **全链路自动发布** — AI 整理正式版本 → 多目标构建 → 多平台分发（GitHub/Gitee/网盘/官网）
+- 🧠 **AI 语义版本管理** — 自动 commit msg、版本号建议、changelog、语义搜索版本
+- ⚙️ **工作流引擎** — 触发词/定时/事件驱动，YAML 定义自动化流程
 - 🤖 **OpenHands Runtime** — 基于开源 Apache 2.0 工业级 Agent Runtime
 - 🔌 **MCP 标准协议** — 工具接入生态化（vs Cursor 私有协议）
 - 🦀 **Tauri 2 桌面** — Rust + WebView，体积小 10x（vs Electron）
 - 🏪 **Skills 市场** — 可复用任务模板，团队/社区共享
+
+> **发布边界**：TimeFlow 生成"给开发者看的发布说明"（Release Notes / changelog），**不做营销物料**（短视频/海报/种草文）。营销方向应另起独立产品。详见 [docs/TIMEFLOW-DESIGN.md](docs/TIMEFLOW-DESIGN.md) § 6.1。
 
 **所有 agent 必须**：
 1. **明确自己工作在哪个代**（1.PC / 2.WEB / 3.dev / 4.AgentWork / 跨代）
@@ -50,12 +56,24 @@
 │   ├── web/                         Next.js 14 Web 端
 │   ├── mcp-bridge/                  MCP 协议桥（独立二进制）
 ├── platformkit/                     <-- 共享层
-│   ├── crates/                      Rust 核心库（aw-git, aw-store...）
+│   ├── crates/                      Rust 核心库
+│   │   ├── timeflow-core/           ⭐ 本地 VCS 引擎（内容寻址+快照链+分支）
+│   │   ├── timeflow-ai/             ⭐ AI 语义层（commit msg/版本号/语义搜索/分类）
+│   │   ├── timeflow-workflow/       ⭐ 工作流引擎（触发词+DAG 执行器）
+│   │   ├── timeflow-release/        ⭐ 全链路发布引擎（多目标构建+多平台分发）
+│   │   ├── aw-git/                  Git 兼容层（libgit2，三模式切换）
+│   │   ├── aw-runtime/              Agent Runtime 适配（OpenHands）
+│   │   ├── aw-sandbox/              Docker 沙箱
+│   │   └── aw-log/                  审计日志
 │   └── packages/                    TypeScript 包（@aw/ui, @aw/sdk...）
 ├── runtime/                         OpenHands 集成层（fork + patch）
 ├── skills/                          Agent Skills 市场内容
 ├── sandbox-image/                   Docker 沙箱镜像 + compose 文件
 ├── docs/                            架构/API/用户文档
+│   ├── TIMEFLOW-DESIGN.md           ⭐ TimeFlow 详细设计
+│   ├── ARCHITECTURE.md              系统架构
+│   ├── ROADMAP.md                   路线图
+│   └── CONTRIBUTING.md              贡献指南
 ├── tests/                           E2E + 集成测试（Playwright + cargo test）
 ├── scripts/                         构建/部署/工具脚本
 ├── examples/                        示例项目（demo 仓库）
@@ -338,6 +356,7 @@
 |------|------|--------|
 | 2026-06-17 | 新建 4.AgentWork 仓库，4 代产品线契约 v1.0 | Trae |
 | 2026-06-17 | 新增 §4 参考项目（UI-TARS-desktop 升级为 reference project） | Trae |
+| 2026-06-17 | **v2.0 重大升级**：产品定位升级为"AI-Native 全链路开发发布工作台"，新增 TimeFlow 引擎（4 个 crate：timeflow-core/ai/workflow/release），更新核心差异化、项目结构、发布边界契约 | Trae |
 
 ---
 
