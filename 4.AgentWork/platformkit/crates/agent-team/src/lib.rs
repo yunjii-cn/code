@@ -17,6 +17,8 @@
 //
 // M4.0 D2-D7: AI 员工定义 + 流式输出 + ChatPanel + 交付物预览 + LLM Gateway
 // M4.1 D1: 知识库系统（RAG 检索增强）
+// M4.1 D2: 规则引擎（关键词 + 逻辑运算 + 5 种动作）
+// M4.1 D3: 话术训练系统（Few-shot + LLM-as-Judge）
 
 #![warn(missing_docs)]
 
@@ -35,6 +37,7 @@ mod employee;
 mod stream;
 mod knowledge;
 mod rule;
+mod speech;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -75,6 +78,12 @@ pub use rule::{
     RuleEngine, EngineResult,
     builtin_finance_rules, builtin_education_rules, builtin_medical_rules,
     builtin_all_rules, builtin_by_industry,
+};
+pub use speech::{
+    SpeechStyle, SpeechExample, SpeechConstraints, ConstraintCheckResult, ConstraintViolation,
+    SpeechTraining, FewShotBuilder, ConstraintChecker, JudgeResult, SpeechJudge,
+    builtin_customer_service_speech, builtin_finance_advisor_speech, builtin_medical_consult_speech,
+    builtin_all_speech,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池
