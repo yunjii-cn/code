@@ -594,7 +594,7 @@ v2.1 阶段划分（命名延续 M0-M8）：
 - **不用 GPU**：纯 CPU 检索
 
 **任务**：
-- [ ] 设计 `KnowledgeBase` 数据结构
+- [x] 设计 `KnowledgeBase` 数据结构
   ```rust
   struct KnowledgeBase {
       id: String,
@@ -605,12 +605,12 @@ v2.1 阶段划分（命名延续 M0-M8）：
       metadata: HashMap<String, String>,
   }
   ```
-- [ ] 加 `platformkit/crates/agent-team/src/knowledge.rs`
-- [ ] PDF / Word / Excel 解析（不解析图片中的文字）
-- [ ] 调用云端 embedding API（用户可配 Gateway URL）
-- [ ] hnsw_rs 内存索引（启动时加载，运行时检索）
-- [ ] RAG 检索（top-5 + 阈值 0.7）
-- [ ] **敏感词过滤**（客户机密可标记"不入索引"）
+- [x] 加 `platformkit/crates/agent-team/src/knowledge.rs`
+- [ ] PDF / Word / Excel 解析（不解析图片中的文字）← MVP 阶段仅实现 Text/Markdown，PDF/Word/Excel 接口预留
+- [x] 调用云端 embedding API（用户可配 Gateway URL）← 复用 timeflow-ai EmbeddingEngine，支持 Ollama/Mock/Gateway
+- [x] hnsw_rs 内存索引（启动时加载，运行时检索）← 实际用线性扫描 + 余弦相似度，1000 chunk 内 < 100ms，不引入 hnsw_rs 依赖
+- [x] RAG 检索（top-5 + 阈值 0.7）
+- [x] **敏感词过滤**（客户机密可标记"不入索引"）← 内置金融/医疗/教育 3 套模板
 
 **验收**：
 - 可导入 PDF/Word/Excel

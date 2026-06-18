@@ -14,6 +14,9 @@
 //   - D3 任务状态机
 //   - D4 共享上下文池
 //   - D5 调度引擎单测 + 集成测试
+//
+// M4.0 D2-D7: AI 员工定义 + 流式输出 + ChatPanel + 交付物预览 + LLM Gateway
+// M4.1 D1: 知识库系统（RAG 检索增强）
 
 #![warn(missing_docs)]
 
@@ -30,6 +33,7 @@ mod coder;
 mod retry;
 mod employee;
 mod stream;
+mod knowledge;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -58,6 +62,13 @@ pub use employee::{
     builtin_employees, builtin_by_id, builtin_general_employees, builtin_industry_employees,
 };
 pub use stream::{StreamEvent, ToolCallStatus, StreamCallback};
+pub use knowledge::{
+    KnowledgeSource, KnowledgeChunk, KnowledgeBase,
+    TextChunker, DocumentParser, SensitiveFilter,
+    KnowledgeStore, RagRetriever, RagResult,
+    DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP,
+    estimate_tokens, is_cjk_char,
+};
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池
 pub fn create_pool_from_builtin(template_name: &str) -> Result<WorkerPool<'static>> {
