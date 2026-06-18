@@ -34,6 +34,7 @@ mod retry;
 mod employee;
 mod stream;
 mod knowledge;
+mod rule;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -68,6 +69,12 @@ pub use knowledge::{
     KnowledgeStore, RagRetriever, RagResult,
     DEFAULT_CHUNK_SIZE, DEFAULT_CHUNK_OVERLAP,
     estimate_tokens, is_cjk_char,
+};
+pub use rule::{
+    LogicOp, RuleCondition, RuleAction, Rule, RuleSet, RuleMatchResult,
+    RuleEngine, EngineResult,
+    builtin_finance_rules, builtin_education_rules, builtin_medical_rules,
+    builtin_all_rules, builtin_by_industry,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池
