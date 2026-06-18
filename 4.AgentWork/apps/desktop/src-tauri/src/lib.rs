@@ -56,13 +56,34 @@ pub struct AppState {
 
 impl Default for AppState {
     fn default() -> Self {
+        // 读取 LLM Gateway 环境变量（M4.0 D7）
+        // 若设置 LLM_GATEWAY_URL，则默认 ai_config 走 Gateway 反代
+        let gateway_url = std::env::var("LLM_GATEWAY_URL").ok().filter(|s| !s.is_empty());
+        let gateway_token = std::env::var("LLM_GATEWAY_TOKEN").ok().filter(|s| !s.is_empty());
+
+        let ai_config = if let Some(url) = gateway_url.as_deref() {
+            tracing::info!(
+                "LLM Gateway 已配置（LLM_GATEWAY_URL={}），默认 AI 配置走 Gateway",
+                url
+            );
+            timeflow_ai::AiConfig {
+                provider: timeflow_ai::LlmProvider::OpenAi,
+                base_url: url.trim_end_matches('/').to_string(),
+                api_key: gateway_token.clone(),
+                model: "glm5.2".to_string(), // 默认走智谱 GLM（Gateway 反代）
+                ..Default::default()
+            }
+        } else {
+            timeflow_ai::AiConfig::default()
+        };
+
         Self {
             timeflow: std::sync::Mutex::new(None),
             watcher: std::sync::Mutex::new(None),
             git_adapter: std::sync::Mutex::new(None),
             repo_path: std::sync::Mutex::new(None),
             ai_engine: std::sync::Mutex::new(None),
-            ai_config: std::sync::Mutex::new(timeflow_ai::AiConfig::default()),
+            ai_config: std::sync::Mutex::new(ai_config),
             ai_enabled: std::sync::Mutex::new(false),
             team: commands::team::TeamState::default(),
         }

@@ -144,3 +144,17 @@ BAK/
 # 内部测试数据
 tests/fixtures/private/
 examples/private/
+
+# ---- LLM Gateway 运行时数据（含真实账号 token，禁止提交） ----
+llm-gateway/**/accounts.json
+llm-gateway/**/users.json
+llm-gateway/**/captures.json
+llm-gateway/**/context_cache.json
+llm-gateway/**/uploaded_files.json
+llm-gateway/**/session_affinity.json
+llm-gateway/**/data/
+llm-gateway/**/context_files/
+llm-gateway/**/__pycache__/
+llm-gateway/**/*.pyc
+llm-gateway/**/.venv/
+llm-gateway/**/venv/

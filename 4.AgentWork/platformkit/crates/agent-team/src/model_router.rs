@@ -286,8 +286,19 @@ impl<'a> ModelCaller<'a> {
 }
 
 /// 创建内置模型路由器（预注册常用模型）
+///
+/// 环境变量覆盖（M4.0 D7）：
+/// - `LLM_GATEWAY_URL`：若设置，所有云端模型（OpenAI 兼容）的 base_url 改为该值
+/// - `LLM_GATEWAY_TOKEN`：若设置，所有云端模型的 api_key 改为该值
+///
+/// 这样部署时只需设置两个环境变量，即可将所有云端模型走 LLM Gateway 反代，
+/// 而无需逐个模型配置。Ollama 本地模型和 Mock 不受影响。
 pub fn builtin_router() -> ModelRouter {
     let mut router = ModelRouter::new();
+
+    // 读取 Gateway 环境变量（M4.0 D7）
+    let gateway_url = std::env::var("LLM_GATEWAY_URL").ok().filter(|s| !s.is_empty());
+    let gateway_token = std::env::var("LLM_GATEWAY_TOKEN").ok().filter(|s| !s.is_empty());
 
     // OpenAI 兼容模型（需用户填 API key，这里用占位符）
     router.register(ModelConfig::openai(
@@ -356,7 +367,42 @@ pub fn builtin_router() -> ModelRouter {
     // Mock（测试用）
     router.register(ModelConfig::mock("mock-test"));
 
+    // 应用 Gateway 环境变量覆盖（M4.0 D7）
+    if gateway_url.is_some() || gateway_token.is_some() {
+        apply_gateway_override(&mut router, gateway_url.as_deref(), gateway_token.as_deref());
+    }
+
     router
+}
+
+/// 将路由器中所有云端模型（OpenAI 兼容）的 base_url / api_key 替换为 Gateway 配置。
+/// Ollama 本地模型和 Mock 不受影响。
+fn apply_gateway_override(
+    router: &mut ModelRouter,
+    gateway_url: Option<&str>,
+    gateway_token: Option<&str>,
+) {
+    tracing::info!(
+        "LLM Gateway 已启用：覆盖云端模型 base_url（{} 个模型）",
+        router.models.len()
+    );
+
+    for (_, config) in router.models.iter_mut() {
+        // 只覆盖 OpenAI 兼容模型（云端），保留 Ollama 和 Mock
+        if config.provider == LlmProvider::OpenAi {
+            if let Some(url) = gateway_url {
+                // 拼接模型 ID 作为路径后缀，例如 https://gateway.com/api/llm/zhipu
+                // 文档约定：Gateway 路径 /api/llm/{provider}/chat/completions
+                // 这里 base_url 设为 https://gateway.com/api/llm/{provider}
+                // OpenAiEngine 会自动拼接 /chat/completions
+                let trimmed = url.trim_end_matches('/');
+                config.base_url = format!("{}/{}", trimmed, config.id);
+            }
+            if let Some(token) = gateway_token {
+                config.api_key = Some(token.to_string());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -546,5 +592,70 @@ mod tests {
         let config = ModelConfig::mock("test");
         assert_eq!(config.provider, LlmProvider::Mock);
         assert_eq!(config.api_key, None);
+    }
+
+    #[test]
+    fn test_apply_gateway_override_overwrites_openai_only() {
+        let mut router = ModelRouter::new();
+        router.register(ModelConfig::openai(
+            "gpt-4o",
+            "https://api.openai.com/v1",
+            "",
+            "gpt-4o",
+        ));
+        router.register(ModelConfig::ollama(
+            "local-llama",
+            "http://localhost:11434",
+            "llama3",
+        ));
+        router.register(ModelConfig::mock("mock-1"));
+
+        apply_gateway_override(
+            &mut router,
+            Some("https://gateway.example.com/api/llm"),
+            Some("gateway-token-xyz"),
+        );
+
+        // OpenAI 模型应被覆盖
+        let gpt = router.get("gpt-4o").unwrap();
+        assert_eq!(gpt.base_url, "https://gateway.example.com/api/llm/gpt-4o");
+        assert_eq!(gpt.api_key, Some("gateway-token-xyz".to_string()));
+
+        // Ollama 模型不应被覆盖
+        let local = router.get("local-llama").unwrap();
+        assert_eq!(local.base_url, "http://localhost:11434");
+        assert_eq!(local.api_key, None);
+
+        // Mock 不应被覆盖
+        let mock = router.get("mock-1").unwrap();
+        assert_eq!(mock.base_url, "mock://localhost");
+    }
+
+    #[test]
+    fn test_apply_gateway_override_only_token() {
+        let mut router = ModelRouter::new();
+        router.register(ModelConfig::openai("gpt-4o", "https://api.openai.com/v1", "", "gpt-4o"));
+
+        // 只传 token，不传 url → base_url 不变，api_key 被覆盖
+        apply_gateway_override(&mut router, None, Some("token-only"));
+
+        let gpt = router.get("gpt-4o").unwrap();
+        assert_eq!(gpt.base_url, "https://api.openai.com/v1");
+        assert_eq!(gpt.api_key, Some("token-only".to_string()));
+    }
+
+    #[test]
+    fn test_apply_gateway_override_trims_trailing_slash() {
+        let mut router = ModelRouter::new();
+        router.register(ModelConfig::openai("glm5.2", "https://original.com", "", "glm-4-plus"));
+
+        apply_gateway_override(
+            &mut router,
+            Some("https://gateway.example.com/api/llm/"),
+            None,
+        );
+
+        let glm = router.get("glm5.2").unwrap();
+        assert_eq!(glm.base_url, "https://gateway.example.com/api/llm/glm5.2");
     }
 }
