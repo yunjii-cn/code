@@ -29,6 +29,7 @@ mod orchestrator;
 mod coder;
 mod retry;
 mod employee;
+mod stream;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -56,6 +57,7 @@ pub use employee::{
     builtin_education_teacher, builtin_sales_followup, builtin_finance_auditor,
     builtin_employees, builtin_by_id, builtin_general_employees, builtin_industry_employees,
 };
+pub use stream::{StreamEvent, ToolCallStatus, StreamCallback};
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池
 pub fn create_pool_from_builtin(template_name: &str) -> Result<WorkerPool<'static>> {

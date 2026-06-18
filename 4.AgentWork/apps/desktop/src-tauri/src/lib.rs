@@ -137,6 +137,9 @@ pub fn run() {
             commands::team::report_task_verify_failed,
             commands::team::report_task_failed,
             commands::team::reset_workflow,
+            // 流式输出命令（M4.0 D3）
+            commands::team::stream_agent_thinking,
+            commands::team::stream_task_progress,
         ])
         .setup(|_app| {
             tracing::info!("AgentWork 桌面端启动完成");

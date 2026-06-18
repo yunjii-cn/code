@@ -6,10 +6,12 @@ import {
   Search,
   Users,
   ClipboardList,
+  MessageSquare,
 } from "lucide-react";
 import { clsx } from "clsx";
 
 const navItems = [
+  { to: "/chat", label: "AI 互动", icon: MessageSquare },
   { to: "/timeline", label: "时间轴", icon: Clock },
   { to: "/branches", label: "分支", icon: GitBranch },
   { to: "/search", label: "语义搜索", icon: Search },

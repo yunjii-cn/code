@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use tauri::Emitter;
 
 use crate::AppResult;
 use agent_team::{
@@ -830,4 +831,121 @@ pub async fn reset_workflow(
     let mut workflow = state.team.workflow.lock().unwrap();
     *workflow = WorkflowState::default();
     Ok("工作流已重置".to_string())
+}
+
+// ===== 流式输出（M4.0 D3）=====
+
+/// 流式推送 Agent 思考过程
+///
+/// MVP 实现：模拟 Orchestrator 拆解需求的过程，分段推送 thinking 事件。
+/// 真实 LLM 集成在 M4.0 D4 ChatPanel 中实现。
+///
+/// 前端监听 `agent_stream` 事件：
+/// ```ts
+/// import { listen } from "@tauri-apps/api/event";
+/// listen<StreamEvent>("agent_stream", (e) => {
+///   console.log(e.payload.type, e.payload);
+/// });
+/// ```
+#[tauri::command]
+pub async fn stream_agent_thinking(
+    requirement: String,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<String> {
+    use agent_team::StreamEvent;
+    use std::time::Instant;
+
+    let workflow_id = format!("wf_stream_{}", chrono::Utc::now().timestamp_millis());
+    let start = Instant::now();
+
+    // 获取当前工作流 ID（如果已规划）
+    let wf_id = {
+        let wf = state.team.workflow.lock().unwrap();
+        wf.workflow_id.clone().unwrap_or_else(|| workflow_id.clone())
+    };
+
+    // 模拟 Orchestrator 思考过程（分段推送）
+    let thinking_steps = vec![
+        "正在分析需求...",
+        "识别关键任务...",
+        "生成任务依赖图...",
+        "分配角色...",
+        "工作流规划完成。",
+    ];
+
+    let mut accumulated = 0usize;
+    for step in &thinking_steps {
+        accumulated += step.chars().count();
+        let event = StreamEvent::thinking(
+            &wf_id,
+            None,
+            "orchestrator",
+            *step,
+            accumulated,
+        );
+        app_handle.emit("agent_stream", &event).map_err(|e| {
+            crate::AppError::Other(format!("推送事件失败: {e}"))
+        })?;
+        // 模拟思考延迟（200ms）
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // 推送完成事件
+    let elapsed_ms = start.elapsed().as_millis() as u64;
+    let done_event = StreamEvent::done(
+        &wf_id,
+        elapsed_ms,
+        0,
+        0,
+        format!("需求「{requirement}」的思考过程已推送完毕"),
+    );
+    app_handle.emit("agent_stream", &done_event).map_err(|e| {
+        crate::AppError::Other(format!("推送完成事件失败: {e}"))
+    })?;
+
+    Ok(wf_id)
+}
+
+/// 流式推送任务执行进度
+///
+/// 模拟单个任务从 Pending → Running → Verifying → Merged 的过程。
+#[tauri::command]
+pub async fn stream_task_progress(
+    task_id: String,
+    task_title: String,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<String> {
+    use agent_team::StreamEvent;
+
+    let wf_id = {
+        let wf = state.team.workflow.lock().unwrap();
+        wf.workflow_id.clone().unwrap_or_else(|| "wf_demo".to_string())
+    };
+
+    // 模拟任务状态流转
+    let states = vec![
+        ("Pending", 0u8),
+        ("Running", 30),
+        ("Running", 60),
+        ("Verifying", 80),
+        ("Merged", 100),
+    ];
+
+    for (new_state, percent) in &states {
+        let event = StreamEvent::progress(
+            &wf_id,
+            &task_id,
+            &task_title,
+            *new_state,
+            *percent,
+        );
+        app_handle.emit("agent_stream", &event).map_err(|e| {
+            crate::AppError::Other(format!("推送进度失败: {e}"))
+        })?;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    Ok(format!("任务 {task_id} 进度推送完毕"))
 }

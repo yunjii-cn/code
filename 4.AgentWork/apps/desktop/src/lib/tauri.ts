@@ -424,3 +424,61 @@ export async function reportTaskFailed(
 export async function resetWorkflow(): Promise<string> {
   return invoke<string>("reset_workflow");
 }
+
+// ===== 流式输出（M4.0 D3）=====
+
+/** 流式事件类型 */
+export type StreamEvent =
+  | {
+      type: "thinking";
+      workflow_id: string;
+      task_id: string | null;
+      role_id: string;
+      delta: string;
+      accumulated_len: number;
+    }
+  | {
+      type: "tool_call";
+      workflow_id: string;
+      task_id: string;
+      role_id: string;
+      tool_name: string;
+      arguments: string;
+      status: "started" | { succeeded: { result_summary: string } } | { failed: { error: string } };
+    }
+  | {
+      type: "progress";
+      workflow_id: string;
+      task_id: string;
+      task_title: string;
+      new_state: string;
+      percent: number;
+    }
+  | {
+      type: "error";
+      workflow_id: string;
+      task_id: string | null;
+      message: string;
+      retryable: boolean;
+    }
+  | {
+      type: "done";
+      workflow_id: string;
+      elapsed_ms: number;
+      tasks_completed: number;
+      tasks_total: number;
+      summary: string;
+    };
+
+/** 流式推送 Agent 思考过程 */
+export async function streamAgentThinking(requirement: string): Promise<string> {
+  return invoke<string>("stream_agent_thinking", { requirement });
+}
+
+/** 流式推送任务执行进度 */
+export async function streamTaskProgress(
+  taskId: string,
+  taskTitle: string
+): Promise<string> {
+  return invoke<string>("stream_task_progress", { taskId, taskTitle });
+}

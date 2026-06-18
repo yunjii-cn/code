@@ -6,13 +6,15 @@ import Branches from "./views/Branches";
 import SemanticSearch from "./views/SemanticSearch";
 import Team from "./views/Team";
 import TaskBoard from "./views/TaskBoard";
+import ChatPanel from "./views/ChatPanel";
 import Settings from "./views/Settings";
 
 export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Layout />}>
-        <Route index element={<Navigate to="/timeline" replace />} />
+        <Route index element={<Navigate to="/chat" replace />} />
+        <Route path="chat" element={<ChatPanel />} />
         <Route path="timeline" element={<Timeline />} />
         <Route path="snapshot/:id" element={<SnapshotDetail />} />
         <Route path="branches" element={<Branches />} />
