@@ -24,12 +24,12 @@
 | 3 | `3.dev/` | 云集旗舰 | Yunji Flagship | Business | ¥99/月 | 🟢 全力开发 |
 | **4** | **`4.AgentWork/`** | **云集智能体工作台** | **AW (AgentWork)** | **Enterprise** | **¥999/月** | 🆕 启动中 |
 
-**核心差异化（五大支柱）**：
-- 🤝 **AI 团队协作引擎** ⭐王炸 — 多 Agent DAG 真并行 + 异构模型差异化绑定（Qwen3.7 推理/GLM5.2 代码/MiniMax3 视觉）+ Git 分支隔离 + 冲突自动解决
-- 🧠 **AST-Native 代码认知** ⭐壁垒 — Tree-sitter + LanceDB 构建"类-方法-调用链"知识图谱，Token 消耗降低 70%，跨语言契约监听
-- 🛡️ **编译期验证护栏** ⭐可信 — 五级验证管道（Lint/类型/编译/契约/调用链），破坏类型安全的代码直接拒绝合并，零幻觉交付
-- 🔄 **TimeFlow 本地版本控制** — 不依赖 git 的本地优先 VCS，自动快照、自由回滚、分支管理
-- 🚀 **全链路自动发布** — AI 整理正式版本 → 多目标构建 → 多平台分发（GitHub/Gitee/网盘/官网）
+**核心差异化（五大支柱，v3.2 重写）**：
+- 🤝 **AI 团队协作引擎** ⭐王炸 — 多 Agent DAG 真并行 + 异构模型差异化绑定（Qwen3.7 推理 / GLM5.2 代码 / MiniMax3 视觉）+ 邮件式异步协作
+- 🧠 **AI 员工培训引擎** ⭐壁垒 — 知识库 + 规则 + 话术 + 评估四要素，纯 prompt + few-shot，**不依赖 GPU 即可行业化**
+- 🛡️ **行业模板 + 自定义** ⭐B 端关键 — 5 核心细分行业（电商-穿搭/电子 + 教育-早教/素质 + 金融-证券）+ 5 候补（金融-建筑/法律/财务/HR/医疗）+ 用户自定义模板向导
+- 💬 **任务驱动 + 互动双引擎** — 维护阶段用 ChatPanel 自然语言互动，开发/执行阶段用 TaskBoard DAG 可视化
+- 🔄 **本地优先 + 云端协同** — 4 核 8G 宝塔服务器即可跑通反代 + 同步 + 备份，**不需要 GPU 集群**
 
 **完整能力**：
 - 🔀 **Git 双模兼容** — 隐身模式（纯本地）/ 同步模式（自动镜像 git）/ 发布模式（只推正式版本）
@@ -39,13 +39,23 @@
 - 🔌 **MCP 标准协议** — 工具接入生态化（vs Cursor 私有协议）
 - 🦀 **Tauri 2 桌面** — Rust + WebView，体积小 10x（vs Electron）
 - 🏪 **Skills 市场** — 可复用任务模板，团队/社区共享
+- 📦 **10 行业模板**（5 核心 + 5 候补）— 电商-穿搭/电子、教育-早教/素质、金融-证券 5 核心 + 5 候补
+- 🛠️ **模板自定义向导**（v3.2 P0）— 用户可基于核心模板 fork 或从空白创建专属模板
 
-> **发布边界**：TimeFlow 生成"给开发者看的发布说明"（Release Notes / changelog），**不做营销物料**（短视频/海报/种草文）。营销方向应另起独立产品。详见 [docs/TIMEFLOW-DESIGN.md](docs/TIMEFLOW-DESIGN.md) § 6.1。
+> **v3.2 演进方向**：从"AI 研发团队"全面升级为"AI 智能体工作台"——
+> - 不再以"写代码"为核心场景，扩展到 5 大行业（电商/教育/金融/法律/财务）的 AI 员工场景
+> - 新增 AI 员工培训引擎（壁垒核心）+ 行业模板（B 端关键）+ 模板自定义（P0 需求）
+> - 新增 ChatPanel 互动机制（维护阶段友好）+ 任务驱动 + 互动双引擎
+> - 新增 6 个内置 AI 员工（3 通用 + 3 行业，扩展到 18 个 = 3 通用 + 15 行业）
+> - 详见 [docs/IMPROVEMENT-PLAN.md](docs/IMPROVEMENT-PLAN.md) v2.2
+> - 未来规划归档到 [docs/FUTURE-PLANS.md](docs/FUTURE-PLANS.md) v1.1
 
 **所有 agent 必须**：
 1. **明确自己工作在哪个代**（1.PC / 2.WEB / 3.dev / 4.AgentWork / 跨代）
 2. **明确自己工作在哪个层**（apps / platformkit / runtime / skills / sandbox-image）
 3. **新功能先在 4.AgentWork 落地**（本目录是 2026 下半年新主力）
+4. **明确自己工作在哪个场景**（代码协作 / AI 员工独立工作 / 5 行业模板 / 互动面板）
+5. **5 行业模板是 B 端获客主力**——任何新功能优先考虑行业模板的兼容性
 
 ---
 
@@ -82,6 +92,7 @@
 │   ├── AGENT-TEAM-DESIGN.md         ⭐🆕 AI 团队协作引擎设计
 │   ├── AST-NATIVE-DESIGN.md         ⭐🆕 AST 代码认知引擎设计
 │   ├── VERIFICATION-GUARDRAILS.md   ⭐🆕 编译期验证护栏设计
+│   ├── IMPROVEMENT-PLAN.md          🆕 完善与增强计划（W9.5+ 演进路线）
 │   ├── ARCHITECTURE.md              系统架构
 │   ├── ROADMAP.md                   路线图（v3.0，20 周）
 │   └── CONTRIBUTING.md              贡献指南
@@ -369,6 +380,8 @@
 | 2026-06-17 | 新增 §4 参考项目（UI-TARS-desktop 升级为 reference project） | Trae |
 | 2026-06-17 | **v2.0 重大升级**：产品定位升级为"AI-Native 全链路开发发布工作台"，新增 TimeFlow 引擎（4 个 crate：timeflow-core/ai/workflow/release），更新核心差异化、项目结构、发布边界契约 | Trae |
 | 2026-06-17 | **v3.0 重大升级**：产品定位升级为"AI 研发团队协作平台"，新增三大壁垒级 crate（agent-team/ast-native/verification-guardrails），核心差异化升级为五大支柱，路线图扩展为 20 周 | Trae |
+| 2026-06-18 | **v3.1 演进方向**：基于 W9 完工后的反思，新增 [docs/IMPROVEMENT-PLAN.md](docs/IMPROVEMENT-PLAN.md)，明确"任务驱动 + 互动机制"双引擎战略，引入 AI 员工定义 + 培训系统（壁垒核心），为跨行业（客服/销售/财务/...）打基础 | Trae + 用户 |
+| 2026-06-18 | **v3.2 演进方向**：IMPROVEMENT-PLAN 升级 v2.2（5 细分行业：电商-穿搭/电子 + 教育-早教/素质 + 金融-证券）+ 5 候补（含金融-建筑投资）+ M4.2 D6 模板自定义向导（P0 用户硬需求）；并加入 v2.3 远期愿景（M6 2027-05+：WordPress 式产品周边 + 6 层用户生态）| 用户 + Trae |
 
 ---
 

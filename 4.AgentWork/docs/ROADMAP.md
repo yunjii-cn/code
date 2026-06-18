@@ -3,7 +3,7 @@
 > **版本**：v3.0
 > **更新日期**：2026-06-17
 > **状态**：M1 进行中（W1 已完成）
-> **配套**：[AGENTS.md](../AGENTS.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) · [AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) · [AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) · [VERIFICATION-GUARDRAILS.md](VERIFICATION-GUARDRAILS.md) · [tier.yaml](../tier.yaml)
+> **配套**：[AGENTS.md](../AGENTS.md) · [ARCHITECTURE.md](ARCHITECTURE.md) · [TIMEFLOW-DESIGN.md](TIMEFLOW-DESIGN.md) · [AGENT-TEAM-DESIGN.md](AGENT-TEAM-DESIGN.md) · [AST-NATIVE-DESIGN.md](AST-NATIVE-DESIGN.md) · [VERIFICATION-GUARDRAILS.md](VERIFICATION-GUARDRAILS.md) · [IMPROVEMENT-PLAN.md](IMPROVEMENT-PLAN.md) · [tier.yaml](../tier.yaml)
 
 本文档将 20 周目标拆解到**周级任务**。每周结束做一次回顾，必要时调整后续计划。
 
@@ -13,6 +13,10 @@
 > 3. **编译期验证护栏**（五级验证管道 + 零幻觉交付）— 详见 [VERIFICATION-GUARDRAILS.md](VERIFICATION-GUARDRAILS.md)
 >
 > 这三大能力让 AgentWork 从"AI 编程工具"升级为"**AI 研发团队协作平台**"，技术壁垒显著提升，开发周期延长 8 周是值得的投入。
+
+> **v3.1 后续增强**：基于 W9 完成后的反思，新增 3 个阶段（W9.5 / W10 / W11）共 6 周，详见 [IMPROVEMENT-PLAN.md](IMPROVEMENT-PLAN.md)。
+>
+> **v3.2 升级**：IMPROVEMENT-PLAN 升级至 v2.2（5 细分行业 + 5 候补 + M4.2 D6 模板自定义向导）+ v2.3 远期（M6 2027-05+：WordPress 式产品周边 + 6 层用户生态）。M4.2 工期 1.5 月 → 2 月。Beta 推迟至 2027-04。
 
 ---
 
