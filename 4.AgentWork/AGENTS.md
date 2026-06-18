@@ -346,8 +346,14 @@
 - `README.md` — 项目门面，5 分钟看懂项目
 - `AGENTS.md` — 本文件，AI 协作契约
 - `tier.yaml` — 商业模式
+- `启动.bat` — Windows 启动菜单（dev / build / test / clippy）
 - `docs/ARCHITECTURE.md` — 系统架构图
 - `docs/ROADMAP.md` — 详细路线图
+- `docs/IMPROVEMENT-PLAN.md` — 完善+增强计划（v2.2）
+- `docs/FUTURE-PLANS.md` — 未来规划参考库（v1.1）
+- `docs/QUICKSTART.md` — 5 分钟快速开始
+- `docs/USER-GUIDE.md` — 详细用户指南
+- `docs/EMPLOYEE-GUIDE.md` — AI 员工定义指南
 - `docs/CONTRIBUTING.md` — 贡献指南
 - `CHANGELOG.md` — 变更日志（自动生成）
 
