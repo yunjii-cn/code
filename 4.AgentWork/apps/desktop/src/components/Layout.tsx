@@ -1,9 +1,20 @@
 import { Outlet, NavLink } from "react-router-dom";
-import { Clock, Settings as SettingsIcon, GitBranch } from "lucide-react";
+import {
+  Clock,
+  Settings as SettingsIcon,
+  GitBranch,
+  Search,
+  Users,
+  ClipboardList,
+} from "lucide-react";
 import { clsx } from "clsx";
 
 const navItems = [
   { to: "/timeline", label: "时间轴", icon: Clock },
+  { to: "/branches", label: "分支", icon: GitBranch },
+  { to: "/search", label: "语义搜索", icon: Search },
+  { to: "/team", label: "团队协作", icon: Users },
+  { to: "/tasks", label: "任务看板", icon: ClipboardList },
   { to: "/settings", label: "设置", icon: SettingsIcon },
 ];
 

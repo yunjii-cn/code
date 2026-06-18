@@ -3,3 +3,6 @@
 
 pub mod system;
 pub mod timeflow;
+pub mod git;
+pub mod ai;
+pub mod team;

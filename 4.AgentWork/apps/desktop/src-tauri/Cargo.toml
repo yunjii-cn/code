@@ -32,6 +32,12 @@ chrono = { workspace = true }
 
 # TimeFlow 引擎（W2 接入，先声明）
 timeflow-core = { path = "../../../platformkit/crates/timeflow-core" }
+# Git 兼容层（W4 接入）
+aw-git = { path = "../../../platformkit/crates/aw-git" }
+# AI 语义层（W5 接入）
+timeflow-ai = { path = "../../../platformkit/crates/timeflow-ai" }
+# 团队协作引擎（W7 接入）
+agent-team = { path = "../../../platformkit/crates/agent-team" }
 
 [features]
 # 默认启用自定义协议

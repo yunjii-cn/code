@@ -1,33 +1,30 @@
 [package]
-name = "timeflow-core"
+name = "aw-git"
 version = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
-description = "TimeFlow 本地版本控制引擎 - 内容寻址存储 + 快照链"
+description = "AgentWork Git 兼容层 - libgit2 三模式切换（隐身/同步/发布）"
 publish = false
 
 [dependencies]
 # Workspace 共享依赖
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true }
 
-# 内容寻址
-sha2 = { workspace = true }
-hex = { workspace = true }
+# libgit2 绑定
+git2 = { workspace = true }
 
-# 配置
+# 配置文件解析
 toml = { workspace = true }
 
-# 文件监控（W3 接入）
-notify = { workspace = true }
+# TimeFlow 引擎（用于读取快照/Blob 数据）
+timeflow-core = { path = "../timeflow-core" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

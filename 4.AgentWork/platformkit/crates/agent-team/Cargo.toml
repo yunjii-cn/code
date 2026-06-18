@@ -1,33 +1,31 @@
 [package]
-name = "timeflow-core"
+name = "agent-team"
 version = { workspace = true }
 edition = { workspace = true }
 rust-version = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
-description = "TimeFlow 本地版本控制引擎 - 内容寻址存储 + 快照链"
+description = "AI 团队协作引擎 - 团队模板 / 模型路由 / Agent 工作池 / DAG 调度"
 publish = false
 
 [dependencies]
 # Workspace 共享依赖
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 tokio = { workspace = true }
+async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-uuid = { workspace = true }
 
-# 内容寻址
-sha2 = { workspace = true }
-hex = { workspace = true }
+# HTTP 客户端（模型路由调用 LLM API）
+reqwest = { workspace = true }
 
-# 配置
-toml = { workspace = true }
-
-# 文件监控（W3 接入）
-notify = { workspace = true }
+# TimeFlow AI 引擎（复用 LlmEngine 抽象）
+timeflow-ai = { path = "../timeflow-ai" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

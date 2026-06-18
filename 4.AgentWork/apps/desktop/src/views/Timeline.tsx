@@ -1,25 +1,44 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, RotateCcw, Clock } from "lucide-react";
-import { listSnapshots, createSnapshot, type SnapshotSummary } from "@/lib/tauri";
+import { Plus, RotateCcw, Clock, AlertCircle, GitBranch } from "lucide-react";
+import {
+  listSnapshots,
+  createSnapshot,
+  rollbackSnapshot,
+  currentBranch,
+  type SnapshotSummary,
+} from "@/lib/tauri";
 import { cn, formatRelativeTime, snapshotTypeConfig, buildStatusConfig } from "@/lib/utils";
+import ConfirmDialog from "@/components/ConfirmDialog";
 
 export default function Timeline() {
   const navigate = useNavigate();
   const [snapshots, setSnapshots] = useState<SnapshotSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
+  const [branchName, setBranchName] = useState<string | null>(null);
+  const [repoError, setRepoError] = useState<string | null>(null);
+
+  // 回滚对话框状态
+  const [rollbackTarget, setRollbackTarget] = useState<SnapshotSummary | null>(null);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
 
   useEffect(() => {
     loadSnapshots();
+    currentBranch()
+      .then(setBranchName)
+      .catch((err) => setRepoError(String(err)));
   }, []);
 
   async function loadSnapshots() {
     try {
       setLoading(true);
+      setRepoError(null);
       const data = await listSnapshots(50);
       setSnapshots(data);
     } catch (err) {
+      setRepoError(String(err));
       console.error("加载快照失败:", err);
     } finally {
       setLoading(false);
@@ -33,8 +52,24 @@ export default function Timeline() {
       await loadSnapshots();
     } catch (err) {
       console.error("创建快照失败:", err);
+      alert(`创建快照失败: ${err}`);
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleRollbackConfirm() {
+    if (!rollbackTarget) return;
+    try {
+      setRollbackLoading(true);
+      setRollbackError(null);
+      await rollbackSnapshot(rollbackTarget.id);
+      await loadSnapshots();
+      setRollbackTarget(null);
+    } catch (err) {
+      setRollbackError(String(err));
+    } finally {
+      setRollbackLoading(false);
     }
   }
 
@@ -51,12 +86,20 @@ export default function Timeline() {
       {/* 顶部栏 */}
       <header className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
         <div>
-          <h1 className="text-lg font-semibold">时间轴</h1>
+          <h1 className="text-lg font-semibold flex items-center gap-2">
+            时间轴
+            {branchName && (
+              <span className="flex items-center gap-1 text-xs font-normal text-zinc-400 bg-zinc-800 px-2 py-0.5 rounded">
+                <GitBranch className="w-3 h-3" />
+                {branchName}
+              </span>
+            )}
+          </h1>
           <p className="text-sm text-zinc-500">共 {snapshots.length} 个快照</p>
         </div>
         <button
           onClick={handleCreateSnapshot}
-          disabled={creating}
+          disabled={creating || !!repoError}
           className="flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-600 hover:bg-brand-700 disabled:opacity-50 transition-colors"
         >
           <Plus className="w-4 h-4" />
@@ -64,13 +107,32 @@ export default function Timeline() {
         </button>
       </header>
 
+      {/* 仓库未初始化提示 */}
+      {repoError && (
+        <div className="m-4 flex items-start gap-3 p-4 rounded-lg bg-amber-950/30 border border-amber-800">
+          <AlertCircle className="w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="text-sm text-amber-200 font-medium">仓库未初始化</p>
+            <p className="text-xs text-amber-400 mt-1">
+              请前往「设置」页面初始化 TimeFlow 仓库后再使用版本控制功能
+            </p>
+            <button
+              onClick={() => navigate("/settings")}
+              className="mt-2 text-xs text-amber-300 hover:text-amber-200 underline"
+            >
+              前往设置 →
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 时间轴列表 */}
       <div className="flex-1 overflow-auto px-6 py-4">
-        {snapshots.length === 0 ? (
+        {snapshots.length === 0 && !repoError ? (
           <div className="flex flex-col items-center justify-center h-full text-zinc-500">
             <Clock className="w-12 h-12 mb-4 opacity-50" />
             <p>暂无快照</p>
-            <p className="text-sm mt-1">修改文件后会自动创建快照</p>
+            <p className="text-sm mt-1">修改文件后会自动创建快照，或点击右上角手动创建</p>
           </div>
         ) : (
           <div className="relative">
@@ -113,9 +175,7 @@ export default function Timeline() {
                         >
                           {typeCfg.label}
                         </span>
-                        <span className={cn("text-xs", buildCfg.color)}>
-                          {buildCfg.label}
-                        </span>
+                        <span className={cn("text-xs", buildCfg.color)}>{buildCfg.label}</span>
                         <span className="text-xs text-zinc-500">
                           {formatRelativeTime(snap.timestamp)}
                         </span>
@@ -123,17 +183,15 @@ export default function Timeline() {
                       <p className="text-sm text-zinc-200 truncate group-hover:text-white">
                         {snap.message}
                       </p>
-                      <p className="text-xs text-zinc-600 mt-0.5 font-mono">
-                        {snap.id}
-                      </p>
+                      <p className="text-xs text-zinc-600 mt-0.5 font-mono">{snap.id}</p>
                     </div>
 
                     {/* 回滚按钮 */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        // TODO: 确认对话框
-                        console.log("回滚到:", snap.id);
+                        setRollbackTarget(snap);
+                        setRollbackError(null);
                       }}
                       className="opacity-0 group-hover:opacity-100 p-1.5 rounded hover:bg-zinc-800 transition-all"
                       title="回滚到此版本"
@@ -147,6 +205,40 @@ export default function Timeline() {
           </div>
         )}
       </div>
+
+      {/* 回滚确认对话框 */}
+      <ConfirmDialog
+        open={!!rollbackTarget}
+        title="确认回滚"
+        variant="warning"
+        loading={rollbackLoading}
+        confirmText="确认回滚"
+        onConfirm={handleRollbackConfirm}
+        onCancel={() => !rollbackLoading && setRollbackTarget(null)}
+        description={
+          <div className="space-y-2">
+            <p>
+              确定要回滚到以下快照吗？工作区文件将被恢复到该快照时的状态。
+            </p>
+            {rollbackTarget && (
+              <div className="bg-zinc-800 rounded p-2 space-y-1">
+                <p className="text-xs text-zinc-400">快照 ID：</p>
+                <p className="text-xs font-mono text-zinc-300 break-all">{rollbackTarget.id}</p>
+                <p className="text-xs text-zinc-400 mt-2">消息：</p>
+                <p className="text-sm text-zinc-200">{rollbackTarget.message}</p>
+              </div>
+            )}
+            <p className="text-xs text-amber-400 bg-amber-950/30 rounded p-2">
+              ⚠️ 回滚不会删除历史，而是创建一个新快照保留完整时间线。
+            </p>
+            {rollbackError && (
+              <p className="text-xs text-red-400 bg-red-950/30 rounded p-2">
+                回滚失败：{rollbackError}
+              </p>
+            )}
+          </div>
+        }
+      />
     </div>
   );
 }
