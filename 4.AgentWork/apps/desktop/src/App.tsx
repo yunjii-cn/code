@@ -8,6 +8,7 @@ import Team from "./views/Team";
 import TaskBoard from "./views/TaskBoard";
 import ChatPanel from "./views/ChatPanel";
 import Settings from "./views/Settings";
+import DeliveryPreview, { MOCK_DELIVERY } from "./components/DeliveryPreview";
 
 export default function App() {
   return (
@@ -21,6 +22,12 @@ export default function App() {
         <Route path="search" element={<SemanticSearch />} />
         <Route path="team" element={<Team />} />
         <Route path="tasks" element={<TaskBoard />} />
+        <Route
+          path="delivery"
+          element={
+            <DeliveryPreview {...MOCK_DELIVERY} />
+          }
+        />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
