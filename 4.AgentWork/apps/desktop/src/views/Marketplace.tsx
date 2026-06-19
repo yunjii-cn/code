@@ -20,6 +20,7 @@ import {
   Eye,
   TrendingUp,
   Upload,
+  Wand2,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -447,13 +448,22 @@ export default function Marketplace() {
               浏览 / 搜索 / 安装社区模板 · 共 {totalTemplates} 个模板（{freeCount} 免费 / {paidCount} 付费）
             </p>
           </div>
-          <button
-            onClick={() => navigate("/marketplace/submit")}
-            className="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-md flex items-center gap-2 text-sm"
-          >
-            <Upload className="w-4 h-4" />
-            提交我的模板
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={() => navigate("/marketplace/customize")}
+              className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-md flex items-center gap-2 text-sm"
+            >
+              <Wand2 className="w-4 h-4" />
+              自定义模板
+            </button>
+            <button
+              onClick={() => navigate("/marketplace/submit")}
+              className="px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-md flex items-center gap-2 text-sm"
+            >
+              <Upload className="w-4 h-4" />
+              提交我的模板
+            </button>
+          </div>
         </div>
 
         {/* 搜索栏 */}

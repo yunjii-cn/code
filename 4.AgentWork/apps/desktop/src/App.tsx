@@ -11,6 +11,7 @@ import Settings from "./views/Settings";
 import TrainingWizard from "./views/TrainingWizard";
 import Marketplace from "./views/Marketplace";
 import TemplateSubmitWizard from "./views/TemplateSubmitWizard";
+import TemplateCustomizeWizard from "./views/TemplateCustomizeWizard";
 import DeliveryPreview, { MOCK_DELIVERY } from "./components/DeliveryPreview";
 
 export default function App() {
@@ -28,6 +29,7 @@ export default function App() {
         <Route path="training" element={<TrainingWizard />} />
         <Route path="marketplace" element={<Marketplace />} />
         <Route path="marketplace/submit" element={<TemplateSubmitWizard />} />
+        <Route path="marketplace/customize" element={<TemplateCustomizeWizard />} />
         <Route
           path="delivery"
           element={
