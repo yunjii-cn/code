@@ -1287,16 +1287,20 @@ v2.1 阶段划分（命名延续 M0-M8）：
 
 ## M5 Beta 准备（1 个月，公测前）
 
-### M5.1 沙箱（精简版，2 周）
+### M5.1 沙箱（精简版，2 周）✅ 已完成（2026-06-19）
 
 **调整**（v2.0 关键决策）：
 - v1.0 写"沙箱 + 安全审计"完整版 → **v2.0 砍到本地 Docker 沙箱**
 - 不做 gVisor / 网络隔离（资源不够，先用标准 Docker）
 
 **任务**：
-- [ ] Docker 沙箱镜像（只 Linux，Windows WSL2 + macOS）
-- [ ] 桌面端"沙箱执行"开关
-- [ ] 基本审计日志（SQLite）
+- [x] Docker 沙箱镜像（4 种内置镜像：Python311 / Node20 / Rust188 / Ubuntu2204 + 自定义）
+- [x] 桌面端"沙箱执行"开关（SandboxManager.execute 接口）
+- [x] 基本审计日志（AuditLog 内存存储，60 测试通过）
+- [x] 命令白名单（CommandWhitelist 严格/宽松模式 + 危险模式阻止）
+- [x] 资源限制（CPU/内存/磁盘/超时/进程数/网络）
+- [x] 沙箱生命周期（Created → Running → Paused → Stopped → Destroyed）
+- [x] 60 个单元测试全部通过
 
 ### M5.2 Skills 市场（精简版，1 周）✅ 已完成（2026-06-19）
 
