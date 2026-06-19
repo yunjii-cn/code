@@ -21,6 +21,8 @@
 // M4.1 D3: 话术训练系统（Few-shot + LLM-as-Judge）
 // M4.1 D4: 培训效果评估（EvalSuite + 批量跑测试集 + 基线对比）
 // M4.1 D6: 云端备份（加密上传 + 多设备同步）
+// M4.2 D1: 跨岗位协作（邮件式异步消息 + 工作流模板）
+// M4.2 D2: 行业模板基础设施（加载 + 安装 + 版本 + 依赖）
 
 #![warn(missing_docs)]
 
@@ -42,6 +44,8 @@ mod rule;
 mod speech;
 mod evaluation;
 mod sync;
+mod collaboration;
+mod template_loader;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -98,6 +102,20 @@ pub use evaluation::{
 pub use sync::{
     SyncConfig, FileEntry, SyncManifest, SyncPackage, CryptoUtil,
     SyncClient, SyncResult, ManifestDiff,
+};
+pub use collaboration::{
+    MessageId, AgentId, MessagePriority, MessageStatus, MessagePayload,
+    AgentMessage, MessageBus,
+    StepTrigger, StepAction, WorkflowStep, WorkflowTemplate,
+    WorkflowStatus, WorkflowInstance, WorkflowRunner,
+    builtin_marketing_workflow, builtin_complaint_workflow, builtin_sales_followup_workflow,
+    builtin_workflows, builtin_workflow_by_id,
+};
+pub use template_loader::{
+    TemplateManifest, TemplateFileEntry, TemplateFileGroup, TemplateDependency,
+    TemplateLoader, TemplateInstallResult, TemplateInstallReport,
+    TemplateVersion, TemplateVersionCompat,
+    builtin_template_registry, builtin_template_by_id,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池

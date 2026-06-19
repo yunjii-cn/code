@@ -748,25 +748,34 @@ v2.1 阶段划分（命名延续 M0-M8）：
 > - 每多 1 个模板 = 多 1 个行业 + 多 3-5 个员工 + 多 30-50% 潜在用户
 > - B 端采购决策：行业方案存在性 = 通过/否决
 
-### M4.2 D1 - 跨岗位协作 MVP（1 周）
+### M4.2 D1 - 跨岗位协作 MVP（1 周）✅ 已完成
 
 **任务**：
-- [ ] 已有 DAG 调度保留（开发场景）
-- [ ] 加"轻协作"模式：员工之间可触发消息（**邮件式异步**，不需长连接）
-- [ ] 跨岗位工作流模板（"营销活动 = 销售 + 文案 + 客服"）
+- [x] 已有 DAG 调度保留（开发场景）
+- [x] 加"轻协作"模式：员工之间可触发消息（**邮件式异步**，不需长连接）
+- [x] 跨岗位工作流模板（"营销活动 = 销售 + 文案 + 客服"）
 
 **验收**：
-- 一个销售线索可自动分配给销售员工
-- 销售完成后通知客服员工
+- ✅ 一个销售线索可自动分配给销售员工
+- ✅ 销售完成后通知客服员工
+
+**实现**（2026-06-19）：
+- 新增 `collaboration.rs`（~900 行）
+- 核心结构：AgentMessage / MessageBus / WorkflowStep / WorkflowTemplate / WorkflowRunner
+- 邮件式异步消息：投递 / 收件箱 / 广播 / 状态管理（Sent/Delivered/Read/Processed/Ignored）
+- 3 个内置工作流模板：marketing_campaign / complaint_handling / sales_followup
+- 工作流触发条件：OnStart / OnMessage / AfterStep / Manual
+- 模板渲染（{{key}} 替换）+ 上下文传递 + 进度跟踪
+- 50 个单元测试全部通过
 
 **资源说明**：
 - 不用云端长连接 = 不占宝塔资源
 - 全部本地处理，云端仅做日志
 
-### M4.2 D2 - 行业模板基础设施（1 周）
+### M4.2 D2 - 行业模板基础设施（1 周）✅ 已完成
 
 **任务**：
-- [ ] 模板目录结构标准化
+- [x] 模板目录结构标准化
   ```
   industry-templates/
   ├── {industry}/
@@ -777,13 +786,23 @@ v2.1 阶段划分（命名延续 M0-M8）：
   │   ├── evals/             # 评估用例
   │   └── manifest.yaml      # 模板清单
   ```
-- [ ] 模板安装向导（1 步安装 + 自动配置）
-- [ ] 模板版本管理（template v1.0.0）
-- [ ] 模板依赖管理（员工 A 依赖员工 B）
+- [x] 模板安装向导（1 步安装 + 自动配置）
+- [x] 模板版本管理（template v1.0.0）
+- [x] 模板依赖管理（员工 A 依赖员工 B）
 
 **验收**：
-- 客户可一键安装完整行业方案
-- 模板员工 + 知识库 + 规则 + 话术 全部到位
+- ✅ 客户可一键安装完整行业方案
+- ✅ 模板员工 + 知识库 + 规则 + 话术 全部到位
+
+**实现**（2026-06-19）：
+- 新增 `template_loader.rs`（~900 行）
+- 核心结构：TemplateManifest / TemplateLoader / TemplateInstallResult / TemplateInstallReport / TemplateVersion / TemplateDependency
+- TemplateLoader：scan / load / verify / install / check_dependencies
+- 1 步安装：复制 manifest + employees + rules + speeches + evals + knowledge 到目标目录
+- 语义化版本管理：major.minor.patch + 兼容性检查
+- 依赖管理：employee / template / system 三类依赖 + required 标记
+- 内置模板注册表：5 个核心行业模板（电商-穿搭/电子 + 教育-早教/素质 + 金融-证券）
+- 62 个单元测试全部通过
 
 ### M4.2 D3 - 5 个核心行业模板（4 周，**B 端获客主力**）✅ 5/5 模板已创建
 
