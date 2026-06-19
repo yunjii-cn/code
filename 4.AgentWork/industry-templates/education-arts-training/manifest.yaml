@@ -1,0 +1,68 @@
+# 教育-素质培训行业模板清单
+# M4.2 D3 Template 4 - 教育-素质培训（AI培训 + 美术培训合并）
+# 设计文档: docs/IMPROVEMENT-PLAN.md § M4.2 D3 模板 4
+#
+# 目标客户：少儿编程/AI启蒙/美术/书法/音乐机构，3-30 人课程顾问 + AI教师 + 作品指导老师团队
+# 业务场景：课程咨询（AI启蒙/美术/书法/音乐）+ 教学辅导（Scratch/Python/作品点评）+ 续费跟进
+
+id: education-arts-training
+name: 教育-素质培训
+version: 1.0.0
+industry: education
+sub_industry: arts_training
+description: 少儿编程/AI启蒙/美术/书法/音乐机构（AI培训+美术培训合并）
+
+# 模板包含的员工列表
+employees:
+  - arts_advisor      # 课程顾问（体验课邀约/课程推荐/续费跟进）
+  - ai_tutor          # AI教师助手（Scratch/Python/LLM基础教学）
+  - arts_teacher      # 作品指导老师（美术/书法/音乐作品点评）
+
+# 模板配置文件清单（供模板引擎加载）
+files:
+  employees:
+    - path: employees/arts_advisor.yml
+      id: arts_advisor
+    - path: employees/ai_tutor.yml
+      id: ai_tutor
+    - path: employees/arts_teacher.yml
+      id: arts_teacher
+  rules:
+    - path: rules/rules.yaml
+      scope: template
+  speeches:
+    - path: speeches/arts_consultation.yml
+      employee_id: arts_advisor
+  evals:
+    - path: evals/eval_suite.yaml
+      employee_id: arts_advisor
+  knowledge:
+    - path: knowledge/
+      docs_count: 5
+
+# 模板元数据
+metadata:
+  target_market: 少儿编程/AI启蒙/美术/书法/音乐机构
+  company_size: 3-30 人
+  employee_count: 3
+  rules_count: 12
+  speech_examples_count: 32
+  eval_cases_count: 22
+  knowledge_docs_count: 5
+  priority: P0
+  author: Trae
+  language: zh-CN
+
+# 合规要点
+compliance:
+  - 不替代真人教师（复杂操作/情感交流转人工）
+  - 不评判学员天赋（避免家长焦虑）
+  - 涉及考级/比赛必须明确"非保过"
+  - 涉及退款按合同条款
+  - 不承诺课程效果（不夸大"学完就能怎样"）
+  - 禁用焦虑营销（不制造"错过就晚了"的恐慌）
+  - 禁用词：没天赋、不是这块料
+  - 必须词：建议尝试、根据兴趣、因材施教
+
+# 创建时间
+created_at: 2026-06-19

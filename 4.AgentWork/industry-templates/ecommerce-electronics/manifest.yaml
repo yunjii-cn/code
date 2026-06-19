@@ -1,0 +1,66 @@
+# 电商-电子行业模板清单
+# M4.2 D3 Template 2 - 电商-电子（3C数码/家电/智能硬件）
+# 设计文档: docs/IMPROVEMENT-PLAN.md § M4.2 D3 模板 2
+#
+# 目标客户：京东/拼多多/天猫旗舰店 3C数码/家电/智能硬件商家，5-50 人客服团队
+# 业务场景：售前参数对比 + 售后故障排查 + 装机使用指导
+
+id: ecommerce-electronics
+name: 电商-电子
+version: 1.0.0
+industry: ecommerce
+sub_industry: electronics
+description: 3C数码/家电/智能硬件商家客服（京东/拼多多/天猫旗舰店）
+
+# 模板包含的员工列表
+employees:
+  - tech_advisor       # 技术顾问（售前参数对比/选型建议）
+  - tech_support       # 售后工程师（故障排查/退换货/维修咨询）
+  - setup_guide        # 装机达人（安装调试/使用教学）
+
+# 模板配置文件清单（供模板引擎加载）
+files:
+  employees:
+    - path: employees/tech_advisor.yml
+      id: tech_advisor
+    - path: employees/tech_support.yml
+      id: tech_support
+    - path: employees/setup_guide.yml
+      id: setup_guide
+  rules:
+    - path: rules/rules.yaml
+      scope: template
+  speeches:
+    - path: speeches/tech_consultation.yml
+      employee_id: tech_advisor
+  evals:
+    - path: evals/eval_suite.yaml
+      employee_id: tech_advisor
+  knowledge:
+    - path: knowledge/
+      docs_count: 5
+
+# 模板元数据
+metadata:
+  target_market: 京东/拼多多/天猫旗舰店 3C 数码商家
+  company_size: 5-50 人
+  employee_count: 3
+  rules_count: 14
+  speech_examples_count: 36
+  eval_cases_count: 22
+  knowledge_docs_count: 5
+  priority: P0
+  author: Trae
+  language: zh-CN
+
+# 合规要点
+compliance:
+  - 涉及金额 > 2000 元转人工
+  - 不替代工程师现场维修
+  - 不诊断医疗设备/婴儿监护类产品
+  - 不推荐金融产品（手机分期/消费贷）
+  - 配件售后 7 天内质量问题包退
+  - 禁用绝对化承诺（绝对稳定/保证无故障）
+
+# 创建时间
+created_at: 2026-06-19

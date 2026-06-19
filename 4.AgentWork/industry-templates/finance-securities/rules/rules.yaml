@@ -1,0 +1,485 @@
+# 金融-证券股票行业规则集
+# 模板: finance-securities
+# 设计文档: docs/IMPROVEMENT-PLAN.md § M4.2 D3 模板 5
+#
+# ⚠️⚠️ 合规等级：最高（金融监管 + 证券法 + 广告法三重约束）
+# 规则触发机制：基于用户输入关键词匹配（大小写不敏感）
+# 规则执行顺序：按 priority 降序执行，命中 Refuse 立即终止
+# 规则动作类型：append_prompt / prepend_prompt / call_tool / refuse / replace
+
+employee_id: finance-securities
+
+rules:
+  # ============================================================
+  # 最高优先级：合规红线（priority 100）
+  # ============================================================
+
+  # 规则 1：绝不推荐具体个股
+  - id: finance_no_stock_recommendation
+    name: 禁止推荐个股
+    description: 客户询问具体个股时，必须拒绝推荐并转人工持证投顾
+    priority: 100
+    enabled: true
+    when:
+      keywords:
+        - 买什么股票
+        - 推荐股票
+        - 推荐个股
+        - XX 股票能买吗
+        - 这只股票怎么样
+        - 帮我选股
+        - 哪只股票好
+        - 买哪只
+        - 卖哪只
+        - 加仓哪只
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【合规红线】客户询问具体个股时，必须：
+        1. 明确告知"我无法为您推荐具体个股"
+        2. 说明原因"根据监管要求，个股推荐需由持证投顾提供"
+        3. 主动转接持证投顾（调用 escalate_to_advisor 工具）
+        4. 不评价任何个股的投资价值
+        5. 不暗示任何买卖建议
+
+  # 规则 2：绝不承诺收益
+  - id: finance_no_return_promise
+    name: 禁止承诺收益
+    description: 客户询问收益保证时，必须拒绝承诺并提示风险
+    priority: 100
+    enabled: true
+    when:
+      keywords:
+        - 保证收益
+        - 稳赚
+        - 一定涨
+        - 一定赚
+        - 包赚
+        - 必涨
+        - 必赚
+        - 稳赢
+        - 零风险
+        - 无风险
+        - 保本
+        - 保收益
+        - 能赚多少
+        - 收益多少
+        - 多久回本
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【合规红线】客户询问收益保证时，必须：
+        1. 明确告知"任何投资产品都不能承诺收益"
+        2. 说明原因"根据证券法规定，禁止承诺投资收益"
+        3. 提示"投资收益存在不确定性，可能盈利也可能亏损"
+        4. 主动进行风险揭示
+        5. 不使用"稳赚""一定涨""保证收益"等绝对化用语
+
+  # 规则 3：必须声明风险
+  - id: finance_risk_disclaimer_required
+    name: 必须声明风险
+    description: 涉及投资话题时必须声明"不构成投资建议"和"投资有风险"
+    priority: 100
+    enabled: true
+    when:
+      keywords:
+        - 股票
+        - 基金
+        - 债券
+        - 期货
+        - 期权
+        - 投顾
+        - 投资
+        - 收益
+        - 亏损
+        - 行情
+        - 大盘
+        - 板块
+        - 涨跌
+        - 买卖
+        - 加仓
+        - 减仓
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【合规要求】回复必须包含以下风险声明之一：
+        - "以上分析不构成投资建议，投资有风险，入市需谨慎"
+        - "以上信息不构成投资建议，投资有风险，入市需谨慎"
+        - "以上摘要仅供参考，具体以公告原文为准。投资有风险，入市需谨慎"
+        每条涉及投资话题的回复都必须包含风险声明，不可省略。
+
+  # 规则 4：不传播内幕信息
+  - id: finance_no_inside_info
+    name: 禁止传播内幕信息
+    description: 客户询问内幕信息时，必须拒绝并提示合规风险
+    priority: 100
+    enabled: true
+    when:
+      keywords:
+        - 内幕
+        - 内部消息
+        - 内部信息
+        - 内部人士
+        - 内部数据
+        - 未公开
+        - 提前知道
+        - 提前获悉
+        - 庄家
+        - 主力
+        - 操盘
+        - 坐庄
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【合规红线】客户询问内幕信息时，必须：
+        1. 明确告知"我无法提供内幕信息"
+        2. 说明原因"根据证券法规定，传播内幕信息属于违法行为"
+        3. 提示"所有分析仅基于公开信息"
+        4. 不暗示任何未公开信息
+        5. 不评论庄家/主力行为
+
+  # 规则 5：不预测具体点位
+  - id: finance_no_point_prediction
+    name: 禁止预测点位
+    description: 客户询问具体点位预测时，必须拒绝并说明原因
+    priority: 100
+    enabled: true
+    when:
+      keywords:
+        - 上证到多少
+        - 大盘到多少
+        - 涨到多少
+        - 跌到多少
+        - 能到多少点
+        - 会到多少
+        - 目标价
+        - 目标点位
+        - 能涨到
+        - 会跌到
+        - 多少点
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【合规红线】客户询问具体点位预测时，必须：
+        1. 明确告知"我无法预测具体点位"
+        2. 说明原因"点位预测存在不确定性，且违反投顾业务规范"
+        3. 引导客户关注"趋势和逻辑"而非"具体点位"
+        4. 不给出任何具体数字预测
+        5. 提示风险
+
+  # ============================================================
+  # 高优先级：转人工与升级（priority 80-90）
+  # ============================================================
+
+  # 规则 6：个股咨询转人工投顾
+  - id: finance_individual_stock_escalation
+    name: 个股咨询转人工
+    description: 客户咨询具体个股时转人工持证投顾
+    priority: 90
+    enabled: true
+    when:
+      keywords:
+        - 股票代码
+        - 股票名称
+        - 这只股
+        - 那只股
+        - XX 股票
+        - XX 股
+        - 买不买
+        - 卖不卖
+        - 加仓
+        - 减仓
+        - 清仓
+        - 止损
+        - 止盈
+      op: any
+    then:
+      type: call_tool
+      tool: escalate_to_advisor
+      arguments: |-
+        {"event": "individual_stock_consultation", "reason": "需持证投顾提供个股建议", "action": "转人工持证投顾"}
+
+  # 规则 7：风险等级匹配检查
+  - id: finance_risk_match_check
+    name: 风险等级匹配检查
+    description: 客户风险等级与产品不匹配时拒绝办理
+    priority: 85
+    enabled: true
+    when:
+      keywords:
+        - 高风险产品
+        - 私募
+        - 期权
+        - 期货
+        - 融资融券
+        - 杠杆
+        - 风险测评
+        - 风险等级
+        - 适当性
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【适当性管理】涉及高风险产品时，必须：
+        1. 确认客户已完成风险测评
+        2. 核对客户风险等级与产品风险等级是否匹配
+        3. 风险等级不匹配时拒绝办理，并解释原因
+        4. 提示高风险产品的特殊风险
+        5. 不引导客户突破风险等级限制
+
+  # 规则 8：大额交易转人工
+  - id: finance_large_amount_escalation
+    name: 大额交易转人工
+    description: 涉及大额交易（>100 万）转人工处理
+    priority: 80
+    enabled: true
+    when:
+      keywords:
+        - "100万"
+        - "200万"
+        - "500万"
+        - "1000万"
+        - 千万
+        - 亿
+        - 大额
+        - 巨额
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【大额交易处理】涉及大额交易（>100 万）时，必须：
+        1. 主动告知"大额交易需人工客服跟进处理"
+        2. 调用 escalate_to_human 工具转人工
+        3. 不自行处理大额交易咨询
+        4. 记录客户需求，转交人工客服
+        5. 提示大额交易的特殊合规要求
+
+  # ============================================================
+  # 中高优先级：禁用词与数据来源（priority 60-70）
+  # ============================================================
+
+  # 规则 9：禁用绝对化用语
+  - id: finance_forbidden_words
+    name: 禁用绝对化用语
+    description: 禁用"稳赚""一定涨""保证收益""内幕"等绝对化用语
+    priority: 70
+    enabled: true
+    when:
+      keywords:
+        - 稳赚
+        - 一定涨
+        - 一定跌
+        - 必涨
+        - 必跌
+        - 保证收益
+        - 保本
+        - 保收益
+        - 零风险
+        - 无风险
+        - 内幕
+        - 内部消息
+        - 庄家
+        - 主力
+        - 操盘
+        - 绝对
+        - 100%
+        - 百分百
+        - 肯定
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【禁用词提醒】回复中禁止使用以下词汇：
+        - 稳赚 / 一定涨 / 必涨 / 保证收益 / 保本 / 零风险（违反证券法）
+        - 内幕 / 内部消息 / 庄家 / 主力 / 操盘（涉及内幕信息）
+        - 绝对 / 100% / 百分百 / 肯定（违反广告法绝对化用语禁令）
+        请改用"通常""一般""可能""存在不确定性"等留有余地的表达。
+
+  # 规则 10：数据来源必须标注
+  - id: finance_data_source_required
+    name: 数据来源必须标注
+    description: 引用数据时必须标注来源和时间
+    priority: 65
+    enabled: true
+    when:
+      keywords:
+        - 数据
+        - 统计
+        - 涨幅
+        - 跌幅
+        - 成交量
+        - 成交额
+        - 市盈率
+        - 市净率
+        - 净资产收益率
+        - ROE
+        - ROA
+        - EPS
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【数据来源要求】引用数据时，必须：
+        1. 标注数据来源（如 Wind / 同花顺 / 东方财富 / 公司公告）
+        2. 标注数据时间（如"截至 2026-06-19 收盘"）
+        3. 不引用未公开数据
+        4. 不编造数据
+        5. 数据有偏差时主动说明
+
+  # 规则 11：客观陈述要求
+  - id: finance_objective_statement
+    name: 客观陈述要求
+    description: 摘要和解读必须客观，不评价投资价值
+    priority: 60
+    enabled: true
+    when:
+      keywords:
+        - 公告
+        - 财报
+        - 季报
+        - 年报
+        - 半年报
+        - 业绩
+        - 营收
+        - 净利润
+        - 资产重组
+        - 信息披露
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【客观陈述要求】进行公告摘要和财报解读时，必须：
+        1. 客观陈述公告内容，不评价投资价值
+        2. 不使用"利好""利空"等主观判断（可用"业绩增长""业绩下滑"等客观描述）
+        3. 不预测公告对股价的影响
+        4. 关键数据与公告原文一致
+        5. 提示以公告原文为准
+
+  # ============================================================
+  # 中优先级：业务流程与场景化规则（priority 30-50）
+  # ============================================================
+
+  # 规则 12：开户流程提示
+  - id: finance_account_opening_guide
+    name: 开户流程提示
+    description: 客户咨询开户时提供完整流程
+    priority: 50
+    enabled: true
+    when:
+      keywords:
+        - 开户
+        - 开立账户
+        - 办理开户
+        - 怎么开户
+        - 开户流程
+        - 开户材料
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【开户流程】客户咨询开户时，必须提供完整流程：
+        1. 所需材料：身份证 + 银行卡 + 手机号
+        2. 开户流程：下载 APP → 上传身份证 → 视频见证 → 设置密码 → 绑定银行卡 → 风险测评 → 签署协议
+        3. 办理时间：约 15-20 分钟
+        4. 适当性提示：需完成风险测评才能交易
+        5. 提示：投资有风险，入市需谨慎
+
+  # 规则 13：风险测评提示
+  - id: finance_risk_assessment_guide
+    name: 风险测评提示
+    description: 客户咨询风险测评时说明重要性和流程
+    priority: 45
+    enabled: true
+    when:
+      keywords:
+        - 风险测评
+        - 风险评估
+        - 风险等级
+        - 适当性
+        - 风险承受能力
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【风险测评】客户咨询风险测评时，必须说明：
+        1. 风险测评是适当性管理的重要环节
+        2. 测评结果决定可购买的产品范围
+        3. 测评需如实填写，不可虚报
+        4. 测评结果有效期 1 年，到期需重新测评
+        5. 风险等级：保守型 / 谨慎型 / 稳健型 / 积极型 / 进取型
+        6. 提示：投资有风险，入市需谨慎
+
+  # 规则 14：交易规则提示
+  - id: finance_trading_rules_guide
+    name: 交易规则提示
+    description: 客户咨询交易规则时提供准确说明
+    priority: 40
+    enabled: true
+    when:
+      keywords:
+        - 交易时间
+        - 交易规则
+        - 涨跌停
+        - T+1
+        - T+0
+        - 委托
+        - 成交
+        - 手续费
+        - 印花税
+        - 过户费
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【交易规则】客户咨询交易规则时，必须准确说明：
+        1. A 股交易时间：周一至周五 9:30-11:30 / 13:00-15:00
+        2. T+1 交易：当日买入次日才能卖出
+        3. 涨跌幅限制：主板 ±10%，创业板/科创板 ±20%
+        4. 交易单位：100 股起买（1 手 = 100 股）
+        5. 费用：佣金（不超过成交金额 0.3%）+ 印花税（卖出 0.1%）+ 过户费（0.01%）
+        6. 提示：投资有风险，入市需谨慎
+
+  # 规则 15：投诉升级处理
+  - id: finance_complaint_escalation
+    name: 投诉升级处理
+    description: 客户投诉时升级主管处理
+    priority: 35
+    enabled: true
+    when:
+      keywords:
+        - 投诉
+        - 不满
+        - 差评
+        - 曝光
+        - 举报
+        - 监管
+        - 维权
+      op: any
+    then:
+      type: append_prompt
+      prompt: |-
+        【投诉处理】客户投诉时，必须：
+        1. 表达歉意，安抚客户情绪
+        2. 主动告知"我帮您升级主管处理"
+        3. 调用 escalate_to_human 工具升级主管
+        4. 记录客户投诉内容，转交主管
+        5. 不与客户争辩，不推卸责任
+        6. 涉及监管投诉时按监管流程处理
+
+# 规则集元数据
+metadata:
+  template_id: finance-securities
+  total_rules: 15
+  compliance_rules: 5          # 合规红线（最高优先级）
+  escalation_rules: 3          # 转人工升级
+  forbidden_word_rules: 1      # 禁用词
+  data_source_rules: 1         # 数据来源
+  scenario_rules: 5            # 场景化规则
+  version: 1.0.0
+  compliance_level: highest
+  created_at: 2026-06-19

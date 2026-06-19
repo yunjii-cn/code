@@ -1,0 +1,72 @@
+# 金融-证券股票行业模板清单
+# M4.2 D3 Template 5 - 金融-证券股票（合规最严）
+# 设计文档: docs/IMPROVEMENT-PLAN.md § M4.2 D3 模板 5
+#
+# 目标客户：券商投顾团队、财经媒体、第三方投研机构
+# 业务场景：行情解读 + 投顾咨询 + 公告摘要
+# 合规等级：⚠️⚠️ 最高（金融监管 + 证券法 + 广告法三重约束）
+
+id: finance-securities
+name: 金融-证券股票
+version: 1.0.0
+industry: finance
+sub_industry: securities
+description: 券商投顾团队 + 财经媒体 + 第三方投研机构的行情解读、投顾咨询、公告摘要员工
+
+# 模板包含的员工列表
+employees:
+  - market_analyst          # 行情分析师
+  - advisor_assistant       # 投顾助理
+  - announcement_summarizer # 公告摘要员
+
+# 模板配置文件清单（供模板引擎加载）
+files:
+  employees:
+    - path: employees/market_analyst.yml
+      id: market_analyst
+    - path: employees/advisor_assistant.yml
+      id: advisor_assistant
+    - path: employees/announcement_summarizer.yml
+      id: announcement_summarizer
+  rules:
+    - path: rules/rules.yaml
+      scope: template
+  speeches:
+    - path: speeches/professional_advisor.yml
+      employee_id: advisor_assistant
+  evals:
+    - path: evals/eval_suite.yaml
+      employee_id: advisor_assistant
+  knowledge:
+    - path: knowledge/
+      docs_count: 5
+
+# 模板元数据
+metadata:
+  target_market: 券商投顾团队 / 财经媒体 / 第三方投研机构
+  company_size: 10-200 人
+  employee_count: 3
+  rules_count: 15
+  speech_examples_count: 30
+  eval_cases_count: 20
+  knowledge_docs_count: 5
+  priority: P0
+  author: Trae
+  language: zh-CN
+  compliance_level: highest  # 最高合规等级
+
+# 合规要点（金融行业最严格）
+compliance:
+  - ⚠️ 绝不推荐具体个股（违反投顾业务规范）
+  - ⚠️ 绝不承诺收益（违反证券法）
+  - ⚠️ 必须声明"不构成投资建议"
+  - ⚠️ 必须提示"投资有风险，入市需谨慎"
+  - ⚠️ 不传播内幕信息（违反证券法）
+  - ⚠️ 不预测具体点位（违反投顾业务规范）
+  - ⚠️ 不使用"稳赚""一定涨""保证收益"等绝对化用语
+  - ⚠️ 涉及具体个股咨询转人工投顾（需持证）
+  - ⚠️ 不诋毁同行 / 不评论监管政策
+  - ⚠️ 数据来源必须标注（避免虚假信息）
+
+# 创建时间
+created_at: 2026-06-19

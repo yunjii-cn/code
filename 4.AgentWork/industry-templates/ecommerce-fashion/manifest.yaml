@@ -1,0 +1,65 @@
+# 电商-穿搭行业模板清单
+# M4.2 D3 Template 1 - 电商-穿搭（优先级最高）
+# 设计文档: docs/IMPROVEMENT-PLAN.md § M4.2 D3 模板 1
+#
+# 目标客户：淘宝/抖音/小红书穿搭商家，5-50 人客服 + 选品 + 搭配团队
+# 业务场景：售前搭配推荐 + 售后退换货 + 内容种草文案
+
+id: ecommerce-fashion
+name: 电商-穿搭
+version: 1.0.0
+industry: ecommerce
+sub_industry: fashion
+description: 淘宝/抖音/小红书穿搭商家客服 + 选品 + 搭配团队
+
+# 模板包含的员工列表
+employees:
+  - fashion_stylist       # 售前搭配师
+  - fashion_after_sales   # 售后客服
+  - fashion_content       # 内容运营
+
+# 模板配置文件清单（供模板引擎加载）
+files:
+  employees:
+    - path: employees/fashion_stylist.yml
+      id: fashion_stylist
+    - path: employees/fashion_after_sales.yml
+      id: fashion_after_sales
+    - path: employees/fashion_content.yml
+      id: fashion_content
+  rules:
+    - path: rules/rules.yaml
+      scope: template
+  speeches:
+    - path: speeches/customer_service.yml
+      employee_id: fashion_stylist
+  evals:
+    - path: evals/eval_suite.yaml
+      employee_id: fashion_stylist
+  knowledge:
+    - path: knowledge/
+      docs_count: 5
+
+# 模板元数据
+metadata:
+  target_market: 淘宝/抖音/小红书穿搭商家
+  company_size: 5-50 人
+  employee_count: 3
+  rules_count: 12
+  speech_examples_count: 32
+  eval_cases_count: 22
+  knowledge_docs_count: 5
+  priority: P0
+  author: Trae
+  language: zh-CN
+
+# 合规要点
+compliance:
+  - 不夸大功效（医美/减肥类话术禁用）
+  - 不承诺面料（不替消费者做鉴定）
+  - 不保证正品（避免法律风险）
+  - 涉及金额 > 500 元转人工
+  - 退换货争议 > 2 次升级主管
+
+# 创建时间
+created_at: 2026-06-19

@@ -19,6 +19,8 @@
 // M4.1 D1: 知识库系统（RAG 检索增强）
 // M4.1 D2: 规则引擎（关键词 + 逻辑运算 + 5 种动作）
 // M4.1 D3: 话术训练系统（Few-shot + LLM-as-Judge）
+// M4.1 D4: 培训效果评估（EvalSuite + 批量跑测试集 + 基线对比）
+// M4.1 D6: 云端备份（加密上传 + 多设备同步）
 
 #![warn(missing_docs)]
 
@@ -38,6 +40,8 @@ mod stream;
 mod knowledge;
 mod rule;
 mod speech;
+mod evaluation;
+mod sync;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -84,6 +88,16 @@ pub use speech::{
     SpeechTraining, FewShotBuilder, ConstraintChecker, JudgeResult, SpeechJudge,
     builtin_customer_service_speech, builtin_finance_advisor_speech, builtin_medical_consult_speech,
     builtin_all_speech,
+};
+pub use evaluation::{
+    EvalCase, EvalSuite, EvalResult, EvalReport, CategoryStat,
+    BaselineComparison, CaseComparison, EvaluationRunner,
+    builtin_customer_service_eval, builtin_finance_advisor_eval, builtin_medical_consult_eval,
+    builtin_all_evals, builtin_eval_by_employee,
+};
+pub use sync::{
+    SyncConfig, FileEntry, SyncManifest, SyncPackage, CryptoUtil,
+    SyncClient, SyncResult, ManifestDiff,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池
