@@ -1298,11 +1298,17 @@ v2.1 阶段划分（命名延续 M0-M8）：
 - [ ] 桌面端"沙箱执行"开关
 - [ ] 基本审计日志（SQLite）
 
-### M5.2 Skills 市场（精简版，1 周）
+### M5.2 Skills 市场（精简版，1 周）✅ 已完成（2026-06-19）
 
 **调整**：
 - v1.0 写"5 个内置 Skills" → **v2.0 砍到 2 个**（developer / customer_service）
 - 不做"Skills 市场下载"（宝塔 8G 内存跑不动 marketplace）
+
+**任务**：
+- [x] 内置 Skill 1：开发技能包（developer）— 6 个工具（code_gen / code_review / debug / refactor / test_gen / doc_gen）
+- [x] 内置 Skill 2：客服技能包（customer_service）— 6 个工具（faq_search / ticket_route / sentiment_analyze / refund_process / order_query / escalation）
+- [x] SkillMarket 注册表（注册 / 注销 / 搜索 / 按分类筛选 / 按角色筛选 / 工具查找）
+- [x] 50 个单元测试全部通过
 
 ### M5.3 内部 Beta（1 周）
 

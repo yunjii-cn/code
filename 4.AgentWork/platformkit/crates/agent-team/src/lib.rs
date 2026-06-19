@@ -47,6 +47,7 @@ mod sync;
 mod collaboration;
 mod template_loader;
 mod template_market;
+mod skill_market;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -124,6 +125,12 @@ pub use template_market::{
     TemplateMarketEntry, TemplateSubmission,
     AutoReviewDimension, AutoReviewResult, ManualReviewResult,
     TemplateMarketplace,
+};
+pub use skill_market::{
+    SkillId, ToolId, SkillCategory, SkillTool, ToolParameter,
+    Skill, SkillMarket, SkillMarketStats,
+    builtin_skills, builtin_skill_by_id,
+    builtin_developer_skill, builtin_customer_service_skill,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池
