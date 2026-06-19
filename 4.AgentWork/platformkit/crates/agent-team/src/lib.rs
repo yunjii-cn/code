@@ -46,6 +46,7 @@ mod evaluation;
 mod sync;
 mod collaboration;
 mod template_loader;
+mod template_market;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -116,6 +117,13 @@ pub use template_loader::{
     TemplateLoader, TemplateInstallResult, TemplateInstallReport,
     TemplateVersion, TemplateVersionCompat,
     builtin_template_registry, builtin_template_by_id,
+};
+pub use template_market::{
+    MarketId, AuthorId, PricingType, ReviewStatus,
+    TemplateRating, RatingSummary,
+    TemplateMarketEntry, TemplateSubmission,
+    AutoReviewDimension, AutoReviewResult, ManualReviewResult,
+    TemplateMarketplace,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池

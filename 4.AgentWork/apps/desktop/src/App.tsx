@@ -9,6 +9,8 @@ import TaskBoard from "./views/TaskBoard";
 import ChatPanel from "./views/ChatPanel";
 import Settings from "./views/Settings";
 import TrainingWizard from "./views/TrainingWizard";
+import Marketplace from "./views/Marketplace";
+import TemplateSubmitWizard from "./views/TemplateSubmitWizard";
 import DeliveryPreview, { MOCK_DELIVERY } from "./components/DeliveryPreview";
 
 export default function App() {
@@ -24,6 +26,8 @@ export default function App() {
         <Route path="team" element={<Team />} />
         <Route path="tasks" element={<TaskBoard />} />
         <Route path="training" element={<TrainingWizard />} />
+        <Route path="marketplace" element={<Marketplace />} />
+        <Route path="marketplace/submit" element={<TemplateSubmitWizard />} />
         <Route
           path="delivery"
           element={

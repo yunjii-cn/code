@@ -8,6 +8,7 @@ import {
   ClipboardList,
   MessageSquare,
   GraduationCap,
+  Store,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -19,6 +20,7 @@ const navItems = [
   { to: "/team", label: "团队协作", icon: Users },
   { to: "/tasks", label: "任务看板", icon: ClipboardList },
   { to: "/training", label: "员工培训", icon: GraduationCap },
+  { to: "/marketplace", label: "模板市场", icon: Store },
   { to: "/settings", label: "设置", icon: SettingsIcon },
 ];
 
