@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
+import { Palette, CheckCircle2, AlertCircle } from "lucide-react";
+import { useTheme } from "@/lib/theme-store";
 import {
   FolderOpen,
-  CheckCircle2,
-  AlertCircle,
   Loader2,
   Eye,
   RefreshCw,
@@ -11,6 +11,8 @@ import {
   Brain,
   Cpu,
   Cloud,
+  FolderTree,
+  RotateCcw,
 } from "lucide-react";
 import {
   getAppInfo,
@@ -24,6 +26,8 @@ import {
   getAiConfig,
   setAiConfig,
   setAiEnabled,
+  getDefaultRepoPath,
+  openFolder,
   type AppInfo,
   type SystemInfo,
   type GitStatusInfo,
@@ -51,6 +55,7 @@ const MODE_INFO: Record<GitMode, { label: string; desc: string; icon: typeof Eye
 };
 
 export default function Settings() {
+  const { currentTheme, setTheme } = useTheme();
   const [appInfo, setAppInfo] = useState<AppInfo | null>(null);
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null);
   const [repoPath, setRepoPath] = useState("");
@@ -69,7 +74,7 @@ export default function Settings() {
 
   // AI 配置相关状态
   const [aiConfig, setAiConfigState] = useState<AiConfigInfo | null>(null);
-  const [aiProvider, setAiProvider] = useState<"openai" | "ollama" | "mock">("ollama");
+  const [aiProvider, setAiProvider] = useState<"openai" | "ollama" | "mock" | "mg">("ollama");
   const [aiApiKey, setAiApiKey] = useState("");
   const [aiModel, setAiModel] = useState("");
   const [aiBaseUrl, setAiBaseUrl] = useState("");
@@ -171,6 +176,42 @@ export default function Settings() {
     }
   }
 
+  // 在系统资源管理器中打开当前仓库文件夹
+  async function handleOpenFolder() {
+    if (!repoPath.trim()) {
+      setInitStatus("error");
+      setInitMessage("请先输入或初始化仓库路径");
+      return;
+    }
+    try {
+      await openFolder(repoPath.trim());
+    } catch (err) {
+      setInitStatus("error");
+      setInitMessage(`打开文件夹失败: ${String(err)}`);
+    }
+  }
+
+  // 使用默认仓库路径（<app_dir>/data/workspace）并自动初始化
+  async function handleUseDefaultPath() {
+    try {
+      setInitStatus("loading");
+      setInitMessage("正在切换到默认仓库...");
+      const defaultPath = await getDefaultRepoPath();
+      setRepoPath(defaultPath);
+      const result = await initRepository(defaultPath);
+      setInitStatus("success");
+      setInitMessage(result);
+      const branch = await currentBranch();
+      setCurrentBranchName(branch);
+      const mode = await getGitMode();
+      setGitModeState(mode as GitMode);
+      refreshGitStatus();
+    } catch (err) {
+      setInitStatus("error");
+      setInitMessage(`使用默认路径失败: ${String(err)}`);
+    }
+  }
+
   async function handleModeSwitch(newMode: GitMode) {
     if (newMode === gitMode || modeSwitching) return;
     try {
@@ -237,6 +278,30 @@ export default function Settings() {
                   </span>
                 </button>
               </div>
+              {/* 辅助按钮：打开文件夹 + 使用默认路径 */}
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={handleOpenFolder}
+                  disabled={!repoPath.trim()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs text-zinc-300"
+                  title="在系统资源管理器中打开当前仓库文件夹"
+                >
+                  <FolderTree className="w-3.5 h-3.5" />
+                  <span>打开文件夹</span>
+                </button>
+                <button
+                  onClick={handleUseDefaultPath}
+                  disabled={initStatus === "loading"}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-xs text-zinc-300"
+                  title="使用软件目录下的 data/workspace 作为默认仓库并自动初始化"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>使用默认路径</span>
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-zinc-500">
+                默认路径为软件目录下的 <code className="px-1 py-0.5 bg-zinc-800 rounded text-zinc-400">data/workspace</code>，首次启动已自动初始化。可随时更改路径并重新初始化。
+              </p>
             </div>
 
             {/* 当前状态 */}
@@ -397,10 +462,11 @@ export default function Settings() {
             {/* LLM 提供方选择 */}
             <div>
               <label className="text-sm text-zinc-300">LLM 提供方</label>
-              <div className="mt-1 grid grid-cols-3 gap-2">
+              <div className="mt-1 grid grid-cols-2 gap-2">
                 {([
                   { value: "ollama", label: "Ollama 本地", icon: Cpu, desc: "不上云" },
                   { value: "openai", label: "OpenAI 云端", icon: Cloud, desc: "更快更准" },
+                  { value: "mg", label: "云集网关", icon: Cloud, desc: "UM 计费" },
                   { value: "mock", label: "Mock 测试", icon: Brain, desc: "不调 API" },
                 ] as const).map(({ value, label, icon: Icon, desc }) => (
                   <button
@@ -472,7 +538,7 @@ export default function Settings() {
                   className="mt-1 w-full bg-zinc-800 text-sm rounded-lg px-3 py-2 border border-zinc-700 focus:border-brand-500 focus:outline-none"
                 />
                 <p className="text-xs text-zinc-500 mt-1">
-                  API key 仅存储在内存中，重启后需重新输入
+                  配置自动持久化，重启后保留
                 </p>
               </div>
             )}
@@ -525,6 +591,39 @@ export default function Settings() {
               <p>
                 <strong className="text-zinc-400">Mock 模式</strong>：返回固定响应，仅用于测试。
               </p>
+            </div>
+          </div>
+        </section>
+
+        {/* 主题外观 */}
+        <section>
+          <h2 className="text-sm font-medium text-zinc-400 mb-3 flex items-center gap-2">
+            <Palette className="w-4 h-4" />
+            主题外观
+          </h2>
+          <div className="bg-zinc-900 rounded-lg p-4 space-y-3">
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                { value: "dark", label: "暗黑" },
+                { value: "light", label: "明亮" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setTheme(opt.value)}
+                  className={`p-3 rounded-lg border text-left transition-all ${
+                    currentTheme === opt.value
+                      ? "border-brand-500 bg-brand-950/30"
+                      : "border-zinc-700 bg-zinc-800/50 hover:border-zinc-600"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className={`text-sm font-medium ${currentTheme === opt.value ? "text-brand-300" : "text-zinc-200"}`}>
+                      {opt.label}
+                    </span>
+                    {currentTheme === opt.value && <CheckCircle2 className="w-4 h-4 text-brand-400" />}
+                  </div>
+                </button>
+              ))}
             </div>
           </div>
         </section>

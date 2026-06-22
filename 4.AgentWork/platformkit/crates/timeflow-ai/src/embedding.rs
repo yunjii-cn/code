@@ -213,6 +213,11 @@ pub fn create_embedding_engine(config: &AiConfig) -> Result<Box<dyn EmbeddingEng
             tracing::warn!("OpenAI embedding 暂未实现，使用 Mock 引擎");
             Ok(Box::new(MockEmbeddingEngine::new()))
         }
+        LlmProvider::Mg => {
+            // MG embedding 走 MG BFF，暂未实现，回退到 Mock
+            tracing::warn!("MG embedding 暂未实现，使用 Mock 引擎");
+            Ok(Box::new(MockEmbeddingEngine::new()))
+        }
         LlmProvider::Mock => Ok(Box::new(MockEmbeddingEngine::new())),
     }
 }

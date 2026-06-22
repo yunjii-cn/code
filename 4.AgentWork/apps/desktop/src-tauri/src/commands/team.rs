@@ -184,6 +184,7 @@ pub async fn register_model(
     api_key: Option<String>,
     model_name: String,
     state: tauri::State<'_, crate::AppState>,
+    app: tauri::AppHandle,
 ) -> AppResult<String> {
     let provider_parsed: timeflow_ai::LlmProvider = provider
         .parse()
@@ -198,11 +199,19 @@ pub async fn register_model(
         timeout_secs: 60,
         max_tokens: 4096,
         temperature: 0.3,
+        routing_hint: timeflow_ai::RoutingHint::Chat,
     };
 
     let mut router = state.team.router.lock().unwrap();
     router.register(config);
     tracing::info!("模型已注册: {}", id);
+
+    // 持久化：保存当前所有模型列表
+    let models: Vec<ModelConfig> = router.list_models().into_iter().map(|mid| {
+        router.get(&mid).cloned().unwrap()
+    }).collect();
+    crate::config_store::save(&app, "custom_models", &models);
+
     Ok(format!("模型 {id} 已注册"))
 }
 

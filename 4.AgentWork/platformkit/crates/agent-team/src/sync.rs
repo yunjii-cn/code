@@ -429,12 +429,14 @@ impl SyncClient {
     }
 
     /// 构建服务器 API URL
+    #[allow(dead_code)]
     fn api_url(&self, path: &str) -> String {
         let base = self.config.server_url.trim_end_matches('/');
         format!("{base}/api/{path}")
     }
 
     /// 构建用户数据 URL
+    #[allow(dead_code)]
     fn user_url(&self) -> String {
         self.api_url(&format!("users/{}/data", self.config.user_id))
     }

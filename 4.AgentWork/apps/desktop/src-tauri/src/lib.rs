@@ -2,8 +2,10 @@
 // 所有 Tauri command 和后端逻辑放这里
 
 use serde::Serialize;
+use tauri::Manager;
 
 mod commands;
+mod config_store;
 
 /// 应用初始化错误
 #[derive(Debug, thiserror::Error)]
@@ -105,11 +107,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_store::Builder::default().build())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             // 系统命令
             commands::system::get_app_info,
             commands::system::get_system_info,
+            commands::system::get_default_repo_path,
+            commands::system::open_folder,
             // TimeFlow 命令
             commands::timeflow::init_repository,
             commands::timeflow::list_snapshots,
@@ -162,10 +167,83 @@ pub fn run() {
             commands::team::stream_agent_thinking,
             commands::team::stream_task_progress,
         ])
-        .setup(|_app| {
+        .setup(|app| {
             tracing::info!("AgentWork 桌面端启动完成");
+
+            // 从持久化存储加载配置
+            let handle = app.handle();
+            load_persisted_config(handle);
+
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");
+}
+
+/// 从持久化存储加载配置到 AppState
+fn load_persisted_config(app: &tauri::AppHandle) {
+    // 加载 AI 配置
+    if let Some(ai_config) = config_store::load::<timeflow_ai::AiConfig>(app, config_store::keys::AI_CONFIG) {
+        tracing::info!("已加载持久化 AI 配置: provider={}", ai_config.provider);
+
+        // 用加载的配置重建 AI 引擎
+        if let Ok(engine) = timeflow_ai::create_engine(ai_config.clone()) {
+            let state: tauri::State<AppState> = app.state();
+            *state.ai_config.lock().unwrap() = ai_config;
+            *state.ai_engine.lock().unwrap() = Some(engine);
+        }
+    }
+
+    // 加载 AI 启用状态
+    if let Some(enabled) = config_store::load::<bool>(app, config_store::keys::AI_ENABLED) {
+        let state: tauri::State<AppState> = app.state();
+        *state.ai_enabled.lock().unwrap() = enabled;
+        tracing::info!("已加载 AI 启用状态: {}", enabled);
+    }
+
+    // 加载仓库路径，如果没有则自动初始化默认仓库
+    let repo_path = config_store::load::<String>(app, config_store::keys::REPO_PATH);
+    let repo_path = match repo_path {
+        Some(p) if std::path::Path::new(&p).exists() => Some(p),
+        _ => {
+            // 没有持久化路径或路径不存在，自动初始化默认仓库
+            let default_path = match app.path().app_local_data_dir() {
+                Ok(dir) => dir.join("data").join("workspace"),
+                Err(e) => {
+                    tracing::warn!("获取应用目录失败，跳过默认仓库初始化: {}", e);
+                    return;
+                }
+            };
+
+            // 创建目录（如果不存在）
+            if let Err(e) = std::fs::create_dir_all(&default_path) {
+                tracing::warn!("创建默认仓库目录失败: {}", e);
+                return;
+            }
+
+            let path_str = default_path.to_string_lossy().to_string();
+            tracing::info!("自动初始化默认仓库: {}", path_str);
+
+            // 初始化 TimeFlow 仓库
+            match timeflow_core::TimeFlow::new(&default_path) {
+                Ok(tf) => {
+                    let state: tauri::State<AppState> = app.state();
+                    *state.timeflow.lock().unwrap() = Some(std::sync::Arc::new(tf));
+                    *state.repo_path.lock().unwrap() = Some(default_path.clone());
+
+                    // 持久化默认路径
+                    config_store::save(app, config_store::keys::REPO_PATH, &path_str);
+                    Some(path_str)
+                }
+                Err(e) => {
+                    tracing::warn!("默认仓库初始化失败: {}", e);
+                    None
+                }
+            }
+        }
+    };
+
+    if let Some(path) = repo_path {
+        tracing::info!("已加载仓库路径: {}", path);
+    }
 }

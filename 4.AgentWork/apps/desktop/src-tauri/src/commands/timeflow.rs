@@ -64,6 +64,7 @@ pub struct WatcherStatus {
 pub async fn init_repository(
     path: String,
     state: tauri::State<'_, crate::AppState>,
+    app: tauri::AppHandle,
 ) -> AppResult<String> {
     let repo_path = PathBuf::from(&path);
     if !repo_path.exists() {
@@ -81,6 +82,9 @@ pub async fn init_repository(
         let mut rp_lock = state.repo_path.lock().unwrap();
         *rp_lock = Some(repo_path.clone());
     }
+
+    // 持久化仓库路径
+    crate::config_store::save(&app, crate::config_store::keys::REPO_PATH, &path);
 
     // 懒加载 Git adapter（读取已保存的模式）
     {

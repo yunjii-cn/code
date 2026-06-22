@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-云集智能编程工作站 - 统一启动器 v3.1
+云集智能编程工作站 - 统一启动器 v3.0
 所有功能内嵌在一个 EXE 中，不再依赖 Electron
 
 架构:
-- PyQt6 + Edge WebView2 (pywebview) 替代 Electron/QWebEngine
-- pywebview js_api 替代 QWebChannel IPC
+- PyQt6 + QWebEngineView 替代 Electron
+- QWebChannel 替代 Electron IPC (preload.cjs)
 - backend.py 提供 Ollama 代理 / CLI 管理 / 配置管理
-- Vue 前端通过 window.pywebview.api 与 Python 通信
+- Vue 前端通过 QWebChannel 与 Python 通信
 - 部署维护只是 EXE 的一个功能模块
 """
 
@@ -26,18 +26,10 @@ else:
 os.makedirs(_temp_pycache, exist_ok=True)
 os.environ["PYTHONPYCACHEPREFIX"] = _temp_pycache
 
-# ── onefile 模式: 将嵌入资源目录加入 sys.path ──
-# PyInstaller --onefile 将所有嵌入文件解压到 _MEIPASS 临时目录
-# 需要将 _MEIPASS 加入 sys.path 以便 import backend 等模块
-if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-    if sys._MEIPASS not in sys.path:
-        sys.path.insert(0, sys._MEIPASS)
-
 sys.dont_write_bytecode = True
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 import json
 import time
-import re
 import subprocess
 import threading
 import traceback
@@ -57,23 +49,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QTextEdit, QFrame, QProgressBar,
     QMessageBox, QFileDialog, QStackedWidget, QSizePolicy,
     QTabWidget, QScrollArea, QComboBox, QSplashScreen,
-    QSplitter, QListWidget, QListWidgetItem, QLineEdit, QCheckBox, QInputDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl, QPropertyAnimation, QEasingCurve, pyqtProperty, QRectF, QEvent, QSize
-from PyQt6.QtGui import QFont, QIcon, QColor, QPixmap, QPainter, QLinearGradient, QPalette, QFontDatabase
-
-try:
-    import webview
-    WEBVIEW_AVAILABLE = True
-except ImportError:
-    WEBVIEW_AVAILABLE = False
-
-# QtWebView2: 轻量级 WebView2 控件，支持内嵌到 Qt 布局，EXE 不膨胀
-try:
-    from qtwebview2 import QtWebView2Widget
-    QTWEBVIEW2_AVAILABLE = True
-except ImportError:
-    QTWEBVIEW2_AVAILABLE = False
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QTimer, QUrl, QPropertyAnimation, pyqtProperty, QRectF
+from PyQt6.QtGui import QFont, QIcon, QColor, QPixmap, QPainter, QLinearGradient, QPalette
+from PyQt6.QtWebEngineWidgets import QWebEngineView
+from PyQt6.QtWebEngineCore import QWebEnginePage
+from PyQt6.QtWebChannel import QWebChannel
 
 from PyQt6.QtCore import QObject
 
@@ -123,14 +104,32 @@ MENU_TRANSLATIONS = {
 }
 
 
-class BackendBridge:
-    """暴露给前端 JS 的 Python 对象，通过 pywebview js_api 暴露"""
-
+class ChineseWebView(QWebEngineView):
     def __init__(self, parent=None):
-        self._app_ref = None  # 由 MainWindow 设置
+        super().__init__(parent)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_translated_menu)
 
-    def _get_main(self):
-        return self._app_ref
+    def _show_translated_menu(self, pos):
+        try:
+            page = self.page()
+            if page is None:
+                return
+            menu = page.createStandardContextMenu()
+            if menu is None:
+                return
+            for action in menu.actions():
+                text = action.text()
+                if text in MENU_TRANSLATIONS:
+                    action.setText(MENU_TRANSLATIONS[text])
+                else:
+                    for en, zh in MENU_TRANSLATIONS.items():
+                        if en in text:
+                            text = text.replace(en, zh)
+                    action.setText(text)
+            menu.exec(self.mapToGlobal(pos))
+        except Exception:
+            pass
 
 # 导入后端模块
 import backend
@@ -142,22 +141,27 @@ from backend import (
 )
 
 
-# ══════════════════════════════════════════════════════════════
-# 品牌名（杀同名逻辑依赖，必须在单实例控制区段之前定义）
-# ══════════════════════════════════════════════════════════════
-BRAND_NAME = "云集智能编程工作站"
+# ── 版本号 ──
+def get_version_from_filename():
+    try:
+        if hasattr(sys, 'frozen'):
+            exe_name = os.path.basename(sys.executable)
+            import re
+            m = re.search(r'v(\d+\.\d+\.\d+\.\d+)', exe_name)
+            if m:
+                return m.group(1)
+        return datetime.now().strftime("%Y.%m.%d.%H%M")
+    except:
+        return datetime.now().strftime("%Y.%m.%d.%H%M")
 
 
-# ══════════════════════════════════════════════════════════════
-# 单实例控制: 杀同名进程 + mutex 占位（最简单方案）
-# ══════════════════════════════════════════════════════════════
-# 设计:
-#   - 启动时直接杀掉所有同名前缀的旧 EXE（杀同名是最简单的方式）
-#   - mutex 仅用于防两个进程同时启动时的 race
-#   - 不需要共享内存 / SHUTDOWN_EVENT / 激活窗口
-#   - 升级场景: 旧 EXE 被杀 → 启动新 EXE，天然完成切换
-#   - 资源名: 固定不带版本号（升级是切换版本，不存在同时运行）
+VERSION = get_version_from_filename()
 
+# ── 单实例控制：命名互斥体 + 命名事件 + 命名共享内存 ──
+# 方案：
+#   同版本 + 同路径 → 激活已运行实例的窗口
+#   同版本 + 不同路径 → 通知旧实例退出
+#   不同版本 → 通知旧版本退出
 import ctypes
 from ctypes import wintypes
 
@@ -165,173 +169,152 @@ _kernel32 = ctypes.windll.kernel32
 _user32 = ctypes.windll.user32
 
 ERROR_ALREADY_EXISTS = 183
-TH32CS_SNAPPROCESS = 0x00000002
-INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+PAGE_READWRITE = 0x04
+FILE_MAP_ALL_ACCESS = 0xF001F
+WM_ACTIVATE_INSTANCE = 0x0400 + 0x1001  # 自定义消息：激活窗口
 
-MUTEX_NAME = "YunJiCode_SingleInstance"
+# 全局句柄，MainWindow 关闭时需要释放
+_instance_mutex = None
+_shutdown_event = None
+_path_mapping = None  # 共享内存句柄
 
-
-class PROCESSENTRY32W(ctypes.Structure):
-    _fields_ = [
-        ("dwSize", ctypes.wintypes.DWORD),
-        ("cntUsage", ctypes.wintypes.DWORD),
-        ("th32ProcessID", ctypes.wintypes.DWORD),
-        ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
-        ("th32ModuleID", ctypes.wintypes.DWORD),
-        ("cntThreads", ctypes.wintypes.DWORD),
-        ("th32ParentProcessID", ctypes.wintypes.DWORD),
-        ("pcPriClassBase", ctypes.c_long),
-        ("dwFlags", ctypes.wintypes.DWORD),
-        ("szExeFile", ctypes.c_wchar * 260),
-    ]
+MUTEX_NAME = f"YunJiCode_SingleInstance_v{VERSION}"
+SHUTDOWN_EVENT_NAME = "YunJiCode_ShutdownEvent"
+PATH_MAPPING_NAME = f"YunJiCode_Path_v{VERSION}"  # 存储当前 EXE 路径的共享内存
+PATH_MAPPING_SIZE = 1024  # 足够存放路径
 
 
-def _kill_same_name_processes():
-    """杀掉所有同名旧进程（EXE 模式按 BRAND_NAME 前缀，开发模式按 main.py）"""
-    if sys.platform != 'win32':
+def _write_exe_path_to_shared_memory():
+    """将当前 EXE 路径写入命名共享内存"""
+    global _path_mapping
+    _path_mapping = _kernel32.CreateFileMappingW(
+        -1, None, PAGE_READWRITE, 0, PATH_MAPPING_SIZE, PATH_MAPPING_NAME
+    )
+    if not _path_mapping:
         return
+    ptr = _kernel32.MapViewOfFile(_path_mapping, FILE_MAP_ALL_ACCESS, 0, 0, PATH_MAPPING_SIZE)
+    if ptr:
+        try:
+            exe_path = sys.executable  # PyInstaller 打包后为 EXE 路径
+            path_bytes = exe_path.encode("utf-16-le") + b"\x00\x00"
+            ctypes.memmove(ptr, path_bytes, min(len(path_bytes), PATH_MAPPING_SIZE))
+        finally:
+            _kernel32.UnmapViewOfFile(ptr)
 
-    my_pid = _kernel32.GetCurrentProcessId()
-    is_frozen = getattr(sys, 'frozen', False)
-    base_prefix = BRAND_NAME.lower()
 
-    # 1. 创建进程快照
-    snap = _kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snap == INVALID_HANDLE_VALUE:
-        return
-
-    # 2. 收集当前进程的祖先链（防止杀掉自己的父/祖父导致自己被连带）
-    my_ancestor_pids = set()
+def _read_exe_path_from_shared_memory():
+    """从命名共享内存读取已运行实例的 EXE 路径"""
+    mapping = _kernel32.OpenFileMappingW(FILE_MAP_ALL_ACCESS, False, PATH_MAPPING_NAME)
+    if not mapping:
+        return ""
     try:
-        import psutil as _ps_anc
-        cur = _ps_anc.Process(my_pid)
-        while True:
-            par = cur.parent()
-            if par is None or par.pid == 0:
-                break
-            my_ancestor_pids.add(par.pid)
-            cur = par
-    except Exception:
-        pass
+        ptr = _kernel32.MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, PATH_MAPPING_SIZE)
+        if not ptr:
+            return ""
+        try:
+            raw = ctypes.string_at(ptr, PATH_MAPPING_SIZE)
+            # utf-16-le 编码，找双零终止
+            end = raw.find(b"\x00\x00")
+            if end > 0:
+                raw = raw[:end + 2]
+            return raw.decode("utf-16-le", errors="ignore").rstrip("\x00")
+        finally:
+            _kernel32.UnmapViewOfFile(ptr)
+    finally:
+        _kernel32.CloseHandle(mapping)
 
-    # 3. 遍历进程，找同名
-    entry = PROCESSENTRY32W()
-    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-    pids_to_kill = []
 
-    if _kernel32.Process32FirstW(snap, ctypes.byref(entry)):
-        while True:
-            pid = entry.th32ProcessID
-            if pid != my_pid and pid not in my_ancestor_pids:
-                exe_name = (entry.szExeFile or "").lower()
-                should_kill = False
-                if is_frozen:
-                    # EXE 模式: 同名前缀的 .exe
-                    should_kill = (
-                        exe_name.startswith(base_prefix)
-                        and exe_name.endswith('.exe')
-                    )
-                else:
-                    # 开发模式: 杀所有跑 main.py 的 python.exe
-                    # (bat 启动时 cmdline 可能是 "python main.py" 不含 1.pc,
-                    #  所以只用 main.py 字符串匹配，不强制 1.pc)
-                    if exe_name in ('python.exe', 'pythonw.exe'):
-                        try:
-                            import psutil
-                            cmdline = ' '.join(psutil.Process(pid).cmdline()).lower()
-                            if 'main.py' in cmdline:
-                                should_kill = True
-                        except Exception:
-                            pass
-                if should_kill:
-                    pids_to_kill.append(pid)
-
-            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-            if not _kernel32.Process32NextW(snap, ctypes.byref(entry)):
-                break
-
-    _kernel32.CloseHandle(snap)
-
-    PROCESS_TERMINATE = 0x0001
-    for pid in pids_to_kill:
-        h = _kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
-        if h:
-            _kernel32.TerminateProcess(h, 0)
-            _kernel32.CloseHandle(h)
-
-    # 等旧进程退出（最多 2 秒）
-    if pids_to_kill:
-        for _ in range(20):
-            time.sleep(0.1)
-            still_alive = []
-            for pid in pids_to_kill:
-                h = _kernel32.OpenProcess(0x00100000, False, pid)
-                if h:
-                    exit_code = ctypes.c_ulong()
-                    if _kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)) and exit_code.value == 259:
-                        still_alive.append(pid)
-                    _kernel32.CloseHandle(h)
-            if not still_alive:
-                break
+def _activate_running_instance():
+    """激活已运行的实例窗口"""
+    # 用窗口类名和标题查找
+    hwnd = _user32.FindWindowW(None, f"云集智能编程工作站 v{VERSION}")
+    if hwnd:
+        # 如果窗口最小化，先恢复
+        if _user32.IsIconic(hwnd):
+            _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        _user32.SetForegroundWindow(hwnd)
+        return True
+    return False
 
 
 def _ensure_single_instance():
-    """单实例控制: 杀同名进程（mutex 仅做一次性冲突检测，用完即弃）
-
-    设计:
-      - 杀同名前缀的旧 EXE / 旧 python main.py（最简单方式）
-      - mutex 不保留句柄，避免泄漏导致后续启动冲突
-      - 杀得彻底的话，mutex 永远成功
-      - 杀不彻底（race 或被杀进程未响应）→ 弹窗提示并退出
+    """单实例控制：
+    1. 同版本 + 同路径 → 激活已运行实例窗口
+    2. 同版本 + 不同路径 → 通知旧实例退出
+    3. 不同版本 → 通知旧版本退出
     """
-    if sys.platform != 'win32':
-        return
+    global _instance_mutex, _shutdown_event
 
-    # 1. 杀所有同名旧进程
-    _kill_same_name_processes()
-
-    # 2. 创建 mutex 做一次性冲突检测（用完即 CloseHandle，不留句柄）
-    m = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
-    last_err = ctypes.GetLastError()
-    if m:
-        _kernel32.CloseHandle(m)  # 立即释放（关键：不留句柄）
-    if last_err == ERROR_ALREADY_EXISTS:
-        # 杀得不彻底（极端 race / 旧进程未响应）
-        ctypes.windll.user32.MessageBoxW(
-            0, f"{BRAND_NAME} 旧实例未能退出，请手动结束进程后重试。", "提示", 0x40
+    # 1. 尝试创建版本互斥体（同版本检测）
+    _instance_mutex = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
+    if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+        # 同版本已在运行
+        existing_path = _read_exe_path_from_shared_memory()
+        my_path = sys.executable
+        same_path = existing_path and (
+            existing_path.lower() == my_path.lower()
         )
-        sys.exit(0)
+
+        if same_path:
+            # 同一 EXE，激活已运行窗口
+            _kernel32.CloseHandle(_instance_mutex)
+            _instance_mutex = None
+            _activate_running_instance()
+            sys.exit(0)
+        else:
+            # 不同路径的同版本，通知旧实例退出
+            _kernel32.CloseHandle(_instance_mutex)
+            _instance_mutex = None
+            _shutdown_event = _kernel32.CreateEventW(None, True, False, SHUTDOWN_EVENT_NAME)
+            _kernel32.SetEvent(_shutdown_event)
+            time.sleep(0.5)
+            # 旧实例退出后，重新创建互斥体
+            _kernel32.CloseHandle(_shutdown_event)
+            _shutdown_event = None
+            _instance_mutex = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
+            if ctypes.GetLastError() == ERROR_ALREADY_EXISTS:
+                # 旧实例还没退出，弹出提示
+                _kernel32.CloseHandle(_instance_mutex)
+                _instance_mutex = None
+                ctypes.windll.user32.MessageBoxW(
+                    0, "云集智能编程工作站旧实例正在退出中，请稍后重试。", "提示", 0x40
+                )
+                sys.exit(0)
+
+    # 2. 通知所有旧版本优雅退出（设置全局关闭事件）
+    #    无论事件是否已存在，都 SetEvent 一次
+    _shutdown_event = _kernel32.CreateEventW(None, True, False, SHUTDOWN_EVENT_NAME)
+    _kernel32.SetEvent(_shutdown_event)
+
+    # 3. 短暂等待旧版本退出
+    time.sleep(0.3)
+    # 重置事件，新实例不会关闭自己
+    _kernel32.ResetEvent(_shutdown_event)
+
+    # 4. 将自身路径写入共享内存
+    _write_exe_path_to_shared_memory()
+
+
+def _is_shutdown_signaled() -> bool:
+    """检查是否收到关闭信号（由更新的实例发出）"""
+    if not _shutdown_event:
+        return False
+    return _kernel32.WaitForSingleObject(_shutdown_event, 0) == 0  # WAIT_OBJECT_0
 
 
 def _cleanup_single_instance():
-    """清理单实例资源（窗口关闭时调用）— 当前无需清理（mutex 已用完即弃）"""
-    pass
-
-
-# ══════════════════════════════════════════════════════════════
-# ── 版本号 ──
-def get_version_from_filename():
-    try:
-        # 优先使用构建信息 (build_pc.py 在打包时写入 _build_info.py)
-        try:
-            from _build_info import BUILD_VERSION
-            return BUILD_VERSION
-        except Exception:
-            pass
-        if hasattr(sys, 'frozen'):
-            exe_name = os.path.basename(sys.executable)
-            import re
-            m = re.search(r'v(\d+\.\d+\.\d+\.\d+)', exe_name)
-            if m:
-                return m.group(1)
-        # 2026-06-16 修复: 开发模式（python main.py）下回退用稳定字符串 "dev"
-        # 之前用 datetime.now() 导致每次启动 VERSION 都不同
-        return "dev"
-    except:
-        return "dev"
-
-
-VERSION = get_version_from_filename()
+    """清理单实例资源（窗口关闭时调用）"""
+    global _instance_mutex, _shutdown_event, _path_mapping
+    if _instance_mutex:
+        _kernel32.ReleaseMutex(_instance_mutex)
+        _kernel32.CloseHandle(_instance_mutex)
+        _instance_mutex = None
+    if _shutdown_event:
+        _kernel32.CloseHandle(_shutdown_event)
+        _shutdown_event = None
+    if _path_mapping:
+        _kernel32.CloseHandle(_path_mapping)
+        _path_mapping = None
 
 # ── 环境路径常量 ──
 NODE_VERSION = "v24.11.1"
@@ -669,23 +652,6 @@ class ProjectManager:
                     })
                 except Exception:
                     pass
-        result.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
-        return result
-
-    def list_all_conversations(self) -> list:
-        """2026-06-16 新增：列出所有项目下的对话历史（用于历史页面）
-
-        返回每条记录都额外带 project_id / project_name 字段，
-        方便在历史页面里按项目分组显示。
-        """
-        result = []
-        for pid, info in self._registry.get("projects", {}).items():
-            project_name = info.get("name", "未命名项目")
-            for c in self.list_conversations(pid):
-                c["project_id"] = pid
-                c["project_name"] = project_name
-                result.append(c)
-        # 整体按 updated_at 倒序
         result.sort(key=lambda c: c.get("updated_at", ""), reverse=True)
         return result
 
@@ -1748,16 +1714,23 @@ class SoftwareUpdater:
         return new_versions
 
 
-# ── pywebview js_api 桥接对象 (替代 QWebChannel) ──
-class BackendBridge:
-    """暴露给前端 JS 的 Python 对象，通过 pywebview js_api 暴露"""
+# ── QWebChannel 桥接对象 (替代 Electron preload.cjs) ──
+class BackendBridge(QObject):
+    """暴露给前端 JS 的 Python 对象，替代 Electron 的 desktopApi"""
+
+    # 信号：前端通过 onDelta/onStatus/onModelsLoaded 连接
+    deltaReceived = pyqtSignal(str)   # JSON string: {"text": "..."}
+    statusReceived = pyqtSignal(str)  # JSON string: {"busy": true, ...}
+    modelsLoaded = pyqtSignal(str)    # JSON string: {"ok": true, "models": [...]}
 
     def __init__(self, parent=None):
+        super().__init__(parent)
         self._app_ref = None  # 由 MainWindow 设置
 
     def _get_main(self):
         return self._app_ref
 
+    @pyqtSlot()
     def frontendReady(self):
         main = self._get_main()
         if main and hasattr(main, '_finish_splash'):
@@ -1765,6 +1738,7 @@ class BackendBridge:
 
     # ── 用户管理 API (多用户登录架构) ──
 
+    @pyqtSlot(result=str)
     def getCurrentUser(self):
         """获取当前用户信息"""
         main = self._get_main()
@@ -1776,6 +1750,7 @@ class BackendBridge:
             "is_default": main.current_user_id == "default"
         })
 
+    @pyqtSlot(result=str)
     def listUsers(self):
         """列出所有用户目录"""
         main = self._get_main()
@@ -1792,6 +1767,7 @@ class BackendBridge:
             users.append({"id": "default", "name": "本地用户"})
         return json.dumps(users)
 
+    @pyqtSlot(str, result=bool)
     def switchUser(self, user_id: str):
         """切换用户 - 重新初始化 ProjectManager 和相关组件"""
         main = self._get_main()
@@ -1835,12 +1811,14 @@ class BackendBridge:
 
     # ── 项目管理 API ──
 
+    @pyqtSlot(result=str)
     def listProjects(self):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.list_projects())
 
+    @pyqtSlot(result=str)
     def getActiveProject(self):
         main = self._get_main()
         if not main:
@@ -1848,6 +1826,7 @@ class BackendBridge:
         proj = main.project_mgr.get_active_project()
         return json.dumps(proj)
 
+    @pyqtSlot(str, str, result=str)
     def createProject(self, name: str, workspace_path: str):
         main = self._get_main()
         if not main:
@@ -1857,6 +1836,7 @@ class BackendBridge:
         main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
+    @pyqtSlot(str, result=str)
     def switchProject(self, project_id: str):
         main = self._get_main()
         if not main:
@@ -1867,12 +1847,14 @@ class BackendBridge:
             main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
+    @pyqtSlot(str, str, result=bool)
     def renameProject(self, project_id: str, new_name: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.rename_project(project_id, new_name)
 
+    @pyqtSlot(str, result=bool)
     def deleteProject(self, project_id: str):
         main = self._get_main()
         if not main:
@@ -1883,6 +1865,7 @@ class BackendBridge:
             main.current_workspace = main.app_dir
         return result
 
+    @pyqtSlot(str, str, str, result=str)
     def updateProject(self, project_id: str, new_name: str, new_workspace_path: str):
         main = self._get_main()
         if not main:
@@ -1892,25 +1875,21 @@ class BackendBridge:
             main.current_workspace = proj.get("workspace_path") or main.app_dir
         return json.dumps(proj)
 
+    @pyqtSlot(str, result=str)
     def getDefaultProjectPath(self, name: str):
         main = self._get_main()
         if not main:
             return ""
         return main.project_mgr.get_default_path(name)
 
+    @pyqtSlot(str, result=str)
     def listConversations(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.list_conversations(project_id))
 
-    def listAllConversations(self):
-        """2026-06-16 新增：列出所有项目的对话历史（历史页面用）"""
-        main = self._get_main()
-        if not main:
-            return json.dumps([])
-        return json.dumps(main.project_mgr.list_all_conversations())
-
+    @pyqtSlot(str, str, result=str)
     def loadConversation(self, project_id: str, session_id: str):
         main = self._get_main()
         if not main:
@@ -1918,12 +1897,14 @@ class BackendBridge:
         msgs = main.project_mgr.load_conversation(project_id, session_id)
         return json.dumps(msgs)
 
+    @pyqtSlot(str, str, str, result=bool)
     def copyConversation(self, source_project_id: str, session_id: str, target_project_id: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.copy_conversation(source_project_id, session_id, target_project_id)
 
+    @pyqtSlot(str, result=str)
     def getProjectContext(self, project_id: str):
         main = self._get_main()
         if not main:
@@ -1931,6 +1912,7 @@ class BackendBridge:
         ctx = main.project_mgr.get_project_context(project_id)
         return json.dumps(ctx)
 
+    @pyqtSlot(str, str, str, result=bool)
     def saveConversation(self, project_id: str, session_id: str, messages_json: str):
         main = self._get_main()
         if not main:
@@ -1941,72 +1923,84 @@ class BackendBridge:
             msgs = []
         return main.project_mgr.save_conversation(project_id, session_id, msgs)
 
+    @pyqtSlot(str, str, result=str)
     def searchConversations(self, project_id: str, keyword: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.search_conversations(project_id, keyword))
 
+    @pyqtSlot(str, str, result=bool)
     def deleteConversation(self, project_id: str, session_id: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.delete_conversation(project_id, session_id)
 
+    @pyqtSlot(str, str, str, result=bool)
     def renameConversation(self, project_id: str, session_id: str, new_title: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.rename_conversation(project_id, session_id, new_title)
 
+    @pyqtSlot(str, result=str)
     def getClaudeMd(self, project_id: str):
         main = self._get_main()
         if not main:
             return ""
         return main.project_mgr.get_claude_md(project_id)
 
+    @pyqtSlot(str, str, result=bool)
     def saveClaudeMd(self, project_id: str, content: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_claude_md(project_id, content)
 
+    @pyqtSlot(result=str)
     def getGlobalClaudeMd(self):
         main = self._get_main()
         if not main:
             return ""
         return main.project_mgr.get_global_claude_md()
 
+    @pyqtSlot(str, result=bool)
     def saveGlobalClaudeMd(self, content: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_global_claude_md(content)
 
+    @pyqtSlot(str, result=str)
     def listMemories(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.list_memories(project_id))
 
+    @pyqtSlot(str, str, str, str, result=bool)
     def saveMemory(self, project_id: str, filename: str, content: str, mem_type: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_memory(project_id, filename, content, mem_type)
 
+    @pyqtSlot(str, str, result=bool)
     def deleteMemory(self, project_id: str, filename: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.delete_memory(project_id, filename)
 
+    @pyqtSlot(str, str, result=str)
     def searchMemories(self, project_id: str, keyword: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.search_memories(project_id, keyword))
 
+    @pyqtSlot(str, str, result=str)
     def autoExtractMemories(self, project_id: str, messages_json: str):
         main = self._get_main()
         if not main:
@@ -2017,18 +2011,21 @@ class BackendBridge:
             msgs = []
         return json.dumps(main.project_mgr.auto_extract_memories(project_id, msgs))
 
+    @pyqtSlot(str, result=str)
     def getMemoryStats(self, project_id: str):
         main = self._get_main()
         if not main:
             return json.dumps({"total": 0, "by_type": {}, "total_size": 0})
         return json.dumps(main.project_mgr.get_memory_stats(project_id))
 
+    @pyqtSlot(str, str, result=str)
     def getRelevantMemories(self, project_id: str, query: str):
         main = self._get_main()
         if not main:
             return json.dumps([])
         return json.dumps(main.project_mgr.get_relevant_memories(project_id, query))
 
+    @pyqtSlot(str, result=str)
     def listProjectTemplates(self, category: str):
         templates = [
             {"id": "react-app", "name": "React 应用", "desc": "React + TypeScript + Vite", "category": "frontend", "prompt": "创建一个 React + TypeScript + Vite 项目，包含基本路由和状态管理", "scaffold": True},
@@ -2058,12 +2055,14 @@ class BackendBridge:
             templates = templates + custom
         return json.dumps(templates)
 
+    @pyqtSlot(str, str, str, str, str, result=bool)
     def saveCustomTemplate(self, name: str, category: str, desc: str, prompt: str, files: str):
         main = self._get_main()
         if not main:
             return False
         return main.project_mgr.save_custom_template(name, category, desc, prompt, files)
 
+    @pyqtSlot(str, result=bool)
     def deleteCustomTemplate(self, template_id: str):
         main = self._get_main()
         if not main:
@@ -2073,6 +2072,7 @@ class BackendBridge:
     def _get_app_data_path(self) -> str:
         return os.path.join(self.user_dir, "app_data.json")
 
+    @pyqtSlot(str, result=str)
     def saveAppData(self, data_json: str):
         try:
             data_path = self._get_app_data_path()
@@ -2085,6 +2085,7 @@ class BackendBridge:
             print(f"[saveAppData] ERROR: {e}")
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(result=str)
     def loadAppData(self):
         try:
             data_path = self._get_app_data_path()
@@ -2099,12 +2100,14 @@ class BackendBridge:
             print(f"[loadAppData] ERROR: {e}")
             return ""
 
+    @pyqtSlot(str, str, result=str)
     def createProjectFromTemplate(self, project_id: str, template_id: str):
         main = self._get_main()
         if not main:
             return json.dumps({"success": False, "error": "main not available"})
         return json.dumps(main.project_mgr.create_project_from_template(project_id, template_id))
 
+    @pyqtSlot(result=str)
     def getVersionHistory(self):
         vh_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "version_history.json")
         if not os.path.exists(vh_path):
@@ -2116,6 +2119,7 @@ class BackendBridge:
         except Exception:
             return json.dumps([])
 
+    @pyqtSlot(str, str, result=str)
     def runTerminalCommand(self, cmd: str, cwd: str):
         try:
             if not cwd or not os.path.isdir(cwd):
@@ -2144,6 +2148,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"output": str(e), "error": str(e), "cwd": cwd})
 
+    @pyqtSlot(str, result=str)
     def getGitStatus(self, project_path: str):
         try:
             if not project_path or not os.path.isdir(project_path):
@@ -2173,6 +2178,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @pyqtSlot(str, str, result=str)
     def gitCommit(self, project_path: str, message: str):
         try:
             if not project_path or not message.strip():
@@ -2189,6 +2195,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @pyqtSlot(str, result=str)
     def getGitLog(self, project_path: str):
         try:
             if not project_path or not os.path.isdir(project_path):
@@ -2214,6 +2221,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @pyqtSlot(str, result=str)
     def getFileTree(self, project_path: str):
         try:
             if not project_path or not os.path.isdir(project_path):
@@ -2237,6 +2245,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps([])
 
+    @pyqtSlot(str, str, result=bool)
     def showDesktopNotification(self, title: str, body: str):
         try:
             from PyQt6.QtWidgets import QSystemTrayIcon
@@ -2248,6 +2257,7 @@ class BackendBridge:
         except Exception:
             return False
 
+    @pyqtSlot(str, result=bool)
     def openExternalUrl(self, url: str):
         try:
             import webbrowser
@@ -2266,6 +2276,7 @@ class BackendBridge:
         """获取插件目录，公共数据"""
         return os.path.join(self.public_dir, "plugins")
 
+    @pyqtSlot(result=str)
     def listPlugins(self):
         plugin_dir = self._get_plugins_dir()
         os.makedirs(plugin_dir, exist_ok=True)
@@ -2288,6 +2299,7 @@ class BackendBridge:
                 pass
         return json.dumps(result)
 
+    @pyqtSlot(str, result=bool)
     def installPlugin(self, plugin_json: str):
         try:
             meta = json.loads(plugin_json)
@@ -2306,6 +2318,7 @@ class BackendBridge:
         except Exception:
             return False
 
+    @pyqtSlot(str, result=bool)
     def uninstallPlugin(self, plugin_id: str):
         try:
             plugin_dir = self._get_plugins_dir()
@@ -2319,6 +2332,7 @@ class BackendBridge:
         except Exception:
             return False
 
+    @pyqtSlot(str, str, result=str)
     def executePlugin(self, plugin_id: str, input_data: str):
         plugin_dir = self._get_plugins_dir()
         code_path = os.path.join(plugin_dir, plugin_id, "index.js")
@@ -2334,6 +2348,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    @pyqtSlot(str, result=bool)
     def startVoiceInput(self, language: str):
         try:
             main = self._get_main()
@@ -2359,6 +2374,7 @@ class BackendBridge:
         except Exception:
             return False
 
+    @pyqtSlot(str, result=bool)
     def speakText(self, text: str):
         try:
             def _speak():
@@ -2380,6 +2396,7 @@ class BackendBridge:
         """获取模型目录，公共数据 (所有用户共享)"""
         return os.path.join(self.public_dir, "models")
 
+    @pyqtSlot(result=str)
     def getOfflineModels(self):
         # 模型是公共数据，所有用户共享
         models_dir = self._get_models_dir()
@@ -2393,6 +2410,7 @@ class BackendBridge:
                     models.append({"name": fname, "path": fpath, "size_mb": round(size_mb, 1)})
         return json.dumps(models)
 
+    @pyqtSlot(str, result=bool)
     def downloadModel(self, url: str):
         try:
             # 模型是公共数据，所有用户共享
@@ -2413,62 +2431,9 @@ class BackendBridge:
         except Exception:
             return False
 
-        # ── pywebview JS通知辅助方法 ──
-    def _notify_delta(self, data: str):
-        main = self._get_main()
-        # QtWebView2: 优先使用 _vue2_widget.evaluate_js
-        if main and hasattr(main, '_vue2_widget') and main._vue2_widget:
-            try:
-                main._vue2_widget.evaluate_js(
-                    "if(window.onDelta) window.onDelta(" + data + ");"
-                )
-            except Exception:
-                pass
-        # pywebview: 回退到 _webview_window.evaluate_js
-        elif main and hasattr(main, '_webview_window') and main._webview_window:
-            try:
-                main._webview_window.evaluate_js(
-                    "if(window.onDelta) window.onDelta(" + data + ");"
-                )
-            except Exception:
-                pass
+    # ── 前端可调用方法 (通过 pyqtSlot 暴露给 QWebChannel) ──
 
-    def _notify_status(self, data: str):
-        main = self._get_main()
-        if main and hasattr(main, '_vue2_widget') and main._vue2_widget:
-            try:
-                main._vue2_widget.evaluate_js(
-                    "if(window.onStatus) window.onStatus(" + data + ");"
-                )
-            except Exception:
-                pass
-        elif main and hasattr(main, '_webview_window') and main._webview_window:
-            try:
-                main._webview_window.evaluate_js(
-                    "if(window.onStatus) window.onStatus(" + data + ");"
-                )
-            except Exception:
-                pass
-
-    def _notify_models(self, data: str):
-        main = self._get_main()
-        if main and hasattr(main, '_vue2_widget') and main._vue2_widget:
-            try:
-                main._vue2_widget.evaluate_js(
-                    "if(window.onModelsLoaded) window.onModelsLoaded(" + data + ");"
-                )
-            except Exception:
-                pass
-        elif main and hasattr(main, '_webview_window') and main._webview_window:
-            try:
-                main._webview_window.evaluate_js(
-                    "if(window.onModelsLoaded) window.onModelsLoaded(" + data + ");"
-                )
-            except Exception:
-                pass
-
-    # ── 前端可调用方法 (通过 pywebview js_api 暴露) ──
-
+    @pyqtSlot(result=str)
     def getState(self):
         """获取应用状态"""
         main = self._get_main()
@@ -2496,6 +2461,7 @@ class BackendBridge:
             "activeProjectId": main.active_project_id,
         })
 
+    @pyqtSlot(result=str)
     def newSession(self):
         main = self._get_main()
         if not main:
@@ -2506,6 +2472,7 @@ class BackendBridge:
         main.started_sessions.discard(main.active_session_id)
         return json.dumps({"sessionId": main.active_session_id})
 
+    @pyqtSlot(str, result=str)
     def sendMessage(self, payload_json: str):
         """发送消息给 AI"""
         main = self._get_main()
@@ -2530,7 +2497,7 @@ class BackendBridge:
                     pass
             main.is_busy = False
             main.active_proc = None
-            self._notify_status(json.dumps({"busy": False}))
+            self.statusReceived.emit(json.dumps({"busy": False}))
 
         prompt = (payload.get("prompt") or "").strip()
         if not prompt:
@@ -2560,13 +2527,14 @@ class BackendBridge:
             main.current_workspace = payload["workspace_path"]
 
         main.is_busy = True
-        self._notify_status(json.dumps({"busy": True}))
+        self.statusReceived.emit(json.dumps({"busy": True}))
 
         t = threading.Thread(target=self._run_cli, args=(prompt, model, provider, settings), daemon=True)
         t.start()
 
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
 
+    @pyqtSlot(result=str)
     def selectDirectory(self):
         try:
             from PyQt6.QtWidgets import QFileDialog
@@ -2583,6 +2551,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(str, result=bool)
     def openInExplorer(self, path: str):
         try:
             import subprocess
@@ -2593,6 +2562,7 @@ class BackendBridge:
         except Exception:
             return False
 
+    @pyqtSlot(result=str)
     def stopMessage(self):
         main = self._get_main()
         if not main or not main.is_busy:
@@ -2606,14 +2576,16 @@ class BackendBridge:
 
         main.is_busy = False
         main.active_session_id = _uuid()
-        self._notify_status(json.dumps({"busy": False}))
+        self.statusReceived.emit(json.dumps({"busy": False}))
         return json.dumps({"ok": True, "sessionId": main.active_session_id})
 
+    @pyqtSlot(result=str)
     def getWorkspace(self):
         main = self._get_main()
         path = main.current_workspace if main else ""
         return json.dumps({"path": path})
 
+    @pyqtSlot(result=str)
     def chooseWorkspace(self):
         """由 Python 端弹出文件夹选择对话框"""
         main = self._get_main()
@@ -2623,12 +2595,14 @@ class BackendBridge:
         main.workspace_choose_requested.emit()
         return json.dumps({"ok": True, "path": main.current_workspace})
 
+    @pyqtSlot(result=str)
     def getSettings(self):
         main = self._get_main()
         if not main:
             return json.dumps({})
         return json.dumps(main.env_manager.read_settings())
 
+    @pyqtSlot(str, result=str)
     def saveSettings(self, payload_json: str):
         main = self._get_main()
         if not main:
@@ -2640,6 +2614,7 @@ class BackendBridge:
         result = main.env_manager.write_settings(payload)
         return json.dumps(result)
 
+    @pyqtSlot(result=str)
     def clearModelSettings(self):
         main = self._get_main()
         if not main:
@@ -2647,6 +2622,7 @@ class BackendBridge:
         result = main.env_manager.clear_model_settings()
         return json.dumps(result)
 
+    @pyqtSlot(str, result=str)
     def listModels(self, payload_json: str):
         """获取模型列表（在后台线程中执行，通过信号返回结果）"""
         try:
@@ -2679,12 +2655,13 @@ class BackendBridge:
                 result = list_zhipu_models(zhipu_key, zhipu_base, timeout)
             else:
                 result = {"ok": False, "error": "Unsupported source."}
-            self._notify_models(json.dumps(result))
+            self.modelsLoaded.emit(json.dumps(result))
 
         t = threading.Thread(target=_do_load, daemon=True)
         t.start()
         return json.dumps({"ok": True, "loading": True})
 
+    @pyqtSlot(result=str)
     def detectHardware(self):
         """检测硬件信息，用于自动配置推荐"""
         info = {"total_ram": 0, "gpu_name": "", "gpu_vram_gb": 0, "cpu_name": "", "cpu_cores": 0}
@@ -2722,6 +2699,7 @@ class BackendBridge:
 
         return json.dumps(info)
 
+    @pyqtSlot(str, result=str)
     def deleteModel(self, payload_json: str):
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
@@ -2749,142 +2727,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)[:200]})
 
-    # ── Ollama 可选对接：按需检测 + 一键安装（不写入部署维护默认项） ──
-
-    def detectOllama(self):
-        """检测 Ollama 本地运行时状态：是否安装、是否在运行
-
-        返回结构化结果，前端根据不同状态展示不同提示：
-        - {installed: False} → 引导一键安装
-        - {installed: True, running: False} → 引导启动 Ollama
-        - {installed: True, running: True} → 正常对接
-        """
-        result = {
-            "installed": False,
-            "running": False,
-            "installPath": None,
-            "version": None,
-            "downloadUrl": "https://ollama.com/download/OllamaSetup.exe",
-            "ollamaUrl": "http://127.0.0.1:11434",
-            "error": None,
-        }
-        try:
-            # ── Step 1: 检测是否安装 ──
-            # Windows 标准安装路径
-            candidate_paths = []
-            localapp = os.environ.get("LOCALAPPDATA", "")
-            programfiles = os.environ.get("ProgramFiles", r"C:\Program Files")
-            programfiles86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
-            userprofile = os.environ.get("USERPROFILE", "")
-
-            if localapp:
-                candidate_paths.append(os.path.join(localapp, "Programs", "Ollama", "ollama.exe"))
-            if programfiles:
-                candidate_paths.append(os.path.join(programfiles, "Ollama", "ollama.exe"))
-            if programfiles86:
-                candidate_paths.append(os.path.join(programfiles86, "Ollama", "ollama.exe"))
-            # 用户可能解压到任意目录
-            if userprofile:
-                candidate_paths.append(os.path.join(userprofile, "ollama.exe"))
-                candidate_paths.append(os.path.join(userprofile, "Downloads", "ollama.exe"))
-            # PATH 中的 ollama
-            try:
-                import shutil as _sh
-                which_ollama = _sh.which("ollama")
-                if which_ollama:
-                    candidate_paths.append(which_ollama)
-            except Exception:
-                pass
-
-            for p in candidate_paths:
-                if p and os.path.isfile(p):
-                    result["installed"] = True
-                    result["installPath"] = p
-                    break
-
-            # ── Step 2: 检测服务是否在跑 ──
-            settings_path = os.path.join(
-                self._get_main().data_dir if self._get_main() else "data",
-                ".env",
-            )
-            ollama_url = "http://127.0.0.1:11434"
-            try:
-                if self._get_main() and hasattr(self._get_main(), "env_manager"):
-                    settings = self._get_main().env_manager.read_settings()
-                    ollama_url = (settings.get("OLLAMA_BASE_URL") or ollama_url).strip()
-            except Exception:
-                pass
-            result["ollamaUrl"] = ollama_url
-
-            if result["installed"]:
-                try:
-                    req = urllib.request.Request(
-                        f"{ollama_url.rstrip('/')}/api/version",
-                        headers={"User-Agent": "YunjiOllamaDetector/1.0"},
-                    )
-                    with urllib.request.urlopen(req, timeout=3) as resp:
-                        if resp.status == 200:
-                            data = json.loads(resp.read().decode("utf-8"))
-                            result["running"] = True
-                            result["version"] = data.get("version", "")
-                except Exception:
-                    result["running"] = False
-
-            return json.dumps(result)
-        except Exception as e:
-            result["error"] = str(e)[:200]
-            return json.dumps(result)
-
-    def installOllama(self):
-        """一键下载并静默安装 Ollama（仅在用户主动点击时触发）
-
-        流程：下载 OllamaSetup.exe → 静默安装 /S → 等待进程结束 → 重新检测
-        """
-        try:
-            import shutil as _sh
-            main = self._get_main()
-            if not main:
-                return json.dumps({"ok": False, "error": "no main"})
-
-            data_dir = main.data_dir
-            os.makedirs(data_dir, exist_ok=True)
-            setup_path = os.path.join(data_dir, "OllamaSetup.exe")
-
-            # 下载（如果还没有）
-            if not os.path.isfile(setup_path) or os.path.getsize(setup_path) < 1024 * 1024:
-                url = "https://ollama.com/download/OllamaSetup.exe"
-                main.log_signal.emit(f"[Ollama] 正在下载安装包: {url}", "#2196F3")
-                urllib.request.urlretrieve(url, setup_path)
-                main.log_signal.emit(f"[Ollama] 下载完成: {setup_path}", "#4CAF50")
-
-            # 静默安装（OllamaSetup.exe 支持 /S 静默参数）
-            main.log_signal.emit("[Ollama] 正在静默安装（约 30-60 秒）...", "#2196F3")
-            r = subprocess.run(
-                [setup_path, "/S"],
-                capture_output=True, text=True, timeout=300,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-            main.log_signal.emit(f"[Ollama] 安装退出码: {r.returncode}", "#4CAF50")
-
-            # 等待几秒让 ollama app 完成注册
-            import time as _t
-            _t.sleep(3)
-
-            # 重新检测
-            return self.detectOllama()
-        except Exception as e:
-            return json.dumps({"ok": False, "error": f"安装失败: {e}"})
-
-    def openOllamaDownloadPage(self):
-        """打开 Ollama 官方下载页（兜底方案）"""
-        try:
-            from PyQt6.QtCore import QUrl
-            from PyQt6.QtGui import QDesktopServices
-            QDesktopServices.openUrl(QUrl("https://ollama.com/download"))
-            return json.dumps({"ok": True})
-        except Exception as e:
-            return json.dumps({"ok": False, "error": str(e)})
-
+    @pyqtSlot(str, result=str)
     def searchOllamaLibrary(self, query: str):
         try:
             q = (query or "").strip()
@@ -2918,6 +2761,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)[:200]})
 
+    @pyqtSlot(str, result=str)
     def pullModel(self, payload_json: str):
         try:
             payload = json.loads(payload_json) if isinstance(payload_json, str) else payload_json
@@ -2937,14 +2781,15 @@ class BackendBridge:
                 req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
                 resp = urllib.request.urlopen(req, timeout=600)
                 result = json.loads(resp.read().decode("utf-8"))
-                self._notify_models(json.dumps({"ok": True, "action": "pull_complete", "model": model_name}))
+                self.modelsLoaded.emit(json.dumps({"ok": True, "action": "pull_complete", "model": model_name}))
             except Exception as e:
-                self._notify_models(json.dumps({"ok": False, "action": "pull_failed", "model": model_name, "error": str(e)[:200]}))
+                self.modelsLoaded.emit(json.dumps({"ok": False, "action": "pull_failed", "model": model_name, "error": str(e)[:200]}))
 
         t = threading.Thread(target=_do_pull, daemon=True)
         t.start()
         return json.dumps({"ok": True, "loading": True, "action": "pulling", "model": model_name})
 
+    @pyqtSlot(result=str)
     def recommendModels(self):
         hw = json.loads(self.detectHardware())
         total_ram_gb = (hw.get("total_ram", 0) or 0) / (1024 ** 3)
@@ -2970,6 +2815,7 @@ class BackendBridge:
                 unique.append(r)
         return json.dumps({"ok": True, "models": unique, "hardware": hw})
 
+    @pyqtSlot(str, result=str)
     def fetchApiKey(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2980,12 +2826,14 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"fetchApiKey异常: {e}"})
 
+    @pyqtSlot(result=str)
     def listApiServices(self):
         try:
             return json.dumps({"ok": True, "services": backend.list_api_services()})
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(str, result=str)
     def getApiServiceInfo(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -2994,6 +2842,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(str, result=str)
     def stopServiceByPort(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3004,6 +2853,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(result=str)
     def startAllApiServices(self):
         try:
             result = backend.start_all_api_services()
@@ -3011,6 +2861,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(result=str)
     def listAllModels(self):
         try:
             result = backend.list_all_models()
@@ -3018,6 +2869,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": str(e)})
 
+    @pyqtSlot(str, result=str)
     def startQwen2Api(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3029,6 +2881,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwen2Api异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def stopQwen2Api(self, payload: str = ""):
         try:
             base_url = ""
@@ -3043,6 +2896,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"stopQwen2Api异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def checkApiService(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3052,6 +2906,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"checkApiService异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def addQwenAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3063,6 +2918,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"addQwenAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def listQwenAccounts(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3073,6 +2929,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listQwenAccounts异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def deleteQwenAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3084,6 +2941,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"deleteQwenAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def startZhipu2Api(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3120,6 +2978,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startZhipu2Api异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def stopZhipu2Api(self, payload: str = ""):
         try:
             base_url = ""
@@ -3134,6 +2993,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"stopZhipu2Api异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def addZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3146,6 +3006,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"addZhipuAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def listZhipuAccounts(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3156,6 +3017,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listZhipuAccounts异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def deleteZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3167,6 +3029,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"deleteZhipuAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def validateZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3178,6 +3041,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"validateZhipuAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def fetchZhipuApiKey(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3188,6 +3052,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"fetchZhipuApiKey异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def createZhipuApiKey(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3198,6 +3063,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"createZhipuApiKey异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def startZhipuRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3208,6 +3074,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startZhipuRegister异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def pollZhipuRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3218,6 +3085,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollZhipuRegister异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def loginZhipuAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3230,6 +3098,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"loginZhipuAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def setStickyAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3241,6 +3110,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"setStickyAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def clearStickyAccount(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3251,6 +3121,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"clearStickyAccount异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def startQwenLogin(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3263,6 +3134,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwenLogin异常: {e}"})
 
+    @pyqtSlot(result=str)
     def pollQwenLogin(self):
         try:
             result = backend.poll_qwen_login()
@@ -3270,6 +3142,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollQwenLogin异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def startQwenRegister(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3283,6 +3156,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"startQwenRegister异常: {e}"})
 
+    @pyqtSlot(result=str)
     def pollQwenRegister(self):
         try:
             result = backend.poll_qwen_register()
@@ -3290,6 +3164,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"pollQwenRegister异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def checkZhipuApi(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3300,6 +3175,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"checkZhipuApi异常: {e}"})
 
+    @pyqtSlot(str, result=str)
     def listZhipuModels(self, payload_json: str = "{}"):
         try:
             payload = json.loads(payload_json) if payload_json else {}
@@ -3310,6 +3186,7 @@ class BackendBridge:
         except Exception as e:
             return json.dumps({"ok": False, "error": f"listZhipuModels异常: {e}"})
 
+    @pyqtSlot(result=str)
     def checkEnvironment(self):
         try:
             result = backend.check_environment()
@@ -3401,7 +3278,7 @@ class BackendBridge:
             system_prompt = self._build_system_prompt(settings, main.current_workspace)
 
             def _on_delta(text):
-                self._notify_delta(json.dumps({"text": text}))
+                self.deltaReceived.emit(json.dumps({"text": text}))
 
             result = main.cli_runner.run(
                 prompt=prompt,
@@ -3428,7 +3305,7 @@ class BackendBridge:
                 main.started_sessions.add(main.active_session_id)
                 result_text = result.get("text", "").strip()
                 if result_text and not result.get("streamed"):
-                    self._notify_delta(json.dumps({"text": result_text}))
+                    self.deltaReceived.emit(json.dumps({"text": result_text}))
             else:
                 cli_sid = result.get("cliSessionId", "")
                 if cli_sid and cli_sid != main.active_session_id:
@@ -3437,19 +3314,19 @@ class BackendBridge:
                 err = result.get("error", "")[:200]
                 main.log_signal.emit(f"[CLI 错误] {err}", "#F44336")
                 if err and not result.get("text"):
-                    self._notify_delta(json.dumps({"text": f"❌ {err}"}))
+                    self.deltaReceived.emit(json.dumps({"text": f"❌ {err}"}))
 
             main.result_ready_signal.emit(json.dumps(result))
         except Exception as e:
             main.log_signal.emit(f"[线程异常] {e}", "#F44336")
-            self._notify_delta(json.dumps({"text": f"❌ 线程异常: {str(e)[:200]}"}))
+            self.deltaReceived.emit(json.dumps({"text": f"❌ 线程异常: {str(e)[:200]}"}))
             main.result_ready_signal.emit(json.dumps({"ok": False, "error": str(e)}))
         finally:
             import time as _time
             _time.sleep(0.3)
             main.is_busy = False
             main.active_proc = None
-            self._notify_status(json.dumps({"busy": False}))
+            self.statusReceived.emit(json.dumps({"busy": False}))
 
 
     @staticmethod
@@ -4003,144 +3880,6 @@ try {{
             return False
 
 
-class ServiceCard(QFrame):
-    """运行服务 - 单个服务的状态卡片（参考云集智能视频创意站架构）"""
-    restart_clicked = pyqtSignal(str)
-    open_clicked = pyqtSignal(str)
-    stop_clicked = pyqtSignal(str)
-
-    def __init__(self, service_id: str, info: dict, parent=None):
-        super().__init__(parent)
-        self.service_id = service_id
-        self.info = info
-        self.is_running = False
-        self.setObjectName("serviceCard")
-        self._setup_ui()
-
-    def _setup_ui(self):
-        # 2026-06-16 重做：上下两行布局，描述自动换行，永不截断
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        layout.setContentsMargins(18, 14, 18, 14)
-
-        # ── 第一行：图标 + 名称（占满） + 状态指示 ──
-        top_row = QHBoxLayout()
-        top_row.setSpacing(12)
-
-        icon_lbl = QLabel(self.info.get("icon", "⚙️"))
-        icon_lbl.setStyleSheet("font-size: 26px; background: transparent; border: none;")
-        icon_lbl.setFixedWidth(32)
-        top_row.addWidget(icon_lbl)
-
-        name_lbl = QLabel(self.info.get("label", self.service_id))
-        name_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFFFFF; background: transparent; border: none;")
-        # 不再 setMaximumWidth / 不再 elide，让它自然占满
-        name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        name_lbl.setTextFormat(Qt.TextFormat.PlainText)
-        top_row.addWidget(name_lbl, 1)
-
-        self.status_dot = QLabel()
-        self.status_dot.setFixedSize(12, 12)
-        self.status_dot.setStyleSheet("background-color: #424242; border: 2px solid #616161; border-radius: 6px;")
-        top_row.addWidget(self.status_dot)
-
-        self.status_text = QLabel("未启动")
-        self.status_text.setStyleSheet("font-size: 12px; color: #AAAAAA; background: transparent; border: none;")
-        self.status_text.setFixedWidth(60)
-        top_row.addWidget(self.status_text)
-
-        layout.addLayout(top_row)
-
-        # ── 第二行：描述（自动换行，不再截断）──
-        desc_lbl = QLabel(self.info.get("desc", ""))
-        desc_lbl.setStyleSheet("font-size: 12px; color: #BBBBBB; background: transparent; border: none; line-height: 1.5;")
-        desc_lbl.setWordWrap(True)         # 关键：开启自动换行
-        desc_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(desc_lbl)
-
-        # ── 第三行：按钮 + 端口 ──
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-
-        self.restart_btn = QPushButton("🔄 重启")
-        self.restart_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1565C0; color: #FFFFFF;
-                border: 1px solid #1976D2; border-radius: 6px;
-                padding: 5px 14px; font-size: 12px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #1976D2; }
-            QPushButton:disabled { background-color: #1a1a1a; color: #555; border-color: #333; }
-        """)
-        self.restart_btn.clicked.connect(lambda: self.restart_clicked.emit(self.service_id))
-        btn_row.addWidget(self.restart_btn)
-
-        self.open_btn = QPushButton("🌐 打开")
-        self.open_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.info.get('color', '#388E3C')}; color: #FFFFFF;
-                border: 1px solid {self.info.get('color', '#388E3C')}; border-radius: 6px;
-                padding: 5px 14px; font-size: 12px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background-color: {self.info.get('hover_color', '#4CAF50')}; }}
-            QPushButton:disabled {{ background-color: #1a1a1a; color: #555; border-color: #333; }}
-        """)
-        self.open_btn.clicked.connect(lambda: self.open_clicked.emit(self.service_id))
-        btn_row.addWidget(self.open_btn)
-
-        self.stop_btn = QPushButton("⏹ 停止")
-        self.stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #C62828; color: #FFFFFF;
-                border: 1px solid #D32F2F; border-radius: 6px;
-                padding: 5px 14px; font-size: 12px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #D32F2F; }
-            QPushButton:disabled { background-color: #1a1a1a; color: #555; border-color: #333; }
-        """)
-        self.stop_btn.clicked.connect(lambda: self.stop_clicked.emit(self.service_id))
-        self.stop_btn.setEnabled(False)
-        btn_row.addWidget(self.stop_btn)
-
-        btn_row.addStretch()
-
-        # 端口信息
-        port = self.info.get("default_port", 0)
-        if port:
-            self.port_lbl = QLabel(f":{port}")
-            self.port_lbl.setStyleSheet("font-size: 12px; color: #AAAAAA; background: transparent; border: none; padding: 4px 8px;")
-            btn_row.addWidget(self.port_lbl)
-
-        layout.addLayout(btn_row)
-
-    def set_running(self, running: bool):
-        """更新服务运行状态"""
-        self.is_running = running
-        if running:
-            self.status_dot.setStyleSheet("background-color: #4CAF50; border: 2px solid #66BB6A; border-radius: 6px;")
-            self.status_text.setText("运行中")
-            self.status_text.setStyleSheet("font-size: 12px; color: #4CAF50; background: transparent; border: none;")
-            self.restart_btn.setEnabled(True)
-            self.stop_btn.setEnabled(True)
-            self.open_btn.setEnabled(True)
-        else:
-            self.status_dot.setStyleSheet("background-color: #424242; border: 2px solid #616161; border-radius: 6px;")
-            self.status_text.setText("未启动")
-            self.status_text.setStyleSheet("font-size: 12px; color: #AAAAAA; background: transparent; border: none;")
-            self.restart_btn.setEnabled(False)
-            self.stop_btn.setEnabled(False)
-            self.open_btn.setEnabled(False)
-
-    def set_starting(self):
-        """显示启动中状态"""
-        self.status_dot.setStyleSheet("background-color: #FFC107; border: 2px solid #FFD54F; border-radius: 6px;")
-        self.status_text.setText("启动中...")
-        self.status_text.setStyleSheet("font-size: 12px; color: #FFC107; background: transparent; border: none;")
-        self.restart_btn.setEnabled(False)
-        self.stop_btn.setEnabled(False)
-        self.open_btn.setEnabled(False)
-
-
 class SplashScreen(QSplashScreen):
     def __init__(self):
         pixmap = QPixmap(520, 360)
@@ -4304,19 +4043,7 @@ class MainWindow(QMainWindow):
         
         if hasattr(sys, 'frozen'):
             # PyInstaller 打包模式
-            # --onefile: sys.executable 在临时解压目录，需要用实际 EXE 位置
-            # --onedir: sys.executable 就在发布目录
-            if hasattr(sys, '_MEIPASS') and not os.path.exists(
-                os.path.join(os.path.dirname(sys.executable), "app")
-            ):
-                # --onefile 模式：EXE 旁边没有 app/，需要在用户可见的 EXE 位置查找
-                import ctypes
-                buf = ctypes.create_unicode_buffer(512)
-                ctypes.windll.kernel32.GetModuleFileNameW(None, buf, 512)
-                real_exe = buf.value
-                exe_dir = os.path.abspath(os.path.dirname(real_exe))
-            else:
-                exe_dir = os.path.abspath(os.path.dirname(sys.executable))
+            exe_dir = os.path.abspath(os.path.dirname(sys.executable))
             self.exe_dir = exe_dir
             self.app_dir = os.path.join(exe_dir, "app")
             self.data_dir = os.path.join(exe_dir, "data")
@@ -4417,23 +4144,6 @@ class MainWindow(QMainWindow):
         self.is_busy = False
         self.active_proc = None
 
-        # 服务管理相关
-        self.service_cards: dict = {}
-        self.service_processes: dict = {}  # service_id -> subprocess.Popen
-        self.service_monitor_timer = QTimer(self)
-        self.service_monitor_timer.timeout.connect(self._monitor_services)
-        self._is_starting_all = False
-
-        # WebView 相关
-        self._web_engine_view = None
-        self._web_engine_page = None
-        self._web_channel = None
-        self._using_webengine = False
-        self._webview_window = None  # pywebview 独立窗口
-        self._webview2_widget = None  # QtWebView2 内嵌 widget
-        self._vue2_widget = None  # Vue 内嵌 widget 页面（带侧边栏的完整界面）
-        self._webview2_initialized = False  # Vue2 窗口是否已创建
-
         if self._splash:
             self._splash.set_progress(0.3, "正在构建界面...")
 
@@ -4453,31 +4163,10 @@ class MainWindow(QMainWindow):
         self.workspace_choose_requested.connect(self._choose_workspace_dialog)
         self.voice_result_signal.connect(self._on_voice_result)
 
-        if self._splash:
-            self._splash.set_progress(0.9, "即将就绪...")
-
-        # 启动时检查环境
-        QTimer.singleShot(800, self._auto_check_and_load)
-
-        # 超时保底：如果前端 15 秒内未加载完成，直接关闭 splash 显示主窗口
-        QTimer.singleShot(15000, self._splash_fallback)
-
-    def _setup_ui(self):
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background-color: #0d0d0d; color: #f0f0f0; font-family: 'Microsoft YaHei', sans-serif; }
-            QPushButton { color: white; border-radius: 8px; padding: 10px 20px; font-size: 13px; font-weight: bold; border: 2px solid transparent; }
-            QPushButton:disabled { background-color: #333; border-color: #333; color: #757575; }
-        """)
-
-        central = QWidget()
-        self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # ── 导航栏 ──
-        nav_bar = QFrame()
-        self.voice_result_signal.connect(self._on_voice_result)
+        # 关闭信号检测：每 500ms 检查是否有更新版本要求本实例退出
+        self._shutdown_timer = QTimer(self)
+        self._shutdown_timer.timeout.connect(self._check_shutdown_signal)
+        self._shutdown_timer.start(500)
 
         if self._splash:
             self._splash.set_progress(0.9, "即将就绪...")
@@ -4501,6 +4190,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(0)
         layout.setContentsMargins(0, 0, 0, 0)
 
+        # ── 顶部导航栏（Tab 式整体导航，底部蓝色指示条）──
         nav_bar = QFrame()
         nav_bar.setFixedHeight(38)
         nav_bar.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 1px solid #2a2a2a; }")
@@ -4520,21 +4210,13 @@ class MainWindow(QMainWindow):
             QPushButton:checked:hover { background-color: #252525; }
         """
 
-        # 任务对话按钮（首页，最左边）
-        self.btn_chat = QPushButton("💬 任务对话")
-        self.btn_chat.setCheckable(True)
-        self.btn_chat.setChecked(True)
-        self.btn_chat.setStyleSheet(menu_button_style)
-        self.btn_chat.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.btn_chat.clicked.connect(lambda: self._switch_page(0))
-        nav_layout.addWidget(self.btn_chat)
-
-        # 运行服务按钮
+        # 运行服务按钮（首页）
         self.btn_home = QPushButton("🚀 运行服务")
         self.btn_home.setCheckable(True)
+        self.btn_home.setChecked(True)
         self.btn_home.setStyleSheet(menu_button_style)
         self.btn_home.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.btn_home.clicked.connect(lambda: self._switch_page(1))
+        self.btn_home.clicked.connect(lambda: self._switch_page(0))
         nav_layout.addWidget(self.btn_home)
 
         # 部署维护按钮
@@ -4542,7 +4224,7 @@ class MainWindow(QMainWindow):
         self.btn_deploy_nav.setCheckable(True)
         self.btn_deploy_nav.setStyleSheet(menu_button_style)
         self.btn_deploy_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.btn_deploy_nav.clicked.connect(lambda: self._switch_page(2))
+        self.btn_deploy_nav.clicked.connect(lambda: self._switch_page(1))
         nav_layout.addWidget(self.btn_deploy_nav)
 
         # 软件更新按钮
@@ -4550,7 +4232,7 @@ class MainWindow(QMainWindow):
         self.btn_update_nav.setCheckable(True)
         self.btn_update_nav.setStyleSheet(menu_button_style)
         self.btn_update_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.btn_update_nav.clicked.connect(lambda: self._switch_page(3))
+        self.btn_update_nav.clicked.connect(lambda: self._switch_page(2))
         nav_layout.addWidget(self.btn_update_nav)
 
         # 项目管理按钮
@@ -4558,9 +4240,7 @@ class MainWindow(QMainWindow):
         self.btn_project_nav.setCheckable(True)
         self.btn_project_nav.setStyleSheet(menu_button_style)
         self.btn_project_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        # 2026-06-16 修复：项目管理/系统设置原本都跳到 _switch_page(4) 但 page_stack
-        # 根本没有这个 index，导致点击没反应。现在分别为 4 和 5。
-        self.btn_project_nav.clicked.connect(lambda: self._switch_page(4))
+        self.btn_project_nav.clicked.connect(lambda: self._switch_page(3))
         nav_layout.addWidget(self.btn_project_nav)
 
         # 系统设置按钮
@@ -4568,51 +4248,29 @@ class MainWindow(QMainWindow):
         self.btn_settings_nav.setCheckable(True)
         self.btn_settings_nav.setStyleSheet(menu_button_style)
         self.btn_settings_nav.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.btn_settings_nav.clicked.connect(lambda: self._switch_page(5))
+        self.btn_settings_nav.clicked.connect(lambda: self._switch_page(4))
         nav_layout.addWidget(self.btn_settings_nav)
-
-        # 2026-06-16: 在导航栏右侧加版本标签，方便用户一眼判断运行的是新代码
-        nav_layout.addStretch()
-        self._nav_version_label = QLabel("v2026.06.16-FIX5  ✅ 修复折叠崩溃 + 导航按钮响应 + 去掉⋯按钮 + 工作区加高")
-        self._nav_version_label.setStyleSheet(
-            "color: #10B981; font-size: 11px; background: transparent; border: none; padding-right: 8px;"
-        )
-        nav_layout.addWidget(self._nav_version_label)
 
         layout.addWidget(nav_bar)
 
         # ── 页面堆叠窗口 ──
         self.page_stack = QStackedWidget()
 
-        # 页面0：任务对话（Vue 前端，QtWebView2）
-        self.chat_page = self._create_chat_page()
-        self.page_stack.addWidget(self.chat_page)
-
-        # 页面1：运行服务（服务状态 + 日志 + 管理按钮）
+        # 页面0：首页 - 运行服务（WebEngine）
         self.home_page = self._create_home_page()
         self.page_stack.addWidget(self.home_page)
 
-        # 页面2：部署维护
+        # 页面1：部署维护
         self.deploy_page = self._create_deploy_page()
         self.page_stack.addWidget(self.deploy_page)
 
-        # 页面3：软件更新
+        # 页面2：软件更新
         self.update_page = self._create_update_page()
         self.page_stack.addWidget(self.update_page)
 
-        # 2026-06-16 修复：补齐页面 4（项目管理）和 5（系统设置），
-        # 之前这两个 index 在 QStackedWidget 中不存在，所以点了没反应
-        self.project_page = self._create_project_page()
-        self.page_stack.addWidget(self.project_page)
-        self.settings_page = self._create_settings_page()
-        self.page_stack.addWidget(self.settings_page)
-
-        # 2026-06-16 新增：页面 6 = 对话历史（左侧 📜 历史按钮跳转到这里）
-        self.history_page = self._create_history_page()
-        self.page_stack.addWidget(self.history_page)
-
-        # 2026-06-16: 边栏折叠快捷键（Ctrl+B 左，Ctrl+Shift+B 右）
-        self._install_sidebar_shortcuts()
+        # 页面3：项目管理（复用首页 WebEngineView）
+        # 页面4：系统设置（复用首页 WebEngineView）
+        # 这两个页面不创建独立页面，而是切换到首页并通过JS切换前端视图
 
         layout.addWidget(self.page_stack, 1)
 
@@ -4633,2943 +4291,70 @@ class MainWindow(QMainWindow):
 
     # ── 页面创建 ──
 
-    def _install_sidebar_shortcuts(self):
-        """2026-06-16：注册左右边栏折叠的键盘快捷键
-        - Ctrl+B         折叠/展开左侧 workbuddy 边栏
-        - Ctrl+Shift+B   折叠/展开右侧配置边栏
-        """
-        from PyQt6.QtGui import QShortcut, QKeySequence
-
-        sc_left = QShortcut(QKeySequence("Ctrl+B"), self)
-        sc_left.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        sc_left.activated.connect(self._toggle_workbuddy_collapse)
-
-        sc_right = QShortcut(QKeySequence("Ctrl+Shift+B"), self)
-        sc_right.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        sc_right.activated.connect(self._toggle_config_collapse)
-
-        self._sc_collapse_left = sc_left
-        self._sc_collapse_right = sc_right
-
-    def _create_chat_page(self):
-        """创建任务对话页面 - 2026-06-16 重写为 3 列布局
-
-        克隆 web 改造前的 PyQt6 设计：右边栏（模型与配置）+ 对话窗口（中间）
-        左边栏参考 workbuddy 风格：workspace + 项目 + 用户区
-        所有功能的完整性：会话、消息、项目、模型、账户、设置
-        """
-        page = QWidget()
-        page.setStyleSheet("background-color: #121212;")
-        outer = QHBoxLayout(page)
-        outer.setSpacing(0)
-        outer.setContentsMargins(0, 0, 0, 0)
-
-        # ── 左侧：workbuddy 风格边栏（220px）──
-        self._workbuddy_panel = self._create_workbuddy_panel()
-        outer.addWidget(self._workbuddy_panel)
-
-        # ── 中间：对话窗（弹性扩展）──
-        self._chat_center = self._create_chat_center()
-        outer.addWidget(self._chat_center, 1)
-
-        # ── 右侧：模型与配置面板（380px）──
-        self._config_panel = self._create_config_panel()
-        outer.addWidget(self._config_panel)
-
-        # pywebview 桥接对象（保留兼容）
-        self.bridge = BackendBridge()
-        self.bridge._app_ref = self
-
-        self._chat_vue_container = None
-        self._chat_vue2_widget = None
-        self._chat_sessions = []
-        self._chat_current_session_id = None
-
-        # 初始数据
-        QTimer.singleShot(200, self._load_initial_data)
-
-        return page
-
-    # ── 左侧 workbuddy 风格边栏 ──
-
-    def _apply_emoji_font(self, btn, size: int = 16):
-        """2026-06-16 终极修复：把按钮的 emoji 文字渲染成 QPixmap，设为按钮 icon
-
-        之前尝试过在 stylesheet 里指定 font-family、在 setFont() 里指定字体，
-        在 Windows 上都还有 emoji 不显示的问题（Qt 的字体回退链没找到彩色 emoji 字体）。
-
-        这次的方案最稳：
-        1. 用 QFontDatabase.addApplicationFont() 直接加载 Windows 自带的
-           Segoe UI Emoji 字体文件（seguiemj.ttf），强制定义字体
-        2. 用 QPainter 把 emoji 文本画到 QPixmap 上（彩色 emoji 字体自带颜色）
-        3. 把 pixmap 设为按钮的 icon，清空按钮文字
-        这样完全不依赖 Qt 的字体回退机制，100% 能显示。
-        """
-        text = btn.text() or ""
-        if not text:
-            return  # 按钮没文字就没必要做 emoji icon 了
-
-        # 1) 加载 Segoe UI Emoji 字体文件
-        family = "Segoe UI Emoji"
-        try:
-            font_path = os.path.join(
-                os.environ.get("WINDIR", "C:/Windows"), "Fonts", "seguiemj.ttf"
-            )
-            if os.path.exists(font_path):
-                fid = QFontDatabase.addApplicationFont(font_path)
-                if fid != -1:
-                    fams = QFontDatabase.applicationFontFamilies(fid)
-                    if fams:
-                        family = fams[0]
-        except Exception:
-            pass
-
-        # 2) 把 emoji 渲染到 pixmap
-        # 关键：emoji 字体自带彩色 glyph，painter 拿到的就是彩色 bitmap
-        pix_size = max(size + 8, 24)  # 给 emoji 一点边距
-        pix = QPixmap(pix_size, pix_size)
-        pix.fill(Qt.GlobalColor.transparent)
-
-        painter = QPainter(pix)
-        try:
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-            # 关键 1：不要 SmoothPixmapTransform（会让彩色 emoji 模糊）
-            # 关键 2：用 LoadedFont 渲染
-            font = QFont(family)
-            font.setPixelSize(int(pix_size * 0.85))
-            font.setStyle(QFont.Style.StyleNormal)
-            font.setBold(False)
-            font.setItalic(False)
-            painter.setFont(font)
-            # 关键 3：彩色 emoji 自带颜色，pen 设什么色都不影响最终颜色
-            # 但设个深色背景匹配的色更保险
-            painter.setPen(Qt.GlobalColor.white)
-            painter.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, text)
-        finally:
-            painter.end()
-
-        # 3) 设到按钮上
-        btn.setIcon(QIcon(pix))
-        btn.setIconSize(QSize(size, size))
-        btn.setText("")  # 清空文字，只显示 icon
-        # 2026-06-16 修复：之前用 regex 删 stylesheet 里的 color: / font-* 时，
-        # `color\s*:\s*[^;}]+;?` 会误中 `background-color:` / `border-color:` / `outline-color:` 里的
-        # `color:` 子串，把所有背景色、边框色都替换成了 transparent，
-        # 导致 hover / pressed / checked 效果全部失效。
-        # 正确做法：完全不动 stylesheet。文字已经清空，文字色和字体属性都没用了；
-        # 背景/边框/hover/pressed/checked 必须保持原样。
-        # 因此下面这堆 regex 全部删除。
-
-    def _create_workbuddy_panel(self):
-        """workbuddy 风格左侧边栏 - 支持折叠
-
-        展开态（220px）：
-          - 顶部：logo + workspace 切换
-          - 中部：导航（对话 / 项目 / 历史 / 收藏 / 终端）
-          - 中部：当前 workspace 的项目列表
-          - 底部：用户区（设置入口）
-
-        折叠态（50px）：
-          - 垂直图标栏（⚡💬📁📜⭐💻👤），点击 ⚡ 展开
-        """
-        panel = QFrame()
-        panel.setFixedWidth(220)
-        panel.setStyleSheet("QFrame { background-color: #0F0F0F; border-right: 1px solid #1F1F1F; }")
-        self._workbuddy_collapsed = False
-        self._workbuddy_panel = panel
-        layout = QVBoxLayout(panel)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # ── 顶部 logo + workspace + 折叠按钮（单行布局） ──
-        header = QFrame()
-        header.setStyleSheet("QFrame { background-color: #141414; border-bottom: 1px solid #1F1F1F; }")
-        header.setMinimumHeight(70)
-        header.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(10, 8, 8, 8)
-        header_layout.setSpacing(6)
-
-        # 第 1 行：⚡ 云集智能 + 折叠按钮
-        top_row = QHBoxLayout()
-        top_row.setSpacing(6)
-        logo = QLabel("⚡")
-        logo.setStyleSheet("font-size: 18px; background: transparent; border: none;")
-        top_row.addWidget(logo)
-        brand = QLabel("云集智能")
-        brand.setStyleSheet("color: #FFFFFF; font-size: 14px; font-weight: bold; background: transparent; border: none;")
-        self._workbuddy_brand_lbl = brand
-        top_row.addWidget(brand)
-        top_row.addStretch()
-        # 折叠按钮：参考 workbuddy 顶部工具按钮风格 - 方块带边框
-        self._workbuddy_collapse_btn = QPushButton("‹")
-        self._workbuddy_collapse_btn.setFixedSize(24, 22)
-        self._workbuddy_collapse_btn.setToolTip("折叠边栏 (Ctrl+B)")
-        self._workbuddy_collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._workbuddy_collapse_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1F1F1F; color: #DDDDDD; border: 1px solid #2A2A2A;
-                border-radius: 4px; font-size: 14px; font-weight: bold; padding: 0px;
-            }
-            QPushButton:hover { background-color: #2A2A2A; color: #FFFFFF; border-color: #3A3A3A; }
-            QPushButton:pressed { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; }
-        """)
-        self._workbuddy_collapse_btn.clicked.connect(self._toggle_workbuddy_collapse)
-        # 注意：不用 _apply_emoji_font。‹ 是基础符号，用默认字体就能显示，
-        # 走 pixmap 路径反而会丢掉 toggle 时 setText("‹"/"›") 的文字更新
-        top_row.addWidget(self._workbuddy_collapse_btn)
-        header_layout.addLayout(top_row)
-
-        # 第 2 行：工作区下拉（独立一整行）
-        ws_row = QHBoxLayout()
-        ws_row.setSpacing(0)
-        ws_btn = QPushButton("📁 我的工作区  ▼")
-        ws_btn.setFixedHeight(28)
-        ws_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1A1A1A; color: #CCCCCC; border: 1px solid #2A2A2A;
-                border-radius: 4px; padding: 0px 10px; font-size: 11px; text-align: left;
-            }
-            QPushButton:hover { background-color: #252525; color: #FFFFFF; border-color: #3A3A3A; }
-        """)
-        ws_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._workbuddy_ws_btn = ws_btn
-        ws_row.addWidget(ws_btn, 1)
-        header_layout.addLayout(ws_row)
-        layout.addWidget(header)
-        self._workbuddy_header = header
-
-        # ── 中部：导航条目 ──
-        nav = QFrame()
-        nav.setStyleSheet("QFrame { background-color: transparent; border: none; }")
-        nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(8, 8, 8, 4)
-        nav_layout.setSpacing(2)
-
-        nav_items = [
-            ("💬", "对话", "session", True),       # 切到当前会话区
-            ("📁", "项目", "project", True),
-            ("📜", "历史", "history", True),
-            ("⭐", "收藏", "favorite", False),       # 暂未实现
-            ("💻", "终端", "terminal", False),
-        ]
-        self._workbuddy_nav_btns = {}  # 保存引用方便后续状态切换
-        for icon, label, kind, enabled in nav_items:
-            btn = QPushButton(f"  {icon}  {label}")
-            btn.setEnabled(enabled)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: transparent; color: #999; border: none;
-                    border-radius: 4px; padding: 7px 8px; font-size: 12px; text-align: left;
-                }
-                QPushButton:hover { background-color: #1F1F1F; color: #FFFFFF; }
-                QPushButton:checked { background-color: #1E3A8A; color: #FFFFFF; }
-                QPushButton:disabled { color: #555; }
-            """)
-            btn.setCheckable(True)
-            btn.setProperty("nav_kind", kind)
-            if enabled:
-                # 2026-06-16: 修复"点了没反应" - 真正绑定 click 事件
-                if kind == "session":
-                    btn.clicked.connect(lambda: (self._refresh_chat_session_list(), self._update_nav_active("session")))
-                elif kind == "project":
-                    btn.clicked.connect(lambda: (self._switch_page(4), self._update_nav_active("project")))
-                elif kind == "history":
-                    btn.clicked.connect(lambda: (self._switch_page(6), self._update_nav_active("history")))  # 2026-06-16: 跳到真正的对话历史页（page 6）
-            if kind == "session":
-                btn.setChecked(True)
-            self._workbuddy_nav_btns[kind] = btn
-            nav_layout.addWidget(btn)
-        nav_layout.addStretch()
-        layout.addWidget(nav)
-
-        # ── 项目列表区 ──
-        proj_frame = QFrame()
-        proj_frame.setStyleSheet("QFrame { background-color: transparent; border: none; }")
-        proj_layout = QVBoxLayout(proj_frame)
-        proj_layout.setContentsMargins(8, 4, 8, 4)
-        proj_layout.setSpacing(4)
-
-        proj_title = QLabel("我的项目")
-        proj_title.setStyleSheet("color: #888; font-size: 10px; padding: 4px 8px; background: transparent; border: none;")
-        proj_layout.addWidget(proj_title)
-
-        self._workbuddy_proj_list = QListWidget()
-        self._workbuddy_proj_list.setStyleSheet("""
-            QListWidget { background-color: transparent; border: none; color: #CCC; font-size: 11px; }
-            QListWidget::item { padding: 6px 8px; border-radius: 4px; }
-            QListWidget::item:hover { background-color: #1F1F1F; color: #FFFFFF; }
-            QListWidget::item:selected { background-color: #1E3A8A; color: #FFFFFF; }
-        """)
-        self._workbuddy_proj_list.itemClicked.connect(self._workbuddy_switch_project)
-        # 2026-06-16: 右键菜单（重命名/删除/打开文件夹/复制路径）
-        self._workbuddy_proj_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._workbuddy_proj_list.customContextMenuRequested.connect(self._workbuddy_project_context_menu)
-        proj_layout.addWidget(self._workbuddy_proj_list, 1)
-
-        proj_actions = QHBoxLayout()
-        proj_actions.setSpacing(4)
-        new_proj_btn = QPushButton("+ 新建")
-        new_proj_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1F1F1F; color: #BBB; border: 1px solid #2A2A2A;
-                border-radius: 4px; padding: 4px 8px; font-size: 10px;
-            }
-            QPushButton:hover { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; }
-        """)
-        new_proj_btn.clicked.connect(self._project_create_dialog)
-        proj_actions.addWidget(new_proj_btn, 1)
-        # 2026-06-16: 去掉原来的"⋯"按钮（与"+ 新建"重复且不直观）
-
-        proj_layout.addLayout(proj_actions)
-        layout.addWidget(proj_frame, 1)
-
-        # ── 底部用户区 ──
-        bottom = QFrame()
-        bottom.setStyleSheet("QFrame { background-color: #141414; border-top: 1px solid #1F1F1F; }")
-        bottom.setFixedHeight(44)
-        bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.setContentsMargins(10, 6, 8, 6)
-        bottom_layout.setSpacing(8)
-
-        avatar = QLabel("👤")
-        avatar.setStyleSheet("font-size: 18px; background: transparent; border: none;")
-        avatar.setFixedWidth(24)
-        bottom_layout.addWidget(avatar)
-
-        user_info = QVBoxLayout()
-        user_info.setSpacing(0)
-        user_name = QLabel("本地用户")
-        user_name.setStyleSheet("color: #FFFFFF; font-size: 11px; font-weight: bold; background: transparent; border: none;")
-        user_info.addWidget(user_name)
-        user_status = QLabel("● 在线")
-        user_status.setStyleSheet("color: #10B981; font-size: 9px; background: transparent; border: none;")
-        user_info.addWidget(user_status)
-        bottom_layout.addLayout(user_info, 1)
-
-        settings_btn = QPushButton("⚙")
-        settings_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent; color: #888; border: none;
-                border-radius: 4px; padding: 4px 6px; font-size: 14px;
-            }
-            QPushButton:hover { background-color: #252525; color: #FFFFFF; }
-        """)
-        settings_btn.clicked.connect(lambda: self._switch_page(5))  # 跳到系统设置
-        bottom_layout.addWidget(settings_btn)
-
-        layout.addWidget(bottom)
-
-        # 2026-06-16: 保存内嵌部件引用，折叠时按需隐藏
-        self._workbuddy_nav = nav
-        self._workbuddy_proj_frame = proj_frame
-        self._workbuddy_bottom = bottom
-
-        # ── 折叠态：垂直图标栏 ──
-        rail = QFrame()
-        rail.setStyleSheet("QFrame { background-color: #0A0A0A; border: none; }")
-        rail_layout = QVBoxLayout(rail)
-        rail_layout.setContentsMargins(4, 12, 4, 12)
-        rail_layout.setSpacing(4)
-        rail.setVisible(False)
-        self._workbuddy_rail = rail
-        self._workbuddy_rail_items = []
-        rail_icons = [
-            ("›", "展开边栏 (Ctrl+B)", None),  # 第一个 = 展开按钮
-            ("💬", "对话", None),
-            ("📁", "项目", lambda: self._switch_page(4)),
-            ("📜", "历史", None),
-            ("⭐", "收藏", None),
-            ("💻", "终端", None),
-        ]
-        for i, (icon, tip, slot) in enumerate(rail_icons):
-            b = QPushButton(icon)
-            b.setFixedSize(40, 36)
-            b.setToolTip(tip)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            if i == 0:
-                # 展开按钮：醒目蓝色，去掉边框
-                b.setStyleSheet("""
-                    QPushButton {
-                        background-color: #1E3A8A; color: #FFFFFF; border: none;
-                        border-radius: 8px;
-                    }
-                    QPushButton:hover { background-color: #3B82F6; }
-                    QPushButton:pressed { background-color: #1D4ED8; }
-                """)
-            else:
-                # 2026-06-16 优化：默认透明，去掉边框，hover/pressed 用对比度强的颜色
-                # 之前 #2A2A2A 和 rail 背景 #101010 太接近，看不出效果
-                # 现在 hover 用中灰 #374151，pressed 用蓝色 #1E3A8A
-                b.setStyleSheet("""
-                    QPushButton {
-                        background-color: transparent; color: #FFFFFF; border: none;
-                        border-radius: 8px;
-                    }
-                    QPushButton:hover { background-color: #374151; }
-                    QPushButton:pressed { background-color: #1E3A8A; }
-                    QPushButton:disabled { color: #555; }
-                """)
-            if slot:
-                b.clicked.connect(slot)
-            elif i == 0:
-                # 2026-06-16 修复：展开按钮的 click 直接绑定到 _toggle_workbuddy_collapse
-                # 之前依赖 toggle 函数里用 setIconText 重新绑定，但 QPushButton 没有 setIconText
-                # 直接 setIconText 会抛 AttributeError 导致闪退
-                b.clicked.connect(self._toggle_workbuddy_collapse)
-            else:
-                b.setEnabled(icon in ("💬", "📜"))  # 仅有意义的可点击按钮
-            # 2026-06-16 终极修复：迷你栏按钮 emoji 不显示
-            # 走 QPixmap 路径：load Segoe UI Emoji 字体 → QPainter 画到 pixmap → setIcon
-            # size=22 让 24x24 icon 在 40x36 按钮里视觉舒服
-            self._apply_emoji_font(b, size=22)
-            rail_layout.addWidget(b)
-            self._workbuddy_rail_items.append(b)
-        # 底部用户头像
-        rail_layout.addStretch()
-        user_avatar = QPushButton("👤")
-        user_avatar.setFixedSize(40, 36)
-        user_avatar.setToolTip("用户设置")
-        user_avatar.setCursor(Qt.CursorShape.PointingHandCursor)
-        # 2026-06-16 优化：和上面的非展开按钮保持一致
-        user_avatar.setStyleSheet("""
-            QPushButton {
-                background-color: transparent; color: #FFFFFF; border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover { background-color: #374151; }
-            QPushButton:pressed { background-color: #1E3A8A; }
-        """)
-        user_avatar.clicked.connect(lambda: self._switch_page(5))
-        # 2026-06-16 终极修复：用户头像走 emoji pixmap 路径
-        self._apply_emoji_font(user_avatar, size=20)
-        rail_layout.addWidget(user_avatar)
-        self._workbuddy_rail_items.append(user_avatar)
-
-        layout.addWidget(rail)
-
-        return panel
-
-    def _animate_panel_width(self, panel, from_w: int, to_w: int, duration: int = 180, on_finish=None):
-        """2026-06-16：折叠/展开的 180ms 宽度动画（修复崩溃：单动画 + 截断旧动画）"""
-        if panel is None:
-            return
-        # 截断上一次未完成的动画，避免 _on_done 误触发
-        if hasattr(panel, "_anim_min") and panel._anim_min is not None:
-            try:
-                panel._anim_min.stop()
-                panel._anim_max.stop()
-            except RuntimeError:
-                pass
-        anim = QPropertyAnimation(panel, b"minimumWidth", panel)
-        anim.setDuration(duration)
-        anim.setStartValue(from_w)
-        anim.setEndValue(to_w)
-        anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        anim2 = QPropertyAnimation(panel, b"maximumWidth", panel)
-        anim2.setDuration(duration)
-        anim2.setStartValue(from_w)
-        anim2.setEndValue(to_w)
-        anim2.setEasingCurve(QEasingCurve.Type.InOutCubic)
-        if on_finish:
-            anim.finished.connect(on_finish)
-        anim.start()
-        anim2.start()
-        panel._anim_min = anim
-        panel._anim_max = anim2
-
-    def _toggle_workbuddy_collapse(self):
-        """折叠/展开 workbuddy 边栏（220px ↔ 50px）"""
-        if not hasattr(self, "_workbuddy_panel") or self._workbuddy_panel is None:
-            return
-        if not self._workbuddy_collapsed:
-            # 折叠：先动画宽度，结束后切换内部 widget 可见性
-            start_w = self._workbuddy_panel.width() or 220
-            def _on_done():
-                # 用 try 包裹，避免动画回调时主窗口已被销毁
-                try:
-                    if not hasattr(self, "_workbuddy_panel") or self._workbuddy_panel is None:
-                        return
-                    for w in (self._workbuddy_header, self._workbuddy_nav,
-                              self._workbuddy_proj_frame, self._workbuddy_bottom):
-                        if w is not None:
-                            w.setVisible(False)
-                    self._workbuddy_rail.setVisible(True)
-                    self._workbuddy_collapse_btn.setText("›")
-                    self._workbuddy_collapse_btn.setToolTip("展开边栏 (Ctrl+B)")
-                except RuntimeError:
-                    pass
-            self._animate_panel_width(self._workbuddy_panel, start_w, 50, on_finish=_on_done)
-            self._workbuddy_collapsed = True
-        else:
-            # 展开
-            start_w = self._workbuddy_panel.width() or 50
-            for w in (self._workbuddy_header, self._workbuddy_nav,
-                      self._workbuddy_proj_frame, self._workbuddy_bottom):
-                if w is not None:
-                    w.setVisible(True)
-            self._workbuddy_rail.setVisible(False)
-            self._workbuddy_collapse_btn.setText("‹")
-            self._workbuddy_collapse_btn.setToolTip("折叠边栏 (Ctrl+B)")
-            def _on_done():
-                try:
-                    if not hasattr(self, "_workbuddy_panel") or self._workbuddy_panel is None:
-                        return
-                    self._workbuddy_panel.setMinimumWidth(220)
-                    self._workbuddy_panel.setMaximumWidth(220)
-                except RuntimeError:
-                    pass
-            self._animate_panel_width(self._workbuddy_panel, start_w, 220, on_finish=_on_done)
-            self._workbuddy_collapsed = False
-        # 2026-06-16 修复：删掉之前的 for 循环
-        # 原因：循环里调用 btn.setIconText(icon)，但 QPushButton 没有 setIconText 方法
-        # （setIconText 是 QAction 的方法），导致 AttributeError 闪退
-        # 展开按钮的 click 已在 rail 创建时一次性绑定，无需每次 toggle 都重新绑
-
-    def _workbuddy_switch_project(self, item):
-        """workbuddy 边栏：点击项目切换"""
-        project_id = item.data(Qt.ItemDataRole.UserRole)
-        if not project_id:
-            return
-        try:
-            result = self.bridge.switchProject(project_id)
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                self._append_log(f"已切换到项目: {item.text()}", "#4CAF50")
-                self._refresh_chat_session_list()
-        except Exception as e:
-            self._append_log(f"切换项目失败: {e}", "#F44336")
-
-    def _workbuddy_project_context_menu(self, pos):
-        """workbuddy 边栏：项目列表右键菜单
-
-        选项：📝 重命名 / 📂 打开文件夹 / 📋 复制路径 / 🗑 删除
-        """
-        item = self._workbuddy_proj_list.itemAt(pos)
-        if not item:
-            return
-        project_id = item.data(Qt.ItemDataRole.UserRole)
-        project_path = item.data(Qt.ItemDataRole.UserRole + 1) or ""
-        if not project_id:
-            return
-        from PyQt6.QtWidgets import QMenu
-        menu = QMenu(self._workbuddy_proj_list)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #1A1A1A; color: #E0E0E0;
-                border: 1px solid #2A2A2A; border-radius: 4px;
-                padding: 4px;
-            }
-            QMenu::item { padding: 6px 18px; border-radius: 3px; }
-            QMenu::item:selected { background-color: #2563EB; color: #FFFFFF; }
-            QMenu::separator { height: 1px; background: #2A2A2A; margin: 4px 0; }
-        """)
-        a_rename = menu.addAction("📝 重命名")
-        a_open = menu.addAction("📂 打开文件夹")
-        menu.addSeparator()
-        a_copy = menu.addAction("📋 复制路径")
-        a_del = menu.addAction("🗑 删除")
-        a_del.setText("🗑  删除项目")
-        a_del.setShortcut("Del")
-        chosen = menu.exec(self._workbuddy_proj_list.mapToGlobal(pos))
-        if chosen is None:
-            return
-        if chosen is a_rename:
-            self._workbuddy_rename_project(project_id, item)
-        elif chosen is a_open:
-            self._workbuddy_open_in_explorer(project_path)
-        elif chosen is a_copy:
-            from PyQt6.QtGui import QGuiApplication
-            QGuiApplication.clipboard().setText(project_path)
-            self._append_log(f"已复制路径: {project_path}", "#4CAF50")
-        elif chosen is a_del:
-            self._workbuddy_delete_project(project_id, item.text())
-
-    def _workbuddy_rename_project(self, project_id, item):
-        """重命名项目"""
-        old_name = item.text().replace("📁 ", "")
-        from PyQt6.QtWidgets import QInputDialog
-        new_name, ok = QInputDialog.getText(self, "重命名项目", "新名称:", text=old_name)
-        if not ok or not new_name.strip() or new_name.strip() == old_name:
-            return
-        try:
-            payload = json.dumps({"project_id": project_id, "name": new_name.strip()})
-            result = self.bridge.renameProject(payload)
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                self._append_log(f"✓ 已重命名: {old_name} → {new_name.strip()}", "#10B981")
-                self._refresh_projects_for_sidebar()
-            else:
-                self._append_log(f"重命名失败: {data}", "#F44336")
-        except Exception as e:
-            self._append_log(f"重命名失败: {e}", "#F44336")
-
-    def _workbuddy_open_in_explorer(self, path):
-        """在资源管理器中打开"""
-        if not path:
-            self._append_log("⚠ 没有可用的项目路径", "#FF9800")
-            return
-        try:
-            self.bridge.openInExplorer(path)
-            self._append_log(f"已打开: {path}", "#4CAF50")
-        except Exception as e:
-            self._append_log(f"打开失败: {e}", "#F44336")
-
-    def _workbuddy_delete_project(self, project_id, display_name):
-        """删除项目（带二次确认）"""
-        from PyQt6.QtWidgets import QMessageBox
-        reply = QMessageBox.question(
-            self, "确认删除",
-            f"确定要删除项目「{display_name}」吗？\n\n注意：项目文件本身不会被删除，只从工作区移除。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            payload = json.dumps({"project_id": project_id})
-            result = self.bridge.deleteProject(payload)
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                self._append_log(f"✓ 已删除项目: {display_name}", "#10B981")
-                self._refresh_projects_for_sidebar()
-            else:
-                self._append_log(f"删除失败: {data}", "#F44336")
-        except Exception as e:
-            self._append_log(f"删除失败: {e}", "#F44336")
-
-    # ── 中间对话窗（toolbar + messages + composer）──
-
-    def _create_chat_center(self):
-        """中间对话窗 - 克隆自 web 改造前的 PyQt6 设计"""
-        container = QFrame()
-        container.setStyleSheet("QFrame { background-color: #121212; }")
-        layout = QVBoxLayout(container)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # ── 顶部 toolbar ──
-        toolbar = QFrame()
-        toolbar.setFixedHeight(48)
-        toolbar.setStyleSheet("QFrame { background-color: #1A1A1A; border-bottom: 1px solid #2A2A2A; }")
-        tb_layout = QHBoxLayout(toolbar)
-        tb_layout.setContentsMargins(12, 8, 12, 8)
-        tb_layout.setSpacing(8)
-
-        self._chat_current_title = QLabel("选择左侧的对话，或点击「+ 新建对话」")
-        self._chat_current_title.setStyleSheet("color: #E0E0E0; font-size: 13px; font-weight: bold; background: transparent; border: none;")
-        tb_layout.addWidget(self._chat_current_title)
-        tb_layout.addStretch()
-
-        def make_btn(text, color, hover, slot, disabled=False):
-            b = QPushButton(text)
-            b.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {color}; color: #FFFFFF; border: none; border-radius: 5px;
-                    padding: 5px 12px; font-size: 11px;
-                }}
-                QPushButton:hover {{ background-color: {hover}; }}
-                QPushButton:disabled {{ background-color: #333; color: #777; }}
-            """)
-            b.clicked.connect(slot)
-            b.setEnabled(not disabled)
-            return b
-
-        self._btn_open_project = make_btn("📂 打开项目", "#374151", "#4B5563", self._chat_choose_workspace)
-        self._btn_new_session = make_btn("🆕 新会话", "#2563EB", "#1D4ED8", self._chat_new_session)
-        self._btn_stop_msg = make_btn("⏹ 停止", "#DC2626", "#B91C1C", self._chat_stop_message, disabled=True)
-        self._btn_toggle_panel = make_btn("⇄ 面板", "#374151", "#4B5563", self._chat_toggle_panel)
-
-        tb_layout.addWidget(self._btn_open_project)
-        tb_layout.addWidget(self._btn_new_session)
-        tb_layout.addWidget(self._btn_stop_msg)
-        tb_layout.addWidget(self._btn_toggle_panel)
-        layout.addWidget(toolbar)
-
-        # ── 消息滚动区 ──
-        self._chat_messages_area = QTextEdit()
-        self._chat_messages_area.setReadOnly(True)
-        self._chat_messages_area.setStyleSheet("""
-            QTextEdit {
-                background-color: #121212; color: #E0E0E0;
-                border: none; font-size: 13px; padding: 16px;
-            }
-        """)
-        layout.addWidget(self._chat_messages_area, 1)
-        self._set_welcome_message()
-
-        # ── 输入区（composer）──
-        composer = QFrame()
-        composer.setStyleSheet("QFrame { background-color: #1A1A1A; border-top: 1px solid #2A2A2A; }")
-        cp_layout = QVBoxLayout(composer)
-        cp_layout.setContentsMargins(12, 10, 12, 10)
-        cp_layout.setSpacing(6)
-
-        self._chat_input = QTextEdit()
-        self._chat_input.setFixedHeight(90)
-        self._chat_input.setPlaceholderText("输入编码任务（Enter 发送，Shift+Enter 换行）")
-        self._chat_input.setStyleSheet("""
-            QTextEdit {
-                background-color: #0E0E0E; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 6px;
-                padding: 8px; font-size: 13px;
-            }
-        """)
-        cp_layout.addWidget(self._chat_input)
-
-        foot_row = QHBoxLayout()
-        foot_row.setSpacing(8)
-        self._composer_status = QLabel("就绪")
-        self._composer_status.setStyleSheet("color: #888; font-size: 11px; background: transparent; border: none;")
-        foot_row.addWidget(self._composer_status)
-        foot_row.addStretch()
-
-        new_btn = QPushButton("🔄 清空")
-        new_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #374151; color: #FFFFFF; border: none; border-radius: 5px;
-                padding: 5px 12px; font-size: 11px;
-            }
-            QPushButton:hover { background-color: #4B5563; }
-        """)
-        new_btn.clicked.connect(self._chat_clear_messages)
-        foot_row.addWidget(new_btn)
-
-        send_btn = QPushButton("🚀 发送任务")
-        send_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #10B981; color: #FFFFFF; border: none; border-radius: 5px;
-                padding: 5px 14px; font-size: 11px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #059669; }
-        """)
-        send_btn.clicked.connect(self._chat_send_message)
-        foot_row.addWidget(send_btn)
-        cp_layout.addLayout(foot_row)
-        layout.addWidget(composer)
-
-        # Enter 发送（保留兼容）
-        self._chat_input.installEventFilter(self)
-
-        return container
-
-    def _set_welcome_message(self):
-        """对话窗默认欢迎信息"""
-        if not hasattr(self, "_chat_messages_area"):
-            return
-        self._chat_messages_area.setHtml("""
-            <div style="padding: 24px; text-align: center; color: #888;">
-                <div style="font-size: 48px; margin-bottom: 12px;">💬</div>
-                <div style="font-size: 18px; color: #FFFFFF; font-weight: bold; margin-bottom: 8px;">
-                    欢迎使用云集智能编程工作站
-                </div>
-                <div style="font-size: 13px; color: #BBB; line-height: 1.8; margin-bottom: 12px;">
-                    这是你的 AI 编程工作台。你可以：<br/>
-                    · 在左侧创建或选择项目 / 对话<br/>
-                    · 在下方输入框描述任务，让 AI 帮你写代码、调试、重构<br/>
-                    · 右侧选择运行模式（☁️云端 / 🔗API / 🦙Ollama）和配置
-                </div>
-                <div style="font-size: 11px; color: #666; margin-top: 16px;">
-                    提示：Enter 发送 · Shift+Enter 换行 · 顶部"打开项目"开始第一次会话
-                </div>
-            </div>
-        """)
-
-    # ── 右侧配置面板（克隆自 web 改造前的 PyQt6 设计）──
-
-    def _create_config_panel(self):
-        """右侧配置面板 - 克隆自 web 改造前的 Vue panel
-
-        结构：
-          - 面板头：模型与配置 + 模式切换（☁️云端 / 🔗API / 🦙Ollama）+ 折叠按钮
-          - 3 种模式的具体 UI（QStackedWidget 切换）
-          - 对话设置：自动授权 / 项目管理 / 称谓 / 保存
-          - 折叠态（50px）：仅显示模式图标
-        """
-        panel = QFrame()
-        panel.setFixedWidth(400)
-        panel.setStyleSheet("QFrame { background-color: #161616; border-left: 1px solid #1F1F1F; }")
-        self._config_collapsed = False
-        self._config_panel_frame = panel
-        layout = QVBoxLayout(panel)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # ── 面板头 + 模式切换 ──
-        header = QFrame()
-        header.setStyleSheet("QFrame { background-color: #1A1A1A; border-bottom: 1px solid #2A2A2A; }")
-        header_layout = QVBoxLayout(header)
-        header_layout.setContentsMargins(14, 12, 14, 12)
-        header_layout.setSpacing(8)
-
-        title_row = QHBoxLayout()
-        title_row.setSpacing(6)
-        title_lbl = QLabel("⚙ 模型与配置")
-        title_lbl.setStyleSheet("color: #FFFFFF; font-size: 14px; font-weight: bold; background: transparent; border: none;")
-        title_row.addWidget(title_lbl)
-        title_row.addStretch()
-        # 折叠按钮：与左侧风格一致的方块按钮
-        self._config_collapse_btn = QPushButton("›")
-        self._config_collapse_btn.setFixedSize(26, 24)
-        self._config_collapse_btn.setToolTip("折叠配置面板 (Ctrl+Shift+B)")
-        self._config_collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._config_collapse_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1F1F1F; color: #CCCCCC; border: 1px solid #2A2A2A;
-                border-radius: 4px; font-size: 16px; font-weight: bold; padding: 0px;
-            }
-            QPushButton:hover { background-color: #2A2A2A; color: #FFFFFF; border-color: #3A3A3A; }
-            QPushButton:pressed { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; }
-        """)
-        self._config_collapse_btn.clicked.connect(self._toggle_config_collapse)
-        # 同样不用 _apply_emoji_font（› 是基础符号）
-        title_row.addWidget(self._config_collapse_btn)
-        header_layout.addLayout(title_row)
-
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(4)
-        mode_btn_style = """
-            QPushButton {
-                background-color: #252525; color: #AAA; border: 1px solid #2F2F2F;
-                border-radius: 4px; padding: 5px 8px; font-size: 11px;
-            }
-            QPushButton:hover { background-color: #2F2F2F; color: #FFF; }
-            QPushButton:checked { background-color: #2563EB; color: #FFFFFF; border-color: #2563EB; }
-        """
-        self._run_mode = "ollama"  # 默认值
-        self._mode_btns = {}
-        for key, label in [("cloud", "☁️ 云端"), ("api", "🔗 API"), ("ollama", "🦙 Ollama")]:
-            btn = QPushButton(label)
-            btn.setCheckable(True)
-            btn.setStyleSheet(mode_btn_style)
-            if key == "ollama":
-                btn.setChecked(True)
-            btn.clicked.connect(lambda _, k=key: self._switch_run_mode(k))
-            mode_row.addWidget(btn, 1)
-            self._mode_btns[key] = btn
-        header_layout.addLayout(mode_row)
-        layout.addWidget(header)
-
-        # ── 3 种模式的内容（QStackedWidget）──
-        self._mode_stack = QStackedWidget()
-        self._mode_stack.setStyleSheet("QStackedWidget { background-color: #161616; border: none; }")
-
-        # 内容区滚动支持
-        from PyQt6.QtWidgets import QScrollArea
-        scroll_style = """
-            QScrollArea { background-color: #161616; border: none; }
-            QScrollBar:vertical { background: #1A1A1A; width: 8px; }
-            QScrollBar::handle:vertical { background: #3A3A3A; border-radius: 4px; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-        """
-
-        # 1. 云端模式
-        cloud_scroll = QScrollArea()
-        cloud_scroll.setStyleSheet(scroll_style)
-        cloud_scroll.setWidgetResizable(True)
-        cloud_widget = self._build_cloud_mode()
-        cloud_scroll.setWidget(cloud_widget)
-        self._mode_stack.addWidget(cloud_scroll)
-
-        # 2. API 模式
-        api_scroll = QScrollArea()
-        api_scroll.setStyleSheet(scroll_style)
-        api_widget = self._build_api_mode()
-        api_scroll.setWidget(api_widget)
-        self._mode_stack.addWidget(api_scroll)
-
-        # 3. Ollama 模式
-        ollama_scroll = QScrollArea()
-        ollama_scroll.setStyleSheet(scroll_style)
-        ollama_widget = self._build_ollama_mode()
-        ollama_scroll.setWidget(ollama_widget)
-        self._mode_stack.addWidget(ollama_scroll)
-
-        # 2026-06-16: 记录 3 个滚动区域 + 滚动位置记忆
-        self._mode_scroll_areas = {
-            "cloud": cloud_scroll, "api": api_scroll, "ollama": ollama_scroll,
-        }
-        self._mode_scroll_pos = {"cloud": 0, "api": 0, "ollama": 0}
-        for k, sa in self._mode_scroll_areas.items():
-            sb = sa.verticalScrollBar()
-            sb.valueChanged.connect(lambda v, kk=k: self._mode_scroll_pos.__setitem__(kk, v))
-
-        layout.addWidget(self._mode_stack, 1)
-
-        # ── 对话设置（始终在底部）──
-        settings_widget = self._build_dialog_settings()
-        layout.addWidget(settings_widget)
-
-        # 保存内嵌部件引用供折叠使用
-        self._config_header = header
-        self._config_settings_widget = settings_widget
-        self._config_mode_stack = self._mode_stack
-
-        # ── 折叠态：垂直模式图标 ──
-        rail = QFrame()
-        rail.setStyleSheet("QFrame { background-color: #101010; border: none; }")
-        rail_layout = QVBoxLayout(rail)
-        rail_layout.setContentsMargins(4, 12, 4, 12)
-        rail_layout.setSpacing(6)
-        rail.setVisible(False)
-        self._config_rail = rail
-        self._config_rail_items = []
-        rail_mode_icons = [
-            ("☁️", "cloud", "云端"),
-            ("🔗️", "api", "API"),
-            ("🦙", "ollama", "Ollama"),
-        ]
-        for icon, key, tip in rail_mode_icons:
-            b = QPushButton(icon)
-            b.setFixedSize(40, 36)
-            b.setToolTip(tip)
-            b.setCheckable(True)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            # 2026-06-16 优化：默认透明，hover/pressed 用对比度强的颜色
-            # 之前 regex bug 把 background-color 也改成了 transparent，所以看起来没效果
-            b.setStyleSheet("""
-                QPushButton {
-                    background-color: transparent; color: #FFFFFF; border: none;
-                    border-radius: 8px;
-                }
-                QPushButton:hover { background-color: #374151; }
-                QPushButton:pressed { background-color: #1E3A8A; }
-                QPushButton:checked {
-                    background-color: #1E3A8A;
-                }
-                QPushButton:checked:hover { background-color: #3B82F6; }
-            """)
-            if key == "ollama":
-                b.setChecked(True)
-            b.clicked.connect(lambda _, k=key: self._switch_run_mode(k))
-            # 2026-06-16 终极修复：右侧迷你栏图标不显示，走 QPixmap 路径
-            self._apply_emoji_font(b, size=22)
-            rail_layout.addWidget(b)
-            self._config_rail_items.append(b)
-        # 分隔条
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("QFrame { background-color: #2A2A2A; border: none; max-height: 1px; min-height: 1px; }")
-        rail_layout.addSpacing(8)
-        rail_layout.addWidget(sep)
-        rail_layout.addSpacing(8)
-        rail_layout.addStretch()
-        expand_btn = QPushButton("‹")
-        expand_btn.setFixedSize(40, 36)
-        expand_btn.setToolTip("展开配置面板 (Ctrl+Shift+B)")
-        expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        expand_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1E3A8A; color: #FFFFFF; border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover { background-color: #3B82F6; }
-            QPushButton:pressed { background-color: #1D4ED8; }
-        """)
-        expand_btn.clicked.connect(self._toggle_config_collapse)
-        # 不用 _apply_emoji_font（‹ 是基础符号）
-        rail_layout.addWidget(expand_btn)
-        self._config_rail_items.append(expand_btn)
-
-        layout.addWidget(rail)
-
-        return panel
-
-    def _toggle_config_collapse(self):
-        """折叠/展开右侧配置面板（400px ↔ 50px）"""
-        if not hasattr(self, "_config_panel_frame") or self._config_panel_frame is None:
-            return
-        if not self._config_collapsed:
-            start_w = self._config_panel_frame.width() or 400
-            def _on_done():
-                try:
-                    for w in (self._config_header, self._config_mode_stack, self._config_settings_widget):
-                        if w is not None:
-                            w.setVisible(False)
-                    self._config_rail.setVisible(True)
-                    self._config_collapse_btn.setText("‹")
-                    self._config_collapse_btn.setToolTip("展开配置面板 (Ctrl+Shift+B)")
-                except RuntimeError:
-                    pass
-            self._animate_panel_width(self._config_panel_frame, start_w, 50, on_finish=_on_done)
-            self._config_collapsed = True
-        else:
-            start_w = self._config_panel_frame.width() or 50
-            for w in (self._config_header, self._config_mode_stack, self._config_settings_widget):
-                if w is not None:
-                    w.setVisible(True)
-            self._config_rail.setVisible(False)
-            self._config_collapse_btn.setText("›")
-            self._config_collapse_btn.setToolTip("折叠配置面板 (Ctrl+Shift+B)")
-            def _on_done():
-                try:
-                    self._config_panel_frame.setMinimumWidth(400)
-                    self._config_panel_frame.setMaximumWidth(400)
-                except RuntimeError:
-                    pass
-            self._animate_panel_width(self._config_panel_frame, start_w, 400, on_finish=_on_done)
-            self._config_collapsed = False
-
-    def _switch_run_mode(self, mode: str):
-        """切换右侧面板的 3 种模式（带滚动位置记忆）"""
-        self._run_mode = mode
-        for k, btn in self._mode_btns.items():
-            btn.setChecked(k == mode)
-        # rail 模式按钮也同步选中
-        if hasattr(self, "_config_rail_items"):
-            mode_to_rail_idx = {"cloud": 0, "api": 1, "ollama": 2}
-            idx = mode_to_rail_idx.get(mode, 2)
-            for i, btn in enumerate(self._config_rail_items[:3]):
-                btn.setChecked(i == idx)
-        if mode == "cloud":
-            self._mode_stack.setCurrentIndex(0)
-        elif mode == "api":
-            self._mode_stack.setCurrentIndex(1)
-        elif mode == "ollama":
-            self._mode_stack.setCurrentIndex(2)
-            QTimer.singleShot(200, self._ollama_check_status)
-        # 恢复滚动位置
-        if hasattr(self, "_mode_scroll_areas") and mode in self._mode_scroll_areas:
-            QTimer.singleShot(50, lambda m=mode: self._mode_scroll_areas[m].verticalScrollBar().setValue(self._mode_scroll_pos.get(m, 0)))
-
-    def _build_cloud_mode(self):
-        """☁️ 云端模式面板"""
-        w = QWidget()
-        w.setStyleSheet("background-color: #161616;")
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-
-        layout.addWidget(self._make_section_title("🔑 API Key"))
-        self._cloud_api_key = QLineEdit()
-        self._cloud_api_key.setPlaceholderText("输入 OpenRouter / Anthropic API Key")
-        self._cloud_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._cloud_api_key.setStyleSheet(self._input_style())
-        layout.addWidget(self._cloud_api_key)
-
-        layout.addWidget(self._make_section_title("云端模型（固定）"))
-        model_btn = QPushButton("openrouter/auto  ★ 工具")
-        model_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1E3A8A; color: #FFFFFF; border: none;
-                border-radius: 5px; padding: 8px 10px; font-size: 12px; text-align: left;
-            }
-        """)
-        model_btn.setEnabled(False)
-        layout.addWidget(model_btn)
-
-        layout.addWidget(self._make_section_title("模型独立配置"))
-        self._cloud_lang = self._make_combo("语言", ["中文", "English"], "中文")
-        layout.addLayout(self._cloud_lang)
-        self._cloud_temp = self._make_field("Temperature", "0.6~0.8 推荐", "0.7")
-        layout.addLayout(self._cloud_temp)
-        self._cloud_max_tokens = self._make_field("Max Tokens", "", "4096")
-        layout.addLayout(self._cloud_max_tokens)
-
-        self._cloud_prompt = QTextEdit()
-        self._cloud_prompt.setPlaceholderText("系统提示词（可选）")
-        self._cloud_prompt.setFixedHeight(60)
-        self._cloud_prompt.setStyleSheet(self._input_style())
-        layout.addWidget(self._cloud_prompt)
-
-        info = QLabel("💡 云端模式无需本地算力，工具调用 ★ 标记表示支持。")
-        info.setStyleSheet("color: #888; font-size: 10px; background: transparent; border: none;")
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        layout.addStretch()
-        return w
-
-    def _build_api_mode(self):
-        """🔗 API 模式面板（含 4 步进度 + 上游账户 + 模型列表）"""
-        w = QWidget()
-        w.setStyleSheet("background-color: #161616;")
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-
-        layout.addWidget(self._make_section_title("API 服务地址"))
-        addr_row = QHBoxLayout()
-        addr_row.setSpacing(0)
-        prefix = QLabel("http://")
-        prefix.setStyleSheet("padding: 0 6px; font-size: 11px; color: #888; background-color: #1A1A1A; border: 1px solid #333; border-right: none; border-radius: 4px 0 0 4px; height: 28px; line-height: 28px;")
-        addr_row.addWidget(prefix)
-        self._api_host = QLineEdit("127.0.0.1")
-        self._api_host.setStyleSheet(self._input_style() + "border-radius: 0; border-left: none; border-right: none;")
-        addr_row.addWidget(self._api_host, 1)
-        colon = QLabel(":")
-        colon.setStyleSheet("padding: 0 6px; font-size: 13px; color: #888; background-color: #1A1A1A; border: 1px solid #333; border-left: none; border-right: none; height: 28px; line-height: 28px;")
-        addr_row.addWidget(colon)
-        self._api_port = QLineEdit("7777")
-        self._api_port.setFixedWidth(60)
-        self._api_port.setStyleSheet(self._input_style() + "border-radius: 0 4px 4px 0; border-left: none; text-align: center;")
-        addr_row.addWidget(self._api_port)
-        layout.addLayout(addr_row)
-
-        # 4 步进度
-        layout.addWidget(self._make_section_title("服务状态"))
-        self._api_steps = [
-            ("检测服务", "check"),
-            ("启动服务", "start"),
-            ("获取 Key", "key"),
-            ("加载模型", "models"),
-        ]
-        self._api_step_widgets = []
-        steps_row = QHBoxLayout()
-        steps_row.setSpacing(4)
-        for i, (label, _) in enumerate(self._api_steps):
-            step_box = QFrame()
-            step_box.setStyleSheet("QFrame { background-color: #1F1F1F; border: 1px solid #2A2A2A; border-radius: 4px; }")
-            step_box.setFixedHeight(46)
-            sl = QVBoxLayout(step_box)
-            sl.setContentsMargins(2, 2, 2, 2)
-            sl.setSpacing(1)
-            dot = QLabel(f"{i+1}")
-            dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            dot.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; background: transparent; border: none;")
-            sl.addWidget(dot)
-            lbl = QLabel(label)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("color: #888; font-size: 9px; background: transparent; border: none;")
-            sl.addWidget(lbl)
-            steps_row.addWidget(step_box, 1)
-            self._api_step_widgets.append((step_box, dot, lbl))
-        layout.addLayout(steps_row)
-
-        # 进度条
-        self._api_progress = QProgressBar()
-        self._api_progress.setRange(0, 100)
-        self._api_progress.setValue(0)
-        self._api_progress.setTextVisible(False)
-        self._api_progress.setFixedHeight(4)
-        self._api_progress.setStyleSheet("""
-            QProgressBar { background-color: #1F1F1F; border: none; border-radius: 2px; }
-            QProgressBar::chunk { background-color: #2563EB; border-radius: 2px; }
-        """)
-        layout.addWidget(self._api_progress)
-
-        self._api_step_msg = QLabel("点击「一键启动」自动配置 API 服务")
-        self._api_step_msg.setStyleSheet("color: #888; font-size: 10px; background: transparent; border: none;")
-        self._api_step_msg.setWordWrap(True)
-        layout.addWidget(self._api_step_msg)
-
-        api_btn_row = QHBoxLayout()
-        api_btn_row.setSpacing(6)
-        self._api_start_btn = QPushButton("▶ 一键启动")
-        self._api_start_btn.setStyleSheet("""
-            QPushButton { background-color: #2563EB; color: #FFFFFF; border: none; border-radius: 5px; padding: 7px 12px; font-size: 12px; font-weight: bold; }
-            QPushButton:hover { background-color: #1D4ED8; }
-            QPushButton:disabled { background-color: #333; color: #777; }
-        """)
-        self._api_start_btn.clicked.connect(self._api_step_auto_run)
-        api_btn_row.addWidget(self._api_start_btn, 1)
-        self._api_stop_btn = QPushButton("■ 停止")
-        self._api_stop_btn.setStyleSheet("""
-            QPushButton { background-color: #7F1D1D; color: #FFFFFF; border: none; border-radius: 5px; padding: 7px 12px; font-size: 12px; }
-            QPushButton:hover { background-color: #991B1B; }
-            QPushButton:disabled { background-color: #333; color: #777; }
-        """)
-        self._api_stop_btn.clicked.connect(self._api_stop_service)
-        self._api_stop_btn.setEnabled(False)
-        api_btn_row.addWidget(self._api_stop_btn)
-        layout.addLayout(api_btn_row)
-
-        # API Key
-        layout.addWidget(self._make_section_title("API Key"))
-        self._api_key = QLineEdit()
-        self._api_key.setPlaceholderText("自动获取或手动输入")
-        self._api_key.setStyleSheet(self._input_style())
-        layout.addWidget(self._api_key)
-
-        # 上游账户（千问账户）
-        layout.addWidget(self._make_section_title("上游账户 (千问)"))
-        qwen_header = QHBoxLayout()
-        qwen_count_lbl = QLabel("-- 个")
-        qwen_count_lbl.setStyleSheet("color: #10B981; font-size: 10px; background: transparent; border: none;")
-        self._qwen_count_lbl = qwen_count_lbl
-        qwen_header.addWidget(qwen_count_lbl)
-        qwen_header.addStretch()
-        refresh_btn = QPushButton("🔄 刷新")
-        refresh_btn.setStyleSheet("""
-            QPushButton { background-color: #1F1F1F; color: #BBB; border: 1px solid #2A2A2A; border-radius: 4px; padding: 3px 8px; font-size: 10px; }
-            QPushButton:hover { background-color: #252525; color: #FFF; }
-        """)
-        refresh_btn.clicked.connect(self._check_qwen_accounts)
-        qwen_header.addWidget(refresh_btn)
-        layout.addLayout(qwen_header)
-
-        self._qwen_account_list = QListWidget()
-        self._qwen_account_list.setStyleSheet("""
-            QListWidget { background-color: #0E0E0E; border: 1px solid #2A2A2A; border-radius: 4px; color: #CCC; font-size: 10px; }
-            QListWidget::item { padding: 4px 6px; }
-            QListWidget::item:hover { background-color: #1F1F1F; }
-        """)
-        self._qwen_account_list.setMaximumHeight(80)
-        # 2026-06-16: 千问账户右键菜单（置顶/取消置顶/删除/复制邮箱）
-        self._qwen_account_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._qwen_account_list.customContextMenuRequested.connect(self._qwen_account_context_menu)
-        layout.addWidget(self._qwen_account_list)
-
-        # 千问账户操作按钮
-        qwen_action_row = QHBoxLayout()
-        qwen_action_row.setSpacing(4)
-        for text, slot in [("🤖 自动注册", self._auto_register_qwen), ("🔑 登录", self._login_qwen), ("➕ 添加Token", self._add_qwen_token)]:
-            b = QPushButton(text)
-            b.setStyleSheet("""
-                QPushButton { background-color: #1F1F1F; color: #BBB; border: 1px solid #2A2A2A; border-radius: 4px; padding: 4px 8px; font-size: 10px; }
-                QPushButton:hover { background-color: #2563EB; color: #FFF; border-color: #2563EB; }
-            """)
-            b.clicked.connect(slot)
-            qwen_action_row.addWidget(b)
-        layout.addLayout(qwen_action_row)
-
-        # 模型列表
-        layout.addWidget(self._make_section_title("可用模型"))
-        self._api_model_list = QListWidget()
-        self._api_model_list.setStyleSheet("""
-            QListWidget { background-color: #0E0E0E; border: 1px solid #2A2A2A; border-radius: 4px; color: #CCC; font-size: 11px; }
-            QListWidget::item { padding: 6px 8px; }
-            QListWidget::item:hover { background-color: #1F1F1F; }
-            QListWidget::item:selected { background-color: #1E3A8A; color: #FFF; }
-        """)
-        self._api_model_list.itemClicked.connect(self._api_select_model)
-        self._api_model_list.setMaximumHeight(120)
-        layout.addWidget(self._api_model_list)
-
-        self._api_model = QLineEdit("qwen3.6-plus")
-        self._api_model.setStyleSheet(self._input_style())
-        layout.addWidget(self._api_model)
-
-        layout.addStretch()
-        return w
-
-    def _build_ollama_mode(self):
-        """🦙 Ollama 模式面板"""
-        w = QWidget()
-        w.setStyleSheet("background-color: #161616;")
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-
-        # 服务地址
-        layout.addWidget(self._make_section_title("Ollama 服务地址"))
-        addr_row = QHBoxLayout()
-        addr_row.setSpacing(4)
-        self._ollama_url = QLineEdit("http://127.0.0.1:11434")
-        self._ollama_url.setStyleSheet(self._input_style())
-        addr_row.addWidget(self._ollama_url, 1)
-        detect_btn = QPushButton("🔍 检测")
-        detect_btn.setStyleSheet(self._btn_sm_style("#2563EB"))
-        detect_btn.clicked.connect(self._ollama_detect_models)
-        addr_row.addWidget(detect_btn)
-        layout.addLayout(addr_row)
-
-        # Ollama 状态指示
-        self._ollama_status_lbl = QLabel("⏳ 检测中...")
-        self._ollama_status_lbl.setStyleSheet("color: #FF9800; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-        self._ollama_status_lbl.setWordWrap(True)
-        layout.addWidget(self._ollama_status_lbl)
-
-        # 推荐安装
-        rec_row = QHBoxLayout()
-        rec_row.setSpacing(4)
-        rec_btn = QPushButton("💡 推荐模型")
-        rec_btn.setStyleSheet(self._btn_sm_style("#7C3AED"))
-        rec_btn.clicked.connect(self._ollama_load_recommendations)
-        rec_row.addWidget(rec_btn, 1)
-        detect2_btn = QPushButton("🔄 重新检测")
-        detect2_btn.setStyleSheet(self._btn_sm_style("#374151"))
-        detect2_btn.clicked.connect(self._ollama_detect_models)
-        rec_row.addWidget(detect2_btn)
-        layout.addLayout(rec_row)
-
-        self._ollama_rec_list = QListWidget()
-        self._ollama_rec_list.setStyleSheet("""
-            QListWidget { background-color: #0E0E0E; border: 1px solid #2A2A2A; border-radius: 4px; color: #CCC; font-size: 10px; }
-            QListWidget::item { padding: 4px 6px; }
-            QListWidget::item:hover { background-color: #1F1F1F; }
-        """)
-        self._ollama_rec_list.setMaximumHeight(70)
-        layout.addWidget(self._ollama_rec_list)
-
-        # 可用模型
-        layout.addWidget(self._make_section_title("可用模型"))
-        self._ollama_model_list = QListWidget()
-        self._ollama_model_list.setStyleSheet("""
-            QListWidget { background-color: #0E0E0E; border: 1px solid #2A2A2A; border-radius: 4px; color: #CCC; font-size: 11px; }
-            QListWidget::item { padding: 6px 8px; }
-            QListWidget::item:hover { background-color: #1F1F1F; }
-            QListWidget::item:selected { background-color: #1E3A8A; color: #FFF; }
-        """)
-        self._ollama_model_list.itemClicked.connect(self._ollama_select_model)
-        self._ollama_model_list.setMaximumHeight(140)
-        layout.addWidget(self._ollama_model_list)
-
-        # 模型配置
-        layout.addWidget(self._make_section_title("模型独立配置"))
-        self._ollama_temp = self._make_field("Temperature", "", "0.7")
-        layout.addLayout(self._ollama_temp)
-        self._ollama_max_tokens = self._make_field("Max Tokens", "", "4096")
-        layout.addLayout(self._ollama_max_tokens)
-
-        self._ollama_hint = QLabel("⚠ 不支持工具调用的模型，编程功能将受限。\n★ 工具 表示该模型支持工具调用。")
-        self._ollama_hint.setStyleSheet("color: #888; font-size: 10px; background: transparent; border: none;")
-        self._ollama_hint.setWordWrap(True)
-        layout.addWidget(self._ollama_hint)
-
-        layout.addStretch()
-        return w
-
-    def _build_dialog_settings(self):
-        """对话设置：自动授权 / 项目管理 / 称谓 / 保存"""
-        frame = QFrame()
-        frame.setStyleSheet("QFrame { background-color: #1A1A1A; border-top: 1px solid #2A2A2A; }")
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
-
-        # 分组标题
-        layout.addWidget(self._make_section_title("对话设置"))
-
-        # 自动授权 toggle
-        auto_row = QHBoxLayout()
-        auto_lbl = QLabel("自动授权工具调用")
-        auto_lbl.setStyleSheet("color: #DDD; font-size: 11px; background: transparent; border: none;")
-        auto_row.addWidget(auto_lbl)
-        auto_row.addStretch()
-        self._auto_approve_toggle = QCheckBox()
-        self._auto_approve_toggle.setStyleSheet("""
-            QCheckBox::indicator { width: 32px; height: 16px; }
-            QCheckBox::indicator:unchecked { background: #333; border-radius: 8px; }
-            QCheckBox::indicator:checked { background: #10B981; border-radius: 8px; }
-        """)
-        self._auto_approve_toggle.setChecked(False)
-        auto_row.addWidget(self._auto_approve_toggle)
-        layout.addLayout(auto_row)
-
-        warn = QLabel("⚠ 开启后 AI 可直接读写文件/执行命令，无需逐次审批")
-        warn.setStyleSheet("color: #FF9800; font-size: 9px; background: transparent; border: none;")
-        warn.setWordWrap(True)
-        layout.addWidget(warn)
-
-        # 项目管理
-        layout.addSpacing(4)
-        layout.addWidget(self._make_section_title("📁 项目管理"))
-        proj_btn_row = QHBoxLayout()
-        proj_btn_row.setSpacing(4)
-        for text, slot in [("📂 打开", self._chat_choose_workspace), ("+ 新建", self._project_create_dialog), ("📋 列表", lambda: self._switch_page(4))]:
-            b = QPushButton(text)
-            b.setStyleSheet("""
-                QPushButton { background-color: #1F1F1F; color: #BBB; border: 1px solid #2A2A2A; border-radius: 4px; padding: 4px 8px; font-size: 10px; }
-                QPushButton:hover { background-color: #2563EB; color: #FFF; border-color: #2563EB; }
-            """)
-            b.clicked.connect(slot)
-            proj_btn_row.addWidget(b)
-        layout.addLayout(proj_btn_row)
-
-        # 当前项目显示
-        self._current_proj_lbl = QLabel("当前项目: 无")
-        self._current_proj_lbl.setStyleSheet("color: #42A5F5; font-size: 10px; background: transparent; border: none;")
-        layout.addWidget(self._current_proj_lbl)
-
-        # 称谓
-        layout.addSpacing(4)
-        self._user_name = QLineEdit("你")
-        self._user_name.setPlaceholderText("你的称谓")
-        self._user_name.setStyleSheet(self._input_style())
-        self._user_name.setMaximumWidth(200)
-        layout.addWidget(self._user_name)
-        self._assistant_name = QLineEdit("助手")
-        self._assistant_name.setPlaceholderText("AI 称谓")
-        self._assistant_name.setStyleSheet(self._input_style())
-        self._assistant_name.setMaximumWidth(200)
-        layout.addWidget(self._assistant_name)
-
-        # 保存按钮
-        layout.addSpacing(4)
-        save_row = QHBoxLayout()
-        save_row.setSpacing(6)
-        clear_btn = QPushButton("清空模型")
-        clear_btn.setStyleSheet("""
-            QPushButton { background-color: #374151; color: #FFFFFF; border: none; border-radius: 5px; padding: 6px 12px; font-size: 11px; }
-            QPushButton:hover { background-color: #4B5563; }
-        """)
-        clear_btn.clicked.connect(self._chat_clear_model_fields)
-        save_row.addWidget(clear_btn, 1)
-        save_btn = QPushButton("💾 保存并启用")
-        save_btn.setStyleSheet("""
-            QPushButton { background-color: #10B981; color: #FFFFFF; border: none; border-radius: 5px; padding: 6px 12px; font-size: 11px; font-weight: bold; }
-            QPushButton:hover { background-color: #059669; }
-        """)
-        save_btn.clicked.connect(self._chat_save_settings)
-        save_row.addWidget(save_btn, 1)
-        layout.addLayout(save_row)
-
-        return frame
-
-    # ── 工具方法 ──
-
-    def _input_style(self):
-        return """
-            QLineEdit, QTextEdit {
-                background-color: #0E0E0E; color: #E0E0E0;
-                border: 1px solid #2A2A2A; border-radius: 4px;
-                padding: 5px 8px; font-size: 11px;
-            }
-            QLineEdit:focus, QTextEdit:focus { border-color: #2563EB; }
-        """
-
-    def _btn_sm_style(self, color):
-        hover = {
-            "#2563EB": "#1D4ED8", "#7C3AED": "#6D28D9", "#374151": "#4B5563",
-        }.get(color, color)
-        return f"""
-            QPushButton {{ background-color: {color}; color: #FFFFFF; border: none; border-radius: 4px; padding: 5px 10px; font-size: 11px; }}
-            QPushButton:hover {{ background-color: {hover}; }}
-            QPushButton:disabled {{ background-color: #333; color: #777; }}
-        """
-
-    def _make_section_title(self, text):
-        lbl = QLabel(text)
-        lbl.setStyleSheet("color: #888; font-size: 10px; font-weight: bold; padding: 4px 0 2px 0; background: transparent; border: none;")
-        return lbl
-
-    def _make_field(self, label, placeholder, value=""):
-        """返回 (label, input) 的横向布局"""
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        l = QLabel(label)
-        l.setStyleSheet("color: #AAA; font-size: 11px; background: transparent; border: none; min-width: 80px;")
-        row.addWidget(l)
-        e = QLineEdit(value)
-        e.setPlaceholderText(placeholder)
-        e.setStyleSheet(self._input_style())
-        row.addWidget(e, 1)
-        row._field_input = e  # 标记方便后续取
-        return row
-
-    def _make_combo(self, label, options, current):
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        l = QLabel(label)
-        l.setStyleSheet("color: #AAA; font-size: 11px; background: transparent; border: none; min-width: 80px;")
-        row.addWidget(l)
-        from PyQt6.QtWidgets import QComboBox
-        c = QComboBox()
-        c.addItems(options)
-        c.setCurrentText(current)
-        c.setStyleSheet("""
-            QComboBox { background-color: #0E0E0E; color: #E0E0E0; border: 1px solid #2A2A2A; border-radius: 4px; padding: 4px 8px; font-size: 11px; }
-            QComboBox::drop-down { border: none; }
-            QComboBox QAbstractItemView { background-color: #1A1A1A; color: #E0E0E0; selection-background-color: #2563EB; }
-        """)
-        row.addWidget(c, 1)
-        return row
-
-    # ── 事件处理 ──
-
-    def _switch_run_mode(self, mode: str):
-        """切换右侧面板的 3 种模式"""
-        self._run_mode = mode
-        for k, btn in self._mode_btns.items():
-            btn.setChecked(k == mode)
-        if mode == "cloud":
-            self._mode_stack.setCurrentIndex(0)
-        elif mode == "api":
-            self._mode_stack.setCurrentIndex(1)
-        elif mode == "ollama":
-            self._mode_stack.setCurrentIndex(2)
-            # 自动检测 Ollama 状态
-            QTimer.singleShot(200, self._ollama_check_status)
-
-    def _chat_toggle_panel(self):
-        """显示/隐藏右侧配置面板"""
-        if self._config_panel.isVisible():
-            self._config_panel.hide()
-        else:
-            self._config_panel.show()
-
-    def _chat_choose_workspace(self):
-        """打开项目 / 选择工作区"""
-        try:
-            result = self.bridge.chooseWorkspace()
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                path = data.get("path", "")
-                self._chat_current_title.setText(f"📂 {path}")
-                self._append_log(f"已打开工作区: {path}", "#4CAF50")
-                self._load_initial_data()
-        except Exception as e:
-            self._append_log(f"打开工作区失败: {e}", "#F44336")
-
-    def _chat_new_session(self):
-        """新会话"""
-        try:
-            result = self.bridge.newSession()
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                session_id = data.get("session_id", "")
-                self._chat_current_session_id = session_id
-                self._chat_current_title.setText(f"会话：{session_id[:8]}...")
-                self._chat_messages_area.clear()
-                self._set_welcome_message()
-                self._append_log(f"已创建新会话: {session_id}", "#4CAF50")
-                self._refresh_chat_session_list()
-        except Exception as e:
-            self._append_log(f"新会话失败: {e}", "#F44336")
-
-    def _chat_stop_message(self):
-        """停止当前消息"""
-        try:
-            self.bridge.stopMessage()
-            self._composer_status.setText("就绪")
-            self._btn_stop_msg.setEnabled(False)
-        except Exception as e:
-            self._append_log(f"停止失败: {e}", "#F44336")
-
-    def _chat_send_message(self):
-        """发送消息"""
-        text = self._chat_input.toPlainText().strip()
-        if not text:
-            return
-        if not self._chat_current_session_id:
-            self._chat_new_session()
-        self._composer_status.setText("执行中...")
-        self._btn_stop_msg.setEnabled(True)
-        try:
-            payload = json.dumps({
-                "session_id": self._chat_current_session_id,
-                "text": text,
-                "model": self._api_model.text() if self._run_mode == "api" else "",
-                "provider": self._run_mode,
-            })
-            self.bridge.sendMessage(payload)
-            self._chat_input.clear()
-        except Exception as e:
-            self._append_log(f"发送失败: {e}", "#F44336")
-            self._composer_status.setText("就绪")
-            self._btn_stop_msg.setEnabled(False)
-
-    def _chat_clear_messages(self):
-        """清空消息"""
-        self._chat_messages_area.clear()
-        self._set_welcome_message()
-
-    # ── 2026-06-16: 消息角色 + Markdown 渲染 ──
-
-    _ROLE_META = {
-        "user":      {"icon": "👤", "name": "你",      "color": "#3B82F6", "align": "right"},
-        "assistant": {"icon": "🤖", "name": "AI 助手", "color": "#10B981", "align": "left"},
-        "system":    {"icon": "⚙️", "name": "系统",   "color": "#A78BFA", "align": "left"},
-        "error":     {"icon": "⚠️", "name": "错误",   "color": "#F44336", "align": "left"},
-    }
-
-    def append_chat_message(self, role: str, text: str, ts: str = "", model: str = ""):
-        """往中间对话窗追加一条带角色/Markdown 渲染的消息
-
-        role: user / assistant / system / error
-        text: 原始 Markdown 文本
-        """
-        if not hasattr(self, "_chat_messages_area"):
-            return
-        meta = self._ROLE_META.get(role, self._ROLE_META["assistant"])
-        ts_html = f'<span style="color: #666; font-size: 9px; margin-left: 6px;">{ts}</span>' if ts else ""
-        model_html = f'<span style="color: #666; font-size: 9px; margin-left: 6px;">{model}</span>' if model else ""
-        # 复制按钮（仅 assistant / user 显示）
-        copy_btn_html = f'''
-            <a href="copy://{role}/{id(text)}" style="float: right; color: #888; font-size: 10px; text-decoration: none; padding: 2px 6px; border: 1px solid #333; border-radius: 3px;" onmouseover="this.style.color='#FFF';this.style.borderColor='#888'" onmouseout="this.style.color='#888';this.style.borderColor='#333'">📋 复制</a>
-        ''' if role in ("assistant", "user") else ""
-
-        body_html = self._markdown_to_html(text)
-        # 整条消息 HTML
-        msg_html = f'''
-            <div style="margin: 8px 0; padding: 8px 4px;">
-                <div style="display: flex; align-items: center; margin-bottom: 4px;">
-                    <span style="font-size: 16px; margin-right: 6px;">{meta["icon"]}</span>
-                    <span style="color: {meta["color"]}; font-size: 12px; font-weight: bold;">{meta["name"]}</span>
-                    {ts_html}
-                    {model_html}
-                    {copy_btn_html}
-                </div>
-                <div style="color: #E0E0E0; font-size: 13px; line-height: 1.7; padding-left: 22px;">
-                    {body_html}
-                </div>
-            </div>
-            <hr style="border: none; border-top: 1px solid #1F1F1F; margin: 6px 0;">
-        '''
-        # 追加到 QTextEdit
-        cursor = self._chat_messages_area.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertHtml(msg_html)
-        # 滚到底部
-        sb = self._chat_messages_area.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
-    def _markdown_to_html(self, text: str) -> str:
-        """极简 Markdown → HTML（适合 PyQt6 QTextEdit）"""
-        import re
-        if not text:
-            return ""
-        # 1. 提取代码块 ```lang\n...\n```
-        code_blocks = []
-        def _save_code(m):
-            lang = m.group(1) or ""
-            code = m.group(2)
-            escaped = (
-                code.replace("&", "&amp;")
-                    .replace("<", "&lt;")
-                    .replace(">", "&gt;")
-            )
-            lang_html = f'<span style="color: #888; font-size: 10px;">{lang}</span>' if lang else ""
-            html = f'''
-                <div style="background: #0A0A0A; border: 1px solid #2A2A2A; border-radius: 4px; margin: 6px 0; padding: 8px;">
-                    {lang_html}
-                    <pre style="color: #E0E0E0; font-family: 'Consolas','Cascadia Code',monospace; font-size: 12px; margin: 4px 0 0 0; white-space: pre-wrap; word-wrap: break-word;">{escaped}</pre>
-                </div>
-            '''
-            code_blocks.append(html)
-            return f"\x00CODEBLOCK{len(code_blocks)-1}\x00"
-        text = re.sub(r"```(\w*)\n(.*?)```", _save_code, text, flags=re.DOTALL)
-
-        # 2. 转义剩余 HTML 特殊字符
-        text = text.replace("&", "&amp;")
-        text = text.replace("<", "&lt;")
-        text = text.replace(">", "&gt;")
-
-        # 3. 标题 (# / ## / ###)
-        text = re.sub(r"^### (.+)$", r'<h4 style="color: #93C5FD; font-size: 13px; margin: 8px 0 4px 0;">\1</h4>', text, flags=re.MULTILINE)
-        text = re.sub(r"^## (.+)$", r'<h3 style="color: #93C5FD; font-size: 14px; margin: 8px 0 4px 0;">\1</h3>', text, flags=re.MULTILINE)
-        text = re.sub(r"^# (.+)$", r'<h2 style="color: #93C5FD; font-size: 16px; margin: 8px 0 4px 0;">\1</h2>', text, flags=re.MULTILINE)
-
-        # 4. 粗体 **...** 和 斜体 *...*
-        text = re.sub(r"\*\*(.+?)\*\*", r'<b style="color: #FCD34D;">\1</b>', text)
-        text = re.sub(r"\*(.+?)\*", r'<i style="color: #FCA5A5;">\1</i>', text)
-
-        # 5. 行内代码 `...`
-        text = re.sub(r"`([^`]+?)`", r'<code style="background: #1A1A1A; color: #A7F3D0; padding: 1px 4px; border-radius: 3px; font-family: monospace; font-size: 12px;">\1</code>', text)
-
-        # 6. 链接 [text](url)
-        text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2" style="color: #60A5FA;">\1</a>', text)
-
-        # 7. 列表 - item
-        lines = text.split("\n")
-        new_lines = []
-        in_ul = False
-        in_ol = False
-        for line in lines:
-            stripped = line.strip()
-            is_li = re.match(r"^- ", stripped)
-            is_oli = re.match(r"^\d+\. ", stripped)
-            is_block = re.match(r"^<(h[1-6]|ul|ol|li|hr|p|div|pre|code|br)\b", stripped)
-            # 列表行处理
-            if is_li:
-                if in_ol:
-                    new_lines.append("</ol>")
-                    in_ol = False
-                if not in_ul:
-                    new_lines.append('<ul style="margin: 4px 0; padding-left: 24px; color: #D1D5DB;">')
-                    in_ul = True
-                new_lines.append(f'<li>{stripped[2:]}</li>')
-                continue
-            if is_oli:
-                if in_ul:
-                    new_lines.append("</ul>")
-                    in_ul = False
-                if not in_ol:
-                    new_lines.append('<ol style="margin: 4px 0; padding-left: 24px; color: #D1D5DB;">')
-                    in_ol = True
-                new_lines.append(f'<li>{stripped[stripped.index(" ")+1:]}</li>')
-                continue
-            # 非列表行：先关掉进行中的列表
-            if in_ul:
-                new_lines.append("</ul>")
-                in_ul = False
-            if in_ol:
-                new_lines.append("</ol>")
-                in_ol = False
-            if not stripped:
-                new_lines.append('<br/>')
-            elif is_block:
-                new_lines.append(stripped)  # 已经是块级元素标签，不包 <p>
-            else:
-                new_lines.append(f'<p style="margin: 4px 0;">{line}</p>')
-        if in_ul:
-            new_lines.append("</ul>")
-        if in_ol:
-            new_lines.append("</ol>")
-        text = "\n".join(new_lines)
-
-        # 8. 还原代码块
-        for i, code_html in enumerate(code_blocks):
-            text = text.replace(f"\x00CODEBLOCK{i}\x00", code_html)
-
-        return text
-
-    def _chat_clear_model_fields(self):
-        """清空模型相关字段"""
-        self._cloud_api_key.clear()
-        self._api_key.clear()
-        self._api_model.setText("")
-        self._ollama_url.setText("http://127.0.0.1:11434")
-
-    def _chat_save_settings(self):
-        """保存并启用设置"""
-        try:
-            payload = json.dumps({
-                "MODEL_PROVIDER": self._run_mode,
-                "ANTHROPIC_API_KEY": self._cloud_api_key.text(),
-                "API_BASE_URL": f"http://{self._api_host.text()}:{self._api_port.text()}",
-                "API_MODEL": self._api_model.text(),
-                "API_KEY": self._api_key.text(),
-                "OLLAMA_BASE_URL": self._ollama_url.text(),
-                "AI_LANGUAGE": "zh",
-                "AI_TEMPERATURE": "",
-                "AI_MAX_TOKENS": "",
-            })
-            result = self.bridge.saveSettings(payload)
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                self._append_log("✓ 设置已保存并启用", "#10B981")
-            else:
-                self._append_log(f"保存失败: {data}", "#F44336")
-        except Exception as e:
-            self._append_log(f"保存失败: {e}", "#F44336")
-
-    # ── 加载初始数据 ──
-
-    def _load_initial_data(self):
-        """加载侧栏项目 + 右上角模式状态"""
-        try:
-            self._refresh_projects_for_sidebar()
-            self._ollama_check_status()
-            self._api_check_status()
-        except Exception as e:
-            self._append_log(f"加载初始数据失败: {e}", "#F44336")
-
-    def _refresh_projects_for_sidebar(self):
-        """刷新 workbuddy 边栏的项目列表"""
-        try:
-            result = self.bridge.listProjects()
-            data = json.loads(result) if isinstance(result, str) else result
-            if not data or not data.get("ok"):
-                return
-            projects = data.get("projects", [])
-            self._workbuddy_proj_list.clear()
-            if not projects:
-                # 2026-06-16: 空状态占位
-                from PyQt6.QtWidgets import QListWidgetItem
-                empty = QListWidgetItem("   暂无项目，点 + 新建")
-                empty.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选
-                empty.setForeground(Qt.GlobalColor.gray)
-                self._workbuddy_proj_list.addItem(empty)
-            else:
-                for p in projects:
-                    from PyQt6.QtWidgets import QListWidgetItem
-                    item = QListWidgetItem(f"📁 {p.get('name', '未命名')}")
-                    item.setData(Qt.ItemDataRole.UserRole, p.get("id"))
-                    item.setData(Qt.ItemDataRole.UserRole + 1, p.get("path") or "")  # 2026-06-16: 存路径供右键菜单用
-                    item.setToolTip(p.get("path", ""))
-                    self._workbuddy_proj_list.addItem(item)
-            # 激活项目
-            active = data.get("active")
-            if active:
-                self._current_proj_lbl.setText(f"当前项目: {active.get('name', '?')}")
-        except Exception as e:
-            self._append_log(f"刷新项目列表失败: {e}", "#F44336")
-
-    def _refresh_chat_session_list(self):
-        """刷新会话列表（保留兼容旧调用）"""
-        # 会话列表原本要显示在左侧；现在改到 workbuddy 边栏的导航区
-        # 暂时留空，旧调用不再触发错误
-        pass
-
-    # ── Ollama 模式相关 ──
-
-    def _ollama_check_status(self):
-        """检测 Ollama 状态"""
-        try:
-            result = self.bridge.detectOllama()
-            data = json.loads(result) if isinstance(result, str) else result
-            if not data:
-                return
-            if data.get("installed") and data.get("running"):
-                v = data.get("version", "?")
-                self._ollama_status_lbl.setText(f"✓ 已运行 · v{v} · {data.get('installPath', '')}")
-                self._ollama_status_lbl.setStyleSheet("color: #10B981; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-            elif data.get("installed") and not data.get("running"):
-                self._ollama_status_lbl.setText(f"⚠ 已安装但未启动：{data.get('installPath', '')}（请启动 Ollama 后重新检测）")
-                self._ollama_status_lbl.setStyleSheet("color: #FF9800; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-            else:
-                self._ollama_status_lbl.setText("○ 未安装 Ollama。点击下面「检测」可一键安装引导")
-                self._ollama_status_lbl.setStyleSheet("color: #FF9800; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-        except Exception as e:
-            self._ollama_status_lbl.setText(f"检测失败: {e}")
-            self._ollama_status_lbl.setStyleSheet("color: #F44336; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-
-    def _ollama_detect_models(self):
-        """检测 Ollama 模型"""
-        if not hasattr(self, "_ollama_model_list"):
-            return
-        self._ollama_model_list.clear()
-        self._ollama_status_lbl.setText("⏳ 检测中...")
-        QTimer.singleShot(50, self._ollama_do_detect)
-
-    def _ollama_do_detect(self):
-        try:
-            url = self._ollama_url.text() or "http://127.0.0.1:11434"
-            payload = json.dumps({"source": "ollama", "base_url": url})
-            result = self.bridge.listModels(payload)
-            data = json.loads(result) if isinstance(result, str) else result
-            if not data or not data.get("ok"):
-                self._ollama_status_lbl.setText(f"⚠ 检测失败: {data.get('error') if data else '未知'}")
-                return
-            models = data.get("models", [])
-            for m in models:
-                from PyQt6.QtWidgets import QListWidgetItem
-                tool = "★ 工具" if m.get("toolSupport") else ("无工具" if m.get("toolSupport") is False else "")
-                size = m.get("size", "")
-                line = f"{m.get('name', m.get('id'))}  {tool}  {size}".strip()
-                item = QListWidgetItem(line)
-                item.setData(Qt.ItemDataRole.UserRole, m.get("id") or m.get("name"))
-                self._ollama_model_list.addItem(item)
-            self._ollama_status_lbl.setText(f"✓ 已检测 {len(models)} 个模型")
-            self._ollama_status_lbl.setStyleSheet("color: #10B981; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-        except Exception as e:
-            self._ollama_status_lbl.setText(f"检测失败: {e}")
-            self._ollama_status_lbl.setStyleSheet("color: #F44336; font-size: 10px; background: transparent; border: none; padding: 4px 6px;")
-
-    def _ollama_load_recommendations(self):
-        """加载推荐模型"""
-        if not hasattr(self, "_ollama_rec_list"):
-            return
-        self._ollama_rec_list.clear()
-        try:
-            result = self.bridge.recommendModels()
-            data = json.loads(result) if isinstance(result, str) else result
-            if not data or not data.get("ok"):
-                return
-            for r in data.get("recommendations", []):
-                from PyQt6.QtWidgets import QListWidgetItem
-                tool = "★ 工具" if r.get("toolSupport") else "无工具"
-                line = f"{r.get('name', '?')}  {tool}  {r.get('size', '')}"
-                item = QListWidgetItem(line)
-                item.setData(Qt.ItemDataRole.UserRole, r.get("name"))
-                item.setToolTip(r.get("reason", ""))
-                self._ollama_rec_list.addItem(item)
-        except Exception as e:
-            self._append_log(f"加载推荐失败: {e}", "#F44336")
-
-    def _ollama_select_model(self, item):
-        """选中 Ollama 模型"""
-        model_id = item.data(Qt.ItemDataRole.UserRole)
-        if model_id:
-            self._chat_input.setPlaceholderText(f"使用 {model_id} 模型 · 输入任务...")
-
-    # ── API 模式相关 ──
-
-    def _api_check_status(self):
-        """检测 API 服务状态"""
-        try:
-            host = self._api_host.text() if hasattr(self, "_api_host") else "127.0.0.1"
-            port = self._api_port.text() if hasattr(self, "_api_port") else "7777"
-            payload = json.dumps({"host": host, "port": port})
-            result = self.bridge.checkApiService(payload)
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok") and data.get("running"):
-                self._update_api_step(4, "✓ API 服务已就绪")
-                self._api_start_btn.setText("✓ API 服务已就绪")
-                self._api_start_btn.setEnabled(False)
-                self._api_stop_btn.setEnabled(True)
-            else:
-                self._update_api_step(0, "未启动")
-        except Exception:
-            self._update_api_step(0, "未启动")
-
-    def _update_api_step(self, progress: int, message: str):
-        """更新 4 步进度状态 (0-4, 4 表示完成)"""
-        if not hasattr(self, "_api_step_widgets"):
-            return
-        for i, (box, dot, lbl) in enumerate(self._api_step_widgets):
-            if i < progress:
-                dot.setText("✓")
-                dot.setStyleSheet("color: #10B981; font-size: 11px; font-weight: bold; background: transparent; border: none;")
-                lbl.setStyleSheet("color: #10B981; font-size: 9px; background: transparent; border: none;")
-                box.setStyleSheet("QFrame { background-color: rgba(16, 185, 129, 0.1); border: 1px solid #10B981; border-radius: 4px; }")
-            elif i == progress:
-                dot.setText(f"{i+1}")
-                dot.setStyleSheet("color: #2563EB; font-size: 11px; font-weight: bold; background: transparent; border: none;")
-                lbl.setStyleSheet("color: #2563EB; font-size: 9px; background: transparent; border: none;")
-                box.setStyleSheet("QFrame { background-color: rgba(37, 99, 235, 0.1); border: 1px solid #2563EB; border-radius: 4px; }")
-            else:
-                dot.setText(f"{i+1}")
-                dot.setStyleSheet("color: #555; font-size: 11px; background: transparent; border: none;")
-                lbl.setStyleSheet("color: #555; font-size: 9px; background: transparent; border: none;")
-                box.setStyleSheet("QFrame { background-color: #1F1F1F; border: 1px solid #2A2A2A; border-radius: 4px; }")
-        percent = int((progress / 4) * 100) if progress < 4 else 100
-        self._api_progress.setValue(percent)
-        self._api_step_msg.setText(message)
-
-    def _api_step_auto_run(self):
-        """一键启动 API 服务（4 步）"""
-        self._api_start_btn.setEnabled(False)
-        host = self._api_host.text()
-        port = self._api_port.text()
-
-        def step1():
-            self._update_api_step(0, "检测服务中...")
-            try:
-                payload = json.dumps({"host": host, "port": port})
-                result = self.bridge.checkApiService(payload)
-                data = json.loads(result) if isinstance(result, str) else result
-                if data and data.get("ok") and data.get("running"):
-                    self._update_api_step(4, "✓ 服务已在运行")
-                    self._api_start_btn.setText("✓ API 服务已就绪")
-                    self._api_stop_btn.setEnabled(True)
-                    return
-            except Exception:
-                pass
-            QTimer.singleShot(200, step2)
-
-        def step2():
-            self._update_api_step(1, "启动服务中...")
-            try:
-                self.bridge.startAllApiServices()
-            except Exception as e:
-                self._api_step_msg.setText(f"启动失败: {e}")
-                self._api_start_btn.setEnabled(True)
-                return
-            QTimer.singleShot(2500, step3)
-
-        def step3():
-            self._update_api_step(2, "获取 API Key 中...")
-            try:
-                result = self.bridge.fetchApiKey()
-                data = json.loads(result) if isinstance(result, str) else result
-                if data and data.get("api_key"):
-                    self._api_key.setText(data.get("api_key"))
-            except Exception:
-                pass
-            QTimer.singleShot(500, step4)
-
-        def step4():
-            self._update_api_step(3, "加载模型列表...")
-            try:
-                payload = json.dumps({"host": host, "port": port})
-                result = self.bridge.listAllModels()
-                data = json.loads(result) if isinstance(result, str) else result
-                if data and data.get("ok"):
-                    self._api_model_list.clear()
-                    for m in data.get("models", []):
-                        from PyQt6.QtWidgets import QListWidgetItem
-                        item = QListWidgetItem(m.get("name") or m.get("id"))
-                        item.setData(Qt.ItemDataRole.UserRole, m.get("id") or m.get("name"))
-                        self._api_model_list.addItem(item)
-            except Exception:
-                pass
-            self._update_api_step(4, "✓ API 服务已就绪")
-            self._api_start_btn.setText("✓ API 服务已就绪")
-            self._api_stop_btn.setEnabled(True)
-            self._api_check_status()
-            self._check_qwen_accounts()
-
-        QTimer.singleShot(50, step1)
-
-    def _api_stop_service(self):
-        """停止 API 服务"""
-        try:
-            host = self._api_host.text()
-            port = self._api_port.text()
-            payload = json.dumps({"host": host, "port": port})
-            self.bridge.stopServiceByPort(payload)
-            self._update_api_step(0, "已停止")
-            self._api_start_btn.setText("▶ 一键启动")
-            self._api_start_btn.setEnabled(True)
-            self._api_stop_btn.setEnabled(False)
-        except Exception as e:
-            self._append_log(f"停止失败: {e}", "#F44336")
-
-    def _api_select_model(self, item):
-        """选中 API 模型"""
-        model_id = item.data(Qt.ItemDataRole.UserRole)
-        if model_id:
-            self._api_model.setText(model_id)
-
-    # ── 千问账户管理 ──
-
-    def _check_qwen_accounts(self):
-        """刷新千问账户列表"""
-        try:
-            result = self.bridge.listQwenAccounts("{}")
-            data = json.loads(result) if isinstance(result, str) else result
-            if not data or not data.get("ok"):
-                return
-            accounts = data.get("accounts", [])
-            self._qwen_account_list.clear()
-            for acc in accounts:
-                from PyQt6.QtWidgets import QListWidgetItem
-                status = "✓" if acc.get("valid") else "✗"
-                line = f"{status} {acc.get('email', '?')[:30]}"
-                item = QListWidgetItem(line)
-                item.setData(Qt.ItemDataRole.UserRole, acc)
-                self._qwen_account_list.addItem(item)
-            count = len(accounts)
-            valid = sum(1 for a in accounts if a.get("valid"))
-            self._qwen_count_lbl.setText(f"{valid}/{count} 有效")
-        except Exception as e:
-            self._qwen_count_lbl.setText(f"-- 错误: {e}")
-
-    def _auto_register_qwen(self):
-        """自动注册千问账户"""
-        self._append_log("正在自动注册千问账户...", "#2196F3")
-        try:
-            self.bridge.startQwenRegister("{}")
-            self._append_log("已启动注册流程，请关注输出日志", "#4CAF50")
-        except Exception as e:
-            self._append_log(f"启动注册失败: {e}", "#F44336")
-
-    def _login_qwen(self):
-        """登录千问账户"""
-        from PyQt6.QtWidgets import QInputDialog
-        email, ok = QInputDialog.getText(self, "登录千问", "邮箱:")
-        if not ok or not email.strip():
-            return
-        pwd, ok = QInputDialog.getText(self, "登录千问", "密码:", QLineEdit.EchoMode.Password)
-        if not ok or not pwd.strip():
-            return
-        try:
-            payload = json.dumps({"email": email.strip(), "password": pwd})
-            self.bridge.startQwenLogin(payload)
-            self._append_log(f"已启动登录: {email}", "#4CAF50")
-        except Exception as e:
-            self._append_log(f"登录失败: {e}", "#F44336")
-
-    def _add_qwen_token(self):
-        """手动添加千问 Token"""
-        from PyQt6.QtWidgets import QInputDialog
-        token, ok = QInputDialog.getText(self, "添加千问 Token", "粘贴 chat.qwen.ai 的 Token:")
-        if not ok or not token.strip():
-            return
-        try:
-            payload = json.dumps({"token": token.strip()})
-            result = self.bridge.addQwenAccount(payload)
-            data = json.loads(result) if isinstance(result, str) else result
-            if data and data.get("ok"):
-                self._append_log("✓ Token 已添加", "#10B981")
-                self._check_qwen_accounts()
-            else:
-                self._append_log(f"添加失败: {data}", "#F44336")
-        except Exception as e:
-            self._append_log(f"添加失败: {e}", "#F44336")
-
-    def _qwen_account_context_menu(self, pos):
-        """千问账户列表：右键菜单（置顶/取消置顶/复制邮箱/删除）"""
-        item = self._qwen_account_list.itemAt(pos)
-        if not item:
-            return
-        acc = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(acc, dict):
-            return
-        is_sticky = acc.get("sticky", False)
-        is_valid = acc.get("valid", True)
-        from PyQt6.QtWidgets import QMenu
-        from PyQt6.QtGui import QGuiApplication
-        menu = QMenu(self._qwen_account_list)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #1A1A1A; color: #E0E0E0;
-                border: 1px solid #2A2A2A; border-radius: 4px;
-                padding: 4px;
-            }
-            QMenu::item { padding: 6px 18px; border-radius: 3px; }
-            QMenu::item:selected { background-color: #2563EB; color: #FFFFFF; }
-            QMenu::item:disabled { color: #555; }
-            QMenu::separator { height: 1px; background: #2A2A2A; margin: 4px 0; }
-        """)
-        a_sticky = menu.addAction("📌 置顶账户" if not is_sticky else "🚫 取消置顶")
-        menu.addSeparator()
-        a_copy = menu.addAction("📋 复制邮箱")
-        a_valid = menu.addAction("🔄 重新验证") if not is_valid else None
-        menu.addSeparator()
-        a_del = menu.addAction("🗑  删除账户")
-        a_del.setShortcut("Del")
-        chosen = menu.exec(self._qwen_account_list.mapToGlobal(pos))
-        if chosen is None:
-            return
-        try:
-            if chosen is a_sticky:
-                if is_sticky:
-                    self.bridge.clearStickyAccount("{}")
-                    self._append_log("✓ 已取消置顶", "#10B981")
-                else:
-                    email = acc.get("email", "")
-                    payload = json.dumps({"email": email})
-                    result = self.bridge.setStickyAccount(payload)
-                    data = json.loads(result) if isinstance(result, str) else result
-                    if data and data.get("ok"):
-                        self._append_log(f"✓ 已置顶: {email}", "#10B981")
-                    else:
-                        self._append_log(f"置顶失败: {data}", "#F44336")
-                self._check_qwen_accounts()
-            elif chosen is a_copy:
-                QGuiApplication.clipboard().setText(acc.get("email", ""))
-                self._append_log(f"已复制邮箱: {acc.get('email', '')}", "#4CAF50")
-            elif a_valid is not None and chosen is a_valid:
-                email = acc.get("email", "")
-                self._append_log(f"正在重新验证: {email}", "#2196F3")
-                # 触发登录流程重新验证
-                self._login_qwen()
-            elif chosen is a_del:
-                from PyQt6.QtWidgets import QMessageBox
-                email = acc.get("email", "")
-                reply = QMessageBox.question(
-                    self, "确认删除",
-                    f"确定要删除千问账户「{email}」吗？\n\n此操作会从工作区移除该账户。",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    payload = json.dumps({"email": email})
-                    result = self.bridge.deleteQwenAccount(payload)
-                    data = json.loads(result) if isinstance(result, str) else result
-                    if data and data.get("ok"):
-                        self._append_log(f"✓ 已删除账户: {email}", "#10B981")
-                        self._check_qwen_accounts()
-                    else:
-                        self._append_log(f"删除失败: {data}", "#F44336")
-        except Exception as e:
-            self._append_log(f"操作失败: {e}", "#F44336")
-
-    def eventFilter(self, obj, event):
-        """Enter / Shift+Enter 处理"""
-        if obj is getattr(self, "_chat_input", None) and event.type() == QEvent.Type.KeyPress:
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    return False
-                self._chat_send_message()
-                return True
-        return super().eventFilter(obj, event)
-
-    def _create_project_page(self):
-        """创建项目管理页面 - 原生 PyQt6 实现"""
-        page = QWidget()
-        page.setStyleSheet("background-color: #121212;")
-        layout = QVBoxLayout(page)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # 顶栏
-        top = QFrame()
-        top.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 1px solid #2a2a2a; }")
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(16, 12, 16, 12)
-        top_layout.setSpacing(8)
-
-        title = QLabel("📁 项目管理")
-        title.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: bold; background: transparent; border: none;")
-        top_layout.addWidget(title)
-
-        top_layout.addStretch()
-
-        self._proj_search = QLineEdit()
-        self._proj_search.setPlaceholderText("🔍 搜索项目...")
-        self._proj_search.setFixedWidth(220)
-        self._proj_search.setStyleSheet("""
-            QLineEdit {
-                background-color: #0e0e0e; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 6px;
-                padding: 6px 10px; font-size: 12px;
-            }
-        """)
-        self._proj_search.textChanged.connect(self._project_filter_changed)
-        top_layout.addWidget(self._proj_search)
-
-        btn_new = QPushButton("+ 新建项目")
-        btn_new.setStyleSheet("""
-            QPushButton {
-                background-color: #2563EB; color: #FFFFFF;
-                border: none; border-radius: 6px;
-                padding: 6px 14px; font-size: 12px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #1D4ED8; }
-        """)
-        btn_new.clicked.connect(self._project_create_dialog)
-        top_layout.addWidget(btn_new)
-
-        layout.addWidget(top)
-
-        # 项目列表
-        self._project_list = QListWidget()
-        self._project_list.setStyleSheet("""
-            QListWidget { background-color: #121212; border: none; color: #E0E0E0; font-size: 13px; }
-            QListWidget::item { padding: 14px 16px; border-bottom: 1px solid #222; }
-            QListWidget::item:hover { background-color: #1f1f1f; }
-            QListWidget::item:selected { background-color: #1E3A8A; color: #fff; }
-        """)
-        layout.addWidget(self._project_list, 1)
-
-        # 底部状态
-        self._proj_status = QLabel("加载中...")
-        self._proj_status.setStyleSheet("color: #888; font-size: 11px; padding: 6px 16px; background-color: #1a1a1a; border-top: 1px solid #2a2a2a;")
-        layout.addWidget(self._proj_status)
-
-        return page
-
-    def _create_history_page(self):
-        """2026-06-16 新增：对话历史页面
-
-        列出所有项目下的所有对话，按更新时间倒序。
-        - 顶部：标题 + 搜索框 + 刷新按钮
-        - 中部：滚动列表（每项显示：项目标签 + 对话标题 + 时间 + 消息数 + 删除按钮）
-        - 底部：状态文字
-        """
-        page = QWidget()
-        page.setStyleSheet("background-color: #121212;")
-        layout = QVBoxLayout(page)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # 顶栏
-        top = QFrame()
-        top.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 1px solid #2a2a2a; }")
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(16, 12, 16, 12)
-        top_layout.setSpacing(8)
-
-        title = QLabel("📜 对话历史")
-        title.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: bold; background: transparent; border: none;")
-        top_layout.addWidget(title)
-
-        top_layout.addStretch()
-
-        self._history_search = QLineEdit()
-        self._history_search.setPlaceholderText("🔍 搜索对话标题...")
-        self._history_search.setFixedWidth(220)
-        self._history_search.setStyleSheet("""
-            QLineEdit {
-                background-color: #0e0e0e; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 6px;
-                padding: 6px 10px; font-size: 12px;
-            }
-        """)
-        self._history_search.textChanged.connect(self._history_filter_changed)
-        top_layout.addWidget(self._history_search)
-
-        btn_refresh = QPushButton("🔄 刷新")
-        btn_refresh.setStyleSheet("""
-            QPushButton {
-                background-color: #1F1F1F; color: #E0E0E0;
-                border: 1px solid #2A2A2A; border-radius: 6px;
-                padding: 6px 14px; font-size: 12px;
-            }
-            QPushButton:hover { background-color: #2A2A2A; color: #FFFFFF; border-color: #3A3A3A; }
-        """)
-        btn_refresh.clicked.connect(self._refresh_history_list)
-        top_layout.addWidget(btn_refresh)
-
-        layout.addWidget(top)
-
-        # 历史列表
-        self._history_list = QListWidget()
-        self._history_list.setStyleSheet("""
-            QListWidget { background-color: #121212; border: none; color: #E0E0E0; font-size: 13px; }
-            QListWidget::item { padding: 12px 16px; border-bottom: 1px solid #222; }
-            QListWidget::item:hover { background-color: #1f1f1f; }
-            QListWidget::item:selected { background-color: #1E3A8A; color: #fff; }
-        """)
-        # 双击跳转到任务对话页并加载该会话
-        self._history_list.itemDoubleClicked.connect(self._history_open_item)
-        layout.addWidget(self._history_list, 1)
-
-        # 底部状态
-        self._history_status = QLabel("加载中...")
-        self._history_status.setStyleSheet("color: #888; font-size: 11px; padding: 6px 16px; background-color: #1a1a1a; border-top: 1px solid #2a2a2a;")
-        layout.addWidget(self._history_status)
-
-        # 缓存最近一次的全量历史，供搜索过滤使用
-        self._history_cache = []
-
-        return page
-
-    def _refresh_history_list(self):
-        """刷新历史列表（从 bridge 拉所有项目的对话）"""
-        if not hasattr(self, "_history_list"):
-            return
-        try:
-            result = self.bridge.listAllConversations()
-            data = json.loads(result) if isinstance(result, str) else result
-            if not data:
-                self._history_cache = []
-            else:
-                self._history_cache = data
-        except Exception as e:
-            self._history_cache = []
-            self._append_log(f"加载历史失败: {e}", "#F44336")
-        self._render_history_list(self._history_cache)
-
-    def _render_history_list(self, items):
-        """渲染历史列表（已过滤过的 items）"""
-        if not hasattr(self, "_history_list"):
-            return
-        self._history_list.clear()
-        if not items:
-            empty = QListWidgetItem("   📭 暂无对话历史。开始你的第一次对话吧～")
-            empty.setFlags(Qt.ItemFlag.NoItemFlags)
-            empty.setForeground(Qt.GlobalColor.gray)
-            self._history_list.addItem(empty)
-            if hasattr(self, "_history_status"):
-                self._history_status.setText("共 0 条")
-            return
-        for c in items:
-            title = c.get("title") or "（未命名对话）"
-            project = c.get("project_name", "未分类")
-            updated = c.get("updated_at", "")
-            count = c.get("message_count", 0)
-            # 时间显示
-            ts = updated.replace("T", " ")
-            if "." in ts:
-                ts = ts.split(".")[0]
-            line = f"💬 {title}\n   📁 {project}  ·  💭 {count} 条  ·  🕒 {ts or '未知时间'}"
-            item = QListWidgetItem(line)
-            item.setData(Qt.ItemDataRole.UserRole, {
-                "project_id": c.get("project_id"),
-                "session_id": c.get("session_id"),
-                "title": title,
-            })
-            self._history_list.addItem(item)
-        if hasattr(self, "_history_status"):
-            self._history_status.setText(f"共 {len(items)} 条对话")
-
-    def _history_filter_changed(self, text):
-        """历史搜索框过滤"""
-        kw = (text or "").strip().lower()
-        if not kw:
-            self._render_history_list(self._history_cache)
-            return
-        filtered = [
-            c for c in self._history_cache
-            if kw in (c.get("title") or "").lower()
-            or kw in (c.get("project_name") or "").lower()
-        ]
-        self._render_history_list(filtered)
-
-    def _history_open_item(self, item):
-        """双击历史项：切换到该项目并把会话 id 暂存，聊天页会读取并加载"""
-        data = item.data(Qt.ItemDataRole.UserRole)
-        if not isinstance(data, dict):
-            return
-        pid = data.get("project_id")
-        sid = data.get("session_id")
-        if not pid or not sid:
-            return
-        try:
-            # 1. 切换项目
-            self.bridge.switchProject(pid)
-            # 2. 暂存要加载的会话 id
-            self._pending_load_session = sid
-            # 3. 切换到任务对话页（page 0）
-            self._switch_page(0)
-            self._append_log(f"已加载历史对话: {data.get('title', sid)}", "#10B981")
-        except Exception as e:
-            self._append_log(f"打开历史对话失败: {e}", "#F44336")
-
-    def _create_settings_page(self):
-        """创建系统设置页面 - 原生 PyQt6 实现"""
-        page = QWidget()
-        page.setStyleSheet("background-color: #121212;")
-        layout = QVBoxLayout(page)
-        layout.setSpacing(0)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        # 顶栏
-        top = QFrame()
-        top.setStyleSheet("QFrame { background-color: #1a1a1a; border-bottom: 1px solid #2a2a2a; }")
-        top_layout = QHBoxLayout(top)
-        top_layout.setContentsMargins(16, 12, 16, 12)
-        title = QLabel("⚙️ 系统设置")
-        title.setStyleSheet("color: #FFFFFF; font-size: 16px; font-weight: bold; background: transparent; border: none;")
-        top_layout.addWidget(title)
-        top_layout.addStretch()
-        layout.addWidget(top)
-
-        # 滚动设置区
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("QScrollArea { background-color: #121212; border: none; }")
-        scroll_body = QWidget()
-        scroll_body.setStyleSheet("background-color: #121212;")
-        body_layout = QVBoxLayout(scroll_body)
-        body_layout.setSpacing(12)
-        body_layout.setContentsMargins(16, 16, 16, 16)
-
-        def make_setting_row(label_text, widget):
-            row = QFrame()
-            row.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px; }")
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(14, 10, 14, 10)
-            label = QLabel(label_text)
-            label.setStyleSheet("color: #E0E0E0; font-size: 13px; background: transparent; border: none; min-width: 140px;")
-            row_layout.addWidget(label)
-            row_layout.addStretch()
-            row_layout.addWidget(widget)
-            return row
-
-        # 主题
-        self._settings_theme = QComboBox()
-        self._settings_theme.addItems(["🌙 暗色", "☀️ 亮色", "🖥️ 跟随系统"])
-        self._settings_theme.setStyleSheet("""
-            QComboBox {
-                background-color: #0e0e0e; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 4px 10px; font-size: 12px; min-width: 140px;
-            }
-        """)
-        body_layout.addWidget(make_setting_row("主题", self._settings_theme))
-
-        # 默认模型供应商
-        self._settings_default_provider = QComboBox()
-        self._settings_default_provider.addItems(["qwen2api", "zhipu2api", "ollama", "openai", "anthropic"])
-        self._settings_default_provider.setStyleSheet("""
-            QComboBox {
-                background-color: #0e0e0e; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 4px 10px; font-size: 12px; min-width: 140px;
-            }
-        """)
-        body_layout.addWidget(make_setting_row("默认供应商", self._settings_default_provider))
-
-        # 自动启动
-        self._settings_autostart = QCheckBox("开机自动启动")
-        self._settings_autostart.setStyleSheet("color: #E0E0E0; font-size: 12px;")
-        body_layout.addWidget(make_setting_row("启动", self._settings_autostart))
-
-        # 声音提醒
-        self._settings_sound = QCheckBox("新消息声音提醒")
-        self._settings_sound.setChecked(True)
-        self._settings_sound.setStyleSheet("color: #E0E0E0; font-size: 12px;")
-        body_layout.addWidget(make_setting_row("提醒", self._settings_sound))
-
-        # 端口
-        self._settings_port = QLineEdit("18080")
-        self._settings_port.setFixedWidth(120)
-        self._settings_port.setStyleSheet("""
-            QLineEdit {
-                background-color: #0e0e0e; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 4px 8px; font-size: 12px;
-            }
-        """)
-        body_layout.addWidget(make_setting_row("API 端口", self._settings_port))
-
-        # 路径
-        self._settings_data_dir = QLineEdit(str(Path("data")))
-        self._settings_data_dir.setFixedWidth(280)
-        self._settings_data_dir.setStyleSheet("""
-            QLineEdit {
-                background-color: #0e0e0e; color: #E0E0E0;
-                border: 1px solid #333; border-radius: 4px;
-                padding: 4px 8px; font-size: 12px;
-            }
-        """)
-        body_layout.addWidget(make_setting_row("数据目录", self._settings_data_dir))
-
-        body_layout.addStretch()
-
-        # 保存按钮
-        btn_save = QPushButton("💾 保存设置")
-        btn_save.setStyleSheet("""
-            QPushButton {
-                background-color: #10B981; color: #FFFFFF;
-                border: none; border-radius: 6px;
-                padding: 8px 18px; font-size: 13px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #059669; }
-        """)
-        btn_save.clicked.connect(self._settings_save_clicked)
-        body_layout.addWidget(btn_save, 0, Qt.AlignmentFlag.AlignRight)
-
-        scroll.setWidget(scroll_body)
-        layout.addWidget(scroll, 1)
-
-        return page
-
     def _create_home_page(self):
-        """创建运行服务页面 - 仅管理服务状态、日志、启动/停止按钮
-        不再包含并排 AI 编程工作台（那已在"任务对话"页面全屏显示）。
-        """
+        """创建首页 - 运行服务（QWebEngineView）"""
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setSpacing(0)
         page_layout.setContentsMargins(0, 0, 0, 0)
 
-        # ── 运行服务卡片区域 ──
-        cards_frame = QFrame()
-        cards_frame.setStyleSheet("QFrame { background-color: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 8px; margin: 12px; padding: 12px; }")
-        cards_layout = QVBoxLayout(cards_frame)
-        cards_layout.setSpacing(8)
-        cards_layout.setContentsMargins(12, 12, 12, 12)
+        # QWebEngineView 加载 Vue 前端
+        self.web_view = ChineseWebView()
+        profile = self.web_view.page().profile()
+        # Web存储路径: 用户级数据 (跟随用户隔离)
+        storage_path = os.path.join(self.user_dir, "webdata")
+        os.makedirs(storage_path, exist_ok=True)
+        profile.setPersistentStoragePath(storage_path)
+        profile.setHttpCacheMaximumSize(50 * 1024 * 1024)
+        self.web_view.setStyleSheet("background-color: #0d0d0d;")
 
-        # 卡片区域标题
-        cards_title_row = QHBoxLayout()
-        cards_title = QLabel("🚀 服务管理")
-        cards_title.setFont(QFont("Microsoft YaHei", 14, QFont.Weight.Bold))
-        cards_title.setStyleSheet("color: #FFFFFF; background: transparent; border: none;")
-        cards_title_row.addWidget(cards_title)
-        cards_title_row.addStretch()
+        self.web_view.page().setBackgroundColor(QColor("#0d0d0d"))
 
-        self.home_status = QLabel("🟢 就绪")
-        self.home_status.setStyleSheet("color: #4CAF50; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-        cards_title_row.addWidget(self.home_status)
-        cards_layout.addLayout(cards_title_row)
-        cards_layout.addSpacing(12)
+        self.web_view.loadFinished.connect(self._on_web_load_finished)
+        self.web_view.page().javaScriptConsoleMessage = self._on_js_console
 
-        # ── 服务定义 ──
-        self._services_info = {
-            "qwen2api": {
-                "label": "千问 API 代理",
-                "icon": "🤖",
-                "color": "#388E3C",
-                "hover_color": "#4CAF50",
-                "default_port": 7777,
-                "desc": "Qwen 系列模型 API 代理服务",
-            },
-            "zhipu2api": {
-                "label": "智谱 API 代理",
-                "icon": "🧠",
-                "color": "#1565C0",
-                "hover_color": "#1976D2",
-                "default_port": 7780,
-                "desc": "GLM 系列模型 API 代理服务",
-            },
-        }
+        # QWebChannel 桥接
+        self.channel = QWebChannel()
+        self.bridge = BackendBridge()
+        self.bridge._app_ref = self
+        self.channel.registerObject("backend", self.bridge)
+        self.web_view.page().setWebChannel(self.channel)
 
-        # 创建各个服务卡片
-        for sid, info in self._services_info.items():
-            card = ServiceCard(sid, info, self)
-            card.setStyleSheet("QFrame { background-color: #222222; border: 1px solid #333333; border-radius: 6px; }")
-            card.restart_clicked.connect(self._on_service_restart)
-            card.open_clicked.connect(self._on_service_open)
-            card.stop_clicked.connect(self._on_service_stop)
-            cards_layout.addWidget(card)
-            self.service_cards[sid] = card
+        page_layout.addWidget(self.web_view, 1)
 
-        # ── 全局操作按钮行 ──
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
-
-        self.btn_start_all = QPushButton("▶ 启动全部服务")
-        self.btn_start_all.setStyleSheet("""
-            QPushButton {
-                background-color: #2E7D32; color: #FFFFFF;
-                border: 1px solid #388E3C; border-radius: 8px;
-                padding: 12px 0; font-size: 14px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #388E3C; }
-            QPushButton:pressed { background-color: #1B5E20; }
-            QPushButton:disabled { background-color: #1a1a1a; color: #555; border-color: #333; }
-        """)
-        self.btn_start_all.clicked.connect(self._start_all_services)
-        btn_row.addWidget(self.btn_start_all)
-
-        self.btn_stop_all = QPushButton("⏹ 停止全部服务")
-        self.btn_stop_all.setEnabled(False)
-        self.btn_stop_all.setStyleSheet("""
-            QPushButton {
-                background-color: #C62828; color: #FFFFFF;
-                border: 1px solid #D32F2F; border-radius: 8px;
-                padding: 12px 0; font-size: 14px; font-weight: bold;
-            }
-            QPushButton:hover { background-color: #D32F2F; }
-            QPushButton:disabled { background-color: #1a1a1a; color: #555; border-color: #333; }
-        """)
-        self.btn_stop_all.clicked.connect(self._stop_all_services)
-        btn_row.addWidget(self.btn_stop_all)
-
-        cards_layout.addLayout(btn_row, 0)
-        cards_layout.addSpacing(16)
-
-        # ── 运行日志面板 ──
-        log_frame = QFrame()
-        log_frame.setStyleSheet("QFrame { background-color: #111; border: 1px solid #222; border-radius: 8px; margin: 0 12px 12px 12px; padding: 8px; }")
-        log_layout = QVBoxLayout(log_frame)
-        log_layout.setSpacing(4)
-        log_layout.setContentsMargins(8, 6, 8, 6)
+        # 底部日志面板（默认折叠）
+        self.log_panel = QFrame()
+        self.log_panel.setVisible(False)
+        self.log_panel.setStyleSheet("QFrame { background-color: #111; border-top: 1px solid #2a2a2a; }")
+        log_layout = QVBoxLayout(self.log_panel)
+        log_layout.setContentsMargins(8, 4, 8, 4)
 
         log_header = QHBoxLayout()
         log_title = QLabel("📋 运行日志")
-        log_title.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+        log_title.setStyleSheet("color: #888; font-size: 11px; font-weight: bold; border: none;")
         log_header.addWidget(log_title)
         log_header.addStretch()
 
-        clear_btn = QPushButton("🗑 清空")
-        clear_btn.setStyleSheet("QPushButton { background: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 4px; padding: 2px 8px; font-size: 10px; color: #888; } QPushButton:hover { background: #3a3a3a; color: #ccc; }")
-        clear_btn.clicked.connect(lambda: self.log_text.clear() if self.log_text else None)
-        log_header.addWidget(clear_btn)
+        self.btn_toggle_log = QPushButton("收起")
+        self.btn_toggle_log.setStyleSheet("QPushButton { background: #333; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 10px; }")
+        self.btn_toggle_log.clicked.connect(lambda: self.log_panel.setVisible(False))
+        log_header.addWidget(self.btn_toggle_log)
         log_layout.addLayout(log_header)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(120)
-        self.log_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #0a0a0a; color: #bbbbbb;
-                border: 1px solid #1a1a1a; border-radius: 4px;
-                font-family: Consolas, monospace; font-size: 11px;
-                padding: 4px;
-            }
-        """)
-        log_layout.addWidget(self.log_text, 0)
+        self.log_text.setMaximumHeight(150)
+        self.log_text.setStyleSheet("QTextEdit { background-color: #0a0a0a; color: #aaa; border: 1px solid #222; border-radius: 4px; padding: 4px; font-family: Consolas, monospace; font-size: 11px; }")
+        log_layout.addWidget(self.log_text)
 
-        page_layout.addWidget(cards_frame, 1)
-        page_layout.addWidget(log_frame, 0)
+        page_layout.addWidget(self.log_panel)
+
+        # 日志切换按钮（浮在首页右下角）
+        self.btn_show_log = QPushButton("📋 日志")
+        self.btn_show_log.setStyleSheet("QPushButton { background: #333; border: 1px solid #444; border-radius: 4px; padding: 2px 8px; font-size: 10px; }")
+        self.btn_show_log.clicked.connect(lambda: self.log_panel.setVisible(not self.log_panel.isVisible()))
 
         return page
-
-    def _load_vue_into_chat_page(self):
-        """将 Vue 前端界面加载到"任务对话"页面
-
-        2026-06-16 修复：之前这里会 deleteLater() 任务对话页所有原生控件，
-        然后塞入 QtWebView2 加载 Vue dist。但 QtWebView2 是第三方实验模块，
-        经常失败/黑屏，导致整个任务对话页一片空白。
-        现在改为：保留原生 PyQt6 任务对话页（带欢迎语 + 会话列表 + 输入框），
-        放弃用 QtWebView2 替换。仅在 log 中告知。
-        """
-        dist_path = os.path.join(self.app_dir, "desktop", "dist", "index.html")
-        if not os.path.exists(dist_path):
-            self._append_log("前端未构建，已使用原生 PyQt6 任务对话页", "#FFC107")
-        else:
-            self._append_log(
-                "✓ 使用原生 PyQt6 任务对话页（QtWebView2 实验模块不稳定，已弃用）",
-                "#4CAF50",
-            )
-        # 关键：什么都不做！保留原生 PyQt6 任务对话页。
-        return
-        vue_layout.setSpacing(0)
-        vue_layout.setContentsMargins(0, 0, 0, 0)
-
-        # WebView2 控件
-        try:
-            from qtwebview2 import QtWebView2Widget
-
-            # 准备 JS APIs dict
-            js_apis = {}
-            for name in dir(self.bridge):
-                if name.startswith('_'):
-                    continue
-                attr = getattr(self.bridge, name)
-                if callable(attr):
-                    js_apis[name] = attr
-
-            # 创建 WebView2 widget
-            self._chat_vue2_widget = QtWebView2Widget(
-                url=None,
-                js_apis=js_apis,
-                parent=vue_container,
-                debug=False,
-            )
-            # 加载本地文件
-            url = QUrl.fromLocalFile(dist_path)
-            self._chat_vue2_widget.load_url(url.toString())
-
-            # 添加到布局
-            vue_layout.addWidget(self._chat_vue2_widget, 1)
-
-            # ── 注入 JS 桥接层 ──
-            shim_js = """
-            (function() {
-                function waitForBridge() {
-                    if (window.qtwebview2 && window.qtwebview2.api) {
-                        if (!window.pywebview) window.pywebview = {};
-                        window.pywebview.api = window.qtwebview2.api;
-                        window.desktopApi = window.qtwebview2.api;
-                        if (typeof pywebviewReady === 'function') {
-                            pywebviewReady();
-                        }
-                    } else {
-                        setTimeout(waitForBridge, 100);
-                    }
-                }
-                waitForBridge();
-            })();
-            """
-            # 页面加载完成后注入 shim
-            QTimer.singleShot(1000, lambda: self._chat_vue2_widget.evaluate_js(shim_js))
-
-            # ── 将 Vue 容器放入任务对话页面 ──
-            chat_page_layout = self.chat_page.layout()
-            if chat_page_layout:
-                # 清除原有的提示文字
-                for i in reversed(range(chat_page_layout.count())):
-                    w = chat_page_layout.itemAt(i).widget()
-                    if w:
-                        w.deleteLater()
-                # 将 Vue 容器放入
-                chat_page_layout.addWidget(vue_container, 1)
-
-            self._chat_vue_container = vue_container
-            self._chat_vue2_widget_ref = self._chat_vue2_widget
-            self._webview2_initialized = True
-            self._append_log("✓ Vue 前端界面已加载", "#4CAF50")
-
-            # 同时更新运行服务页面的状态
-            self.home_status.setText("🟢 Vue 前端已就绪")
-            self.home_status.setStyleSheet("color: #4CAF50; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-
-        except Exception as e:
-            self._append_log(f"Vue 前端加载失败: {e}", "#F44336")
-            import traceback
-            self._append_log(traceback.format_exc(), "#FF5722")
-            return
-
-    def _start_all_services(self):
-        """启动全部服务（用户手动触发）"""
-        if self._is_starting_all:
-            return
-        self._is_starting_all = True
-        self.btn_start_all.setEnabled(False)
-        self.home_status.setText("🔄 启动中...")
-        self.home_status.setStyleSheet("color: #FFC107; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-
-        self._append_log("正在启动全部服务...", "#4CAF50")
-
-        # 设置所有卡片为"启动中"
-        for card in self.service_cards.values():
-            card.set_starting()
-
-        # 在后台线程中依次启动服务
-        def _do_start():
-            # 1. 启动 qwen2api
-            self._start_api_service("qwen2api")
-            # 2. 启动 zhipu2api
-            self._start_api_service("zhipu2api")
-            # 3. 启动前端
-            QTimer.singleShot(500, self._load_vue_into_chat_page)
-
-        t = threading.Thread(target=_do_start, daemon=True)
-        t.start()
-
-        # 启动服务状态监控
-        self.service_monitor_timer.start(3000)
-
-    def _stop_all_services(self):
-        """停止全部服务"""
-        self._append_log("正在停止全部服务...", "#FFC107")
-        self.btn_stop_all.setEnabled(False)
-
-        def _do_stop():
-            # 停止 API 服务
-            try:
-                backend.stop_qwen2api()
-            except Exception as e:
-                self._append_log(f"停止千问服务异常: {e}", "#F44336")
-
-            try:
-                backend.stop_zhipu2api()
-            except Exception as e:
-                self._append_log(f"停止智谱服务异常: {e}", "#F44336")
-
-            # 停止前端服务
-            self._stop_frontend_service()
-
-            QTimer.singleShot(1000, self._on_all_services_stopped)
-
-        t = threading.Thread(target=_do_stop, daemon=True)
-        t.start()
-
-    def _on_all_services_stopped(self):
-        """所有服务停止后的回调"""
-        self._is_starting_all = False
-        for card in self.service_cards.values():
-            card.set_running(False)
-        self.btn_start_all.setEnabled(True)
-        self.btn_stop_all.setEnabled(False)
-        self.home_status.setText("🟢 就绪")
-        self.home_status.setStyleSheet("color: #4CAF50; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-        self.service_monitor_timer.stop()
-        self._append_log("全部服务已停止", "#FFC107")
-
-    def _start_api_service(self, service_id: str):
-        """启动单个 API 服务（qwen2api 或 zhipu2api）"""
-        reg = backend.API_SERVICE_REGISTRY.get(service_id)
-        if not reg:
-            self._append_log(f"未知服务: {service_id}", "#F44336")
-            return
-
-        label = reg["label"]
-        port = reg["default_port"]
-
-        # 先检查是否已经在运行
-        base_url = f"http://127.0.0.1:{port}"
-        chk = backend.check_api_service(base_url)
-        if chk.get("running") and chk.get("serviceType") == reg["service_type"]:
-            self._append_log(f"{label} 服务已在运行 (:{port})", "#4CAF50")
-            QTimer.singleShot(0, lambda sid=service_id: self.service_cards[sid].set_running(True))
-            return
-
-        self._append_log(f"正在启动 {label} 服务...", "#2196F3")
-
-        try:
-            if service_id == "qwen2api":
-                result = backend.start_qwen2api(port=port)
-            elif service_id == "zhipu2api":
-                result = backend.start_zhipu2api(port=port)
-            else:
-                return
-
-            if result.get("ok"):
-                self._append_log(f"✓ {label} 服务启动成功 (:{port})", "#4CAF50")
-                QTimer.singleShot(0, lambda sid=service_id: self.service_cards[sid].set_running(True))
-            else:
-                error = result.get("error", "未知错误")
-                self._append_log(f"✗ {label} 服务启动失败: {error}", "#F44336")
-                QTimer.singleShot(0, lambda sid=service_id: self.service_cards[sid].set_running(False))
-        except Exception as e:
-            self._append_log(f"✗ {label} 服务启动异常: {e}", "#F44336")
-            QTimer.singleShot(0, lambda sid=service_id: self.service_cards[sid].set_running(False))
-
-    def _start_frontend_service(self):
-        """启动前端 - 内嵌到首页（QtWebView2）"""
-        # 设置前端卡片为运行中
-        card = self.service_cards.get("frontend")
-        if card:
-            card.set_running(True)
-
-        self._append_log("正在加载 Vue 前端界面...", "#2196F3")
-        # 加载 Vue 到首页
-        QTimer.singleShot(1000, self._load_vue_into_chat_page)
-
-    def _stop_frontend_service(self):
-        """停止前端服务 - 关闭 Vue 视图"""
-        self._close_vue_view()
-
-    def _finish_start_all(self):
-        """启动全部服务后的最终状态更新"""
-        self._is_starting_all = False
-        self.btn_start_all.setEnabled(True)
-
-        # 检查有多少服务真正在运行
-        running_count = sum(1 for c in self.service_cards.values() if c.is_running)
-        if running_count > 0:
-            self.btn_stop_all.setEnabled(True)
-            self.home_status.setText(f"🟢 {running_count} 个服务运行中")
-            self.home_status.setStyleSheet("color: #4CAF50; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-        else:
-            self.home_status.setText("🟡 就绪（无服务运行）")
-            self.home_status.setStyleSheet("color: #FFC107; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-
-    def _on_service_restart(self, service_id: str):
-        """重启单个服务"""
-        self._append_log(f"正在重启 {service_id}...", "#2196F3")
-        card = self.service_cards.get(service_id)
-        if card:
-            card.set_starting()
-
-        def _do_restart():
-            if service_id == "qwen2api":
-                backend.stop_qwen2api()
-                time.sleep(1)
-                self._start_api_service("qwen2api")
-            elif service_id == "zhipu2api":
-                backend.stop_zhipu2api()
-                time.sleep(1)
-                self._start_api_service("zhipu2api")
-            elif service_id == "frontend":
-                self._start_frontend_service()
-
-        t = threading.Thread(target=_do_restart, daemon=True)
-        t.start()
-
-    def _on_service_open(self, service_id: str):
-        """打开服务页面"""
-        if service_id in ("qwen2api", "zhipu2api"):
-            import webbrowser
-            port = self._services_info[service_id]["default_port"]
-            webbrowser.open(f"http://127.0.0.1:{port}")
-        elif service_id == "frontend":
-            # 前端现在内嵌在首页，直接切换到底部
-            if self._webview2_initialized:
-                self._vue_tab.setStyleSheet("""
-                    QPushButton { background-color: #1565C0; color: #FFFFFF; border: none; border-radius: 4px; padding: 4px 12px; font-size: 12px; font-weight: bold; }
-                """)
-
-    def _on_service_stop(self, service_id: str):
-        """停止单个服务"""
-        self._append_log(f"正在停止 {service_id}...", "#FFC107")
-
-        def _do_stop():
-            if service_id == "qwen2api":
-                backend.stop_qwen2api()
-            elif service_id == "zhipu2api":
-                backend.stop_zhipu2api()
-            elif service_id == "frontend":
-                self._stop_frontend_service()
-
-            QTimer.singleShot(500, self._monitor_services)
-
-        t = threading.Thread(target=_do_stop, daemon=True)
-        t.start()
-
-    def _monitor_services(self):
-        """定时监控服务状态，更新卡片和按钮"""
-        running_count = 0
-        for sid, info in self._services_info.items():
-            card = self.service_cards.get(sid)
-            if not card:
-                continue
-
-            if sid in ("qwen2api", "zhipu2api"):
-                port = info["default_port"]
-                base_url = f"http://127.0.0.1:{port}"
-                try:
-                    chk = backend.check_api_service(base_url)
-                    is_running = chk.get("running", False)
-                except Exception:
-                    is_running = False
-            elif sid == "frontend":
-                is_running = hasattr(self, '_webview_window') and self._webview_window is not None
-            else:
-                is_running = False
-
-            card.set_running(is_running)
-            if is_running:
-                running_count += 1
-
-        # 更新全局状态
-        if not self._is_starting_all:
-            if running_count > 0:
-                self.btn_start_all.setEnabled(True)
-                self.btn_stop_all.setEnabled(True)
-                self.home_status.setText(f"🟢 {running_count} 个服务运行中")
-                self.home_status.setStyleSheet("color: #4CAF50; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-            else:
-                self.btn_start_all.setEnabled(True)
-                self.btn_stop_all.setEnabled(False)
-                self.home_status.setText("🟢 就绪")
-                self.home_status.setStyleSheet("color: #4CAF50; font-size: 12px; font-weight: bold; background: transparent; border: none;")
-
-    def _launch_webview(self):
-        """启动 pywebview 独立窗口，加载 Vue 前端"""
-        if not WEBVIEW_AVAILABLE:
-            QMessageBox.critical(self, "错误", "pywebview 未安装，请运行 pip install pywebview")
-            return
-
-        dist_path = os.path.join(self.app_dir, "desktop", "dist", "index.html")
-        if not os.path.exists(dist_path):
-            QMessageBox.warning(self, "前端未构建", "请先在「部署维护」中构建前端")
-            return
-
-        def _run_webview():
-            w = webview.create_window(
-                "云集智能编程工作站", url=dist_path,
-                js_api=self.bridge,
-                width=1280, height=860,
-                confirm_close=True,
-            )
-            self._webview_window = w
-            webview.start()
-
-        t = threading.Thread(target=_run_webview, daemon=False)
-        t.start()
 
     def _create_deploy_page(self):
         """创建部署维护页面"""
@@ -7887,73 +4672,24 @@ class MainWindow(QMainWindow):
 
     # ── 页面切换 ──
 
-    def _update_nav_active(self, kind: str):
-        """2026-06-16：workbuddy 边栏导航按钮互斥高亮"""
-        if not hasattr(self, "_workbuddy_nav_btns"):
-            return
-        for k, btn in self._workbuddy_nav_btns.items():
-            btn.setChecked(k == kind)
-
     def _switch_page(self, index):
         """切换页面"""
-        # 2026-06-16 修复：补齐 4（项目管理）、5（系统设置）、6（对话历史）的处理
-        if index == 4:
-            # 项目管理：原生 QStackedWidget 切换
-            self.btn_chat.setChecked(False)
-            self.btn_home.setChecked(False)
-            self.btn_deploy_nav.setChecked(False)
-            self.btn_update_nav.setChecked(False)
-            self.btn_project_nav.setChecked(True)
-            self.btn_settings_nav.setChecked(False)
-            self.page_stack.setCurrentIndex(4)
-            self._refresh_project_list()
-        elif index == 5:
-            # 系统设置：原生 QStackedWidget 切换
-            self.btn_chat.setChecked(False)
-            self.btn_home.setChecked(False)
-            self.btn_deploy_nav.setChecked(False)
-            self.btn_update_nav.setChecked(False)
-            self.btn_project_nav.setChecked(False)
-            self.btn_settings_nav.setChecked(True)
-            self.page_stack.setCurrentIndex(5)
-            self._refresh_settings_panel()
-        elif index == 6:
-            # 2026-06-16 新增：对话历史页
-            self.btn_chat.setChecked(False)
-            self.btn_home.setChecked(False)
-            self.btn_deploy_nav.setChecked(False)
-            self.btn_update_nav.setChecked(False)
-            self.btn_project_nav.setChecked(False)
-            self.btn_settings_nav.setChecked(False)
-            self.page_stack.setCurrentIndex(6)
-            self._refresh_history_list()
-        elif index == 3:
-            # 软件更新
-            self.btn_chat.setChecked(False)
-            self.btn_home.setChecked(False)
-            self.btn_deploy_nav.setChecked(False)
-            self.btn_update_nav.setChecked(True)
-            self.btn_project_nav.setChecked(False)
-            self.btn_settings_nav.setChecked(False)
-            self.page_stack.setCurrentIndex(3)
+        actual_page = 0 if index in (3, 4) else index
+        self.btn_home.setChecked(index == 0)
+        self.btn_deploy_nav.setChecked(index == 1)
+        self.btn_update_nav.setChecked(index == 2)
+        self.btn_project_nav.setChecked(index == 3)
+        self.btn_settings_nav.setChecked(index == 4)
+        self.page_stack.setCurrentIndex(actual_page)
+
+        if index == 1:
+            self._refresh_deploy_env_status()
+        if index == 2:
             self._render_active_tab()
-        else:
-            self.btn_chat.setChecked(index == 0)
-            self.btn_home.setChecked(index == 1)
-            self.btn_deploy_nav.setChecked(index == 2)
-            self.btn_update_nav.setChecked(False)
-            self.btn_project_nav.setChecked(False)
-            self.btn_settings_nav.setChecked(False)
-            self.page_stack.setCurrentIndex(index)
-
-            if index == 2:
-                self._refresh_deploy_env_status()
-
-    def _switch_to_project_view(self):
-        """切换到项目管理视图"""
-        if self._webview2_initialized and hasattr(self, '_chat_vue2_widget') and self._chat_vue2_widget:
+        if index in (0, 3, 4):
+            nav_name = {0: "chat", 3: "project", 4: "settings"}.get(index, "chat")
             try:
-                self._chat_vue2_widget.evaluate_js(f"if(window.switchNav) window.switchNav('project');")
+                self.web_view.page().runJavaScript(f"if(window.switchNav) window.switchNav('{nav_name}');")
             except Exception:
                 pass
 
@@ -8557,25 +5293,24 @@ class MainWindow(QMainWindow):
                 parts.append(f"{k}:{'✓' if v else '✗'}")
             self.log_signal.emit("环境检查: " + " ".join(parts), "#666")
 
-            # 自动启动基础服务（千问 + 智谱 API）
-            QTimer.singleShot(500, self._auto_start_services)
-            
             QTimer.singleShot(100, self._load_frontend)
             QTimer.singleShot(200, self._refresh_deploy_env_status)
 
         t = threading.Thread(target=_check, daemon=True)
         t.start()
 
-    def _auto_start_services(self):
-        """自动启动基础 API 服务（千问 + 智谱）"""
-        try:
-            self._start_api_service("qwen2api")
-            self._start_api_service("zhipu2api")
-            # 延迟 1.5 秒后加载 Vue 前端
-            QTimer.singleShot(1500, self._load_vue_into_chat_page)
-            self.home_status.setText("🟢 服务已就绪")
-        except Exception as e:
-            self._append_log(f"自动启动服务失败: {e}", "#FF9800")
+    def _on_web_load_finished(self, ok: bool):
+        if ok:
+            self.web_view.setVisible(True)
+            if self._splash and self._splash.isVisible():
+                self._splash.set_progress(0.95, "正在渲染界面...")
+
+    def _finish_splash(self):
+        if self._splash and self._splash.isVisible():
+            self._splash.set_progress(1.0, "加载完成！")
+            self.show()
+            self._splash.finish(self)
+            self._splash = None
 
     def _splash_fallback(self):
         if self._splash and self._splash.isVisible():
@@ -8584,13 +5319,18 @@ class MainWindow(QMainWindow):
             self._splash = None
 
     def _load_frontend(self):
-        """检查前端是否已构建并更新状态"""
+        """加载 Vue 前端到 QWebEngineView"""
         dist_path = os.path.join(self.app_dir, "desktop", "dist", "index.html")
+
         if not os.path.exists(dist_path):
-            self._update_status("⚠ 前端未构建")
-            self.log_signal.emit("前端未构建，请先运行部署维护", "#FFC107")
+            self._update_status("✗ 前端未构建")
+            self.log_signal.emit("[错误] 前端未构建，请先运行部署维护", "#F44336")
             return
-        self._update_status("🟢 就绪（点击首页「一键启动」启动工作台）")
+
+        # 使用 file:// URL 加载
+        url = QUrl.fromLocalFile(dist_path)
+        self.web_view.load(url)
+        self._update_status("🟢 就绪")
 
         # 更新环境状态栏
         self._update_env_status()
@@ -8631,8 +5371,7 @@ class MainWindow(QMainWindow):
         self._pending_voice_result = text
         try:
             escaped = json.dumps(text)
-            if self._webview_window:
-                self._webview_window.evaluate_js(f"if(window.setVoiceResult) window.setVoiceResult({escaped});")
+            self.web_view.page().runJavaScript(f"if(window.setVoiceResult) window.setVoiceResult({escaped});")
         except Exception:
             pass
 
@@ -8860,414 +5599,30 @@ class MainWindow(QMainWindow):
         t.start()
 
     # ── 软件更新 ──
-    # ── 2026-06-16 新增：原生任务对话/项目管理/系统设置 事件处理 ──
-
-    def _chat_new_session(self):
-        """新建会话：弹输入框取标题"""
-        title, ok = QInputDialog.getText(self, "新建对话", "请输入对话标题：", text="新对话")
-        if not ok or not title.strip():
-            return
-        sid = datetime.now().strftime("%Y%m%d%H%M%S")
-        sess = {"id": sid, "title": title.strip(), "created_at": datetime.now().isoformat(timespec="seconds"), "messages": []}
-        self._chat_sessions.insert(0, sess)
-        self._chat_session_list.addItem(QListWidgetItem(f"💬 {sess['title']}\n   {sid}"))
-        self._chat_current_session_id = sid
-        self._chat_current_title.setText(sess["title"])
-        self._chat_messages_area.clear()
-        self._chat_input.setFocus()
-        self._append_log(f"已创建对话: {sess['title']}", "#10B981")
-
-    def _chat_load_session(self, item):
-        """加载左侧选中的会话"""
-        try:
-            idx = self._chat_session_list.row(item)
-            sess = self._chat_sessions[idx]
-        except (IndexError, AttributeError):
-            return
-        self._chat_current_session_id = sess["id"]
-        self._chat_current_title.setText(sess["title"])
-        # 渲染历史消息
-        html = ""
-        for m in sess.get("messages", []):
-            role = m.get("role", "assistant")
-            text = m.get("text", "")
-            if role == "user":
-                html += f'<div style="margin: 8px 0; padding: 10px 14px; background: #1E3A8A; color: #fff; border-radius: 8px; max-width: 75%; margin-left: auto;">{text}</div>'
-            else:
-                html += f'<div style="margin: 8px 0; padding: 10px 14px; background: #1f1f1f; color: #E0E0E0; border-radius: 8px; max-width: 75%;">{text}</div>'
-        self._chat_messages_area.setHtml(html or '<div style="color: #888; text-align: center; margin-top: 40px;">（空对话）</div>')
-
-    def _chat_send_message(self):
-        """发送消息：先存到当前会话，再用后端做 AI 响应（如果有）"""
-        text = self._chat_input.toPlainText().strip()
-        if not text:
-            return
-        if not self._chat_current_session_id:
-            # 没有选中的会话，先创建一个
-            self._chat_new_session()
-        # 找到当前会话
-        sess = None
-        for s in self._chat_sessions:
-            if s["id"] == self._chat_current_session_id:
-                sess = s
-                break
-        if sess is None:
-            self._append_log("当前会话无效，请重新选择", "#FFC107")
-            return
-        sess.setdefault("messages", []).append({"role": "user", "text": text, "time": datetime.now().isoformat(timespec="seconds")})
-        # 渲染
-        self._chat_load_session(self._chat_session_list.currentItem() or self._chat_session_list.item(0))
-        self._chat_input.clear()
-        # AI 响应占位
-        sess["messages"].append({
-            "role": "assistant",
-            "text": f"（本地占位响应）你刚说了：{text}\n\n要启用真实 AI 响应，请在「运行服务」页启动 qwen2api / zhipu2api 后端服务。",
-            "time": datetime.now().isoformat(timespec="seconds"),
-        })
-        self._chat_load_session(self._chat_session_list.currentItem() or self._chat_session_list.item(0))
-        self._append_log(f"[chat] {text[:30]}...", "#9CA3AF")
-
-    def _refresh_project_list(self):
-        """刷新项目列表（占位实现，列出 data/ 下的子目录作为项目）"""
-        if not hasattr(self, "_project_list"):
-            return
-        self._project_list.clear()
-        data_dir = Path("data")
-        candidates = []
-        if data_dir.exists():
-            for child in sorted(data_dir.iterdir()):
-                if child.is_dir() and not child.name.startswith("."):
-                    candidates.append(child)
-        # 兜底：根目录 + desktop
-        for p in [Path("app"), Path("ver")]:
-            if p.exists() and p not in candidates:
-                candidates.append(p)
-        if not candidates:
-            self._proj_status.setText("未发现项目。可点击右上角「+ 新建项目」创建。")
-            placeholder = QListWidgetItem("（暂无项目）")
-            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._project_list.addItem(placeholder)
-            return
-        for proj in candidates:
-            stat = proj.stat()
-            item = QListWidgetItem(f"📁 {proj.name}/\n   {proj}")
-            item.setData(Qt.ItemDataRole.UserRole, str(proj))
-            self._project_list.addItem(item)
-        self._proj_status.setText(f"共 {len(candidates)} 个项目")
-
-    def _project_filter_changed(self, text):
-        """项目搜索过滤"""
-        if not hasattr(self, "_project_list"):
-            return
-        for i in range(self._project_list.count()):
-            item = self._project_list.item(i)
-            item.setHidden(bool(text) and text.lower() not in item.text().lower())
-
-    def _project_create_dialog(self):
-        """新建项目对话框"""
-        name, ok = QInputDialog.getText(self, "新建项目", "项目名：", text="")
-        if not ok or not name.strip():
-            return
-        target = Path("data") / name.strip()
-        try:
-            target.mkdir(parents=True, exist_ok=True)
-            (target / "README.md").write_text(f"# {name}\n\n由云集智能编程工作站在 {datetime.now().isoformat(timespec='seconds')} 创建。\n", encoding="utf-8")
-            self._append_log(f"已创建项目: {name}", "#10B981")
-            self._refresh_project_list()
-        except Exception as e:
-            QMessageBox.critical(self, "创建失败", str(e))
-
-    def _refresh_settings_panel(self):
-        """刷新系统设置面板（从配置文件加载）"""
-        # 占位实现：未来接入 config_service
-        self._append_log("已切换到系统设置", "#9CA3AF")
-
-    def _settings_save_clicked(self):
-        """保存设置"""
-        cfg = {
-            "theme": self._settings_theme.currentText(),
-            "default_provider": self._settings_default_provider.currentText(),
-            "autostart": self._settings_autostart.isChecked(),
-            "sound": self._settings_sound.isChecked(),
-            "api_port": self._settings_port.text(),
-            "data_dir": self._settings_data_dir.text(),
-        }
-        try:
-            cfg_path = Path("data") / "settings.json"
-            cfg_path.parent.mkdir(parents=True, exist_ok=True)
-            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-            self._append_log(f"设置已保存到 {cfg_path}", "#10B981")
-            QMessageBox.information(self, "保存成功", f"设置已保存到\n{cfg_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "保存失败", str(e))
+    # ── 关闭 ──
+    def _check_shutdown_signal(self):
+        """检测是否有更新版本的实例要求本实例退出"""
+        if _is_shutdown_signaled():
+            print("[APP] 收到关闭信号，正在优雅退出...")
+            self.close()
 
     def closeEvent(self, event):
         _cleanup_single_instance()
         event.accept()
 
 
-# ══════════════════════════════════════════════════════════════
-# ── 自部署机制 (参考云集智能视频创意站) ──
-# ══════════════════════════════════════════════════════════════
-# 首次运行: 单 EXE → 自部署到同级目录 → 启动稳定入口 EXE
-# 后续运行: 直接启动已部署的稳定 EXE
-#
-# 部署后目录结构:
-#   云集智能编程工作站/
-#   ├── .yunji.lock
-#   ├── 云集智能编程工作站.exe              ← 稳定入口 (硬链接)
-#   ├── ver/
-#   │   └── 云集智能编程工作站-v2026.xx.xx.xxxx.exe
-#   ├── app/                      ← 从 EXE 内嵌释放的资源
-#   │   ├── desktop/dist/
-#   │   ├── backend.py
-#   │   ├── api/  services/  routes/  platformkit/
-#   │   └── ...
-#   ├── data/
-#   └── temp/
-# ══════════════════════════════════════════════════════════════
-
-BRAND_NAME = "云集智能编程工作站"
-LOCK_FILE_NAME = ".yunji.lock"
-
-
-def _create_hardlink(src, dst):
-    """创建硬链接，失败则回退到复制"""
-    try:
-        if os.path.exists(dst):
-            os.remove(dst)
-        os.link(src, dst)
-        return True
-    except OSError:
-        pass
-    try:
-        if os.path.exists(dst):
-            os.remove(dst)
-        shutil.copy2(src, dst)
-        return True
-    except Exception:
-        return False
-
-
-def _find_install_root(start_dir=None):
-    """从指定目录向上查找包含 app/ 子目录的安装根"""
-    d = start_dir or (
-        os.path.dirname(sys.executable) if getattr(sys, 'frozen', False)
-        else os.path.dirname(os.path.abspath(__file__))
-    )
-    for _ in range(5):
-        if os.path.isdir(os.path.join(d, "app")):
-            return d
-        parent = os.path.dirname(d)
-        if parent == d:
-            break
-        d = parent
-    return None
-
-
-def _self_deploy(exe_dir):
-    """
-    自部署: 将单 EXE 展开为完整目录结构
-
-    首次运行时:
-    1. 创建 deploy_dir/ver/ 和 data/、temp/
-    2. 从 _MEIPASS 释放嵌入资源到 deploy_dir/app/
-    3. 写 .yunji.lock 标记
-    4. 复制 EXE 到 ver/ 并创建硬链接作为稳定入口
-    5. 启动稳定入口 EXE (带 --cleanup 清理原始 EXE)
-
-    已部署时:
-    直接返回 deploy_dir 路径
-    """
-    src_exe = os.path.abspath(sys.executable)
-    exe_basename = os.path.basename(src_exe)
-
-    if BRAND_NAME not in exe_basename:
-        return None
-
-    deploy_dir = os.path.join(exe_dir, BRAND_NAME)
-    lock_path = os.path.join(deploy_dir, LOCK_FILE_NAME)
-    already_deployed = os.path.isdir(deploy_dir) and os.path.isfile(lock_path)
-
-    if already_deployed:
-        entry_exe = os.path.join(deploy_dir, f"{BRAND_NAME}.exe")
-        if os.path.isfile(entry_exe) and os.path.normpath(src_exe) != os.path.normpath(entry_exe):
-            # 启动稳定入口，让它清理当前 EXE
-            subprocess.Popen(
-                f'ping -n 3 127.0.0.1 >nul & start "" "{entry_exe}" --cleanup="{src_exe}"',
-                shell=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            # 释放单实例资源
-            try:
-                _cleanup_single_instance()
-            except Exception:
-                pass
-            os._exit(0)
-        return deploy_dir
-
-    # ── 首次部署 ──
-    os.makedirs(deploy_dir, exist_ok=True)
-
-    ver_dir = os.path.join(deploy_dir, "ver")
-    os.makedirs(ver_dir, exist_ok=True)
-    app_dir = os.path.join(deploy_dir, "app")
-    os.makedirs(app_dir, exist_ok=True)
-    os.makedirs(os.path.join(deploy_dir, "data"), exist_ok=True)
-    os.makedirs(os.path.join(deploy_dir, "temp"), exist_ok=True)
-
-    # 从 _MEIPASS 释放嵌入资源
-    meipass = getattr(sys, '_MEIPASS', '')
-    if meipass:
-        _IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo")
-
-        # 目录资源
-        _DIR_RESOURCES = [
-            "desktop/dist",
-            "api/qwen2api",
-            "api/zhipu2api",
-            "services",
-            "routes",
-            "platformkit",
-            "shims",
-            "scripts",
-        ]
-        for rel in _DIR_RESOURCES:
-            src = os.path.join(meipass, rel)
-            dst = os.path.join(app_dir, rel)
-            if os.path.isdir(src):
-                try:
-                    if os.path.exists(dst):
-                        shutil.rmtree(dst, ignore_errors=True)
-                    shutil.copytree(src, dst, ignore=_IGNORE)
-                except Exception:
-                    pass
-
-        # 文件资源
-        _FILE_RESOURCES = [
-            "backend.py", "package.json",
-            "icon.ico", "icon.png",
-            "version_info.txt", "version_history.json",
-            "versions.json", "gitlog.json", "project.json",
-        ]
-        for rel in _FILE_RESOURCES:
-            src = os.path.join(meipass, rel)
-            dst = os.path.join(app_dir, rel)
-            if os.path.isfile(src) and not os.path.isfile(dst):
-                try:
-                    shutil.copy2(src, dst)
-                except Exception:
-                    pass
-
-    # 写锁文件
-    with open(lock_path, "w", encoding="utf-8") as f:
-        f.write("yunji")
-
-    # 确定版本化 EXE 文件名
-    if not exe_basename.startswith(BRAND_NAME + "-v"):
-        m = re.search(r'v(\d+\.\d+\.\d+\.\d+)', exe_basename)
-        ver_str = m.group(1) if m else datetime.now().strftime("%Y.%m.%d.%H%M")
-        new_name = f"{BRAND_NAME}-v{ver_str}.exe"
-    else:
-        new_name = exe_basename
-
-    # 复制 EXE 到 ver/
-    target_exe = os.path.join(ver_dir, new_name)
-    if os.path.normpath(src_exe) != os.path.normpath(target_exe):
-        shutil.copy2(src_exe, target_exe)
-
-    # 创建硬链接作为稳定入口
-    entry_exe = os.path.join(deploy_dir, f"{BRAND_NAME}.exe")
-    if not os.path.isfile(entry_exe):
-        _create_hardlink(target_exe, entry_exe)
-
-    # 启动稳定入口，让它清理原始 EXE
-    if os.path.normpath(src_exe) != os.path.normpath(entry_exe):
-        if os.path.isfile(entry_exe):
-            subprocess.Popen(
-                f'ping -n 3 127.0.0.1 >nul & start "" "{entry_exe}" --cleanup="{src_exe}"',
-                shell=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-        # 释放单实例资源
-        try:
-            _cleanup_single_instance()
-        except Exception:
-            pass
-        os._exit(0)
-
-    return deploy_dir
-
-
-def _find_dev_dir():
-    """
-    查找或创建部署目录
-
-    冻结模式 (EXE):
-    - 已部署: 返回部署目录
-    - 未部署: 触发自部署
-
-    开发模式:
-    - 返回 1.PC/ 目录
-    """
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        # 检查是否已在部署目录中运行
-        d = exe_dir
-        for _ in range(5):
-            if os.path.isfile(os.path.join(d, LOCK_FILE_NAME)):
-                if os.path.isdir(os.path.join(d, "ver")) and os.path.isfile(
-                    os.path.join(d, f"{BRAND_NAME}.exe")
-                ):
-                    return d
-            parent = os.path.dirname(d)
-            if parent == d:
-                break
-            d = parent
-
-        # 检查当前 EXE 是否就是稳定入口
-        exe_basename = os.path.basename(sys.executable)
-        if exe_basename == f"{BRAND_NAME}.exe" and os.path.isfile(
-            os.path.join(exe_dir, LOCK_FILE_NAME)
-        ):
-            return exe_dir
-
-        # 触发自部署
-        result = _self_deploy(exe_dir)
-        return result or exe_dir
-
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
 def main():
-    # ── 处理 --cleanup 参数 (自部署后清理原始 EXE) ──
-    for arg in sys.argv[1:]:
-        if arg.startswith("--cleanup="):
-            old_exe = arg.split("=", 1)[1].strip('"')
-            def _delayed_cleanup():
-                try:
-                    time.sleep(3)
-                    if os.path.isfile(old_exe):
-                        os.remove(old_exe)
-                except Exception:
-                    pass
-            threading.Thread(target=_delayed_cleanup, daemon=True).start()
-            break
-
-    # ── 自部署 (冻结模式) ──
-    if getattr(sys, 'frozen', False):
-        deploy_dir = _find_dev_dir()
-        if deploy_dir:
-            entry_exe = os.path.join(deploy_dir, f"{BRAND_NAME}.exe")
-            if os.path.isfile(entry_exe) and os.path.normpath(
-                os.path.abspath(sys.executable)
-            ) != os.path.normpath(entry_exe):
-                # 当前不是稳定入口，启动稳定入口
-                subprocess.Popen(
-                    [entry_exe] + sys.argv[1:],
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                os._exit(0)
+    if hasattr(sys, '_MEIPASS'):
+        os.environ['QTWEBENGINEPROCESS_PATH'] = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'bin', 'QtWebEngineProcess.exe')
+        os.environ['QTWEBENGINE_CHROMIUM_FLAGS'] = '--disable-gpu'
+        if not os.environ.get('QTWEBENGINE_RESOURCES_PATH'):
+            res_path = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'resources')
+            if os.path.isdir(res_path):
+                os.environ['QTWEBENGINE_RESOURCES_PATH'] = res_path
+        if not os.environ.get('QTWEBENGINE_LOCALES_PATH'):
+            loc_path = os.path.join(sys._MEIPASS, 'PyQt6', 'Qt6', 'translations', 'qtwebengine_locales')
+            if os.path.isdir(loc_path):
+                os.environ['QTWEBENGINE_LOCALES_PATH'] = loc_path
 
     _ensure_single_instance()
 

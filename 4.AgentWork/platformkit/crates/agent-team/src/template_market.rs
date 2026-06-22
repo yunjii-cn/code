@@ -14,7 +14,7 @@
 //   - 平台可审核质量
 
 use crate::error::{Result, TeamError};
-use crate::template_loader::{TemplateManifest, TemplateVersion};
+use crate::template_loader::TemplateManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
@@ -642,12 +642,14 @@ impl TemplateMarketplace {
 
     /// 下架条目
     pub fn delist(&mut self, market_id: &str, reason: impl Into<String>) -> Result<()> {
+        let reason = reason.into();
         let entry = self
             .entries
             .get_mut(market_id)
             .ok_or_else(|| TeamError::Other(format!("市场条目不存在: {market_id}")))?;
         entry.review_status = ReviewStatus::Delisted;
-        // 不直接删除，保留下架记录
+        // 不直接删除，保留下架记录；下架原因通过 eprintln 输出便于排查
+        eprintln!("[marketplace] 下架 {}: {}", market_id, reason);
         Ok(())
     }
 

@@ -6,6 +6,108 @@
 
 :root {
   color-scheme: dark;
+
+  /* ===== 默认主题：深空蓝 ===== */
+  /* 背景色 */
+  --bg-primary: #09090b;
+  --bg-secondary: #18181b;
+  --bg-surface: #1f1f23;
+  --bg-elevated: #27272a;
+
+  /* 文字色 */
+  --text-primary: #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --text-inverse: #09090b;
+
+  /* 边框色 */
+  --border-color: #27272a;
+
+  /* 品牌色 */
+  --brand-primary: #3b82f6;
+  --brand-hover: #2563eb;
+  --brand-light: #1e3a8a;
+
+  /* 状态色 */
+  --status-success: #22c55e;
+  --status-warning: #eab308;
+  --status-error: #ef4444;
+}
+
+/* 午夜紫主题 */
+[data-theme="midnight"] {
+  --bg-primary: #0f0522;
+  --bg-secondary: #1a0a3e;
+  --bg-surface: #231050;
+  --bg-elevated: #2d1563;
+  --text-primary: #f3e8ff;
+  --text-secondary: #c4b5fd;
+  --text-muted: #a78bfa;
+  --text-inverse: #0f0522;
+  --border-color: #3b1f7e;
+  --brand-primary: #8b5cf6;
+  --brand-hover: #7c3aed;
+  --brand-light: #4c1d95;
+  --status-success: #34d399;
+  --status-warning: #fbbf24;
+  --status-error: #f87171;
+}
+
+/* 北极白主题 */
+[data-theme="arctic"] {
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8fafc;
+  --bg-surface: #f1f5f9;
+  --bg-elevated: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --text-inverse: #ffffff;
+  --border-color: #cbd5e1;
+  --brand-primary: #0ea5e9;
+  --brand-hover: #0284c7;
+  --brand-light: #e0f2fe;
+  --status-success: #10b981;
+  --status-warning: #f59e0b;
+  --status-error: #ef4444;
+}
+
+/* 森林绿主题 */
+[data-theme="forest"] {
+  --bg-primary: #0a1a0f;
+  --bg-secondary: #112b18;
+  --bg-surface: #163320;
+  --bg-elevated: #1b4028;
+  --text-primary: #dcfce7;
+  --text-secondary: #86efac;
+  --text-muted: #4ade80;
+  --text-inverse: #0a1a0f;
+  --border-color: #166534;
+  --brand-primary: #22c55e;
+  --brand-hover: #16a34a;
+  --brand-light: #14532d;
+  --status-success: #4ade80;
+  --status-warning: #facc15;
+  --status-error: #fb7185;
+}
+
+/* 日落橙主题 */
+[data-theme="sunset"] {
+  --bg-primary: #1a0f0a;
+  --bg-secondary: #2d1a0e;
+  --bg-surface: #3d2314;
+  --bg-elevated: #4a2c1a;
+  --text-primary: #fef3c7;
+  --text-secondary: #fcd34d;
+  --text-muted: #fbbf24;
+  --text-inverse: #1a0f0a;
+  --border-color: #78350f;
+  --brand-primary: #f97316;
+  --brand-hover: #ea580c;
+  --brand-light: #431407;
+  --status-success: #4ade80;
+  --status-warning: #fbbf24;
+  --status-error: #fb7185;
 }
 
 body {
@@ -14,6 +116,9 @@ body {
     "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* 使用 CSS 变量作为 Tailwind 颜色的后备 */
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 /* 自定义滚动条 */
@@ -27,10 +132,10 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: var(--bg-elevated);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: var(--text-muted);
 }

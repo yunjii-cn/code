@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-use crate::config::{AiConfig, LlmProvider};
+use crate::config::{AiConfig, LlmProvider, RoutingHint};
 use crate::error::{AiError, Result};
 
 /// LLM 消息（chat completion 格式）
@@ -87,6 +87,14 @@ pub struct OpenAiEngine {
 impl OpenAiEngine {
     /// 创建 OpenAI 引擎
     pub fn new(config: AiConfig) -> Result<Self> {
+        Self::with_routing_hint(config, None)
+    }
+
+    /// 创建带路由提示的引擎（MG 模式用）
+    ///
+    /// `hint` 非 None 时，会在请求头注入 `X-Model-Preference: {hint}`，
+    /// MG BFF 据此做智能路由（Code→DeepSeek-Coder, Reasoning→Claude, 等）
+    pub fn with_routing_hint(config: AiConfig, hint: Option<RoutingHint>) -> Result<Self> {
         let api_key = config
             .api_key
             .as_ref()
@@ -101,6 +109,13 @@ impl OpenAiEngine {
                     reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
                         .map_err(|e| AiError::Config(format!("无效 API key: {}", e)))?,
                 );
+                // MG 智能路由提示
+                if let Some(h) = hint {
+                    headers.insert(
+                        reqwest::header::HeaderName::from_static("x-model-preference"),
+                        reqwest::header::HeaderValue::from_static(h.as_str()),
+                    );
+                }
                 headers
             })
             .build()?;
@@ -276,6 +291,10 @@ impl LlmEngine for MockEngine {
 pub fn create_engine(config: AiConfig) -> Result<Box<dyn LlmEngine>> {
     match config.provider {
         LlmProvider::OpenAi => Ok(Box::new(OpenAiEngine::new(config)?)),
+        LlmProvider::Mg => {
+            let hint = config.routing_hint;
+            Ok(Box::new(OpenAiEngine::with_routing_hint(config, Some(hint))?))
+        }
         LlmProvider::Ollama => Ok(Box::new(OllamaEngine::new(config)?)),
         LlmProvider::Mock => Ok(Box::new(MockEngine::conventional_commit())),
     }

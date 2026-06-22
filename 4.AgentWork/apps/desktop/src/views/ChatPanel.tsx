@@ -365,8 +365,7 @@ export default function ChatPanel() {
   return (
     <div className="flex flex-col h-full bg-zinc-950 text-zinc-100">
       {/* 顶部标题栏 */}
-      <header className="flex items-center gap-2 px-6 py-3 border-b border-zinc-800 bg-zinc-900/50">
-        <Sparkles className="w-5 h-5 text-brand-400" />
+      <header className="flex items-center px-6 py-3 border-b border-zinc-800 bg-zinc-900/50">
         <h1 className="text-lg font-semibold">AI 互动面板</h1>
         <span className="text-xs text-zinc-500 ml-2">
           M4.0 D4 · 第 {roundCount} 轮对话

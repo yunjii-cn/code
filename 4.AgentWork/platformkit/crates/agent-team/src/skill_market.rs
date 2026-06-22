@@ -15,7 +15,6 @@
 //   - Skill.tools = 该 Skill 提供的工具列表
 //   - 员工加载 Skill 后，获得 Skill 提供的所有工具
 
-use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

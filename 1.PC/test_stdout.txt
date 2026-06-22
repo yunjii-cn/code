@@ -1,6 +1,0 @@
-[API] FastAPI 服务启动于 http://127.0.0.1:18080
-[API] 开发模式：Vite 代理 /api → FastAPI，pywebview 未启动
-[API] API 文档: http://127.0.0.1:18080/docs
-INFO:     127.0.0.1:59181 - "GET /api/health HTTP/1.1" 200 OK
-INFO:     127.0.0.1:57395 - "GET /api/ai/providers HTTP/1.1" 200 OK
-INFO:     127.0.0.1:57396 - "GET /api/system/state HTTP/1.1" 200 OK

@@ -19,6 +19,7 @@ tauri-build = { version = "2.0", features = [] }
 # Tauri 核心
 tauri = { version = "2.0", features = [] }
 tauri-plugin-shell = "2.0"
+tauri-plugin-store = "2.0"
 
 # Workspace 共享依赖
 serde = { workspace = true }

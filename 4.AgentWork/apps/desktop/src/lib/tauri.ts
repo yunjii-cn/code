@@ -68,7 +68,7 @@ export interface GitStatusInfo {
 }
 
 export interface AiConfigInfo {
-  provider: "openai" | "ollama" | "mock";
+  provider: "openai" | "ollama" | "mock" | "mg";
   base_url: string;
   model: string;
   has_api_key: boolean;
@@ -85,6 +85,16 @@ export async function getAppInfo(): Promise<AppInfo> {
 
 export async function getSystemInfo(): Promise<SystemInfo> {
   return invoke<SystemInfo>("get_system_info");
+}
+
+/// 获取默认仓库路径
+export async function getDefaultRepoPath(): Promise<string> {
+  return invoke<string>("get_default_repo_path");
+}
+
+/// 在系统资源管理器中打开文件夹
+export async function openFolder(path: string): Promise<void> {
+  return invoke<void>("open_folder", { path });
 }
 
 // ===== TimeFlow 仓库命令 =====

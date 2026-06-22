@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use timeflow_ai::{
     AiConfig, LlmEngine, LlmMessage, LlmProvider, LlmResponse, MockEngine, OllamaEngine, OpenAiEngine,
+    RoutingHint,
 };
 
 /// 模型配置
@@ -31,7 +32,7 @@ pub struct ModelConfig {
     pub provider: LlmProvider,
     /// API base URL
     pub base_url: String,
-    /// API key（OpenAI 必填，Ollama 可空）
+    /// API key（OpenAI 必填，Ollama 可空，Mg 用 UM access_token）
     pub api_key: Option<String>,
     /// 模型名（实际传给 API 的，如 "gpt-4o-mini"）
     pub model_name: String,
@@ -41,6 +42,9 @@ pub struct ModelConfig {
     pub max_tokens: u32,
     /// 温度
     pub temperature: f32,
+    /// 模型路由提示（仅 Mg provider 生效）
+    #[serde(default)]
+    pub routing_hint: RoutingHint,
 }
 
 impl ModelConfig {
@@ -55,6 +59,26 @@ impl ModelConfig {
             timeout_secs: 60,
             max_tokens: 4096,
             temperature: 0.3,
+            routing_hint: RoutingHint::Chat,
+        }
+    }
+
+    /// 创建 MG（云集模型网关）模型配置
+    ///
+    /// - `api_key`: UM access_token（走 UM 钱包统一计费）
+    /// - `model_name`: MG 侧模型名（如 "deepseek-coder" / "claude-3-opus"）
+    /// - `hint`: 路由提示，MG BFF 据此选择最优模型
+    pub fn mg(id: impl Into<String>, api_key: impl Into<String>, model_name: impl Into<String>, hint: RoutingHint) -> Self {
+        Self {
+            id: id.into(),
+            provider: LlmProvider::Mg,
+            base_url: "https://mg.yunjii.cn/v1".to_string(),
+            api_key: Some(api_key.into()),
+            model_name: model_name.into(),
+            timeout_secs: 90,
+            max_tokens: 8192,
+            temperature: 0.3,
+            routing_hint: hint,
         }
     }
 
@@ -69,6 +93,7 @@ impl ModelConfig {
             timeout_secs: 120,
             max_tokens: 4096,
             temperature: 0.3,
+            routing_hint: RoutingHint::Chat,
         }
     }
 
@@ -83,6 +108,7 @@ impl ModelConfig {
             timeout_secs: 5,
             max_tokens: 256,
             temperature: 0.0,
+            routing_hint: RoutingHint::Chat,
         }
     }
 
@@ -96,6 +122,7 @@ impl ModelConfig {
             timeout: Duration::from_secs(self.timeout_secs),
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            routing_hint: self.routing_hint,
         }
     }
 }
@@ -182,6 +209,10 @@ impl ModelRouter {
         let ai_config = config.to_ai_config();
         let engine: Box<dyn LlmEngine> = match config.provider {
             LlmProvider::OpenAi => Box::new(OpenAiEngine::new(ai_config)?),
+            LlmProvider::Mg => Box::new(OpenAiEngine::with_routing_hint(
+                ai_config,
+                Some(config.routing_hint),
+            )?),
             LlmProvider::Ollama => Box::new(OllamaEngine::new(ai_config)?),
             LlmProvider::Mock => Box::new(MockEngine::conventional_commit()),
         };
@@ -364,6 +395,34 @@ pub fn builtin_router() -> ModelRouter {
         "qwen2.5-coder:7b",
     ));
 
+    // 云集模型网关（MG）—— 走 UM 钱包统一计费 + 智能路由
+    // api_key 留空，运行时由 UM SSO token 自动注入
+    // MG BFF 根据 routing_hint 自动选择最优模型
+    router.register(ModelConfig::mg(
+        "mg-deepseek-coder",
+        "",
+        "deepseek-coder",
+        RoutingHint::Code,
+    ));
+    router.register(ModelConfig::mg(
+        "mg-claude",
+        "",
+        "claude-3-opus",
+        RoutingHint::Reasoning,
+    ));
+    router.register(ModelConfig::mg(
+        "mg-gpt4o",
+        "",
+        "gpt-4o",
+        RoutingHint::Vision,
+    ));
+    router.register(ModelConfig::mg(
+        "mg-qwen-chat",
+        "",
+        "qwen-max",
+        RoutingHint::Chat,
+    ));
+
     // Mock（测试用）
     router.register(ModelConfig::mock("mock-test"));
 
@@ -388,8 +447,8 @@ fn apply_gateway_override(
     );
 
     for (_, config) in router.models.iter_mut() {
-        // 只覆盖 OpenAI 兼容模型（云端），保留 Ollama 和 Mock
-        if config.provider == LlmProvider::OpenAi {
+        // 只覆盖 OpenAI 兼容模型和 MG 模型（云端），保留 Ollama 和 Mock
+        if config.provider == LlmProvider::OpenAi || config.provider == LlmProvider::Mg {
             if let Some(url) = gateway_url {
                 // 拼接模型 ID 作为路径后缀，例如 https://gateway.com/api/llm/zhipu
                 // 文档约定：Gateway 路径 /api/llm/{provider}/chat/completions
@@ -566,7 +625,21 @@ mod tests {
         assert!(models.contains(&"glm5.2".to_string()));
         assert!(models.contains(&"qwen3.7".to_string()));
         assert!(models.contains(&"local-llama-3".to_string()));
+        assert!(models.contains(&"mg-deepseek-coder".to_string()));
+        assert!(models.contains(&"mg-claude".to_string()));
+        assert!(models.contains(&"mg-gpt4o".to_string()));
+        assert!(models.contains(&"mg-qwen-chat".to_string()));
         assert!(models.contains(&"mock-test".to_string()));
+    }
+
+    #[test]
+    fn test_model_config_mg() {
+        let config = ModelConfig::mg("mg-test", "um-token", "deepseek-coder", RoutingHint::Code);
+        assert_eq!(config.provider, LlmProvider::Mg);
+        assert_eq!(config.base_url, "https://mg.yunjii.cn/v1");
+        assert_eq!(config.api_key, Some("um-token".to_string()));
+        assert_eq!(config.model_name, "deepseek-coder");
+        assert_eq!(config.routing_hint, RoutingHint::Code);
     }
 
     #[test]
@@ -603,6 +676,12 @@ mod tests {
             "",
             "gpt-4o",
         ));
+        router.register(ModelConfig::mg(
+            "mg-claude",
+            "",
+            "claude-3-opus",
+            RoutingHint::Reasoning,
+        ));
         router.register(ModelConfig::ollama(
             "local-llama",
             "http://localhost:11434",
@@ -620,6 +699,11 @@ mod tests {
         let gpt = router.get("gpt-4o").unwrap();
         assert_eq!(gpt.base_url, "https://gateway.example.com/api/llm/gpt-4o");
         assert_eq!(gpt.api_key, Some("gateway-token-xyz".to_string()));
+
+        // MG 模型也应被覆盖
+        let mg = router.get("mg-claude").unwrap();
+        assert_eq!(mg.base_url, "https://gateway.example.com/api/llm/mg-claude");
+        assert_eq!(mg.api_key, Some("gateway-token-xyz".to_string()));
 
         // Ollama 模型不应被覆盖
         let local = router.get("local-llama").unwrap();

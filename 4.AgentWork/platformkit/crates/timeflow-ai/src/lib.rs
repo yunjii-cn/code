@@ -29,7 +29,7 @@ pub use error::{AiError, Result};
 pub use llm::{LlmEngine, LlmMessage, LlmResponse, OpenAiEngine, OllamaEngine, MockEngine, create_engine};
 pub use prompts::{build_commit_msg_prompt, build_summary_prompt, build_classify_prompt, ConventionalCommit, CommitType};
 pub use commit_msg::{CommitMsgGenerator, format_diff, format_file_changes};
-pub use config::{AiConfig, LlmProvider};
+pub use config::{AiConfig, LlmProvider, RoutingHint};
 pub use classify::{SnapshotClassifier, ClassifyInput, ClassifyResult, snapshot_to_input};
 pub use embedding::{EmbeddingEngine, EmbeddingVector, MockEmbeddingEngine, OllamaEmbeddingEngine, create_embedding_engine, cosine_similarity};
 pub use search::{SemanticSearch, SearchResult, SearchIndex};

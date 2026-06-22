@@ -4,24 +4,20 @@ export default {
   theme: {
     extend: {
       colors: {
-        // AgentWork 品牌色：深空蓝 + 电光青
+        // 品牌色跟随 CSS 变量（主题切换时自动更新）
         brand: {
-          50: "#eff6ff",
-          100: "#dbeafe",
-          200: "#bfdbfe",
-          300: "#93c5fd",
-          400: "#60a5fa",
-          500: "#3b82f6",
-          600: "#2563eb",
-          700: "#1d4ed8",
-          800: "#1e40af",
-          900: "#1e3a8a",
-          950: "#172554",
+          400: "var(--brand-primary)",
+          500: "var(--brand-primary)",
+          600: "var(--brand-hover)",
+          700: "var(--brand-hover)",
+          800: "var(--brand-light)",
+          900: "var(--brand-light)",
+          950: "var(--brand-light)",
         },
         accent: {
-          400: "#22d3ee",
-          500: "#06b6d4",
-          600: "#0891b2",
+          400: "var(--brand-primary)",
+          500: "var(--brand-primary)",
+          600: "var(--brand-hover)",
         },
       },
     },

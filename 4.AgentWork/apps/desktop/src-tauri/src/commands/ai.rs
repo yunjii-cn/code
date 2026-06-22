@@ -64,6 +64,7 @@ pub async fn set_ai_config(
     temperature: Option<f32>,
     enabled: Option<bool>,
     state: tauri::State<'_, crate::AppState>,
+    app: tauri::AppHandle,
 ) -> AppResult<String> {
     let parsed_provider: LlmProvider = provider
         .parse()
@@ -81,6 +82,7 @@ pub async fn set_ai_config(
                 LlmProvider::OpenAi => "https://api.openai.com/v1".to_string(),
                 LlmProvider::Ollama => "http://localhost:11434".to_string(),
                 LlmProvider::Mock => "mock://localhost".to_string(),
+                LlmProvider::Mg => "https://mg.yunjii.cn/v1".to_string(),
             };
         }
 
@@ -95,6 +97,7 @@ pub async fn set_ai_config(
                 LlmProvider::OpenAi => "gpt-4o-mini".to_string(),
                 LlmProvider::Ollama => "qwen2.5-coder:7b".to_string(),
                 LlmProvider::Mock => "mock-model".to_string(),
+                LlmProvider::Mg => "deepseek-coder".to_string(),
             };
         }
 
@@ -115,6 +118,15 @@ pub async fn set_ai_config(
     let new_cfg = state.ai_config.lock().unwrap().clone();
     let engine: Box<dyn LlmEngine> = match new_cfg.provider {
         LlmProvider::Mock => Box::new(MockEngine::conventional_commit()),
+        LlmProvider::Mg => match timeflow_ai::create_engine(new_cfg) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("MG 引擎创建失败: {}", e);
+                let mut ae = state.ai_engine.lock().unwrap();
+                *ae = None;
+                return Err(crate::AppError::Ai(e));
+            }
+        },
         _ => match timeflow_ai::create_engine(new_cfg) {
             Ok(e) => e,
             Err(e) => {
@@ -129,7 +141,11 @@ pub async fn set_ai_config(
     let mut ae = state.ai_engine.lock().unwrap();
     *ae = Some(engine);
 
-    tracing::info!("AI 配置已更新: provider={}", provider);
+    // 持久化保存 AI 配置
+    let cfg_snapshot = state.ai_config.lock().unwrap().clone();
+    crate::config_store::save(&app, crate::config_store::keys::AI_CONFIG, &cfg_snapshot);
+    tracing::info!("AI 配置已持久化: provider={}", provider);
+
     Ok(format!("AI 配置已更新（provider={provider}）"))
 }
 
@@ -138,9 +154,11 @@ pub async fn set_ai_config(
 pub async fn set_ai_enabled(
     enabled: bool,
     state: tauri::State<'_, crate::AppState>,
+    app: tauri::AppHandle,
 ) -> AppResult<()> {
     *state.ai_enabled.lock().unwrap() = enabled;
-    tracing::info!("AI 自动生成: {}", if enabled { "已启用" } else { "已禁用" });
+    crate::config_store::save(&app, crate::config_store::keys::AI_ENABLED, &enabled);
+    tracing::info!("AI 自动生成: {}（已持久化）", if enabled { "已启用" } else { "已禁用" });
     Ok(())
 }
 

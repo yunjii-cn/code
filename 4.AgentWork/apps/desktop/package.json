@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "predev": "node -e \"import('child_process').then(({execSync}) => { try { const out = execSync('netstat -ano | findstr :1420 | findstr LISTENING', {stdio: 'pipe'}).toString(); const pids = [...new Set(out.split(/\\r?\\n/).map(l => l.trim().split(/\\s+/).pop()).filter(p => p && /\\d+/.test(p)))]; pids.forEach(p => { try { execSync(`taskkill /F /PID ${p}`, {stdio: 'ignore'}); console.log('Killed PID ' + p + ' on port 1420'); } catch {} }); } catch {} })\"",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -15,6 +16,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
+    "@tauri-apps/plugin-store": "^2.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.0",

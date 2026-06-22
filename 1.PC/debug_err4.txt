@@ -1,3 +1,0 @@
-Traceback (most recent call last):
-  File "api_main.py", line 22, in <module>
-AttributeError: 'NoneType' object has no attribute 'initialize'

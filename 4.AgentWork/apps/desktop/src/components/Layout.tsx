@@ -9,8 +9,12 @@ import {
   MessageSquare,
   GraduationCap,
   Store,
+  Server,
+  Sun,
+  Moon,
 } from "lucide-react";
 import { clsx } from "clsx";
+import { useTheme } from "@/lib/theme-store";
 
 const navItems = [
   { to: "/chat", label: "AI 互动", icon: MessageSquare },
@@ -21,19 +25,17 @@ const navItems = [
   { to: "/tasks", label: "任务看板", icon: ClipboardList },
   { to: "/training", label: "员工培训", icon: GraduationCap },
   { to: "/marketplace", label: "模板市场", icon: Store },
+  { to: "/modelservice", label: "模型服务", icon: Server },
   { to: "/settings", label: "设置", icon: SettingsIcon },
 ];
 
 export default function Layout() {
+  const { isLight, toggleTheme } = useTheme();
+
   return (
     <div className="flex h-screen bg-zinc-950 text-zinc-100">
       {/* 侧边栏 */}
       <aside className="w-16 flex flex-col items-center py-4 border-r border-zinc-800 bg-zinc-900">
-        {/* Logo */}
-        <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-brand-500 to-accent-500 flex items-center justify-center mb-8">
-          <GitBranch className="w-5 h-5 text-white" />
-        </div>
-
         {/* 导航 */}
         <nav className="flex-1 flex flex-col gap-2">
           {navItems.map(({ to, label, icon: Icon }) => (
@@ -54,6 +56,19 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+
+        {/* 亮/暗切换按钮 */}
+        <button
+          onClick={toggleTheme}
+          className="w-10 h-10 rounded-lg flex items-center justify-center text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors"
+          title={isLight ? "切换到暗黑" : "切换到明亮"}
+        >
+          {isLight ? (
+            <Moon className="w-5 h-5" />
+          ) : (
+            <Sun className="w-5 h-5" />
+          )}
+        </button>
       </aside>
 
       {/* 主内容区 */}
