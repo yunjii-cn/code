@@ -115,6 +115,7 @@ pub fn run() {
             commands::system::get_system_info,
             commands::system::get_default_repo_path,
             commands::system::open_folder,
+            commands::system::export_logs,
             // TimeFlow 命令
             commands::timeflow::init_repository,
             commands::timeflow::list_snapshots,
@@ -152,6 +153,7 @@ pub fn run() {
             commands::team::get_team_config,
             commands::team::list_models,
             commands::team::register_model,
+            commands::team::test_model_connection,
             commands::team::get_team_status,
             commands::team::execute_team_task,
             // 工作流管理命令（W9 M3.3 D4）
@@ -163,9 +165,25 @@ pub fn run() {
             commands::team::report_task_verify_failed,
             commands::team::report_task_failed,
             commands::team::reset_workflow,
+            // M6.2 进化仪表盘 + 无代码工具构建器
+            commands::team::get_evolution_stats,
+            commands::team::preview_tool_prompt,
+            commands::team::execute_tool_preview,
+            // M6.2 记忆管理 + 进化包
+            commands::team::list_memories,
+            commands::team::delete_memory,
+            commands::team::add_memory,
+            commands::team::get_evolution_report,
+            commands::team::export_evolution_pack,
+            commands::team::import_evolution_pack,
+            // M6.2 真实数据源工具执行
+            commands::team::execute_tool_full,
             // 流式输出命令（M4.0 D3）
             commands::team::stream_agent_thinking,
             commands::team::stream_task_progress,
+            commands::team::list_multi_entries,
+            commands::team::register_multi_entry,
+            commands::team::unregister_multi_entry,
         ])
         .setup(|app| {
             tracing::info!("AgentWork 桌面端启动完成");

@@ -43,49 +43,20 @@ import {
   type TaskInfo,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
-// 状态配置：颜色 + 图标 + 中文标签
-const stateConfig: Record<
-  string,
-  { label: string; color: string; border: string; icon: typeof Clock }
-> = {
-  Pending: {
-    label: "待执行",
-    color: "bg-zinc-700/40 text-zinc-300",
-    border: "border-zinc-600",
-    icon: Clock,
-  },
-  Running: {
-    label: "执行中",
-    color: "bg-blue-950/50 text-blue-300",
-    border: "border-blue-500",
-    icon: Loader2,
-  },
-  Verifying: {
-    label: "验证中",
-    color: "bg-amber-950/50 text-amber-300",
-    border: "border-amber-500",
-    icon: Activity,
-  },
-  Merged: {
-    label: "已合并",
-    color: "bg-green-950/50 text-green-300",
-    border: "border-green-500",
-    icon: CheckCircle2,
-  },
-  Failed: {
-    label: "失败",
-    color: "bg-red-950/50 text-red-300",
-    border: "border-red-500",
-    icon: AlertCircle,
-  },
-  Rejected: {
-    label: "已拒绝",
-    color: "bg-zinc-950 text-zinc-500",
-    border: "border-zinc-700",
-    icon: XCircle,
-  },
-};
+// 状态配置：颜色 + 图标 + 标签（按 locale 生成）
+function useStateConfigs() {
+  const { t } = useI18n();
+  return {
+    Pending: { label: t("task.status.Pending"), color: "bg-zinc-700/40 text-zinc-300", border: "border-zinc-600", icon: Clock },
+    Running: { label: t("task.status.Running"), color: "bg-blue-950/50 text-blue-300", border: "border-blue-500", icon: Loader2 },
+    Verifying: { label: t("task.status.Verifying"), color: "bg-amber-950/50 text-amber-300", border: "border-amber-500", icon: Activity },
+    Merged: { label: t("task.status.Merged"), color: "bg-green-950/50 text-green-300", border: "border-green-500", icon: CheckCircle2 },
+    Failed: { label: t("task.status.Failed"), color: "bg-red-950/50 text-red-300", border: "border-red-500", icon: AlertCircle },
+    Rejected: { label: t("task.status.Rejected"), color: "bg-zinc-950 text-zinc-500", border: "border-zinc-700", icon: XCircle },
+  } as Record<string, { label: string; color: string; border: string; icon: typeof Clock }>;
+}
 
 // 角色颜色配置
 const roleColors: Record<string, string> = {
@@ -101,6 +72,8 @@ function getRoleColor(role: string): string {
 }
 
 export default function TaskBoard() {
+  const stateConfig = useStateConfigs();
+  const { t } = useI18n();
   const [overview, setOverview] = useState<WorkflowOverview | null>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{
@@ -163,7 +136,7 @@ export default function TaskBoard() {
       setOverview(data);
       setLastActions(actions);
       if (actions.length === 0) {
-        showMessage("info", "无 ready 任务可调度（等待任务完成或全部已终态）");
+        showMessage("info", t("task.noReadyTasks"));
       } else {
         showMessage(
           "success",
@@ -209,8 +182,8 @@ export default function TaskBoard() {
       setLastActions(actions);
       if (actions.length > 0) {
         showMessage(
-          "info",
-          `任务 ${taskId} 验证失败，触发 ${actions.length} 个动作（重试/拒绝）`
+          "error",
+          t("task.taskVerifyFailActions", { id: taskId, n: actions.length })
         );
       } else {
         showMessage("info", `任务 ${taskId} 验证失败`);
@@ -236,7 +209,7 @@ export default function TaskBoard() {
       const data = await getCurrentWorkflow();
       setOverview(data);
       setLastActions([]);
-      showMessage("info", "工作流已重置");
+      showMessage("info", t("task.workflowReset"));
     } catch (err) {
       showMessage("error", String(err));
     }
@@ -264,7 +237,7 @@ export default function TaskBoard() {
   return (
     <div className="flex flex-col h-full">
       {/* 顶部标题栏 */}
-      <header className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
+      <header className="px-4 sm:px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
         <h1 className="text-lg font-semibold flex items-center gap-2">
           <ClipboardList className="w-5 h-5" />
           任务看板
@@ -330,7 +303,7 @@ export default function TaskBoard() {
                 type="text"
                 value={requirement}
                 onChange={(e) => setRequirement(e.target.value)}
-                placeholder="输入需求，例如：添加一个健康检查接口 /api/health"
+                placeholder={t("task.requirementPlaceholder")}
                 className="flex-1 bg-zinc-800 text-sm rounded-lg px-3 py-2 border border-zinc-700 focus:border-brand-500 focus:outline-none"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") handlePlan();
@@ -346,7 +319,7 @@ export default function TaskBoard() {
                 ) : (
                   <Zap className="w-4 h-4" />
                 )}
-                <span>{planning ? "规划中..." : "规划工作流"}</span>
+                <span>{planning ? t("task.planningWithProgress") : t("task.planning")}</span>
               </button>
             </div>
             <p className="text-xs text-zinc-500">
@@ -377,7 +350,7 @@ export default function TaskBoard() {
                   )}
                 >
                   {overview.progress_percent}%
-                  {overview.is_finished && " ✓ 完成"}
+                  {overview.is_finished && ` ${t("task.finishedSuffix")}`}
                 </span>
               </div>
               <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
@@ -393,7 +366,7 @@ export default function TaskBoard() {
               </div>
               {overview.requirement && (
                 <p className="text-xs text-zinc-500 pt-1">
-                  原始需求：{overview.requirement}
+                  {t("task.originalRequirement")} {overview.requirement}
                 </p>
               )}
             </div>
@@ -443,8 +416,8 @@ export default function TaskBoard() {
               {lastActions.length > 0 && (
                 <div className="bg-zinc-800/50 rounded p-3 space-y-2">
                   <p className="text-xs text-zinc-400 font-medium">
-                    本次调度动作（{lastActions.length}）
-                  </p>
+                      {t("task.actionsHeader", { n: lastActions.length })}
+                    </p>
                   {lastActions.map((action, idx) => (
                     <ActionBadge key={idx} action={action} />
                   ))}
@@ -459,7 +432,7 @@ export default function TaskBoard() {
           <section>
             <h2 className="text-sm font-medium text-zinc-400 mb-3 flex items-center gap-2">
               <ClipboardList className="w-4 h-4" />
-              任务看板（按状态分组）
+              {t("task.boardGrouped")}
             </h2>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {stateOrder.map((stateType) => {
@@ -624,6 +597,7 @@ function DagVisualization({ tasks }: { tasks: TaskInfo[] }) {
 
 // DAG 节点
 function DagNode({ task }: { task: TaskInfo }) {
+  const stateConfig = useStateConfigs();
   const config = stateConfig[task.state.state_type] ?? stateConfig.Pending;
   const Icon = config.icon;
 

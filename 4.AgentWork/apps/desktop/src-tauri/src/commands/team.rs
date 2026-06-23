@@ -12,7 +12,7 @@ use tauri::Emitter;
 use crate::AppResult;
 use agent_team::{
     builtin_router, builtin_templates, DagScheduler, ModelConfig, ModelRouter, ScheduleAction,
-    ScheduleEvent, Task, TaskDag, TaskState, TeamTemplate,
+    ScheduleEvent, Task, TaskDag, TaskState, TeamTemplate, MultiEntryRegistry, MultiEntry,
 };
 
 /// 团队模板信息（前端展示用）
@@ -74,6 +74,12 @@ pub struct TeamState {
     // 所以这里只存配置，执行时临时创建 WorkerPool
     /// 当前工作流（W9 M3.3 D4）
     pub workflow: Mutex<WorkflowState>,
+    /// 长期记忆库（M6.2）
+    pub memory_store: Mutex<agent_team::MemoryStore>,
+    /// 技能注册表（M6.2）
+    pub skill_registry: Mutex<agent_team::SkillRegistry>,
+    /// 多入口注册表（M6.4 W16）
+    pub multi_entry: Mutex<MultiEntryRegistry>,
 }
 
 impl Default for TeamState {
@@ -82,6 +88,9 @@ impl Default for TeamState {
             template: Mutex::new(None),
             router: Mutex::new(builtin_router()),
             workflow: Mutex::new(WorkflowState::default()),
+            memory_store: Mutex::new(agent_team::MemoryStore::new()),
+            skill_registry: Mutex::new(agent_team::SkillRegistry::default()),
+            multi_entry: Mutex::new(MultiEntryRegistry::new()),
         }
     }
 }
@@ -215,6 +224,56 @@ pub async fn register_model(
     Ok(format!("模型 {id} 已注册"))
 }
 
+/// 测试模型连接
+///
+/// 向 `{base_url}/models` 发送 GET 请求，检查模型服务是否可达。
+/// 返回成功/失败消息。
+#[tauri::command]
+pub async fn test_model_connection(
+    id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<String> {
+    // 将 router 访问放入块作用域，确保 MutexGuard 在 await 前释放（Send 约束）
+    let (base_url, api_key) = {
+        let router = state.team.router.lock().unwrap();
+        let config = router
+            .get(&id)
+            .ok_or_else(|| crate::AppError::Other(format!("模型 {} 未注册", id)))?;
+        (
+            config.base_url.trim_end_matches('/').to_string(),
+            config.api_key.clone(),
+        )
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| crate::AppError::Other(format!("HTTP 客户端创建失败: {}", e)))?;
+
+    let mut req = client.get(format!("{}/models", base_url));
+    if let Some(key) = api_key {
+        req = req.bearer_auth(key);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                Ok(format!("模型 {} 连接成功", id))
+            } else {
+                let status = resp.status();
+                Err(crate::AppError::Other(format!(
+                    "模型 {} 返回 HTTP {}",
+                    id, status
+                )))
+            }
+        }
+        Err(e) => Err(crate::AppError::Other(format!(
+            "模型 {} 连接失败: {}",
+            id, e
+        ))),
+    }
+}
+
 /// 获取 Worker 池状态
 ///
 /// 注：由于 WorkerPool 生命周期问题，这里只返回模板中定义的角色信息
@@ -249,10 +308,12 @@ pub async fn get_team_status(
 /// 执行团队任务（单角色，测试用）
 ///
 /// W8 M3.2 将实现完整的 DAG 调度
+/// M6.2：新增 work_mode 参数，支持用户选择工作模式并注入 prompt
 #[tauri::command]
 pub async fn execute_team_task(
     role_id: String,
     task: String,
+    work_mode: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> AppResult<String> {
     let template = state
@@ -273,6 +334,14 @@ pub async fn execute_team_task(
     let router = state.team.router.lock().unwrap().clone();
     let mut worker = agent_team::AgentWorker::new(role, &router)
         .map_err(|e| crate::AppError::Other(e.to_string()))?;
+
+    // M6.2：应用工作模式
+    let mode = work_mode
+        .as_deref()
+        .map(agent_team::WorkMode::from_str_lossy)
+        .unwrap_or_default();
+    worker.set_work_mode(mode);
+    tracing::info!("执行任务使用工作模式: {:?}", mode);
 
     let result = worker
         .execute(&task)
@@ -842,6 +911,505 @@ pub async fn reset_workflow(
     Ok("工作流已重置".to_string())
 }
 
+// ===== M6.2 进化仪表盘 + 无代码工具构建器 =====
+
+/// 进化统计数据（前端展示用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvolutionStats {
+    pub evolution_index: u32,
+    pub memory_count: u32,
+    pub session_count: u32,
+    pub skill_mastery: u32,
+    pub success_rate: u32,
+    pub active_employees: u32,
+}
+
+/// 获取进化统计数据
+///
+/// MVP：根据当前已加载的团队模板返回模拟聚合数据。
+/// 后续接入真实的 memory / session / skill 统计。
+#[tauri::command]
+pub async fn get_evolution_stats(
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<EvolutionStats> {
+    let template = state.team.template.lock().unwrap();
+    let role_count = template.as_ref().map(|t| t.team.roles.len()).unwrap_or(0);
+
+    Ok(EvolutionStats {
+        evolution_index: 60 + role_count as u32 * 3,
+        memory_count: 120 + role_count as u32 * 6,
+        session_count: 30 + role_count as u32 * 2,
+        skill_mastery: 75 + role_count as u32 * 2,
+        success_rate: 88 + role_count as u32,
+        active_employees: role_count.max(3) as u32,
+    })
+}
+
+/// 工具参数定义（前端输入）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolParameterInput {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub param_type: String,
+    pub description: String,
+    pub required: bool,
+}
+
+/// 工具定义（前端输入）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinitionInput {
+    pub name: String,
+    pub description: String,
+    pub parameters: Vec<ToolParameterInput>,
+    pub template: String,
+}
+
+/// 工具预览执行结果
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolPreviewResult {
+    pub success: bool,
+    pub output: String,
+}
+
+/// 预览工具 Prompt
+///
+/// 使用简单占位符替换生成 prompt，支持：
+///   - {{tool.name}}
+///   - {{tool.description}}
+///   - {{#each params}} ... {{name}} / {{value}} ... {{/each}}
+#[tauri::command]
+pub async fn preview_tool_prompt(tool: ToolDefinitionInput) -> AppResult<String> {
+    let mut prompt = tool.template.clone();
+    prompt = prompt.replace("{{tool.name}}", &tool.name);
+    prompt = prompt.replace("{{tool.description}}", &tool.description);
+
+    // 简单处理 {{#each params}} ... {{/each}}
+    if let Some(start) = prompt.find("{{#each params}}") {
+        if let Some(end) = prompt.find("{{/each}}") {
+            let loop_body = &prompt[start + "{{#each params}}".len()..end];
+            let mut rendered = String::new();
+            for param in &tool.parameters {
+                let item = loop_body
+                    .replace("{{name}}", &param.name)
+                    .replace("{{value}}", &format!("<{}>", param.name));
+                rendered.push_str(&item);
+            }
+            prompt.replace_range(start..end + "{{/each}}".len(), &rendered);
+        }
+    }
+
+    Ok(prompt)
+}
+
+/// 执行工具预览
+///
+/// MVP：不实际调用 LLM，根据工具名和参数返回模拟结果。
+/// 后续可接入真实工具执行引擎（Python/Rust function / HTTP endpoint）。
+#[tauri::command]
+pub async fn execute_tool_preview(
+    tool: ToolDefinitionInput,
+    values: std::collections::HashMap<String, String>,
+) -> AppResult<ToolPreviewResult> {
+    // 校验必填参数
+    for param in &tool.parameters {
+        if param.required && values.get(&param.name).map(|s| s.is_empty()).unwrap_or(true) {
+            return Ok(ToolPreviewResult {
+                success: false,
+                output: format!("缺少必填参数: {}", param.name),
+            });
+        }
+    }
+
+    // 生成模拟结果
+    let param_summary: Vec<String> = tool
+        .parameters
+        .iter()
+        .map(|p| {
+            let v = values.get(&p.name).cloned().unwrap_or_else(|| "-".to_string());
+            format!("{}: {}", p.name, v)
+        })
+        .collect();
+
+    let output = format!(
+        "工具 [{}] 执行成功。\n参数：\n{}\n\n模拟返回结果：\n{{\n  \"success\": true,\n  \"tool\": \"{}\",\n  \"result\": \"已根据输入完成处理\"\n}}",
+        tool.name,
+        param_summary.join("\n"),
+        tool.name
+    );
+
+    Ok(ToolPreviewResult { success: true, output })
+}
+
+// ===== M6.2 进化仪表盘：记忆管理 =====
+
+/// 记忆条目（前端展示用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryEntryInfo {
+    pub id: String,
+    pub scope_id: String,
+    pub layer: String,
+    pub kind: String,
+    pub tags: Vec<String>,
+    pub content: String,
+    pub priority: u8,
+}
+
+/// 进化报告（前端展示用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvolutionReport {
+    pub employee_id: String,
+    pub memory_count: u32,
+    pub session_count: u32,
+    pub skill_count: u32,
+    pub success_rate: f32,
+    pub memories: Vec<MemoryEntryInfo>,
+    pub skills: Vec<SkillInfo>,
+}
+
+/// 技能信息（前端展示用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInfo {
+    pub id: String,
+    pub name: String,
+    pub tags: Vec<String>,
+    pub description: String,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub success_rate: f32,
+}
+
+/// 进化包（导出/导入用）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvolutionPack {
+    pub version: String,
+    pub exported_at: String,
+    pub employee_id: String,
+    pub memories: Vec<agent_team::MemoryEntry>,
+    pub skills: Vec<agent_team::SkillV2>,
+}
+
+/// 列出指定员工的记忆
+#[tauri::command]
+pub async fn list_memories(
+    employee_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<Vec<MemoryEntryInfo>> {
+    let store = state.team.memory_store.lock().unwrap();
+    let entries: Vec<MemoryEntryInfo> = store
+        .by_scope(&employee_id)
+        .into_iter()
+        .map(|e| MemoryEntryInfo {
+            id: e.id.clone(),
+            scope_id: e.scope_id.clone(),
+            layer: format!("{:?}", e.layer),
+            kind: format!("{:?}", e.kind),
+            tags: e.tags.clone(),
+            content: e.content.clone(),
+            priority: e.priority,
+        })
+        .collect();
+    Ok(entries)
+}
+
+/// 删除指定记忆
+#[tauri::command]
+pub async fn delete_memory(
+    memory_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<bool> {
+    let mut store = state.team.memory_store.lock().unwrap();
+    let removed = store.remove(&memory_id);
+    Ok(removed)
+}
+
+/// 添加记忆
+#[tauri::command]
+pub async fn add_memory(
+    employee_id: String,
+    content: String,
+    kind: String,
+    priority: Option<u8>,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<MemoryEntryInfo> {
+    let memory_id = format!("mem_{}", chrono::Utc::now().timestamp_millis());
+    let entry = agent_team::MemoryEntry::new(
+        &memory_id,
+        &employee_id,
+        agent_team::MemoryLayer::Employee,
+        agent_team::MemoryKind::from_str_lossy(&kind),
+        &content,
+    )
+    .with_priority(priority.unwrap_or(50));
+
+    let info = MemoryEntryInfo {
+        id: entry.id.clone(),
+        scope_id: entry.scope_id.clone(),
+        layer: format!("{:?}", entry.layer),
+        kind: format!("{:?}", entry.kind),
+        tags: entry.tags.clone(),
+        content: entry.content.clone(),
+        priority: entry.priority,
+    };
+
+    let mut store = state.team.memory_store.lock().unwrap();
+    store.add(entry);
+    Ok(info)
+}
+
+/// 获取进化报告（聚合记忆 + 技能 + 统计）
+#[tauri::command]
+pub async fn get_evolution_report(
+    employee_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<EvolutionReport> {
+    let memory_store = state.team.memory_store.lock().unwrap();
+    let memories: Vec<MemoryEntryInfo> = memory_store
+        .by_scope(&employee_id)
+        .into_iter()
+        .map(|e| MemoryEntryInfo {
+            id: e.id.clone(),
+            scope_id: e.scope_id.clone(),
+            layer: format!("{:?}", e.layer),
+            kind: format!("{:?}", e.kind),
+            tags: e.tags.clone(),
+            content: e.content.clone(),
+            priority: e.priority,
+        })
+        .collect();
+
+    let skill_registry = state.team.skill_registry.lock().unwrap();
+    let skills: Vec<SkillInfo> = skill_registry
+        .all()
+        .into_iter()
+        .map(|s| {
+            let total = s.success_count + s.failure_count;
+            let rate = if total > 0 {
+                s.success_count as f32 / total as f32
+            } else {
+                1.0
+            };
+            SkillInfo {
+                id: s.manifest.id.clone(),
+                name: s.manifest.name.clone(),
+                tags: s.manifest.tags.clone(),
+                description: s.manifest.description.clone(),
+                success_count: s.success_count,
+                failure_count: s.failure_count,
+                success_rate: rate,
+            }
+        })
+        .collect();
+
+    let total_tool_calls: u64 = skills.iter().map(|s| s.success_count + s.failure_count).sum();
+    let total_success: u64 = skills.iter().map(|s| s.success_count).sum();
+    let success_rate = if total_tool_calls > 0 {
+        total_success as f32 / total_tool_calls as f32
+    } else {
+        1.0
+    };
+
+    Ok(EvolutionReport {
+        employee_id,
+        memory_count: memories.len() as u32,
+        session_count: 0, // 后续接入 SessionStore
+        skill_count: skills.len() as u32,
+        success_rate,
+        memories,
+        skills,
+    })
+}
+
+/// 导出进化包（JSON 格式）
+#[tauri::command]
+pub async fn export_evolution_pack(
+    employee_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<String> {
+    let memory_store = state.team.memory_store.lock().unwrap();
+    let memories: Vec<agent_team::MemoryEntry> = memory_store
+        .by_scope(&employee_id)
+        .into_iter()
+        .cloned()
+        .collect();
+
+    let skill_registry = state.team.skill_registry.lock().unwrap();
+    let skills: Vec<agent_team::SkillV2> = skill_registry.all().into_iter().cloned().collect();
+
+    let pack = EvolutionPack {
+        version: "1.0".to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        employee_id,
+        memories,
+        skills,
+    };
+
+    let json = serde_json::to_string_pretty(&pack)
+        .map_err(|e| crate::AppError::Other(e.to_string()))?;
+    Ok(json)
+}
+
+/// 导入进化包
+#[tauri::command]
+pub async fn import_evolution_pack(
+    pack_json: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> AppResult<String> {
+    let pack: EvolutionPack = serde_json::from_str(&pack_json)
+        .map_err(|e| crate::AppError::Other(format!("进化包格式错误: {}", e)))?;
+
+    let mut memory_store = state.team.memory_store.lock().unwrap();
+    let memory_count = pack.memories.len();
+    for entry in pack.memories {
+        memory_store.add(entry);
+    }
+
+    let mut skill_registry = state.team.skill_registry.lock().unwrap();
+    let skill_count = pack.skills.len();
+    for skill in pack.skills {
+        skill_registry.register(skill);
+    }
+
+    Ok(format!(
+        "已导入进化包：{} 条记忆，{} 个技能（员工 {}）",
+        memory_count, skill_count, pack.employee_id
+    ))
+}
+
+// ===== M6.2 无代码工具构建器：Real HTTP 数据源 =====
+
+/// 工具数据源类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDataSource {
+    /// HTTP API
+    HttpApi {
+        url: String,
+        method: String,
+        headers: Option<std::collections::HashMap<String, String>>,
+    },
+    /// 文件读取
+    File {
+        path: String,
+        format: String,
+    },
+    /// 模拟数据
+    Mock,
+}
+
+/// 工具定义（含数据源）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDefinitionFull {
+    pub name: String,
+    pub description: String,
+    pub parameters: Vec<ToolParameterInput>,
+    pub template: String,
+    pub data_source: Option<ToolDataSource>,
+}
+
+/// 执行工具（真实数据源）
+///
+/// 支持 HTTP API（GET/POST）和文件读取。
+/// 参数通过 URL 占位符 `{param_name}` 替换。
+#[tauri::command]
+pub async fn execute_tool_full(
+    tool: ToolDefinitionFull,
+    values: std::collections::HashMap<String, String>,
+) -> AppResult<ToolPreviewResult> {
+    // 校验必填参数
+    for param in &tool.parameters {
+        if param.required && values.get(&param.name).map(|s| s.is_empty()).unwrap_or(true) {
+            return Ok(ToolPreviewResult {
+                success: false,
+                output: format!("缺少必填参数: {}", param.name),
+            });
+        }
+    }
+
+    match tool.data_source.as_ref() {
+        Some(ToolDataSource::HttpApi { url, method, headers }) => {
+            // 替换 URL 占位符
+            let mut resolved_url = url.clone();
+            for (key, val) in &values {
+                resolved_url = resolved_url.replace(&format!("{{{}}}", key), val);
+            }
+
+            let client = reqwest::Client::new();
+            let mut req = match method.to_uppercase().as_str() {
+                "GET" => client.get(&resolved_url),
+                "POST" => client.post(&resolved_url),
+                "PUT" => client.put(&resolved_url),
+                "DELETE" => client.delete(&resolved_url),
+                _ => {
+                    return Ok(ToolPreviewResult {
+                        success: false,
+                        output: format!("不支持的 HTTP 方法: {}", method),
+                    })
+                }
+            };
+
+            // 设置 headers
+            if let Some(hdrs) = headers {
+                for (k, v) in hdrs {
+                    req = req.header(k, v);
+                }
+            }
+
+            // POST/PUT 携带 JSON body
+            if method.to_uppercase() == "POST" || method.to_uppercase() == "PUT" {
+                req = req.json(&values);
+            }
+
+            match req.timeout(std::time::Duration::from_secs(10)).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let body = resp.text().await.unwrap_or_default();
+                    let success = status.is_success();
+                    Ok(ToolPreviewResult {
+                        success,
+                        output: format!("HTTP {} {}\n响应: {}", status.as_u16(), status.canonical_reason().unwrap_or(""), body),
+                    })
+                }
+                Err(e) => Ok(ToolPreviewResult {
+                    success: false,
+                    output: format!("HTTP 请求失败: {}", e),
+                }),
+            }
+        }
+        Some(ToolDataSource::File { path, format: _ }) => {
+            match std::fs::read_to_string(path) {
+                Ok(content) => Ok(ToolPreviewResult {
+                    success: true,
+                    output: content,
+                }),
+                Err(e) => Ok(ToolPreviewResult {
+                    success: false,
+                    output: format!("文件读取失败: {}", e),
+                }),
+            }
+        }
+        _ => {
+            // Mock 或无数据源：回退到模拟结果
+            let param_summary: Vec<String> = tool
+                .parameters
+                .iter()
+                .map(|p| {
+                    let v = values.get(&p.name).cloned().unwrap_or_else(|| "-".to_string());
+                    format!("{}: {}", p.name, v)
+                })
+                .collect();
+
+            let output = format!(
+                "工具 [{}] 执行成功（模拟）。\n参数：\n{}\n\n模拟返回结果：\n{{\n  \"success\": true,\n  \"tool\": \"{}\",\n  \"result\": \"已根据输入完成处理\"\n}}",
+                tool.name,
+                param_summary.join("\n"),
+                tool.name
+            );
+
+            Ok(ToolPreviewResult { success: true, output })
+        }
+    }
+}
+
 // ===== 流式输出（M4.0 D3）=====
 
 /// 流式推送 Agent 思考过程
@@ -957,4 +1525,30 @@ pub async fn stream_task_progress(
     }
 
     Ok(format!("任务 {task_id} 进度推送完毕"))
+}
+
+/// 列出所有多入口
+#[tauri::command]
+pub async fn list_multi_entries(state: tauri::State<'_, TeamState>) -> AppResult<Vec<MultiEntry>> {
+    Ok(state.multi_entry.lock().unwrap().list())
+}
+
+/// 注册一个新入口
+#[tauri::command]
+pub async fn register_multi_entry(
+    state: tauri::State<'_, TeamState>,
+    entry: MultiEntry,
+) -> AppResult<()> {
+    state.multi_entry.lock().unwrap().register(entry);
+    Ok(())
+}
+
+/// 注销一个入口
+#[tauri::command]
+pub async fn unregister_multi_entry(
+    state: tauri::State<'_, TeamState>,
+    id: String,
+) -> AppResult<()> {
+    state.multi_entry.lock().unwrap().unregister(&id);
+    Ok(())
 }

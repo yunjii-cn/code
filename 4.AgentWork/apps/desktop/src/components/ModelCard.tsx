@@ -13,6 +13,10 @@ import {
   CheckCircle2,
   Settings,
   Sparkles,
+  Loader2,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from "lucide-react";
 import type { ModelCardData } from "../views/ModelService";
 
@@ -21,6 +25,12 @@ interface ModelCardProps {
   enabled: boolean;
   onToggle: (model: ModelCardData) => void;
   onConfigure: (model: ModelCardData) => void;
+  /** 是否已在后端注册 */
+  registered?: boolean;
+  /** 连接测试状态 */
+  connectionStatus?: "idle" | "testing" | "connected" | "failed";
+  /** 测试连接回调 */
+  onTestConnection?: (model: ModelCardData) => void;
 }
 
 /// 能力标签图标映射
@@ -52,7 +62,15 @@ const providerLabels: Record<string, string> = {
   mock: "测试",
 };
 
-export default function ModelCard({ model, enabled, onToggle, onConfigure }: ModelCardProps) {
+export default function ModelCard({
+  model,
+  enabled,
+  onToggle,
+  onConfigure,
+  registered = false,
+  connectionStatus = "idle",
+  onTestConnection,
+}: ModelCardProps) {
   const isFree = model.pricing === "free";
   const isLocal = model.pricing === "local";
   const isMg = model.provider === "mg";
@@ -84,6 +102,11 @@ export default function ModelCard({ model, enabled, onToggle, onConfigure }: Mod
             <div className="flex items-center gap-1.5 mt-0.5 text-xs text-zinc-500">
               <Server className="w-3 h-3" />
               <span>{providerLabels[model.provider] ?? model.provider}</span>
+              {registered && (
+                <span className="flex items-center gap-0.5 text-green-400">
+                  · <CheckCircle2 className="w-2.5 h-2.5" /> 已注册
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -129,6 +152,27 @@ export default function ModelCard({ model, enabled, onToggle, onConfigure }: Mod
         {model.description}
       </p>
 
+      {/* 连接状态指示 */}
+      {registered && connectionStatus !== "idle" && (
+        <div
+          className={clsx(
+            "flex items-center gap-1.5 text-xs px-2 py-1 rounded",
+            connectionStatus === "testing" && "text-zinc-400 bg-zinc-800/50",
+            connectionStatus === "connected" && "text-green-400 bg-green-950/30",
+            connectionStatus === "failed" && "text-red-400 bg-red-950/30"
+          )}
+        >
+          {connectionStatus === "testing" && <Loader2 className="w-3 h-3 animate-spin" />}
+          {connectionStatus === "connected" && <Wifi className="w-3 h-3" />}
+          {connectionStatus === "failed" && <WifiOff className="w-3 h-3" />}
+          <span>
+            {connectionStatus === "testing" && "测试中..."}
+            {connectionStatus === "connected" && "已连接"}
+            {connectionStatus === "failed" && "连接失败"}
+          </span>
+        </div>
+      )}
+
       {/* 操作按钮 */}
       <div className="flex gap-2 pt-2 border-t border-zinc-800">
         <button
@@ -152,6 +196,24 @@ export default function ModelCard({ model, enabled, onToggle, onConfigure }: Mod
             </>
           )}
         </button>
+        {registered && onTestConnection && (
+          <button
+            onClick={() => onTestConnection(model)}
+            disabled={connectionStatus === "testing"}
+            className="px-2.5 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center gap-1 disabled:opacity-50"
+            title="测试连接"
+          >
+            {connectionStatus === "testing" ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : connectionStatus === "connected" ? (
+              <Wifi className="w-4 h-4 text-green-400" />
+            ) : connectionStatus === "failed" ? (
+              <WifiOff className="w-4 h-4 text-red-400" />
+            ) : (
+              <RefreshCw className="w-4 h-4" />
+            )}
+          </button>
+        )}
         <button
           onClick={() => onConfigure(model)}
           className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center gap-1"

@@ -97,6 +97,11 @@ export async function openFolder(path: string): Promise<void> {
   return invoke<void>("open_folder", { path });
 }
 
+/// 导出诊断日志包（返回 JSON 文件路径）
+export async function exportLogs(): Promise<string> {
+  return invoke<string>("export_logs");
+}
+
 // ===== TimeFlow 仓库命令 =====
 
 export async function initRepository(path: string): Promise<string> {
@@ -309,16 +314,69 @@ export async function registerModel(params: {
   return invoke<string>("register_model", params);
 }
 
+/// 测试已注册模型的连接（向 {base_url}/models 发 GET 请求）
+export async function testModelConnection(id: string): Promise<string> {
+  return invoke<string>("test_model_connection", { id });
+}
+
 export async function getTeamStatus(): Promise<WorkerInfo[]> {
   return invoke<WorkerInfo[]>("get_team_status");
 }
 
 export async function executeTeamTask(
   roleId: string,
-  task: string
+  task: string,
+  workMode?: "learn" | "teach" | "collaborate" | "auto" | "approval"
 ): Promise<string> {
-  return invoke<string>("execute_team_task", { roleId, task });
+  return invoke<string>("execute_team_task", { roleId, task, work_mode: workMode });
 }
+
+/** 工作模式信息 */
+export interface WorkModeInfo {
+  id: "learn" | "teach" | "collaborate" | "auto" | "approval";
+  label: string;
+  icon: string;
+  description: string;
+  userInvolvement: string;
+}
+
+export const WORK_MODES: WorkModeInfo[] = [
+  {
+    id: "collaborate",
+    label: "协作模式",
+    icon: "🤝",
+    description: "与用户一起完成任务，主动给出建议，关键决策请用户拍板",
+    userInvolvement: "中",
+  },
+  {
+    id: "auto",
+    label: "自动模式",
+    icon: "🚀",
+    description: "全自动执行任务，完成后统一汇报结果",
+    userInvolvement: "极低",
+  },
+  {
+    id: "approval",
+    label: "审批模式",
+    icon: "🔒",
+    description: "先输出完整计划等待用户批准，每步执行前都要确认",
+    userInvolvement: "极高",
+  },
+  {
+    id: "learn",
+    label: "学习模式",
+    icon: "🧠",
+    description: "Agent 主动观察用户操作并记录偏好，任务结束后沉淀知识",
+    userInvolvement: "低",
+  },
+  {
+    id: "teach",
+    label: "教学模式",
+    icon: "👨‍🏫",
+    description: "用户手把手教 Agent，结束时封装为可复用 Skill",
+    userInvolvement: "高",
+  },
+];
 
 // ===== 工作流管理（W9 M3.3 D4）=====
 
@@ -491,4 +549,151 @@ export async function streamTaskProgress(
   taskTitle: string
 ): Promise<string> {
   return invoke<string>("stream_task_progress", { taskId, taskTitle });
+}
+
+// ===== M6.2 进化仪表盘 + 无代码工具构建器 =====
+
+/** 进化统计数据 */
+export interface EvolutionStats {
+  evolution_index: number;
+  memory_count: number;
+  session_count: number;
+  skill_mastery: number;
+  success_rate: number;
+  active_employees: number;
+}
+
+/** 工具定义（前端） */
+export interface ToolDefinitionInput {
+  name: string;
+  description: string;
+  parameters: {
+    name: string;
+    type: "string" | "number" | "boolean";
+    description: string;
+    required: boolean;
+  }[];
+  template: string;
+}
+
+/** 工具预览执行结果 */
+export interface ToolPreviewResult {
+  success: boolean;
+  output: string;
+}
+
+export async function getEvolutionStats(): Promise<EvolutionStats> {
+  return invoke<EvolutionStats>("get_evolution_stats");
+}
+
+export async function previewToolPrompt(tool: ToolDefinitionInput): Promise<string> {
+  return invoke<string>("preview_tool_prompt", { tool });
+}
+
+export async function executeToolPreview(
+  tool: ToolDefinitionInput,
+  values: Record<string, string>
+): Promise<ToolPreviewResult> {
+  return invoke<ToolPreviewResult>("execute_tool_preview", { tool, values });
+}
+
+// ===== M6.2 记忆管理 + 进化包 =====
+
+/** 记忆条目 */
+export interface MemoryEntryInfo {
+  id: string;
+  scope_id: string;
+  layer: string;
+  kind: string;
+  tags: string[];
+  content: string;
+  priority: number;
+}
+
+/** 技能信息 */
+export interface SkillInfo {
+  id: string;
+  name: string;
+  tags: string[];
+  description: string;
+  success_count: number;
+  failure_count: number;
+  success_rate: number;
+}
+
+/** 进化报告 */
+export interface EvolutionReport {
+  employee_id: string;
+  memory_count: number;
+  session_count: number;
+  skill_count: number;
+  success_rate: number;
+  memories: MemoryEntryInfo[];
+  skills: SkillInfo[];
+}
+
+/** 工具数据源类型 */
+export interface ToolDataSourceHttp {
+  type: "http_api";
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+}
+
+export interface ToolDataSourceFile {
+  type: "file";
+  path: string;
+  format: string;
+}
+
+export type ToolDataSource = ToolDataSourceHttp | ToolDataSourceFile | { type: "mock" };
+
+/** 完整工具定义（含数据源） */
+export interface ToolDefinitionFull {
+  name: string;
+  description: string;
+  parameters: {
+    name: string;
+    type: "string" | "number" | "boolean";
+    description: string;
+    required: boolean;
+  }[];
+  template: string;
+  data_source?: ToolDataSource;
+}
+
+export async function listMemories(employeeId: string): Promise<MemoryEntryInfo[]> {
+  return invoke<MemoryEntryInfo[]>("list_memories", { employeeId });
+}
+
+export async function deleteMemory(memoryId: string): Promise<boolean> {
+  return invoke<boolean>("delete_memory", { memoryId });
+}
+
+export async function addMemory(
+  employeeId: string,
+  content: string,
+  kind: string,
+  priority?: number
+): Promise<MemoryEntryInfo> {
+  return invoke<MemoryEntryInfo>("add_memory", { employeeId, content, kind, priority });
+}
+
+export async function getEvolutionReport(employeeId: string): Promise<EvolutionReport> {
+  return invoke<EvolutionReport>("get_evolution_report", { employeeId });
+}
+
+export async function exportEvolutionPack(employeeId: string): Promise<string> {
+  return invoke<string>("export_evolution_pack", { employeeId });
+}
+
+export async function importEvolutionPack(packJson: string): Promise<string> {
+  return invoke<string>("import_evolution_pack", { packJson });
+}
+
+export async function executeToolFull(
+  tool: ToolDefinitionFull,
+  values: Record<string, string>
+): Promise<ToolPreviewResult> {
+  return invoke<ToolPreviewResult>("execute_tool_full", { tool, values });
 }

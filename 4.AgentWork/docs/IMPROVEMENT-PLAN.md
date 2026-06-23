@@ -9,6 +9,7 @@
 > - [FUTURE-PLANS.md](FUTURE-PLANS.md) — 未来规划参考库（沙箱/Skills/LoRA/私有化/移动端/WordPress 式生态等，**参考预留**）
 > - [ROADMAP.md](ROADMAP.md) — 主线 20 周
 > **远期愿景**：v2.3（2027-05+，M6 阶段：WordPress 式产品周边 + 用户生态）
+> **v2.4 新增参考**：2026-06-22 起补充《AW-降维打击-zcode融合增强版-v2.md》，把 zcode 的 Skill / 子代理 / 计划模式 / 验证护栏 / 工作树优势融入 M6 全民 AI 路线。
 > **追踪**：[W8 M3.2 + W9 M3.3 已完成]，本文档是 W9.5 起的下一阶段
 
 ---

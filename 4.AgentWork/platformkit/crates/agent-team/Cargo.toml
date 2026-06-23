@@ -26,6 +26,9 @@ reqwest = { workspace = true }
 # TimeFlow AI 引擎（复用 LlmEngine 抽象）
 timeflow-ai = { path = "../timeflow-ai" }
 
+# 会话历史持久化（SQLite + FTS5）
+rusqlite = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

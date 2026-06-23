@@ -15,6 +15,7 @@
 use crate::error::Result;
 use crate::model_router::{ModelCaller, ModelRouter};
 use crate::team_template::{Role, TeamTemplate};
+use crate::work_mode::WorkMode;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use timeflow_ai::{LlmMessage, LlmResponse};
@@ -49,6 +50,8 @@ pub struct AgentWorker<'a> {
     tasks_completed: u32,
     /// 处理失败的任务数
     tasks_failed: u32,
+    /// 工作模式（M6.2）
+    work_mode: WorkMode,
 }
 
 impl<'a> AgentWorker<'a> {
@@ -62,7 +65,18 @@ impl<'a> AgentWorker<'a> {
             last_error: None,
             tasks_completed: 0,
             tasks_failed: 0,
+            work_mode: WorkMode::default(),
         })
+    }
+
+    /// 设置工作模式（M6.2）
+    pub fn set_work_mode(&mut self, mode: WorkMode) {
+        self.work_mode = mode;
+    }
+
+    /// 获取当前工作模式（M6.2）
+    pub fn work_mode(&self) -> WorkMode {
+        self.work_mode
     }
 
     /// 获取当前状态
@@ -157,14 +171,21 @@ impl<'a> AgentWorker<'a> {
 
     /// 构建系统提示词
     fn build_system_prompt(&self) -> String {
+        let mut prompt = String::new();
+
+        // M6.2：注入工作模式提示
+        prompt.push_str(self.work_mode.system_prompt_hint());
+        prompt.push_str("\n\n");
+
         if let Some(custom) = &self.role.system_prompt {
-            return custom.clone();
+            prompt.push_str(custom);
+            return prompt;
         }
 
-        let mut prompt = format!(
+        prompt.push_str(&format!(
             "你是{}（{}）。\n\n职责：{}\n\n",
             self.role.name, self.role.id, self.role.description
-        );
+        ));
 
         if !self.role.skills.is_empty() {
             prompt.push_str("技能：\n");
@@ -460,7 +481,9 @@ mod tests {
 
         let worker = AgentWorker::new(role, &router).unwrap();
         let prompt = worker.build_system_prompt();
-        assert_eq!(prompt, "自定义提示词");
+        // M6.2：工作模式提示始终注入，即使使用自定义 system_prompt
+        assert!(prompt.contains("自定义提示词"));
+        assert!(prompt.contains("【协作模式】"));
     }
 
     #[test]

@@ -68,6 +68,12 @@ W18 (10-19~25)  ░░▓▓ M6.1 全链路整合         目标：五大支柱�
 W19 (10-26~11-01) ░░▓▓ M6.2 内部 Beta        目标：100 内部用户跑通
 W20 (11-02~08)  ░░▓▓ M6.3 公开 Beta         目标：1000 外部用户
 
+=== M6+：全民 AI 增强支线（2027-05+，与 v2.3 生态化并行）===
+M6.1 自进化基础      目标：memory / sessions / skills_v2 / prompt_builder
+M6.2 全民可用        目标：work_mode / evolution_dashboard / no-code tool builder
+M6.3 行业生态        目标：team knowledge / template marketplace / profile manager
+M6.4 降维打击        目标：MCP + multi-entry + 安全与审计闭环
+
 🔵 M1 ✅进行中  🟡 M2-M3 计划  🟢 M4-M6 远期
 ```
 

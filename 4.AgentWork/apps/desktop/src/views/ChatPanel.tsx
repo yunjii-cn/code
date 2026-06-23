@@ -34,6 +34,7 @@ import {
   type StreamEvent,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 /** 消息角色 */
 type MessageRole = "user" | "assistant" | "system";
@@ -92,7 +93,16 @@ const WELCOME_MESSAGE: ChatMessage = {
 };
 
 export default function ChatPanel() {
-  const [messages, setMessages] = useState<ChatMessage[]>([WELCOME_MESSAGE]);
+  const { t } = useI18n();
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: "welcome",
+      role: "assistant",
+      content: t("chat.welcome"),
+      timestamp: Date.now(),
+      status: "sent",
+    } as ChatMessage,
+  ]);
   const [input, setInput] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamItems, setStreamItems] = useState<StreamItem[]>([]);
@@ -365,19 +375,19 @@ export default function ChatPanel() {
   return (
     <div className="flex flex-col h-full bg-zinc-950 text-zinc-100">
       {/* 顶部标题栏 */}
-      <header className="flex items-center px-6 py-3 border-b border-zinc-800 bg-zinc-900/50">
-        <h1 className="text-lg font-semibold">AI 互动面板</h1>
+      <header className="flex items-center px-4 sm:px-6 py-3 border-b border-zinc-800 bg-zinc-900/50">
+        <h1 className="text-lg font-semibold">{t("chat.title")}</h1>
         <span className="text-xs text-zinc-500 ml-2">
-          M4.0 D4 · 第 {roundCount} 轮对话
+          {t("chat.subtitle", { round: roundCount })}
         </span>
         <div className="flex-1" />
         <button
           onClick={handleClear}
           className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
-          title="清空对话"
+          title={t("chat.clearTitle")}
         >
           <Trash2 className="w-3.5 h-3.5" />
-          清空
+          {t("chat.clear")}
         </button>
       </header>
 
@@ -420,7 +430,13 @@ export default function ChatPanel() {
                 {msg.triggeredTask && (
                   <span className="flex items-center gap-1 text-amber-400">
                     <ClipboardList className="w-3 h-3" />
-                    已触发任务
+                    {t("chat.triggersTask")}
+                  </span>
+                )}
+                {msg.status === "failed" && (
+                  <span className="flex items-center gap-1 text-red-400">
+                    <AlertCircle className="w-3 h-3" />
+                    {t("chat.sendFailed")}
                   </span>
                 )}
               </div>
@@ -448,7 +464,7 @@ export default function ChatPanel() {
             {/* 打字指示器 */}
             <div className="flex items-center gap-2 text-xs text-zinc-500">
               <Loader2 className="w-3 h-3 animate-spin" />
-              <span>AI 正在思考...</span>
+              <span>{t("chat.aiThinking")}</span>
             </div>
           </div>
         )}
@@ -462,7 +478,7 @@ export default function ChatPanel() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="输入你的需求...（Enter 发送，Shift+Enter 换行。含「修这个」自动跳转任务看板）"
+            placeholder={t("chat.placeholder")}
             rows={1}
             className={cn(
               "flex-1 resize-none rounded-xl bg-zinc-800 border border-zinc-700",
@@ -501,7 +517,7 @@ export default function ChatPanel() {
           )}
         </div>
         <p className="mt-2 text-xs text-zinc-600">
-          AgentWork AI · 任务驱动 + 互动双引擎 · 多轮对话上下文（最近 6 轮）
+          {t("chat.footer", { n: 6 })}
         </p>
       </div>
     </div>

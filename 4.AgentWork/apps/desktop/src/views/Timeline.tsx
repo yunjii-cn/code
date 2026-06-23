@@ -10,9 +10,11 @@ import {
 } from "@/lib/tauri";
 import { cn, formatRelativeTime, snapshotTypeConfig, buildStatusConfig } from "@/lib/utils";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import { useI18n } from "@/i18n";
 
 export default function Timeline() {
   const navigate = useNavigate();
+  const { t } = useI18n();
   const [snapshots, setSnapshots] = useState<SnapshotSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -84,10 +86,10 @@ export default function Timeline() {
   return (
     <div className="flex flex-col h-full">
       {/* 顶部栏 */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-zinc-800">
+      <header className="flex items-center justify-between px-4 sm:px-6 py-4 border-b border-zinc-800">
         <div>
           <h1 className="text-lg font-semibold flex items-center gap-2">
-            时间轴
+            {t("timeline.title")}
             {branchName && (
               <span className="flex items-center gap-1 text-xs font-normal text-zinc-400 bg-zinc-800 px-2 py-0.5 rounded">
                 <GitBranch className="w-3 h-3" />
@@ -95,7 +97,7 @@ export default function Timeline() {
               </span>
             )}
           </h1>
-          <p className="text-sm text-zinc-500">共 {snapshots.length} 个快照</p>
+          <p className="text-sm text-zinc-500">{t("timeline.snapshotCount", { n: snapshots.length })}</p>
         </div>
         <button
           onClick={handleCreateSnapshot}
@@ -209,31 +211,29 @@ export default function Timeline() {
       {/* 回滚确认对话框 */}
       <ConfirmDialog
         open={!!rollbackTarget}
-        title="确认回滚"
+        title={t("timeline.rollbackConfirmTitle")}
         variant="warning"
         loading={rollbackLoading}
-        confirmText="确认回滚"
+        confirmText={t("timeline.rollbackConfirm")}
         onConfirm={handleRollbackConfirm}
         onCancel={() => !rollbackLoading && setRollbackTarget(null)}
         description={
           <div className="space-y-2">
-            <p>
-              确定要回滚到以下快照吗？工作区文件将被恢复到该快照时的状态。
-            </p>
+            <p>{t("timeline.rollbackConfirmDesc")}</p>
             {rollbackTarget && (
               <div className="bg-zinc-800 rounded p-2 space-y-1">
-                <p className="text-xs text-zinc-400">快照 ID：</p>
+                <p className="text-xs text-zinc-400">{t("timeline.rollbackSnapshotId")}</p>
                 <p className="text-xs font-mono text-zinc-300 break-all">{rollbackTarget.id}</p>
-                <p className="text-xs text-zinc-400 mt-2">消息：</p>
+                <p className="text-xs text-zinc-400 mt-2">{t("timeline.rollbackSnapshotMsg")}</p>
                 <p className="text-sm text-zinc-200">{rollbackTarget.message}</p>
               </div>
             )}
             <p className="text-xs text-amber-400 bg-amber-950/30 rounded p-2">
-              ⚠️ 回滚不会删除历史，而是创建一个新快照保留完整时间线。
+              {t("timeline.rollbackTip")}
             </p>
             {rollbackError && (
               <p className="text-xs text-red-400 bg-red-950/30 rounded p-2">
-                回滚失败：{rollbackError}
+                {t("timeline.rollbackFailPrefix")}{rollbackError}
               </p>
             )}
           </div>

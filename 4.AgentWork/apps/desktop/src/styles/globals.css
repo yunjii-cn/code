@@ -2,26 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
-/* AgentWork 全局样式 */
-
-:root {
+/* ── 暗黑主题（默认）──────────────────────────────── */
+:root,
+.dark {
   color-scheme: dark;
-
-  /* ===== 默认主题：深空蓝 ===== */
-  /* 背景色 */
-  --bg-primary: #09090b;
-  --bg-secondary: #18181b;
-  --bg-surface: #1f1f23;
-  --bg-elevated: #27272a;
-
-  /* 文字色 */
-  --text-primary: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
-  --text-inverse: #09090b;
-
-  /* 边框色 */
-  --border-color: #27272a;
 
   /* 品牌色 */
   --brand-primary: #3b82f6;
@@ -32,82 +16,100 @@
   --status-success: #22c55e;
   --status-warning: #eab308;
   --status-error: #ef4444;
+
+  /* Tailwind zinc-* 映射（暗黑） */
+  --tw-bg-zinc-950: #09090b;
+  --tw-bg-zinc-900: #18181b;
+  --tw-bg-zinc-800: #27272a;
+  --tw-bg-zinc-700: #3f3f46;
+  --tw-bg-zinc-300: #d4d4d8;
+  --tw-bg-zinc-200: #e4e4e7;
+  --tw-bg-zinc-100: #f4f4f5;
+  --tw-bg-zinc-50:  #fafafa;
+
+  --tw-border-zinc-950: #09090b;
+  --tw-border-zinc-900: #18181b;
+  --tw-border-zinc-800: #27272a;
+  --tw-border-zinc-700: #3f3f46;
+  --tw-border-zinc-600: #52525b;
+  --tw-border-zinc-500: #71717a;
+  --tw-border-zinc-400: #a1a1aa;
+  --tw-border-zinc-300: #d4d4d8;
+  --tw-border-zinc-200: #e4e4e7;
+
+  --tw-text-zinc-950: #09090b;
+  --tw-text-zinc-900: #18181b;
+  --tw-text-zinc-800: #27272a;
+  --tw-text-zinc-500: #71717a;
+  --tw-text-zinc-400: #a1a1aa;
+  --tw-text-zinc-300: #d4d4d8;
+  --tw-text-zinc-200: #e4e4e7;
+  --tw-text-zinc-100: #f4f4f5;
+  --tw-text-zinc-50:  #fafafa;
+
+  /* 品牌透明叠加 */
+  --bg-primary: var(--tw-bg-zinc-950);
+  --bg-secondary: var(--tw-bg-zinc-900);
+  --bg-surface: #1f1f23;
+  --bg-elevated: var(--tw-bg-zinc-800);
+  --text-primary: var(--tw-text-zinc-50);
+  --text-secondary: var(--tw-text-zinc-400);
+  --text-muted: var(--tw-text-zinc-500);
+  --text-inverse: var(--tw-text-zinc-950);
+  --border-color: var(--tw-border-zinc-800);
 }
 
-/* 午夜紫主题 */
-[data-theme="midnight"] {
-  --bg-primary: #0f0522;
-  --bg-secondary: #1a0a3e;
-  --bg-surface: #231050;
-  --bg-elevated: #2d1563;
-  --text-primary: #f3e8ff;
-  --text-secondary: #c4b5fd;
-  --text-muted: #a78bfa;
-  --text-inverse: #0f0522;
-  --border-color: #3b1f7e;
-  --brand-primary: #8b5cf6;
-  --brand-hover: #7c3aed;
-  --brand-light: #4c1d95;
-  --status-success: #34d399;
-  --status-warning: #fbbf24;
-  --status-error: #f87171;
-}
+/* ── 明亮主题 ──────────────────────────────── */
+.light {
+  color-scheme: light;
 
-/* 北极白主题 */
-[data-theme="arctic"] {
+  --brand-primary: #2563eb;
+  --brand-hover: #1d4ed8;
+  --brand-light: #dbeafe;
+
+  --status-success: #059669;
+  --status-warning: #d97706;
+  --status-error: #dc2626;
+
+  /* Tailwind zinc-* 映射（明亮模式：反转深浅，使用专业浅灰色板） */
+  --tw-bg-zinc-950: #ffffff;
+  --tw-bg-zinc-900: #f4f4f5;
+  --tw-bg-zinc-800: #e4e4e7;
+  --tw-bg-zinc-700: #d4d4d8;
+  --tw-bg-zinc-300: #52525b;
+  --tw-bg-zinc-200: #3f3f46;
+  --tw-bg-zinc-100: #27272a;
+  --tw-bg-zinc-50:  #18181b;
+
+  --tw-border-zinc-950: #ffffff;
+  --tw-border-zinc-900: #f4f4f5;
+  --tw-border-zinc-800: #e4e4e7;
+  --tw-border-zinc-700: #d4d4d8;
+  --tw-border-zinc-600: #a1a1aa;
+  --tw-border-zinc-500: #71717a;
+  --tw-border-zinc-400: #d4d4d8;
+  --tw-border-zinc-300: #e4e4e7;
+  --tw-border-zinc-200: #f4f4f5;
+
+  --tw-text-zinc-950: #ffffff;
+  --tw-text-zinc-900: #fafafa;
+  --tw-text-zinc-800: #e4e4e7;
+  --tw-text-zinc-500: #71717a;
+  --tw-text-zinc-400: #a1a1aa;
+  --tw-text-zinc-300: #d4d4d8;
+  --tw-text-zinc-200: #3f3f46;
+  --tw-text-zinc-100: #27272a;
+  --tw-text-zinc-50:  #18181b;
+
   --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --bg-surface: #f1f5f9;
-  --bg-elevated: #e2e8f0;
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-muted: #94a3b8;
+  --bg-secondary: #f4f4f5;
+  --bg-surface: #fafafa;
+  --bg-elevated: #e4e4e7;
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #71717a;
   --text-inverse: #ffffff;
-  --border-color: #cbd5e1;
-  --brand-primary: #0ea5e9;
-  --brand-hover: #0284c7;
-  --brand-light: #e0f2fe;
-  --status-success: #10b981;
-  --status-warning: #f59e0b;
-  --status-error: #ef4444;
-}
-
-/* 森林绿主题 */
-[data-theme="forest"] {
-  --bg-primary: #0a1a0f;
-  --bg-secondary: #112b18;
-  --bg-surface: #163320;
-  --bg-elevated: #1b4028;
-  --text-primary: #dcfce7;
-  --text-secondary: #86efac;
-  --text-muted: #4ade80;
-  --text-inverse: #0a1a0f;
-  --border-color: #166534;
-  --brand-primary: #22c55e;
-  --brand-hover: #16a34a;
-  --brand-light: #14532d;
-  --status-success: #4ade80;
-  --status-warning: #facc15;
-  --status-error: #fb7185;
-}
-
-/* 日落橙主题 */
-[data-theme="sunset"] {
-  --bg-primary: #1a0f0a;
-  --bg-secondary: #2d1a0e;
-  --bg-surface: #3d2314;
-  --bg-elevated: #4a2c1a;
-  --text-primary: #fef3c7;
-  --text-secondary: #fcd34d;
-  --text-muted: #fbbf24;
-  --text-inverse: #1a0f0a;
-  --border-color: #78350f;
-  --brand-primary: #f97316;
-  --brand-hover: #ea580c;
-  --brand-light: #431407;
-  --status-success: #4ade80;
-  --status-warning: #fbbf24;
-  --status-error: #fb7185;
+  --border-color: #e4e4e7;
 }
 
 body {
@@ -116,7 +118,6 @@ body {
     "Microsoft YaHei", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* 使用 CSS 变量作为 Tailwind 颜色的后备 */
   background-color: var(--bg-primary);
   color: var(--text-primary);
 }
@@ -138,4 +139,44 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
+}
+
+/* ── 明亮主题增强：阴影 + 卡片层次 ── */
+.light {
+  /* 亮色模式下卡片使用柔和阴影替代粗边框 */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-elevated: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+
+/* 亮色模式：卡片背景使用 surface 色而非深灰 */
+.light .bg-zinc-900 {
+  box-shadow: var(--shadow-card);
+}
+
+/* 亮色模式：品牌色按钮加深以保证白字对比度 */
+.light .bg-brand-600 {
+  background-color: #2563eb !important;
+}
+
+.light .bg-brand-600:hover {
+  background-color: #1d4ed8 !important;
+}
+
+/* 亮色模式：输入框聚焦阴影 */
+.light input:focus,
+.light textarea:focus {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+/* 亮色模式：绿色/红色提示条降饱和 */
+.light .bg-green-950\/30 {
+  background-color: rgba(5, 150, 105, 0.08) !important;
+}
+
+.light .bg-red-950\/30 {
+  background-color: rgba(220, 38, 38, 0.08) !important;
+}
+
+.light .bg-brand-950\/30 {
+  background-color: rgba(37, 99, 235, 0.08) !important;
 }

@@ -49,6 +49,17 @@ mod template_loader;
 mod template_market;
 mod skill_market;
 mod sandbox;
+mod memory;
+mod sessions;
+mod skills_v2;
+mod prompt_builder;
+mod work_mode;
+mod tool_provider;
+mod team_knowledge;
+mod profile_manager;
+mod mcp_client;
+mod security;
+mod multi_entry;
 
 pub use error::{TeamError, Result};
 pub use team_template::{
@@ -138,6 +149,29 @@ pub use sandbox::{
     CommandWhitelist, CommandCheckResult, CommandResult,
     AuditLogEntry, AuditEvent, AuditLog,
     SandboxManager, SandboxManagerStats,
+};
+pub use memory::{MemoryLayer, MemoryKind, MemoryEntry, MemoryStore};
+pub use sessions::{SessionRecord, TurnRecord, ToolCallTrace, SessionStore};
+pub use skills_v2::{SkillManifest, SkillStep, SkillV2, SkillRegistry};
+pub use prompt_builder::{PromptBuilder, PromptBudget, PromptLayer, PromptSection};
+pub use work_mode::WorkMode;
+pub use tool_provider::{
+    ToolProvider, ToolProviderKind, ToolRequest, ToolResponse,
+    EchoProvider, FileToolProvider, ToolRegistry,
+};
+pub use team_knowledge::{
+    KnowledgeLayer, KnowledgeEntry, TeamKnowledge, TeamKnowledgeManager,
+    ConflictResolution, KnowledgeSyncMode,
+};
+pub use profile_manager::{Profile, ProfileManager};
+pub use mcp_client::{
+    McpServerType, McpServerConfig, McpTool, McpClientState, McpClient,
+};
+pub use security::{
+    SecurityLevel, SecurityCheckResult, SecurityChecker,
+};
+pub use multi_entry::{
+    MultiEntry, MultiEntryRegistry, EntryKind,
 };
 
 /// 便捷函数：从内置模板 + 内置路由器创建 Worker 池

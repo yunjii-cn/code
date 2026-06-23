@@ -18,13 +18,18 @@ import {
   registerModel,
   getTeamStatus,
   executeTeamTask,
+  WORK_MODES,
   type TeamTemplateInfo,
   type RoleInfo,
   type ModelInfo,
   type WorkerInfo,
+  type WorkModeInfo,
 } from "@/lib/tauri";
+import { cn } from "@/lib/utils";
+import { useI18n } from "@/i18n";
 
 export default function Team() {
+  const { t } = useI18n();
   const [templates, setTemplates] = useState<TeamTemplateInfo[]>([]);
   const [currentRoles, setCurrentRoles] = useState<RoleInfo[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -45,6 +50,7 @@ export default function Team() {
   const [taskPrompt, setTaskPrompt] = useState("");
   const [taskResult, setTaskResult] = useState<string | null>(null);
   const [executing, setExecuting] = useState(false);
+  const [workMode, setWorkMode] = useState<WorkModeInfo["id"]>("collaborate");
 
   useEffect(() => {
     refreshAll();
@@ -121,7 +127,7 @@ export default function Team() {
       setExecuting(true);
       setTaskResult(null);
       setMessage(null);
-      const result = await executeTeamTask(taskRole, taskPrompt.trim());
+      const result = await executeTeamTask(taskRole, taskPrompt.trim(), workMode);
       setTaskResult(result);
       setMessage({ type: "success", text: "任务执行完成" });
       await refreshAll();
@@ -134,10 +140,10 @@ export default function Team() {
 
   return (
     <div className="flex flex-col h-full">
-      <header className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
+      <header className="px-4 sm:px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
         <h1 className="text-lg font-semibold flex items-center gap-2">
           <Users className="w-5 h-5" />
-          团队协作
+          {t("team.title")}
         </h1>
         <button
           onClick={refreshAll}
@@ -170,7 +176,7 @@ export default function Team() {
 
         {/* 团队模板选择 */}
         <section>
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">团队模板</h2>
+          <h2 className="text-sm font-medium text-zinc-400 mb-3">{t("team.templates")}</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             {templates.map((tmpl) => (
               <button
@@ -203,7 +209,7 @@ export default function Team() {
         {currentRoles.length > 0 && (
           <section>
             <h2 className="text-sm font-medium text-zinc-400 mb-3">
-              当前团队角色（{currentRoles.length}）
+              {t("team.currentRoles", { n: currentRoles.length })}
             </h2>
             <div className="space-y-2">
               {currentRoles.map((role) => (
@@ -294,6 +300,29 @@ export default function Team() {
               执行任务（单角色测试）
             </h2>
             <div className="bg-zinc-900 rounded-lg p-4 space-y-3">
+              {/* M6.2：工作模式选择器 */}
+              <div className="flex flex-wrap gap-2">
+                {WORK_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    onClick={() => setWorkMode(mode.id)}
+                    title={mode.description}
+                    className={cn(
+                      "flex items-center gap-1.5 px-2.5 py-1.5 text-xs rounded-lg border transition-all",
+                      workMode === mode.id
+                        ? "border-brand-500 bg-brand-950/30 text-brand-300"
+                        : "border-zinc-700 bg-zinc-800/50 text-zinc-400 hover:bg-zinc-800"
+                    )}
+                  >
+                    <span>{mode.icon}</span>
+                    <span>{mode.label}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="text-xs text-zinc-500">
+                当前模式：{WORK_MODES.find((m) => m.id === workMode)?.description}
+              </div>
+
               <div className="flex gap-2">
                 <select
                   value={taskRole}
@@ -338,7 +367,7 @@ export default function Team() {
         {/* 已注册模型 */}
         <section>
           <h2 className="text-sm font-medium text-zinc-400 mb-3">
-            已注册模型（{models.length}）
+            {t("team.registeredModels", { n: models.length })}
           </h2>
           <div className="bg-zinc-900 rounded-lg p-3 space-y-1">
             {models.length === 0 ? (
@@ -376,7 +405,7 @@ export default function Team() {
         <section>
           <h2 className="text-sm font-medium text-zinc-400 mb-3 flex items-center gap-2">
             <Plus className="w-4 h-4" />
-            注册自定义模型
+            {t("team.registerCustomModel")}
           </h2>
           <div className="bg-zinc-900 rounded-lg p-4 space-y-3">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -425,7 +454,7 @@ export default function Team() {
                 />
               </div>
               <div>
-                <label className="text-xs text-zinc-500">模型名</label>
+                <label className="text-xs text-zinc-500">{t("team.modelName")}</label>
                 <input
                   type="text"
                   value={newModelName}
@@ -457,7 +486,7 @@ export default function Team() {
               ) : (
                 <Plus className="w-4 h-4" />
               )}
-              <span>{registering ? "注册中..." : "注册模型"}</span>
+              <span>{registering ? t("team.registering") : t("team.register")}</span>
             </button>
           </div>
         </section>

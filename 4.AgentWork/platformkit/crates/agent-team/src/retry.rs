@@ -124,6 +124,9 @@ impl ErrorClassifier {
             TeamError::Yaml(_) => ErrorKind::Retryable,
             TeamError::Json(_) => ErrorKind::Retryable,
 
+            // 数据库错误 → 可重试（临时锁定/并发）
+            TeamError::Rusqlite(_) => ErrorKind::Retryable,
+
             // 其他错误 → 不可重试
             TeamError::Other(_) => ErrorKind::NonRetryable,
         }

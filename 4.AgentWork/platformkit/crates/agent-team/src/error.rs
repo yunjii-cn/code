@@ -17,6 +17,10 @@ pub enum TeamError {
     #[error("IO 错误: {0}")]
     Io(#[from] std::io::Error),
 
+    /// SQLite 错误
+    #[error("数据库错误: {0}")]
+    Rusqlite(#[from] rusqlite::Error),
+
     /// TimeFlow AI 错误
     #[error("AI 引擎错误: {0}")]
     Ai(#[from] timeflow_ai::AiError),

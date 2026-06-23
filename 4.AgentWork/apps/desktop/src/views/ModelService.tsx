@@ -1,13 +1,15 @@
 // 模型服务页面
 // 卡片式模型管理，超越 Cherry Studio 的 5 个差异化：
 // 1. 免费推荐标签  2. 按能力分组  3. 试用按钮  4. 用量统计  5. 自动拉取模型列表
+// 6. 已注册模型同步（后端 list_models）  7. 一键连接测试
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useCallback } from "react";
 import { clsx } from "clsx";
-import { Search, Sparkles, Server, TrendingUp } from "lucide-react";
+import { Search, Sparkles, Server, TrendingUp, RefreshCw, CheckCircle2 } from "lucide-react";
 import ModelCard from "../components/ModelCard";
 import ModelDetailDrawer from "../components/ModelDetailDrawer";
-import { registerModel } from "../lib/tauri";
+import { registerModel, listModels, testModelConnection, type ModelInfo } from "../lib/tauri";
+import { useI18n } from "@/i18n";
 
 // ===== 类型定义 =====
 
@@ -198,11 +200,41 @@ const BUILTIN_MODELS: ModelCardData[] = [
 
 // ===== 主组件 =====
 
+type ConnectionStatus = "idle" | "testing" | "connected" | "failed";
+
 export default function ModelService() {
+  const { t } = useI18n();
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState<Category>("all");
   const [enabledIds, setEnabledIds] = useState<Set<string>>(new Set());
   const [drawerModel, setDrawerModel] = useState<ModelCardData | null>(null);
+  const [registeredIds, setRegisteredIds] = useState<Set<string>>(new Set());
+  const [connectionStatuses, setConnectionStatuses] = useState<Record<string, ConnectionStatus>>({});
+  const [loadingRegistered, setLoadingRegistered] = useState(false);
+
+  /// 从后端加载已注册模型
+  const refreshRegistered = useCallback(async () => {
+    setLoadingRegistered(true);
+    try {
+      const models: ModelInfo[] = await listModels();
+      const ids = new Set(models.map((m) => m.id));
+      setRegisteredIds(ids);
+      // 已注册的模型自动视为已启用
+      setEnabledIds((prev) => {
+        const next = new Set(prev);
+        ids.forEach((id) => next.add(id));
+        return next;
+      });
+    } catch (err) {
+      console.error("加载已注册模型失败:", err);
+    } finally {
+      setLoadingRegistered(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshRegistered();
+  }, [refreshRegistered]);
 
   /// 过滤后的模型列表
   const filteredModels = useMemo(() => {
@@ -248,17 +280,34 @@ export default function ModelService() {
         api_key: apiKey || undefined,
         model_name: model.model_name,
       });
-      // 自动启用
+      // 自动启用 + 标记已注册
       setEnabledIds((prev) => new Set(prev).add(model.id));
+      setRegisteredIds((prev) => new Set(prev).add(model.id));
       setDrawerModel(null);
+      // 刷新已注册列表
+      refreshRegistered();
     } catch (err) {
       console.error("注册模型失败:", err);
-      alert(`保存失败: ${err}`);
+      alert(`${t("common.failed")}: ${err}`);
+    }
+  };
+
+  /// 测试连接
+  const handleTestConnection = async (model: ModelCardData) => {
+    if (connectionStatuses[model.id] === "testing") return;
+    setConnectionStatuses((prev) => ({ ...prev, [model.id]: "testing" }));
+    try {
+      await testModelConnection(model.id);
+      setConnectionStatuses((prev) => ({ ...prev, [model.id]: "connected" }));
+    } catch (err) {
+      console.error("连接测试失败:", err);
+      setConnectionStatuses((prev) => ({ ...prev, [model.id]: "failed" }));
     }
   };
 
   /// 统计数据
   const enabledCount = enabledIds.size;
+  const registeredCount = registeredIds.size;
   const freeCount = BUILTIN_MODELS.filter((m) => m.pricing === "free").length;
   const totalCount = BUILTIN_MODELS.length;
 
@@ -268,12 +317,22 @@ export default function ModelService() {
       <header className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Server className="w-5 h-5 text-brand-400" />
-          <h1 className="text-lg font-medium text-zinc-100">模型服务</h1>
+          <h1 className="text-lg font-medium text-zinc-100">{t("modelService.title")}</h1>
           <span className="text-xs text-zinc-500">
-            ({enabledCount} 启用 / {totalCount} 总计)
+            ({enabledCount} {t("modelService.enabled")} / {totalCount} {t("modelService.total")})
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {/* 刷新已注册模型 */}
+          <button
+            onClick={refreshRegistered}
+            disabled={loadingRegistered}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 disabled:opacity-50 transition-colors text-xs text-zinc-300"
+            title={t("modelService.refresh")}
+          >
+            <RefreshCw className={clsx("w-3.5 h-3.5", loadingRegistered && "animate-spin")} />
+            <span className="hidden sm:inline">{t("modelService.refresh")}</span>
+          </button>
           {/* 搜索框 */}
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
@@ -281,21 +340,31 @@ export default function ModelService() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索模型..."
-              className="w-56 pl-9 pr-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-brand-600"
+              placeholder={t("modelService.search.placeholder")}
+              className="w-40 sm:w-56 pl-9 pr-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-brand-600"
             />
           </div>
         </div>
       </header>
 
+      {/* 已注册模型提示条 */}
+      {registeredCount > 0 && (
+        <div className="px-6 py-2 border-b border-zinc-800 bg-green-950/20 flex items-center gap-2 text-xs">
+          <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+          <span className="text-green-300">
+            {t("modelService.registered")}: {registeredCount}
+          </span>
+        </div>
+      )}
+
       {/* 分类标签栏 */}
-      <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-2">
+      <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-2 overflow-x-auto">
         {(Object.keys(categoryLabels) as Category[]).map((cat) => (
           <button
             key={cat}
             onClick={() => setCategory(cat)}
             className={clsx(
-              "px-3 py-1 text-sm rounded-full transition-colors flex items-center gap-1",
+              "px-3 py-1 text-sm rounded-full transition-colors flex items-center gap-1 whitespace-nowrap",
               category === cat
                 ? "bg-brand-600 text-white"
                 : "bg-zinc-900 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
@@ -305,17 +374,17 @@ export default function ModelService() {
             {categoryLabels[cat]}
           </button>
         ))}
-        <div className="ml-auto text-xs text-zinc-500">
-          {filteredModels.length} 个模型
+        <div className="ml-auto text-xs text-zinc-500 whitespace-nowrap">
+          {filteredModels.length}
         </div>
       </div>
 
       {/* 卡片网格 */}
-      <div className="flex-1 overflow-auto px-6 py-4">
+      <div className="flex-1 overflow-auto px-4 sm:px-6 py-4">
         {filteredModels.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-zinc-500">
             <Search className="w-12 h-12 mb-3 opacity-30" />
-            <p className="text-sm">未找到匹配的模型</p>
+            <p className="text-sm">{t("cmdpalette.empty")}</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -326,6 +395,9 @@ export default function ModelService() {
                 enabled={enabledIds.has(model.id)}
                 onToggle={handleToggle}
                 onConfigure={setDrawerModel}
+                registered={registeredIds.has(model.id)}
+                connectionStatus={connectionStatuses[model.id] || "idle"}
+                onTestConnection={handleTestConnection}
               />
             ))}
           </div>
@@ -333,20 +405,20 @@ export default function ModelService() {
       </div>
 
       {/* 底部用量条 */}
-      <footer className="px-6 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center justify-between text-xs">
+      <footer className="px-4 sm:px-6 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center justify-between text-xs">
         <div className="flex items-center gap-4">
           <span className="flex items-center gap-1.5 text-zinc-400">
             <TrendingUp className="w-3.5 h-3.5" />
-            今日用量: <span className="text-zinc-200">0 tokens</span>
+            {t("modelService.usage.today")}: <span className="text-zinc-200">0 tokens</span>
           </span>
-          <span className="text-zinc-600">|</span>
+          <span className="text-zinc-600 hidden sm:inline">|</span>
           <span className="flex items-center gap-1.5 text-zinc-400">
             <Sparkles className="w-3.5 h-3.5 text-green-400" />
-            免费模型: <span className="text-green-400">{freeCount} 个可用</span>
+            {t("modelService.usage.free")}: <span className="text-green-400">{freeCount}</span>
           </span>
         </div>
         <div className="flex items-center gap-2 text-zinc-500">
-          <span>云集网关: UM 钱包统一计费</span>
+          <span className="hidden sm:inline">{t("modelService.gateway")}</span>
         </div>
       </footer>
 
