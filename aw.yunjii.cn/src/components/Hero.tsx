@@ -54,15 +54,15 @@ export default function Hero() {
         {/* Hero title */}
         <motion.h1
           {...fadeUp(0.2)}
-          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.08] mb-3"
+          className="text-5xl sm:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.06] mb-6"
         >
           <span className="text-[var(--color-text)]">{t("hero.title1")}</span>
         </motion.h1>
 
-        {/* Tagline — lighter weight, gradient, smaller */}
+        {/* Tagline — confident weight, AW soft gradient, sized for impact */}
         <motion.p
-          {...fadeUp(0.28)}
-          className="text-xl sm:text-2xl md:text-3xl lg:text-4xl font-light tracking-wide leading-relaxed text-gradient-aw-hero mb-8"
+          {...fadeUp(0.3)}
+          className="text-2xl sm:text-3xl lg:text-5xl font-semibold tracking-tight leading-snug text-[var(--color-aw-soft)] mb-10"
         >
           {t("hero.title2a")}
           <br />
