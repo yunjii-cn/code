@@ -13,7 +13,8 @@
   "hero": {
     "badge": "云集第 4 代 · Enterprise 旗舰产品",
     "title1": "云集智能体工作台",
-    "title2": "AI员工组成数字化团队，自进化工作流",
+    "title2a": "培养自进化AI员工",
+    "title2b": "打造数字化协作团队",
     "description": "AgentWork 是现代智能数字化工作空间。多 Agent DAG 真并行协作、AST-Native 代码认知引擎、编译期验证护栏——让 AI 从辅助工具升级为真正的生产力。",
     "cta": "预约演示"
   },

@@ -13,7 +13,8 @@
   "hero": {
     "badge": "Gen 4 · Enterprise Flagship",
     "title1": "Yunji Agent Workstation",
-    "title2": "AI Employees Form Digital Teams with Self-Evolving Workflows",
+    "title2a": "Cultivate Self-Evolving AI Employees",
+    "title2b": "Build Digitally Collaborative Teams",
     "description": "AgentWork is a modern intelligent digital workspace. Multi-Agent DAG truly parallel collaboration, AST-Native code cognition engine, and compile-time verification guardrails — elevating AI from an assistant to real productivity.",
     "cta": "Request Demo"
   },

@@ -58,7 +58,9 @@ export default function Hero() {
         >
           <span className="text-[var(--color-text)]">{t("hero.title1")}</span>
           <br />
-          <span className="text-gradient-aw-hero">{t("hero.title2")}</span>
+          <span className="text-gradient-aw-hero">{t("hero.title2a")}</span>
+          <br />
+          <span className="text-gradient-aw-hero">{t("hero.title2b")}</span>
         </motion.h1>
 
         {/* Description — refined, larger */}
