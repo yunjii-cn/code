@@ -51,17 +51,23 @@ export default function Hero() {
           {t("hero.badge")}
         </motion.div>
 
-        {/* Hero title — massive, bold, premium */}
+        {/* Hero title */}
         <motion.h1
           {...fadeUp(0.2)}
-          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.08] mb-6"
+          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.08] mb-3"
         >
           <span className="text-[var(--color-text)]">{t("hero.title1")}</span>
-          <br />
-          <span className="text-gradient-aw-hero">{t("hero.title2a")}</span>
-          <br />
-          <span className="text-gradient-aw-hero">{t("hero.title2b")}</span>
         </motion.h1>
+
+        {/* Tagline — lighter weight, gradient, smaller */}
+        <motion.p
+          {...fadeUp(0.28)}
+          className="text-xl sm:text-2xl md:text-3xl lg:text-4xl font-light tracking-wide leading-relaxed text-gradient-aw-hero mb-8"
+        >
+          {t("hero.title2a")}
+          <br />
+          {t("hero.title2b")}
+        </motion.p>
 
         {/* Description — refined, larger */}
         <motion.p
