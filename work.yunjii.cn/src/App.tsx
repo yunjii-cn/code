@@ -4,6 +4,7 @@ import { ThemeProvider } from "./context/ThemeContext";
 import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
 import ProductMatrix from "./components/ProductMatrix";
+import { DesktopDetail, WebDetail, TeamDetail } from "./components/ProductDetail";
 import PriceComparison from "./components/PriceComparison";
 import AccountInfo from "./components/AccountInfo";
 import DownloadSection from "./components/DownloadSection";
@@ -22,6 +23,9 @@ function AppContent() {
       <main>
         <Hero />
         <ProductMatrix />
+        <DesktopDetail />
+        <WebDetail />
+        <TeamDetail />
         <PriceComparison />
         <AccountInfo />
         <DownloadSection />

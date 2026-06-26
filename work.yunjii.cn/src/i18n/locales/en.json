@@ -32,19 +32,70 @@
     "suitableFor": "For: ",
     "pc": {
       "name": "Yunji PC",
-      "tagline": "Forever free. Local AI coding tool. Your data never leaves your machine."
+      "tagline": "Local-first AI coding tool. Your data stays on your machine.",
+      "desc": "Forever free, no feature gating. Works offline with Ollama. Privacy-first — code, AI chat, and knowledge stay 100% local.",
+      "detail": {
+        "heading": "Yunji PC — Local-First AI Coding",
+        "intro": "Yunji PC is a forever-free local AI coding desktop tool. Double-click to launch, works offline, Ollama integrated. PyQt6 native window — faster and lighter than web-based alternatives.",
+        "features": [
+          { "title": "Forever Free", "desc": "No feature gating. Open-source (AGPL-3.0), community-driven." },
+          { "title": "Offline Ready", "desc": "Works without internet. Ollama local models at zero cost." },
+          { "title": "Privacy First", "desc": "Code, AI chat, and knowledge stay 100% on your machine. Zero telemetry." },
+          { "title": "Zero Registration", "desc": "Double-click the EXE and start. No account needed." }
+        ],
+        "tech": "PyQt6 + Python 3.12 + FastAPI (embedded)",
+        "users": "Developers / Students / Privacy advocates",
+        "cta": "Download Free"
+      }
     },
     "web": {
       "name": "Yunji Web",
-      "tagline": "From ¥0.99/mo. Cross-platform AI coding workspace."
+      "tagline": "Cross-platform AI coding workspace.",
+      "desc": "Seamless switching across desktop, phone, and tablet. Cloud AI one-click access, local Ollama mode also available. PWA and mobile coverage.",
+      "detail": {
+        "heading": "Yunji Web — Cross-Platform Lightweight Workspace",
+        "intro": "Yunji Web delivers cross-platform AI coding. One account, seamless switching across desktop, phone, and tablet. FastAPI backend + Vue 3 frontend with PWA/Capacitor multi-device coverage.",
+        "features": [
+          { "title": "Multi-Device Sync", "desc": "Start on desktop, continue on phone. 3 devices simultaneously." },
+          { "title": "Cloud AI", "desc": "One-click cloud model access. No Ollama setup needed." },
+          { "title": "Local Mode", "desc": "Prefer data on-device? Switch to Ollama mode anytime." },
+          { "title": "PWA Support", "desc": "Your phone becomes the app. No app store install needed." }
+        ],
+        "tech": "FastAPI + Vue 3 + Vite + Capacitor",
+        "users": "Freelancers / Small teams / Mobile workers",
+        "cta": "Start Trial"
+      }
     },
     "team": {
       "name": "Yunji Team",
-      "tagline": "¥99/mo. Full-featured AI coding workspace for teams."
+      "tagline": "Full-featured AI coding workspace for teams.",
+      "desc": "5-role team collaboration, 4-layer knowledge engine, Yjs real-time collaboration. SSO + audit + multi-tenant — enterprise compliance ready.",
+      "detail": {
+        "heading": "Yunji Team — Full AI Coding Team Workspace",
+        "intro": "Yunji Team provides complete AI coding team collaboration. 5-role team model (Lead/Architect/Dev/QA/Docs), 4-layer knowledge engine (Correction/Pattern/Fact/Preference) with strength evolution, and Yjs CRDT real-time collaboration.",
+        "features": [
+          { "title": "5-Role Team", "desc": "Lead, Architect, Dev, QA, Docs — boundary checks and cross-review built in." },
+          { "title": "4-Layer Knowledge Engine", "desc": "Correction, Pattern, Fact, Preference + strength evolution. Gets smarter over time." },
+          { "title": "Yjs Real-Time Collab", "desc": "Multiple users editing files simultaneously. CRDT guarantees no data loss." },
+          { "title": "Enterprise Compliance", "desc": "SSO + audit logs + multi-tenant + private deployment options." }
+        ],
+        "tech": "FastAPI + Platformkit + Vue 3 + Yjs",
+        "users": "Mid-size teams / Enterprises / Government",
+        "cta": "Learn More"
+      }
     },
     "agentwork": {
       "name": "AgentWork",
-      "tagline": "AI agent workstation. AI employees + AI teams + industry templates."
+      "tagline": "AI agent workstation. AI employees + AI teams + industry templates.",
+      "desc": "Next-gen AI R&D workspace. Multi-Agent DAG true parallelism, AST-Native code cognition, compile-time verification guardrails.",
+      "detail": {
+        "heading": "",
+        "intro": "",
+        "features": [],
+        "tech": "",
+        "users": "",
+        "cta": ""
+      }
     }
   },
   "pricing": {

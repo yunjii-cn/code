@@ -32,19 +32,70 @@
     "suitableFor": "适合：",
     "pc": {
       "name": "云集 PC 版",
-      "tagline": "永久免费的本地 AI 编程工具，数据不离开你的电脑"
+      "tagline": "本地 AI 编程工具，数据不离开你的电脑",
+      "desc": "永久免费，无功能阉割。离线可用，Ollama 原生支持。隐私第一，代码、AI 对话、知识 100% 留存本地。",
+      "detail": {
+        "heading": "云集 PC 版 — 本地优先的 AI 编程",
+        "intro": "云集 PC 版是永久免费的本地 AI 编程桌面工具。双击即用，断网也能跑，Ollama 一键对接。PyQt6 原生窗口，响应更快、占资源更少。",
+        "features": [
+          { "title": "永久免费", "desc": "无功能阉割，GitHub 开源（AGPL-3.0），社区驱动。" },
+          { "title": "离线可用", "desc": "断网也能跑，Ollama 本地模型零成本运行。" },
+          { "title": "隐私第一", "desc": "代码、AI 对话、知识 100% 留存本地，零遥测。" },
+          { "title": "零注册", "desc": "双击 EXE 即可使用，无需任何账号。" }
+        ],
+        "tech": "PyQt6 + Python 3.12 + FastAPI（内嵌）",
+        "users": "程序员 / 学生 / 隐私党 / 离线党",
+        "cta": "免费下载"
+      }
     },
     "web": {
       "name": "云集 Web 版",
-      "tagline": "¥9.9/月起，跨端跨平台的 AI 编程工作空间"
+      "tagline": "跨端跨平台的 AI 编程工作空间",
+      "desc": "电脑、手机、平板无缝切换。云端 AI 一键使用，本地 Ollama 模式也可选。PWA / 移动端全覆盖。",
+      "detail": {
+        "heading": "云集 Web 版 — 跨端跨平台的轻量工作空间",
+        "intro": "云集 Web 版提供跨端跨平台的 AI 编程体验。一个账户，电脑、手机、平板无缝切换。FastAPI 后端 + Vue 3 前端，PWA / Capacitor 多端覆盖。",
+        "features": [
+          { "title": "多端同步", "desc": "电脑写一半，手机继续，3 设备同时在线。" },
+          { "title": "云端 AI", "desc": "一键接入云端模型，不用配置 Ollama。" },
+          { "title": "本地模式", "desc": "不想数据走云？切换 Ollama 模式即可。" },
+          { "title": "PWA 支持", "desc": "手机就是 App，无需下载安装。" }
+        ],
+        "tech": "FastAPI + Vue 3 + Vite + Capacitor",
+        "users": "自由职业 / 小团队 / 移动办公",
+        "cta": "开始试用"
+      }
     },
     "team": {
       "name": "云集团队版",
-      "tagline": "¥99/月，全功能的 AI 编程团队工作空间"
+      "tagline": "全功能的 AI 编程团队工作空间",
+      "desc": "5 角色团队协作、4 层知识引擎、Yjs 实时协作。SSO + 审计 + 多租户，企业合规一站满足。",
+      "detail": {
+        "heading": "云集团队版 — 全功能的 AI 编程团队工作空间",
+        "intro": "云集团队版提供完整的 AI 编程团队协作能力。5 角色团队模式（主管/架构/开发/测试/文档）、4 层知识引擎（纠正/模式/事实/偏好）+ 强度演化、Yjs CRDT 实时协作。",
+        "features": [
+          { "title": "5 角色团队", "desc": "主管/架构/开发/测试/文档，边界检查 + 交叉审查。" },
+          { "title": "4 层知识引擎", "desc": "纠正、模式、事实、偏好 + 强度演化，越用越聪明。" },
+          { "title": "Yjs 实时协作", "desc": "多用户同时编辑文件，CRDT 保证不丢数据。" },
+          { "title": "企业合规", "desc": "SSO + 审计日志 + 多租户 + 私有化部署可选。" }
+        ],
+        "tech": "FastAPI + Platformkit + Vue 3 + Yjs",
+        "users": "中型团队 / 企业 / 政府",
+        "cta": "了解更多"
+      }
     },
     "agentwork": {
       "name": "AgentWork",
-      "tagline": "AI 智能体工作台，AI 员工 + AI 团队 + 行业模板"
+      "tagline": "AI 智能体工作台，AI 员工 + AI 团队 + 行业模板",
+      "desc": "新一代 AI 研发工作空间。多 Agent DAG 真并行、AST-Native 代码认知、编译期验证护栏。",
+      "detail": {
+        "heading": "",
+        "intro": "",
+        "features": [],
+        "tech": "",
+        "users": "",
+        "cta": ""
+      }
     }
   },
   "pricing": {
