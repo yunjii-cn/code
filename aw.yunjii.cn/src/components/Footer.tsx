@@ -11,7 +11,7 @@ export default function Footer() {
         <div className="flex flex-col md:flex-row items-start justify-between gap-12 mb-16">
           {/* Brand */}
           <div className="max-w-xs">
-            <a href="#" className="flex items-center gap-3 text-[var(--color-text)] font-bold text-lg mb-4">
+            <a href="https://yunjii.cn" target="_blank" rel="noopener" className="flex items-center gap-3 text-[var(--color-text)] font-bold text-lg mb-4 hover:text-[var(--color-aw-soft)] transition-colors">
               <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[var(--color-aw-primary)] to-[var(--color-aw-soft)] flex items-center justify-center text-white text-xs font-extrabold shadow-[0_0_20px_rgba(30,108,240,0.3)]">
                 AW
               </div>
@@ -66,7 +66,7 @@ export default function Footer() {
           <div className="flex items-center gap-8 text-xs text-[var(--color-text-faint)]">
             <a href="#" className="hover:text-[var(--color-aw-soft)] transition-colors">{t("footer.privacy")}</a>
             <a href="#" className="hover:text-[var(--color-aw-soft)] transition-colors">{t("footer.terms")}</a>
-            <span>备案号</span>
+            <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" className="hover:text-[var(--color-aw-soft)] transition-colors">鄂ICP备2024085021号-1</a>
           </div>
         </div>
       </div>

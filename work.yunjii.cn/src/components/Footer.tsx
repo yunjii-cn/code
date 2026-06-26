@@ -25,11 +25,11 @@ export default function Footer() {
         <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-8 mb-12">
           {/* Brand */}
           <div className="lg:col-span-2">
-            <a href="#" className="flex items-center gap-2.5 text-[var(--color-text)] font-semibold text-lg mb-4">
+            <a href="https://yunjii.cn" target="_blank" rel="noopener" className="flex items-center gap-2.5 text-[var(--color-text)] font-semibold text-lg mb-4 hover:text-[var(--color-yj-red)] transition-colors">
               <div className="w-8 h-8 rounded-lg bg-[var(--color-yj-red)] flex items-center justify-center text-white text-sm font-bold">
                 云
               </div>
-              云集工作台
+              云集智能
             </a>
             <p className="text-[var(--color-text-muted)] text-sm leading-relaxed max-w-xs">
               {t("footer.tagline")}
@@ -59,7 +59,7 @@ export default function Footer() {
           <div className="flex items-center gap-6 text-xs text-[var(--color-text-faint)]">
             <a href="#" className="hover:text-[var(--color-text-muted)] transition-colors">{t("footer.privacy")}</a>
             <a href="#" className="hover:text-[var(--color-text-muted)] transition-colors">{t("footer.terms")}</a>
-            <a href="#" className="hover:text-[var(--color-text-muted)] transition-colors">{t("footer.icp")}</a>
+            <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener" className="hover:text-[var(--color-text-muted)] transition-colors">{t("footer.icp")}</a>
           </div>
         </div>
       </div>
