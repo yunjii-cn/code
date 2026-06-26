@@ -5,7 +5,8 @@ export default function Footer() {
   const links = t("footer.links", { returnObjects: true }) as string[];
 
   return (
-    <footer className="border-t border-[var(--color-aw-primary)]/8 px-4 sm:px-6 py-16 sm:py-20">
+    <footer className="relative border-t border-transparent px-4 sm:px-6 py-16 sm:py-20">
+      <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[var(--color-aw-primary)]/20 to-transparent" />
       <div className="max-w-7xl mx-auto">
         <div className="flex flex-col md:flex-row items-start justify-between gap-12 mb-16">
           {/* Brand */}

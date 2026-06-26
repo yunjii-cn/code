@@ -247,6 +247,12 @@ export default function ProductShowcase() {
   return (
     <section className="relative py-20 sm:py-28 px-4 sm:px-6 overflow-hidden">
       <div className="absolute inset-0 bg-[var(--color-aw-primary)]/[0.008]" />
+      {/* Ambient glow */}
+      <motion.div
+        animate={{ opacity: [0.04, 0.1, 0.04] }}
+        transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
+        className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[700px] h-[300px] bg-[var(--color-aw-primary)]/6 blur-[180px] rounded-full pointer-events-none"
+      />
 
       <div className="relative max-w-5xl mx-auto">
         {/* Header */}

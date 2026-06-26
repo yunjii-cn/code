@@ -54,7 +54,7 @@ export default function Features() {
               viewport={{ once: true }}
               transition={{ duration: 0.5, delay: i * 0.1 }}
               whileHover={{ y: -4 }}
-              className="group relative rounded-2xl bg-[var(--color-surface)] border border-[var(--color-aw-primary)]/8 p-8 sm:p-10 transition-all duration-300 hover:border-[var(--color-aw-primary)]/25 hover:shadow-[0_8px_40px_rgba(30,108,240,0.06)]"
+              className="group relative rounded-2xl bg-gradient-to-b from-[var(--color-aw-primary)]/[0.02] to-[var(--color-surface)] border border-[var(--color-aw-primary)]/8 p-8 sm:p-10 transition-all duration-300 hover:border-[var(--color-aw-primary)]/30 hover:shadow-[0_8px_40px_rgba(30,108,240,0.08)]"
             >
               {/* Top gradient accent line */}
               <div className="absolute top-0 left-6 right-6 h-px bg-gradient-to-r from-transparent via-[var(--color-aw-primary)]/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />

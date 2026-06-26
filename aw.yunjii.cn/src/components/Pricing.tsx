@@ -72,7 +72,7 @@ function PricingCard({ tier, index }: { tier: Tier; index: number }) {
 
   const cardBase = tier.highlighted
     ? "border-[var(--color-aw-primary)]/30 bg-[var(--color-aw-primary)]/[0.03] aw-ring-glow hover:shadow-[0_0_60px_rgba(30,108,240,0.18)] scale-[1.02] lg:scale-105 z-10"
-    : "border-[var(--color-aw-primary)]/8 bg-[var(--color-surface)] hover:border-[var(--color-aw-primary)]/20";
+    : "border-[var(--color-aw-primary)]/8 bg-gradient-to-b from-[var(--color-aw-primary)]/[0.015] to-[var(--color-surface)] hover:border-[var(--color-aw-primary)]/25";
 
   const btnBase = tier.highlighted
     ? "bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white shadow-[0_0_30px_rgba(30,108,240,0.25)] hover:shadow-[0_0_45px_rgba(30,108,240,0.4)]"
@@ -87,10 +87,8 @@ function PricingCard({ tier, index }: { tier: Tier; index: number }) {
       whileHover={tier.highlighted ? { y: -6 } : { y: -4 }}
       className={`relative rounded-2xl ${cardBase} p-6 sm:p-7 transition-all duration-400 flex flex-col`}
     >
-      {/* Top gradient line for highlighted */}
-      {tier.highlighted && (
-        <div className="absolute top-0 left-6 right-6 h-px bg-gradient-to-r from-transparent via-[var(--color-aw-primary)]/50 to-transparent" />
-      )}
+      {/* Top gradient line */}
+      <div className={`absolute top-0 left-6 right-6 h-px bg-gradient-to-r from-transparent via-[var(--color-aw-primary)]/${tier.highlighted ? "50" : "15"} to-transparent`} />
 
       {/* Recommended badge */}
       {tier.highlighted && (

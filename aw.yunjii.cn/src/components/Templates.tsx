@@ -52,7 +52,7 @@ export default function Templates() {
                 viewport={{ once: true }}
                 transition={{ duration: 0.45, delay: i * 0.1 }}
                 whileHover={{ y: -6 }}
-                className="group relative rounded-2xl bg-[var(--color-surface)] border border-[var(--color-aw-primary)]/6 p-7 text-center transition-all duration-300 hover:border-[var(--color-aw-primary)]/25 hover:shadow-[0_8px_32px_rgba(30,108,240,0.05)]"
+                className="group relative rounded-2xl bg-gradient-to-b from-[var(--color-aw-primary)]/[0.015] to-[var(--color-surface)] border border-[var(--color-aw-primary)]/6 p-7 text-center transition-all duration-300 hover:border-[var(--color-aw-primary)]/25 hover:shadow-[0_8px_32px_rgba(30,108,240,0.06)]"
               >
                 {/* Icon */}
                 <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br ${gradientClass} flex items-center justify-center mx-auto mb-5 text-2xl group-hover:scale-110 transition-transform duration-300`}>

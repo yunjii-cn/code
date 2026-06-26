@@ -69,7 +69,7 @@ export default function Architecture() {
                 <div className="absolute left-[43px] top-1/2 w-8 h-px bg-gradient-to-r from-[var(--color-aw-primary)]/25 to-transparent" />
 
                 {/* Card */}
-                <div className="rounded-2xl bg-[var(--color-surface)] border border-[var(--color-aw-primary)]/6 p-6 sm:p-8 hover:border-[var(--color-aw-primary)]/20 hover:shadow-[0_4px_24px_rgba(30,108,240,0.04)] transition-all duration-300">
+                <div className="rounded-2xl bg-gradient-to-r from-[var(--color-aw-primary)]/[0.02] to-[var(--color-surface)] border border-[var(--color-aw-primary)]/6 p-6 sm:p-8 hover:border-[var(--color-aw-primary)]/25 hover:shadow-[0_4px_24px_rgba(30,108,240,0.06)] transition-all duration-300">
                   <div className="flex items-center gap-4 mb-3">
                     <div className="w-10 h-10 rounded-xl bg-[var(--color-aw-primary)]/10 text-[var(--color-aw-soft)] flex items-center justify-center shrink-0">
                       {layerIcons[i] ?? layerIcons[0]}
