@@ -113,6 +113,13 @@ body {
   background-clip: text;
 }
 
+.text-gradient-aw-hero {
+  background: linear-gradient(135deg, #8ab4ff 0%, #3b82f6 30%, #1e6cf0 60%, #1553c7 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
 /* 蓝色辉光环 */
 .aw-ring-glow {
   box-shadow:
