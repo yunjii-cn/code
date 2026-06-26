@@ -64,21 +64,75 @@
   },
   "pricing": {
     "title": "Pricing",
-    "subtitle": "Per-seat pricing for enterprises of 50+. Industry templates and private deployment options included.",
-    "price": "¥999",
-    "period": "/seat/month",
-    "features": [
-      "AI Employees × 5 + AI Teams",
-      "Industry Templates × 3 (E-commerce/Edu/FinTech)",
-      "AST-Native Code Cognition Engine",
-      "TimeFlow Local Version Control",
-      "Full-Cycle Auto Deploy Pipeline",
-      "Compile-Time Verification Guardrails",
-      "Dedicated Customer Success Manager",
-      "Private Deployment Available"
+    "subtitle": "Flat monthly pricing. No per-seat charges. From individual dev to enterprise customization.",
+    "recommended": "Recommended",
+    "tiers": [
+      {
+        "name": "Starter",
+        "price": "¥399",
+        "period": "/month",
+        "features": [
+          "AI Employees × 2",
+          "Industry Templates × 1",
+          "Basic AST Code Cognition Engine",
+          "TimeFlow Local Version Control",
+          "Community Support"
+        ],
+        "cta": "Start Trial",
+        "highlighted": false
+      },
+      {
+        "name": "Team",
+        "price": "¥699",
+        "period": "/month",
+        "features": [
+          "AI Employees × 5 + AI Teams",
+          "Industry Templates × 2",
+          "Full AST Code Cognition Engine",
+          "TimeFlow Version Control",
+          "Auto Deploy Pipeline",
+          "Compile-Time Verification Guardrails",
+          "Email Support"
+        ],
+        "cta": "Start Trial",
+        "highlighted": false
+      },
+      {
+        "name": "Professional",
+        "price": "¥999",
+        "period": "/month",
+        "features": [
+          "AI Employees × 10 + AI Teams × 2",
+          "Industry Templates × 5 (All)",
+          "AST-Native Full + Custom Rules",
+          "TimeFlow + Cross-Project Collaboration",
+          "Full-Cycle Auto Deploy Pipeline",
+          "Compile-Time Verification Guardrails",
+          "Dedicated Customer Success Manager",
+          "Priority Support"
+        ],
+        "cta": "Request Demo",
+        "highlighted": true
+      },
+      {
+        "name": "Enterprise",
+        "price": "¥1999",
+        "period": "+/month",
+        "features": [
+          "Unlimited AI Employees",
+          "Unlimited AI Teams",
+          "All Templates + Custom",
+          "Private Deployment Available",
+          "Local Model Inference (MLX/ONNX)",
+          "Custom Plugin Sandbox",
+          "Dedicated CS Team",
+          "SLA 99.9% · 7×24 Support"
+        ],
+        "cta": "Contact Us",
+        "highlighted": false
+      }
     ],
-    "cta": "Request Demo",
-    "footer": "Custom enterprise pricing · Private deployment from ¥500K"
+    "footer": "All plans include 14-day free trial · No credit card required"
   },
   "cta_section": {
     "title": "Ready to level up your R&D team?",

@@ -64,21 +64,75 @@
   },
   "pricing": {
     "title": "定价方案",
-    "subtitle": "面向 50+ 人企业，按席位付费。含行业模板、私有化部署选项。",
-    "price": "¥999",
-    "period": "/月/席位",
-    "features": [
-      "AI 员工 × 5 + AI 团队",
-      "行业模板 × 3（电商/教育/金融）",
-      "AST-Native 代码认知引擎",
-      "TimeFlow 本地版本控制",
-      "全链路自动发布流水线",
-      "编译期验证护栏",
-      "专属客户成功经理",
-      "私有化部署可选"
+    "subtitle": "固定月费，不按席位计费。从个人开发到企业定制，总有一档适合你。",
+    "recommended": "推荐",
+    "tiers": [
+      {
+        "name": "Starter",
+        "price": "¥399",
+        "period": "/月",
+        "features": [
+          "AI 员工 × 2",
+          "行业模板 × 1",
+          "基础 AST 代码认知引擎",
+          "TimeFlow 本地版本控制",
+          "社区支持"
+        ],
+        "cta": "开始试用",
+        "highlighted": false
+      },
+      {
+        "name": "Team",
+        "price": "¥699",
+        "period": "/月",
+        "features": [
+          "AI 员工 × 5 + AI 团队",
+          "行业模板 × 2",
+          "全量 AST 代码认知引擎",
+          "TimeFlow 版本控制",
+          "自动发布流水线",
+          "编译期验证护栏",
+          "邮件支持"
+        ],
+        "cta": "开始试用",
+        "highlighted": false
+      },
+      {
+        "name": "Professional",
+        "price": "¥999",
+        "period": "/月",
+        "features": [
+          "AI 员工 × 10 + AI 团队 × 2",
+          "行业模板 × 5（全部）",
+          "AST-Native 全量 + 自定义规则",
+          "TimeFlow + 跨项目协作",
+          "全链路自动发布流水线",
+          "编译期验证护栏",
+          "专属客户成功经理",
+          "优先技术支持"
+        ],
+        "cta": "预约演示",
+        "highlighted": true
+      },
+      {
+        "name": "Enterprise",
+        "price": "¥1999",
+        "period": "起/月",
+        "features": [
+          "不限量 AI 员工",
+          "不限量 AI 团队",
+          "行业模板全部 + 定制",
+          "私有化部署可选",
+          "本地模型推理（MLX/ONNX）",
+          "自定义插件沙箱",
+          "专属客户成功团队",
+          "SLA 99.9% · 7×24 支持"
+        ],
+        "cta": "联系我们",
+        "highlighted": false
+      }
     ],
-    "cta": "预约演示",
-    "footer": "企业定制单独议价 · 私有化部署 ¥50 万起"
+    "footer": "所有方案均含 14 天免费试用 · 无需绑定信用卡"
   },
   "cta_section": {
     "title": "准备好升级你的研发团队了吗？",
