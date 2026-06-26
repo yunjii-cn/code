@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface Slide {
@@ -216,32 +217,19 @@ function TeamMock() {
   );
 }
 
-const slides: Slide[] = [
-  {
-    title: "全景仪表盘",
-    subtitle: "实时掌握所有 AI 员工的工作状态、任务进度和成功率。",
-    render: () => <DashboardMock />,
-  },
-  {
-    title: "DAG 工作流编排",
-    subtitle: "拖拽式可视化编排，多 Agent 任务自动并行拆解与汇聚。",
-    render: () => <WorkflowMock />,
-  },
-  {
-    title: "AST 原生代码编辑",
-    subtitle: "AI 真正\"理解\"代码结构，零幻觉交付，支持 20+ 语言。",
-    render: () => <CodeMock />,
-  },
-  {
-    title: "AI 团队协作",
-    subtitle: "AI 员工与人类无缝对话，上下文共享、分工协作。",
-    render: () => <TeamMock />,
-  },
-];
-
 export default function ProductShowcase() {
+  const { t } = useTranslation();
   const [current, setCurrent] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
+
+  const slidesData = t("showcase.slides", { returnObjects: true }) as Array<{ title: string; subtitle: string }>;
+
+  const slides: Slide[] = [
+    { ...slidesData[0], render: () => <DashboardMock /> } as Slide,
+    { ...slidesData[1], render: () => <WorkflowMock /> } as Slide,
+    { ...slidesData[2], render: () => <CodeMock /> } as Slide,
+    { ...slidesData[3], render: () => <TeamMock /> } as Slide,
+  ].filter((s): s is Slide => s.title !== undefined);
 
   const next = useCallback(() => {
     setCurrent((c) => (c + 1) % slides.length);
@@ -270,13 +258,13 @@ export default function ProductShowcase() {
           className="text-center mb-12 sm:mb-16"
         >
           <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-6">
-            产品界面
+            {t("showcase.badge")}
           </div>
           <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold text-[var(--color-text)] mb-3">
-            看看 AgentWork 长什么样
+            {t("showcase.title")}
           </h2>
           <p className="text-[var(--color-text-muted)] text-sm sm:text-base max-w-lg mx-auto">
-            现代、高效、沉浸式的 AI 智能体工作台，专为企业级开发团队打造。
+            {t("showcase.subtitle")}
           </p>
         </motion.div>
 

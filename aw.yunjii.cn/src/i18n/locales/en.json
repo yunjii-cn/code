@@ -134,6 +134,17 @@
     ],
     "footer": "All plans include 14-day free trial · No credit card required"
   },
+  "showcase": {
+    "badge": "Interface",
+    "title": "The Immersive AI Agent Workstation",
+    "subtitle": "Native desktop experience built for 50+ person enterprise R&D teams. Modern, efficient, focused.",
+    "slides": [
+      { "title": "Unified Dashboard", "subtitle": "Real-time visibility into all AI employee statuses, task progress, and success rates." },
+      { "title": "DAG Workflow Orchestration", "subtitle": "Visual drag-and-drop orchestration with automatic parallel task decomposition and aggregation." },
+      { "title": "AST-Native Code Editing", "subtitle": "AI that truly \"understands\" code structure — zero hallucination delivery across 20+ languages." },
+      { "title": "AI Team Collaboration", "subtitle": "Seamless dialogue between AI employees and humans with shared context and division of labor." }
+    ]
+  },
   "cta_section": {
     "title": "Ready to level up your R&D team?",
     "subtitle": "Book a 30-minute demo to see how AgentWork can be tailored for your business.",
