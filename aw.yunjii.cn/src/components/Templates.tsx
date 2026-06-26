@@ -30,7 +30,7 @@ export default function Templates() {
           transition={{ duration: 0.55 }}
           className="text-center mb-18 sm:mb-24"
         >
-          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
+          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 backdrop-blur-md text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
             行业模板
           </div>
           <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-[var(--color-text)] mb-5 tracking-tight">
@@ -52,7 +52,7 @@ export default function Templates() {
                 viewport={{ once: true }}
                 transition={{ duration: 0.45, delay: i * 0.1 }}
                 whileHover={{ y: -6 }}
-                className="group relative rounded-2xl bg-gradient-to-b from-[var(--color-aw-primary)]/[0.015] to-[var(--color-surface)] border border-[var(--color-aw-primary)]/6 p-7 text-center transition-all duration-300 hover:border-[var(--color-aw-primary)]/25 hover:shadow-[0_8px_32px_rgba(30,108,240,0.06)]"
+                className="group relative rounded-2xl bg-gradient-to-b from-[var(--color-aw-primary)]/[0.015] to-[var(--color-surface)]/70 backdrop-blur-sm border border-[var(--color-aw-primary)]/6 p-7 text-center transition-all duration-300 hover:border-[var(--color-aw-primary)]/25 hover:shadow-[0_8px_32px_rgba(30,108,240,0.06)]"
               >
                 {/* Icon */}
                 <div className={`w-16 h-16 rounded-2xl bg-gradient-to-br ${gradientClass} flex items-center justify-center mx-auto mb-5 text-2xl group-hover:scale-110 transition-transform duration-300`}>

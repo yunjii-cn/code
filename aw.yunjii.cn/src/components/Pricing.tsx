@@ -34,7 +34,7 @@ export default function Pricing() {
           transition={{ duration: 0.55 }}
           className="text-center mb-16 sm:mb-20"
         >
-          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
+          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 backdrop-blur-md text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
             定价
           </div>
           <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-[var(--color-text)] mb-5 tracking-tight">
@@ -71,8 +71,8 @@ function PricingCard({ tier, index }: { tier: Tier; index: number }) {
   const { t } = useTranslation();
 
   const cardBase = tier.highlighted
-    ? "border-[var(--color-aw-primary)]/30 bg-[var(--color-aw-primary)]/[0.03] aw-ring-glow hover:shadow-[0_0_60px_rgba(30,108,240,0.18)] scale-[1.02] lg:scale-105 z-10"
-    : "border-[var(--color-aw-primary)]/8 bg-gradient-to-b from-[var(--color-aw-primary)]/[0.015] to-[var(--color-surface)] hover:border-[var(--color-aw-primary)]/25";
+    ? "border-[var(--color-aw-primary)]/30 bg-[var(--color-aw-primary)]/[0.03] backdrop-blur-sm aw-ring-glow hover:shadow-[0_0_60px_rgba(30,108,240,0.18)] scale-[1.02] lg:scale-105 z-10"
+    : "border-[var(--color-aw-primary)]/8 bg-gradient-to-b from-[var(--color-aw-primary)]/[0.015] to-[var(--color-surface)]/70 backdrop-blur-sm hover:border-[var(--color-aw-primary)]/25";
 
   const btnBase = tier.highlighted
     ? "bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white shadow-[0_0_30px_rgba(30,108,240,0.25)] hover:shadow-[0_0_45px_rgba(30,108,240,0.4)]"

@@ -33,7 +33,7 @@ export default function Features() {
           transition={{ duration: 0.55 }}
           className="text-center mb-18 sm:mb-24"
         >
-          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
+          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 backdrop-blur-md text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
             核心能力
           </div>
           <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-[var(--color-text)] mb-5 tracking-tight">
@@ -54,7 +54,7 @@ export default function Features() {
               viewport={{ once: true }}
               transition={{ duration: 0.5, delay: i * 0.1 }}
               whileHover={{ y: -4 }}
-              className="group relative rounded-2xl bg-gradient-to-b from-[var(--color-aw-primary)]/[0.02] to-[var(--color-surface)] border border-[var(--color-aw-primary)]/8 p-8 sm:p-10 transition-all duration-300 hover:border-[var(--color-aw-primary)]/30 hover:shadow-[0_8px_40px_rgba(30,108,240,0.08)]"
+              className="group relative rounded-2xl bg-gradient-to-b from-[var(--color-aw-primary)]/[0.02] to-[var(--color-surface)]/70 backdrop-blur-sm border border-[var(--color-aw-primary)]/8 p-8 sm:p-10 transition-all duration-300 hover:border-[var(--color-aw-primary)]/30 hover:shadow-[0_8px_40px_rgba(30,108,240,0.08)]"
             >
               {/* Top gradient accent line */}
               <div className="absolute top-0 left-6 right-6 h-px bg-gradient-to-r from-transparent via-[var(--color-aw-primary)]/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />

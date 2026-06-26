@@ -48,7 +48,7 @@ export default function CtaSection() {
             <motion.a
               whileHover={{ scale: 1.03 }}
               href="https://work.yunjii.cn"
-              className="w-full sm:w-auto px-10 py-4 border border-[var(--color-aw-primary)]/15 text-[var(--color-aw-soft)] rounded-xl font-medium text-base hover:border-[var(--color-aw-primary)]/35 hover:bg-[var(--color-aw-primary)]/5 transition-all"
+              className="w-full sm:w-auto px-10 py-4 border border-[var(--color-aw-primary)]/15 backdrop-blur-sm text-[var(--color-aw-soft)] rounded-xl font-medium text-base hover:border-[var(--color-aw-primary)]/35 hover:bg-[var(--color-aw-primary)]/10 transition-all"
             >
               查看产品矩阵
             </motion.a>
