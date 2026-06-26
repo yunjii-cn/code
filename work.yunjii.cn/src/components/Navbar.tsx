@@ -167,7 +167,7 @@ export default function Navbar() {
               <motion.button
                 whileHover={{ scale: 1.03 }}
                 whileTap={{ scale: 0.97 }}
-                className="text-sm px-4 py-2 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-lg font-medium transition-all shadow-[var(--shadow-glow)]"
+                className="text-sm px-4 py-2 bg-[var(--color-yj-red)] hover:bg-[var(--color-yj-red-deep)] text-white rounded-lg font-medium transition-all"
               >
                 {t("nav.startFree")}
               </motion.button>
@@ -227,7 +227,7 @@ export default function Navbar() {
               </button>
               <motion.button
                 whileTap={{ scale: 0.98 }}
-                className="w-full py-3.5 bg-[var(--color-aw-primary)] text-white rounded-xl font-semibold text-base shadow-[var(--shadow-glow)]"
+                className="w-full py-3.5 bg-[var(--color-yj-red)] text-white rounded-xl font-semibold text-base"
               >
                 {t("nav.startFree")}
               </motion.button>

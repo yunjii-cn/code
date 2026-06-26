@@ -91,12 +91,12 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
         compact ? "w-[280px] snap-center shrink-0" : ""
       } ${
         tier.highlighted
-          ? "border-[var(--color-aw-primary)]/30 bg-[var(--color-aw-primary)]/5 ring-1 ring-[var(--color-aw-primary)]/20"
-          : "border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-border-hover)]"
+        ? "border-[var(--color-yj-red)]/20 bg-[var(--color-yj-red)]/[0.02] ring-1 ring-[var(--color-yj-red)]/10"
+        : "border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-border-hover)]"
       }`}
     >
       {tier.highlighted && (
-        <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-[var(--color-aw-primary)] text-white text-xs font-semibold rounded-full">
+        <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-[var(--color-yj-red)] text-white text-xs font-semibold rounded-full">
           最受欢迎
         </div>
       )}
@@ -128,7 +128,7 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
         href="#"
         className={`block text-center py-3 rounded-xl font-semibold text-sm transition-all ${
           tier.highlighted
-            ? "bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white shadow-[var(--shadow-glow)]"
+            ? "bg-[var(--color-yj-red)] hover:bg-[var(--color-yj-red-deep)] text-white"
             : "border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-border-hover)]"
         }`}
       >
