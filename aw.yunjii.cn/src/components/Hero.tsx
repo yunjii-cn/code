@@ -14,7 +14,7 @@ export default function Hero() {
   const { t } = useTranslation();
 
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
+    <section className="relative min-h-[90vh] sm:min-h-screen flex items-center justify-center overflow-hidden">
       {/* Deep immersive AW blue atmosphere — multi-layered */}
       <div className="absolute inset-0 bg-aw-mesh" />
       <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse 80% 50% at 50% 35%, rgba(30,108,240,0.12) 0%, transparent 70%)" }} />
@@ -54,7 +54,7 @@ export default function Hero() {
         {/* Hero title — massive, bold, premium */}
         <motion.h1
           {...fadeUp(0.2)}
-          className="text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-extrabold tracking-tight leading-[1.04] mb-8"
+          className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight leading-[1.08] mb-6"
         >
           <span className="text-[var(--color-text)]">{t("hero.title1")}</span>
           <br />
@@ -64,7 +64,7 @@ export default function Hero() {
         {/* Description — refined, larger */}
         <motion.p
           {...fadeUp(0.4)}
-          className="text-base sm:text-lg md:text-xl text-[var(--color-text-muted)] max-w-3xl mx-auto mb-14 leading-relaxed"
+          className="text-base sm:text-lg text-[var(--color-text-muted)] max-w-2xl mx-auto mb-12 leading-relaxed"
         >
           {t("hero.description")}
         </motion.p>

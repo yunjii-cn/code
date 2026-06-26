@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { ThemeProvider } from "./context/ThemeContext";
 import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
+import ProductShowcase from "./components/ProductShowcase";
 import Features from "./components/Features";
 import Templates from "./components/Templates";
 import Architecture from "./components/Architecture";
@@ -22,6 +23,7 @@ function AppContent() {
       <Navbar />
       <main>
         <Hero />
+        <ProductShowcase />
         <Features />
         <Templates />
         <Architecture />
