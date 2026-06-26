@@ -14,8 +14,15 @@ export default function Features() {
   const items = t("features.items", { returnObjects: true }) as Array<{ icon: string; title: string; desc: string }>;
 
   return (
-    <section id="features" className="relative py-28 sm:py-36 px-4 sm:px-6">
+    <section id="features" className="relative py-28 sm:py-36 px-4 sm:px-6 overflow-hidden">
       <div className="absolute inset-0 bg-[var(--color-aw-primary)]/[0.012]" />
+
+      {/* Ambient glow */}
+      <motion.div
+        animate={{ opacity: [0.06, 0.14, 0.06] }}
+        transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
+        className="absolute bottom-0 right-0 w-[600px] h-[400px] bg-[var(--color-aw-primary)]/8 blur-[180px] rounded-full pointer-events-none translate-x-1/4 translate-y-1/4"
+      />
 
       <div className="relative max-w-7xl mx-auto">
         {/* Section header */}

@@ -18,6 +18,13 @@ export default function Pricing() {
     <section id="pricing" className="relative py-28 sm:py-36 px-4 sm:px-6 overflow-hidden">
       <div className="absolute inset-0 bg-[var(--color-aw-primary)]/[0.012]" />
 
+      {/* Ambient glow */}
+      <motion.div
+        animate={{ opacity: [0.05, 0.12, 0.05] }}
+        transition={{ duration: 9, repeat: Infinity, ease: "easeInOut" }}
+        className="absolute top-1/4 right-0 w-[500px] h-[500px] bg-[var(--color-aw-primary)]/6 blur-[180px] rounded-full pointer-events-none translate-x-1/4"
+      />
+
       <div className="relative max-w-7xl mx-auto">
         {/* Section header */}
         <motion.div

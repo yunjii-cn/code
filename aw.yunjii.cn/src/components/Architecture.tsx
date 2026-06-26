@@ -15,7 +15,13 @@ export default function Architecture() {
   const layers = t("architecture.layers", { returnObjects: true }) as Array<{ name: string; tech: string; desc: string }>;
 
   return (
-    <section id="architecture" className="relative py-28 sm:py-36 px-4 sm:px-6">
+    <section id="architecture" className="relative py-28 sm:py-36 px-4 sm:px-6 overflow-hidden">
+      {/* Ambient glow */}
+      <motion.div
+        animate={{ opacity: [0.04, 0.1, 0.04] }}
+        transition={{ duration: 10, repeat: Infinity, ease: "easeInOut" }}
+        className="absolute top-1/3 left-1/2 -translate-x-1/2 w-[500px] h-[300px] bg-[var(--color-aw-primary)]/6 blur-[160px] rounded-full pointer-events-none"
+      />
       <div className="max-w-4xl mx-auto">
         <motion.div
           initial={{ opacity: 0, y: 24 }}
