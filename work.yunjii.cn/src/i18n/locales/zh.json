@@ -49,7 +49,7 @@
   },
   "pricing": {
     "title": "透明定价",
-    "subtitle": "从永久免费到企业定制，每一档都是经过深度用户研究后做出的诚实定义。",
+    "subtitle": "固定月费，不按席位计费。从免费到企业级，每一档都经过深度用户研究后做出的诚实定义。",
     "tiers": {
       "free": {
         "name": "Free",
@@ -58,17 +58,17 @@
       },
       "pro": {
         "name": "Pro",
-        "period": "/月",
+        "period": "起/月",
         "cta": "开始试用"
       },
       "business": {
         "name": "Business",
-        "period": "/月",
+        "period": "起/月",
         "cta": "了解更多"
       },
       "enterprise": {
         "name": "Enterprise",
-        "period": "/月/席位",
+        "period": "起/月",
         "cta": "预约演示"
       }
     }

@@ -49,7 +49,7 @@
   },
   "pricing": {
     "title": "Transparent Pricing",
-    "subtitle": "From free forever to enterprise custom — every tier is honestly defined through deep user research.",
+    "subtitle": "Flat monthly pricing, no per-seat charges. From free to enterprise — every tier honestly defined through deep user research.",
     "tiers": {
       "free": {
         "name": "Free",
@@ -58,17 +58,17 @@
       },
       "pro": {
         "name": "Pro",
-        "period": "/mo",
+        "period": "from/mo",
         "cta": "Start Trial"
       },
       "business": {
         "name": "Business",
-        "period": "/mo",
+        "period": "from/mo",
         "cta": "Learn More"
       },
       "enterprise": {
         "name": "Enterprise",
-        "period": "/seat/mo",
+        "period": "from/mo",
         "cta": "Request Demo"
       }
     }

@@ -104,28 +104,28 @@ export const tiers: Tier[] = [
     features: [
       "本地 AI（Ollama）",
       "单设备使用",
-      "PyQt6 桌面端",
+      "云集 PC 版",
       "社区支持",
     ],
     cta: "免费下载",
   },
   {
     name: "Pro",
-    price: "¥9.9",
-    period: "/月",
+    price: "¥99",
+    period: "起/月",
     features: [
       "云端 AI 模型",
       "跨端同步（3 设备）",
-      "PWA / 移动壳",
-      "¥10 等值算力/月",
+      "PWA / 移动端",
+      "¥50 等值算力/月",
       "邮件支持",
     ],
     cta: "开始试用",
   },
   {
     name: "Business",
-    price: "¥99",
-    period: "/月",
+    price: "¥199",
+    period: "起/月",
     features: [
       "全部 Pro 功能",
       "5 角色团队协作",
@@ -139,8 +139,8 @@ export const tiers: Tier[] = [
   },
   {
     name: "Enterprise",
-    price: "¥999",
-    period: "/月/席位",
+    price: "¥399",
+    period: "起/月",
     features: [
       "AI 员工 + AI 团队",
       "行业模板（电商/教育/金融）",

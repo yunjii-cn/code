@@ -6,14 +6,14 @@ const tierFeatures: Record<string, string[]> = {
   Free: [
     "本地 AI（Ollama）",
     "单设备使用",
-    "PyQt6 桌面端",
+    "云集 PC 版",
     "社区支持",
   ],
   Pro: [
     "云端 AI 模型",
     "跨端同步（3 设备）",
-    "PWA / 移动壳",
-    "¥10 等值算力/月",
+    "PWA / 移动端",
+    "¥50 等值算力/月",
     "邮件支持",
   ],
   Business: [
