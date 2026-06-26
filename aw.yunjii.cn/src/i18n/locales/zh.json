@@ -1,0 +1,96 @@
+{
+  "app": {
+    "title": "AgentWork | 云集智能体工作台"
+  },
+  "nav": {
+    "features": "能力",
+    "templates": "行业模板",
+    "architecture": "架构",
+    "pricing": "价格",
+    "login": "登录",
+    "cta": "预约演示"
+  },
+  "hero": {
+    "badge": "云集第 4 代 · Enterprise 旗舰产品",
+    "title1": "AI 智能体工作台",
+    "title2": "AI 员工 + AI 团队 + 行业模板",
+    "description": "AgentWork 是为 50+ 人企业打造的下一代 AI 研发工作空间。多 Agent DAG 真并行协作、AST-Native 代码认知引擎、编译期验证护栏——让 AI 从辅助工具升级为真正的生产力。",
+    "cta": "预约演示"
+  },
+  "features": {
+    "title": "核心能力",
+    "items": [
+      {
+        "icon": "agent",
+        "title": "多 Agent DAG 协作",
+        "desc": "多个 AI Agent 以有向无环图（DAG）编排并行协作，每个 Agent 专注一个子任务，调度引擎自动分配、聚合结果。"
+      },
+      {
+        "icon": "ast",
+        "title": "AST-Native 代码认知",
+        "desc": "基于 Rust 实现的 AST 解析引擎，让 AI 真正「读懂」代码结构，而非模式匹配。支持 20+ 编程语言。"
+      },
+      {
+        "icon": "guard",
+        "title": "编译期验证护栏",
+        "desc": "AI 生成的代码经过静态分析 + 编译验证双重护栏，语法错误拦截率 100%，零幻觉交付。"
+      },
+      {
+        "icon": "timeflow",
+        "title": "TimeFlow 版本控制",
+        "desc": "本地化的时间序列版本控制引擎，每次变更自动快照，任意时间点回滚，数据完全可控。"
+      }
+    ]
+  },
+  "templates": {
+    "title": "行业模板",
+    "subtitle": "AgentWork 为不同行业预训练专门的 AI 员工能力。",
+    "items": [
+      { "name": "电商零售", "desc": "商品管理、订单流、推荐引擎、库存同步", "icon": "电商" },
+      { "name": "在线教育", "desc": "课程管理、学员进度、测评系统、直播集成", "icon": "教育" },
+      { "name": "金融科技", "desc": "风控建模、合规审计、交易系统、数据安全", "icon": "金融" },
+      { "name": "企业 SaaS", "desc": "多租户架构、计费系统、RBAC、API 网关", "icon": "SaaS" }
+    ]
+  },
+  "architecture": {
+    "title": "技术架构",
+    "subtitle": "Tauri 2 + Rust + React，桌面级性能与 Web 灵活性的完美结合。",
+    "layers": [
+      { "name": "桌面壳", "tech": "Tauri 2", "desc": "原生窗口、系统托盘、自动更新、< 30 MB 安装包" },
+      { "name": "核心引擎", "tech": "Rust", "desc": "AST 解析、DAG 调度、版本控制、插件沙箱" },
+      { "name": "AI 运行时", "tech": "MLX / ONNX", "desc": "本地模型推理、Prompt 编排、多模态处理" },
+      { "name": "交互层", "tech": "React 19", "desc": "WebView 渲染、实时协作、可视化编排画布" }
+    ]
+  },
+  "pricing": {
+    "title": "定价方案",
+    "subtitle": "面向 50+ 人企业，按席位付费。含行业模板、私有化部署选项。",
+    "price": "¥999",
+    "period": "/月/席位",
+    "features": [
+      "AI 员工 × 5 + AI 团队",
+      "行业模板 × 3（电商/教育/金融）",
+      "AST-Native 代码认知引擎",
+      "TimeFlow 本地版本控制",
+      "全链路自动发布流水线",
+      "编译期验证护栏",
+      "专属客户成功经理",
+      "私有化部署可选"
+    ],
+    "cta": "预约演示",
+    "footer": "企业定制单独议价 · 私有化部署 ¥50 万起"
+  },
+  "cta_section": {
+    "title": "准备好升级你的研发团队了吗？",
+    "subtitle": "预约 30 分钟线上演示，了解 AgentWork 如何为你的业务量身定制。",
+    "button": "预约演示"
+  },
+  "footer": {
+    "tagline": "AgentWork 是云集智能第 4 代产品，为 50+ 人企业提供 AI 驱动的下一代研发工作空间。",
+    "products": "云集产品",
+    "links": ["云集 PC 版", "云集 Web 版", "云集团队版", "云集工作台"],
+    "copyright": "© 2026 云集智能. 保留所有权利.",
+    "privacy": "隐私政策",
+    "terms": "服务条款"
+  }
+}

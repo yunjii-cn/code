@@ -1,0 +1,107 @@
+{
+  "app": {
+    "title": "Yunji Work | 云集工作台",
+    "subtitle": "4 Generations of AI-Native Workspaces",
+    "description": "From personal local programming to enterprise AI team collaboration. Yunji provides the right AI-native workspace for every developer."
+  },
+  "nav": {
+    "products": "Products",
+    "pricing": "Pricing",
+    "download": "Download",
+    "docs": "Docs",
+    "login": "Sign In",
+    "startFree": "Start Free"
+  },
+  "hero": {
+    "badge": "4-Generation Product Matrix Now Live",
+    "title1": "Yunji Workspace",
+    "title2": "One Platform, Four Ways to Work",
+    "description": "From personal offline coding to enterprise AI team collaboration — Yunji provides the right AI-native workspace for every kind of developer. Start free forever, data stays private, scale as you grow.",
+    "ctaProducts": "Explore Products",
+    "ctaPricing": "Compare Plans",
+    "statLines": "Product Lines",
+    "statPrice": "Starting Price",
+    "statTech": "Tech Stacks"
+  },
+  "products": {
+    "title": "4-Generation Product Matrix",
+    "subtitle": "From free to enterprise, from local to cloud, from solo to AI team. Each generation solves real problems for a specific audience.",
+    "stable": "Stable",
+    "beta": "Beta",
+    "coming": "Coming Soon",
+    "suitableFor": "For: ",
+    "pc": {
+      "name": "Yunji PC",
+      "tagline": "Forever free. Local AI coding tool. Your data never leaves your machine."
+    },
+    "web": {
+      "name": "Yunji Web",
+      "tagline": "From ¥0.99/mo. Cross-platform AI coding workspace."
+    },
+    "team": {
+      "name": "Yunji Team",
+      "tagline": "¥99/mo. Full-featured AI coding workspace for teams."
+    },
+    "agentwork": {
+      "name": "AgentWork",
+      "tagline": "AI agent workstation. AI employees + AI teams + industry templates."
+    }
+  },
+  "pricing": {
+    "title": "Transparent Pricing",
+    "subtitle": "From free forever to enterprise custom — every tier is honestly defined through deep user research.",
+    "tiers": {
+      "free": {
+        "name": "Free",
+        "period": "Forever",
+        "cta": "Download Free"
+      },
+      "pro": {
+        "name": "Pro",
+        "period": "/mo",
+        "cta": "Start Trial"
+      },
+      "business": {
+        "name": "Business",
+        "period": "/mo",
+        "cta": "Learn More"
+      },
+      "enterprise": {
+        "name": "Enterprise",
+        "period": "/seat/mo",
+        "cta": "Request Demo"
+      }
+    }
+  },
+  "account": {
+    "title": "One Account, All Products",
+    "subtitle": "Sign up once, access Yunji PC, Web, Team, and AgentWork. Unified identity, seamless cross-platform.",
+    "register": "Sign Up Free",
+    "features": ["Single Sign-On", "Cross-Platform Data Sync", "Unified Billing", "Enterprise SSO"]
+  },
+  "download": {
+    "title": "Download & Access",
+    "subtitle": "Choose your product and get started. All products accessible from a single entry point."
+  },
+  "footer": {
+    "tagline": "Yunji is an AI-native workspace company. Four generations of products covering individual to enterprise scenarios.",
+    "products": "Products",
+    "resources": "Resources",
+    "about": "About",
+    "productLinks": ["Yunji PC", "Yunji Web", "Yunji Team", "AgentWork"],
+    "resourceLinks": ["Docs", "Download", "API", "Community"],
+    "aboutLinks": ["Company", "Blog", "Contact", "Careers"],
+    "privacy": "Privacy Policy",
+    "terms": "Terms of Service",
+    "icp": "ICP License",
+    "copyright": "© 2026 Yunji. All rights reserved."
+  },
+  "theme": {
+    "dark": "Dark Mode",
+    "light": "Light Mode",
+    "system": "System"
+  },
+  "lang": {
+    "switch": "中文"
+  }
+}

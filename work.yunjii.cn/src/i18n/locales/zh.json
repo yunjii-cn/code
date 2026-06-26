@@ -1,0 +1,107 @@
+{
+  "app": {
+    "title": "云集工作台 | Yunji Work",
+    "subtitle": "4 代 AI 原生工作空间",
+    "description": "从个人本地编程到企业 AI 团队协作，云集为每一类开发者提供合适的 AI 原生工作空间。"
+  },
+  "nav": {
+    "products": "产品",
+    "pricing": "价格",
+    "download": "下载",
+    "docs": "文档",
+    "login": "登录",
+    "startFree": "免费开始"
+  },
+  "hero": {
+    "badge": "云集 4 代产品矩阵已上线",
+    "title1": "云集智能工作台",
+    "title2": "4 类用户，一站选择",
+    "description": "从个人本地编程到企业 AI 团队协作，云集为每一类开发者提供合适的 AI 原生工作空间。永久免费起步，数据隐私可控，能力随需扩展。",
+    "ctaProducts": "查看全部产品",
+    "ctaPricing": "对比价格",
+    "statLines": "产品线",
+    "statPrice": "最低价格",
+    "statTech": "技术栈"
+  },
+  "products": {
+    "title": "4 代产品矩阵",
+    "subtitle": "从免费到企业，从本地到云端，从单人编程到 AI 团队协作。每一代解决一类用户的真实问题。",
+    "stable": "稳定版",
+    "beta": "Beta",
+    "coming": "即将发布",
+    "suitableFor": "适合：",
+    "pc": {
+      "name": "云集 PC 版",
+      "tagline": "永久免费的本地 AI 编程工具，数据不离开你的电脑"
+    },
+    "web": {
+      "name": "云集 Web 版",
+      "tagline": "¥9.9/月起，跨端跨平台的 AI 编程工作空间"
+    },
+    "team": {
+      "name": "云集团队版",
+      "tagline": "¥99/月，全功能的 AI 编程团队工作空间"
+    },
+    "agentwork": {
+      "name": "AgentWork",
+      "tagline": "AI 智能体工作台，AI 员工 + AI 团队 + 行业模板"
+    }
+  },
+  "pricing": {
+    "title": "透明定价",
+    "subtitle": "从永久免费到企业定制，每一档都是经过深度用户研究后做出的诚实定义。",
+    "tiers": {
+      "free": {
+        "name": "Free",
+        "period": "永久",
+        "cta": "免费下载"
+      },
+      "pro": {
+        "name": "Pro",
+        "period": "/月",
+        "cta": "开始试用"
+      },
+      "business": {
+        "name": "Business",
+        "period": "/月",
+        "cta": "了解更多"
+      },
+      "enterprise": {
+        "name": "Enterprise",
+        "period": "/月/席位",
+        "cta": "预约演示"
+      }
+    }
+  },
+  "account": {
+    "title": "一个账号，全系通行",
+    "subtitle": "只需注册一次，即可登录云集 PC 版、Web 版、团队版和 AgentWork。统一身份，跨代无缝。",
+    "register": "免费注册",
+    "features": ["单点登录", "跨代数据互通", "统一计费中心", "企业 SSO"]
+  },
+  "download": {
+    "title": "下载与入口",
+    "subtitle": "选择你的产品，立即开始。所有产品均可从统一入口访问。"
+  },
+  "footer": {
+    "tagline": "云集智能是 AI 原生工作空间公司。旗下 4 代产品，覆盖个人到企业全场景。",
+    "products": "产品",
+    "resources": "资源",
+    "about": "关于",
+    "productLinks": ["云集 PC 版", "云集 Web 版", "云集团队版", "AgentWork"],
+    "resourceLinks": ["文档", "下载", "API", "社区"],
+    "aboutLinks": ["公司", "博客", "联系我们", "加入我们"],
+    "privacy": "隐私政策",
+    "terms": "服务条款",
+    "icp": "备案号",
+    "copyright": "© 2026 云集智能. 保留所有权利."
+  },
+  "theme": {
+    "dark": "暗黑模式",
+    "light": "明亮模式",
+    "system": "跟随系统"
+  },
+  "lang": {
+    "switch": "English"
+  }
+}

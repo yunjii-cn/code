@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+/* ─── Design Tokens (Dark — default) ─── */
+:root,
+.dark {
+  /* Brand colors */
+  --color-yj-red: #e61912;
+  --color-yj-red-deep: #b81410;
+
+  /* AW Blue */
+  --color-aw-primary: #1e6cf0;
+  --color-aw-hover: #1553c7;
+  --color-aw-soft: #5b9bff;
+  --color-aw-glow: rgba(30, 108, 240, 0.28);
+  --color-aw-glow-strong: rgba(30, 108, 240, 0.40);
+
+  /* Surfaces */
+  --color-bg: #0b0d12;
+  --color-surface: #121620;
+  --color-elevated: #171c28;
+  --color-border: rgba(255, 255, 255, 0.10);
+  --color-border-hover: rgba(255, 255, 255, 0.16);
+
+  /* Text */
+  --color-text: #f8fafc;
+  --color-text-muted: #a1a8b3;
+  --color-text-faint: #697282;
+
+  /* Misc */
+  --color-grid: rgba(255, 255, 255, 0.03);
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+
+  /* Shadows */
+  --shadow-glow: 0 0 24px rgba(30, 108, 240, 0.28);
+  --shadow-glow-strong: 0 0 36px rgba(30, 108, 240, 0.40);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.24);
+  --shadow-card-hover: 0 4px 16px rgba(0, 0, 0, 0.32);
+
+  --color-nav-bg: rgba(11, 13, 18, 0.82);
+}
+
+/* ─── Light Theme ─── */
+.light {
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-elevated: #f1f5f9;
+  --color-border: rgba(0, 0, 0, 0.10);
+  --color-border-hover: rgba(0, 0, 0, 0.18);
+
+  --color-text: #0f172a;
+  --color-text-muted: #475569;
+  --color-text-faint: #94a3b8;
+
+  --color-grid: rgba(0, 0, 0, 0.04);
+  --color-success: #16a34a;
+  --color-warning: #ca8a04;
+
+  --shadow-glow: 0 0 24px rgba(30, 108, 240, 0.18);
+  --shadow-glow-strong: 0 0 32px rgba(30, 108, 240, 0.28);
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-card-hover: 0 4px 16px rgba(0, 0, 0, 0.12);
+
+  --color-nav-bg: rgba(248, 250, 252, 0.82);
+}
+
+/* ─── Tailwind Theme ─── */
+@theme {
+  --font-sans: "Inter", "HarmonyOS Sans SC", "Noto Sans SC", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+/* ─── Global ─── */
+html {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ─── Utilities ─── */
+.bg-grid-pattern {
+  background-image:
+    linear-gradient(var(--color-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-grid) 1px, transparent 1px);
+  background-size: 64px 64px;
+}
+
+.text-gradient-aw {
+  background: linear-gradient(135deg, #5b9bff 0%, #1e6cf0 50%, #1553c7 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}

@@ -1,0 +1,96 @@
+{
+  "app": {
+    "title": "AgentWork | AI Agent Workstation"
+  },
+  "nav": {
+    "features": "Features",
+    "templates": "Templates",
+    "architecture": "Architecture",
+    "pricing": "Pricing",
+    "login": "Sign In",
+    "cta": "Request Demo"
+  },
+  "hero": {
+    "badge": "Gen 4 · Enterprise Flagship",
+    "title1": "AI Agent Workstation",
+    "title2": "AI Employees + AI Teams + Industry Templates",
+    "description": "AgentWork is the next-gen AI R&D workspace built for enterprises of 50+ people. Multi-Agent DAG parallel collaboration, AST-Native code cognition engine, and compile-time verification guardrails — elevating AI from assistant to true productivity.",
+    "cta": "Request Demo"
+  },
+  "features": {
+    "title": "Core Capabilities",
+    "items": [
+      {
+        "icon": "agent",
+        "title": "Multi-Agent DAG Collaboration",
+        "desc": "Multiple AI agents orchestrated via DAG for true parallel collaboration. Each agent focuses on a sub-task; the scheduler auto-distributes and aggregates results."
+      },
+      {
+        "icon": "ast",
+        "title": "AST-Native Code Cognition",
+        "desc": "Rust-based AST parsing engine enabling AI to truly 'understand' code structure — not pattern matching. Supports 20+ programming languages."
+      },
+      {
+        "icon": "guard",
+        "title": "Compile-Time Verification Guardrails",
+        "desc": "AI-generated code passes static analysis + compilation verification. 100% syntax error interception. Zero hallucination delivery."
+      },
+      {
+        "icon": "timeflow",
+        "title": "TimeFlow Version Control",
+        "desc": "Local time-series version control engine. Auto-snapshot every change. Rollback to any point in time. Data fully under your control."
+      }
+    ]
+  },
+  "templates": {
+    "title": "Industry Templates",
+    "subtitle": "AgentWork pre-trains specialized AI employee capabilities for different industries.",
+    "items": [
+      { "name": "E-commerce & Retail", "desc": "Product management, order flow, recommendation engine, inventory sync", "icon": "Ecom" },
+      { "name": "Online Education", "desc": "Course management, student progress, assessment, live streaming", "icon": "Edu" },
+      { "name": "FinTech", "desc": "Risk modeling, compliance audit, trading systems, data security", "icon": "Fin" },
+      { "name": "Enterprise SaaS", "desc": "Multi-tenant architecture, billing, RBAC, API gateway", "icon": "SaaS" }
+    ]
+  },
+  "architecture": {
+    "title": "Technical Architecture",
+    "subtitle": "Tauri 2 + Rust + React — desktop performance meets web flexibility.",
+    "layers": [
+      { "name": "Desktop Shell", "tech": "Tauri 2", "desc": "Native windows, system tray, auto-update, < 30 MB installer" },
+      { "name": "Core Engine", "tech": "Rust", "desc": "AST parsing, DAG scheduling, version control, plugin sandbox" },
+      { "name": "AI Runtime", "tech": "MLX / ONNX", "desc": "Local model inference, prompt orchestration, multimodal processing" },
+      { "name": "UI Layer", "tech": "React 19", "desc": "WebView rendering, real-time collaboration, visual orchestration canvas" }
+    ]
+  },
+  "pricing": {
+    "title": "Pricing",
+    "subtitle": "Per-seat pricing for enterprises of 50+. Industry templates and private deployment options included.",
+    "price": "¥999",
+    "period": "/seat/month",
+    "features": [
+      "AI Employees × 5 + AI Teams",
+      "Industry Templates × 3 (E-commerce/Edu/FinTech)",
+      "AST-Native Code Cognition Engine",
+      "TimeFlow Local Version Control",
+      "Full-Cycle Auto Deploy Pipeline",
+      "Compile-Time Verification Guardrails",
+      "Dedicated Customer Success Manager",
+      "Private Deployment Available"
+    ],
+    "cta": "Request Demo",
+    "footer": "Custom enterprise pricing · Private deployment from ¥500K"
+  },
+  "cta_section": {
+    "title": "Ready to level up your R&D team?",
+    "subtitle": "Book a 30-minute demo to see how AgentWork can be tailored for your business.",
+    "button": "Request Demo"
+  },
+  "footer": {
+    "tagline": "AgentWork is Yunji's 4th-gen product, providing AI-driven next-gen R&D workspaces for 50+ person enterprises.",
+    "products": "Yunji Products",
+    "links": ["Yunji PC", "Yunji Web", "Yunji Team", "Yunji Work"],
+    "copyright": "© 2026 Yunji. All rights reserved.",
+    "privacy": "Privacy Policy",
+    "terms": "Terms of Service"
+  }
+}
