@@ -31,12 +31,12 @@
     "coming": "Coming Soon",
     "suitableFor": "For: ",
     "pc": {
-      "name": "Yunji PC",
+      "name": "Yunji Work Desktop",
       "tagline": "Local-first AI coding tool. Your data stays on your machine.",
       "desc": "Forever free, no feature gating. Works offline with Ollama. Privacy-first — code, AI chat, and knowledge stay 100% local.",
       "detail": {
-        "heading": "Yunji PC — Local-First AI Coding",
-        "intro": "Yunji PC is a forever-free local AI coding desktop tool. Double-click to launch, works offline, Ollama integrated. PyQt6 native window — faster and lighter than web-based alternatives.",
+        "heading": "Yunji Work Desktop — Local-First AI Coding",
+        "intro": "Yunji Work Desktop is a forever-free local AI coding desktop tool. Double-click to launch, works offline, Ollama integrated. PyQt6 native window — faster and lighter than web-based alternatives.",
         "features": [
           { "title": "Forever Free", "desc": "No feature gating. Open-source (AGPL-3.0), community-driven." },
           { "title": "Offline Ready", "desc": "Works without internet. Ollama local models at zero cost." },
@@ -49,12 +49,12 @@
       }
     },
     "web": {
-      "name": "Yunji Web",
+      "name": "Yunji Work Web",
       "tagline": "Cross-platform AI coding workspace.",
       "desc": "Seamless switching across desktop, phone, and tablet. Cloud AI one-click access, local Ollama mode also available. PWA and mobile coverage.",
       "detail": {
-        "heading": "Yunji Web — Cross-Platform Lightweight Workspace",
-        "intro": "Yunji Web delivers cross-platform AI coding. One account, seamless switching across desktop, phone, and tablet. FastAPI backend + Vue 3 frontend with PWA/Capacitor multi-device coverage.",
+        "heading": "Yunji Work Web — Cross-Platform Lightweight Workspace",
+        "intro": "Yunji Work Web delivers cross-platform AI coding. One account, seamless switching across desktop, phone, and tablet. FastAPI backend + Vue 3 frontend with PWA/Capacitor multi-device coverage.",
         "features": [
           { "title": "Multi-Device Sync", "desc": "Start on desktop, continue on phone. 3 devices simultaneously." },
           { "title": "Cloud AI", "desc": "One-click cloud model access. No Ollama setup needed." },
@@ -67,12 +67,12 @@
       }
     },
     "team": {
-      "name": "Yunji Team",
+      "name": "Yunji Work Team",
       "tagline": "Full-featured AI coding workspace for teams.",
       "desc": "5-role team collaboration, 4-layer knowledge engine, Yjs real-time collaboration. SSO + audit + multi-tenant — enterprise compliance ready.",
       "detail": {
-        "heading": "Yunji Team — Full AI Coding Team Workspace",
-        "intro": "Yunji Team provides complete AI coding team collaboration. 5-role team model (Lead/Architect/Dev/QA/Docs), 4-layer knowledge engine (Correction/Pattern/Fact/Preference) with strength evolution, and Yjs CRDT real-time collaboration.",
+        "heading": "Yunji Work Team — Full AI Coding Team Workspace",
+        "intro": "Yunji Work Team provides complete AI coding team collaboration. 5-role team model (Lead/Architect/Dev/QA/Docs), 4-layer knowledge engine (Correction/Pattern/Fact/Preference) with strength evolution, and Yjs CRDT real-time collaboration.",
         "features": [
           { "title": "5-Role Team", "desc": "Lead, Architect, Dev, QA, Docs — boundary checks and cross-review built in." },
           { "title": "4-Layer Knowledge Engine", "desc": "Correction, Pattern, Fact, Preference + strength evolution. Gets smarter over time." },
@@ -126,7 +126,7 @@
   },
   "account": {
     "title": "One Account, All Products",
-    "subtitle": "Sign up once, access Yunji PC, Web, Team, and AgentWork. Unified identity, seamless cross-platform.",
+    "subtitle": "Sign up once, access Desktop, Web, Team, and AgentWork. Unified identity, seamless cross-platform.",
     "register": "Sign Up Free",
     "features": ["Single Sign-On", "Cross-Platform Data Sync", "Unified Billing", "Enterprise SSO"]
   },
@@ -135,17 +135,17 @@
     "subtitle": "Choose your product and get started. All products accessible from a single entry point."
   },
   "footer": {
-    "tagline": "Yunji is an AI-native workspace company. Four generations of products covering individual to enterprise scenarios.",
+    "tagline": "Yunji Work is an AI-native workspace brand. Four generations of products covering individual to enterprise scenarios.",
     "products": "Products",
     "resources": "Resources",
     "about": "About",
-    "productLinks": ["Yunji PC", "Yunji Web", "Yunji Team", "AgentWork"],
+    "productLinks": ["Yunji Work Desktop", "Yunji Work Web", "Yunji Work Team", "AgentWork"],
     "resourceLinks": ["Docs", "Download", "API", "Community"],
     "aboutLinks": ["Company", "Blog", "Contact", "Careers"],
     "privacy": "Privacy Policy",
     "terms": "Terms of Service",
     "icp": "ICP 鄂ICP备2024085021号-1",
-    "copyright": "© 2026 Yunji. All rights reserved."
+    "copyright": "© 2026 Yunji Work. All rights reserved."
   },
   "theme": {
     "dark": "Dark Mode",

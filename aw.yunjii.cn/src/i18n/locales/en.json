@@ -152,10 +152,10 @@
     "button": "Request Demo"
   },
   "footer": {
-    "tagline": "AgentWork is Yunji's 4th-gen product, providing AI-driven next-gen R&D workspaces for 50+ person enterprises.",
-    "products": "Yunji Products",
-    "links": ["Yunji PC", "Yunji Web", "Yunji Team", "Yunji Work"],
-    "copyright": "© 2026 Yunji. All rights reserved.",
+    "tagline": "AgentWork is the 4th-gen product of Yunji Work, providing AI-driven next-gen R&D workspaces for 50+ person enterprises.",
+    "products": "Yunji Work Products",
+    "links": ["Yunji Work Desktop", "Yunji Work Web", "Yunji Work Team", "Yunji Work"],
+    "copyright": "© 2026 Yunji Work. All rights reserved.",
     "privacy": "Privacy Policy",
     "terms": "Terms of Service"
   }

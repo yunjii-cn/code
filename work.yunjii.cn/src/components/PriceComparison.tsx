@@ -6,7 +6,7 @@ const tierFeatures: Record<string, string[]> = {
   Free: [
     "本地 AI 引擎（Ollama 原生）",
     "单设备使用，断网也能跑",
-    "云集 PC 版桌面端",
+    "云集工作台·桌面版",
     "代码、对话 100% 留存本地",
     "零注册，双击即用",
     "社区支持",

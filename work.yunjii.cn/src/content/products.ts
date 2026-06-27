@@ -25,7 +25,7 @@ export interface Tier {
 export const products: Product[] = [
   {
     id: "pc",
-    name: "云集 PC 版",
+    name: "云集工作台·桌面版",
     tagline: "本地 AI 编程工具，数据不离开你的电脑",
     tier: "Free",
     price: "永久免费",
@@ -43,7 +43,7 @@ export const products: Product[] = [
   },
   {
     id: "web",
-    name: "云集 Web 版",
+    name: "云集工作台·网络版",
     tagline: "跨端跨平台的 AI 编程工作空间",
     tier: "Pro",
     price: "¥99/月起",
@@ -61,7 +61,7 @@ export const products: Product[] = [
   },
   {
     id: "team",
-    name: "云集团队版",
+    name: "云集工作台·团队版",
     tagline: "全功能的 AI 编程团队工作空间",
     tier: "Business",
     price: "¥199/月起",
@@ -106,7 +106,7 @@ export const tiers: Tier[] = [
     features: [
       "本地 AI 引擎（Ollama 原生）",
       "单设备使用，断网也能跑",
-      "云集 PC 版桌面端",
+      "云集工作台·桌面版",
       "代码、对话 100% 留存本地",
       "零注册，双击即用",
       "社区支持",

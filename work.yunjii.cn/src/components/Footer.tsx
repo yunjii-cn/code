@@ -29,7 +29,7 @@ export default function Footer() {
               <div className="w-8 h-8 rounded-lg bg-[var(--color-yj-red)] flex items-center justify-center text-white text-sm font-bold">
                 云
               </div>
-              云集智能
+              云集工作台
             </a>
             <p className="text-[var(--color-text-muted)] text-sm leading-relaxed max-w-xs">
               {t("footer.tagline")}

@@ -3,21 +3,21 @@ import { motion } from "framer-motion";
 
 const downloads = [
   {
-    name: "云集 PC 版",
+    name: "云集工作台·桌面版",
     desc: "PyQt6 桌面应用，双击即用",
     size: "~80 MB",
     platform: "Windows 10+",
     href: "#",
   },
   {
-    name: "云集 Web 版",
+    name: "云集工作台·网络版",
     desc: "浏览器即用，PWA 可安装",
     size: "在线服务",
     platform: "全平台",
     href: "#",
   },
   {
-    name: "云集团队版",
+    name: "云集工作台·团队版",
     desc: "团队协作工作空间",
     size: "在线服务",
     platform: "全平台",

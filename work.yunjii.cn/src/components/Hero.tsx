@@ -10,9 +10,9 @@ const stats = [
 ];
 
 const quickJumps = [
-  { label: "云集 PC 版", href: "#desktop" },
-  { label: "云集 Web 版", href: "#web" },
-  { label: "云集团队版", href: "#team" },
+  { label: "桌面版", href: "#desktop" },
+  { label: "网络版", href: "#web" },
+  { label: "团队版", href: "#team" },
   { label: "AgentWork", href: "#agentwork" },
 ];
 
