@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "AgentWork | AI Agent Workstation"
+    "title": "AgentWork | Yunjii AgentWork"
   },
   "nav": {
     "features": "Features",
@@ -11,11 +11,11 @@
     "cta": "Request Demo"
   },
   "hero": {
-    "badge": "Gen 4 · Enterprise Flagship",
-    "title1": "Yunji Agent Workstation",
+    "badge": "Yunjii AgentWork · Gen 4 Enterprise Flagship",
+    "title1": "Yunjii AgentWork",
     "title2a": "Cultivate Self-Evolving AI Employees",
     "title2b": "Build Digitally Collaborative Teams",
-    "description": "AgentWork is a modern intelligent digital workspace. Multi-Agent DAG truly parallel collaboration, AST-Native code cognition engine, and compile-time verification guardrails — elevating AI from an assistant to real productivity.",
+    "description": "Yunjii AgentWork is a modern intelligent digital workspace. Multi-Agent DAG truly parallel collaboration, AST-Native code cognition engine, and compile-time verification guardrails — elevating AI from an assistant to real productivity.",
     "cta": "Request Demo"
   },
   "features": {
