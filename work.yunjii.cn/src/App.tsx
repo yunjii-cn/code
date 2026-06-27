@@ -18,6 +18,19 @@ function AppContent() {
     document.title = t("app.title");
   }, [t]);
 
+  if (selectedProduct) {
+    return (
+      <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] transition-colors duration-300">
+        <Navbar />
+        <ProductDetailPage
+          productId={selectedProduct}
+          onClose={() => setSelectedProduct(null)}
+        />
+        <Footer />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] transition-colors duration-300">
       <Navbar />
@@ -29,13 +42,6 @@ function AppContent() {
         <DownloadSection />
       </main>
       <Footer />
-
-      {selectedProduct && (
-        <ProductDetailPage
-          productId={selectedProduct}
-          onClose={() => setSelectedProduct(null)}
-        />
-      )}
     </div>
   );
 }
