@@ -30,7 +30,7 @@ const themeIcons = {
   ),
 };
 
-export default function Navbar() {
+export default function Navbar({ onLogoClick }: { onLogoClick?: () => void }) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
@@ -85,9 +85,12 @@ export default function Navbar() {
           {/* Logo */}
           <motion.a
             href="#"
+            onClick={(e) => {
+              if (onLogoClick) { e.preventDefault(); onLogoClick(); }
+            }}
             whileHover={{ scale: 1.02 }}
             whileTap={{ scale: 0.98 }}
-            className="flex items-center gap-2.5 text-[var(--color-text)] font-semibold text-lg tracking-tight shrink-0"
+            className="flex items-center gap-2.5 text-[var(--color-text)] font-semibold text-lg tracking-tight shrink-0 cursor-pointer"
           >
             <div className="w-8 h-8 rounded-lg bg-[var(--color-yj-red)] flex items-center justify-center text-white text-sm font-bold">
               云

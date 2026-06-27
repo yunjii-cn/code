@@ -4,7 +4,6 @@ import { motion } from "framer-motion";
 
 interface Props {
   productId: string;
-  onClose: () => void;
 }
 
 const generationLabels: Record<string, string> = {
@@ -44,7 +43,7 @@ const awFeatures: Array<{ title: string; desc: string }> = [
   { title: "行业模板 + 自定义", desc: "电商/教育/金融/SaaS 预置模板，支持行业定制扩展。" },
 ];
 
-export default function ProductDetailPage({ productId, onClose }: Props) {
+export default function ProductDetailPage({ productId }: Props) {
   const { t } = useTranslation();
   const prefix = i18nPrefixes[productId] ?? "products.pc";
   const d = t(`${prefix}.detail`, { returnObjects: true }) as Record<string, unknown>;
@@ -63,20 +62,7 @@ export default function ProductDetailPage({ productId, onClose }: Props) {
   const displayFeatures = isAW ? awFeatures : features;
 
   return (
-    <main>
-      {/* Back link */}
-      <div className="max-w-5xl mx-auto px-4 sm:px-6 pt-6">
-        <button
-          onClick={onClose}
-          className="inline-flex items-center gap-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors group"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="group-hover:-translate-x-0.5 transition-transform">
-            <path d="M19 12H5M12 19l-7-7 7-7" />
-          </svg>
-          返回产品矩阵
-        </button>
-      </div>
-
+    <main className="pt-6">
       {/* Page content */}
       <div className="max-w-4xl mx-auto px-4 sm:px-6 py-12 sm:py-20">
         <motion.div
@@ -131,28 +117,19 @@ export default function ProductDetailPage({ productId, onClose }: Props) {
             <span>{userLabels[productId]}</span>
           </div>
 
-          <div className="flex gap-3">
-            {isAW ? (
-              <a
-                href="https://aw.yunjii.cn"
-                target="_blank"
-                rel="noopener"
-                className="inline-flex items-center gap-2 px-8 py-3 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-xl font-semibold text-sm transition-colors shadow-[0_0_24px_rgba(30,108,240,0.25)]"
-              >
-                访问 Yunjii AgentWork 官网
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
-                </svg>
-              </a>
-            ) : (
-              <button
-                onClick={onClose}
-                className="px-8 py-3 border border-[var(--color-border)] hover:border-[var(--color-border-hover)] text-[var(--color-text)] rounded-xl font-semibold text-sm transition-colors"
-              >
-                返回产品矩阵
-              </button>
-            )}
-          </div>
+          {isAW && (
+            <a
+              href="https://aw.yunjii.cn"
+              target="_blank"
+              rel="noopener"
+              className="inline-flex items-center gap-2 px-8 py-3 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-xl font-semibold text-sm transition-colors shadow-[0_0_24px_rgba(30,108,240,0.25)]"
+            >
+              访问 Yunjii AgentWork 官网
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
+              </svg>
+            </a>
+          )}
         </motion.div>
       </div>
     </main>

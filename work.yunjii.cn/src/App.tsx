@@ -21,11 +21,8 @@ function AppContent() {
   if (selectedProduct) {
     return (
       <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] transition-colors duration-300">
-        <Navbar />
-        <ProductDetailPage
-          productId={selectedProduct}
-          onClose={() => setSelectedProduct(null)}
-        />
+        <Navbar onLogoClick={() => setSelectedProduct(null)} />
+        <ProductDetailPage productId={selectedProduct} />
         <Footer />
       </div>
     );
