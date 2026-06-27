@@ -29,6 +29,7 @@ const tierFeatures: Record<string, string[]> = {
     "优先技术支持",
   ],
   Enterprise: [
+    "AI 团队协作引擎（多Agent DAG并行+异构模型）",
     "多 Agent DAG 真并行协作",
     "行业模板（电商/教育/金融/SaaS）",
     "AST-Native 代码认知引擎",
@@ -91,7 +92,7 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
       viewport={{ once: true, margin: "-60px" }}
       transition={{ duration: 0.4, delay: index * 0.08 }}
       whileHover={!compact ? { y: -6, scale: 1.02 } : undefined}
-      className={`relative rounded-2xl border p-6 sm:p-7 transition-all duration-300 ${
+      className={`relative rounded-2xl border p-6 sm:p-7 transition-all duration-300 flex flex-col ${
         compact ? "w-[280px] snap-center shrink-0" : ""
       } ${
         tier.highlighted
@@ -108,7 +109,7 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
       {/* Name + description */}
       <div className="mb-6">
         <h3 className="text-lg font-bold text-[var(--color-text)]">{t(`pricing.tiers.${tierKey}.name`)}</h3>
-        <p className="text-xs text-[var(--color-text-faint)] mt-1.5 leading-relaxed">{tier.desc}</p>
+        <p className="text-xs text-[var(--color-text-faint)] mt-1.5 leading-relaxed min-h-[2rem]">{tier.desc}</p>
         <div className="mt-3 flex items-baseline gap-0.5">
           <span className="text-3xl sm:text-4xl font-bold text-[var(--color-text)]">{tier.price}</span>
           {t(`pricing.tiers.${tierKey}.period`) !== "" && (
@@ -117,7 +118,7 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
         </div>
       </div>
 
-      <ul className="space-y-3 mb-8">
+      <ul className="space-y-3 mb-8 flex-1">
         {(tierFeatures[tier.name] || []).map((feature, i) => (
           <li key={i} className="flex items-start gap-2.5 text-sm text-[var(--color-text-muted)]">
             <svg className="w-4 h-4 mt-0.5 shrink-0 text-[var(--color-aw-soft)]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
@@ -132,7 +133,7 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
         href="#"
-        className={`block text-center py-3 rounded-xl font-semibold text-sm transition-all ${
+        className={`block text-center py-3 rounded-xl font-semibold text-sm transition-all mt-auto ${
           tier.highlighted
             ? "bg-[var(--color-yj-red)] hover:bg-[var(--color-yj-red-deep)] text-white"
             : "border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-border-hover)]"

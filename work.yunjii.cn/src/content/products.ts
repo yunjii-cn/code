@@ -149,8 +149,9 @@ export const tiers: Tier[] = [
     name: "Enterprise",
     price: "¥399",
     period: "起/月",
-    desc: "AI 智能体工作台，AI 员工 + 行业模板",
+    desc: "AI 智能体工作台，AI 员工组成数字化团队，自进化工作流",
     features: [
+      "AI 团队协作引擎（多Agent DAG并行+异构模型）",
       "多 Agent DAG 真并行协作",
       "行业模板（电商/教育/金融/SaaS）",
       "AST-Native 代码认知引擎",
