@@ -53,26 +53,14 @@ const productIcons: Record<string, ReactNode> = {
   ),
 };
 
-const sectionAnchors: Record<string, string> = {
-  pc: "#desktop-detail",
-  web: "#web-detail",
-  team: "#team-detail",
-  agentwork: "https://aw.yunjii.cn",
-};
+interface Props {
+  onSelectProduct?: (id: string) => void;
+}
 
-const linkTargets: Record<string, string | undefined> = {
-  pc: undefined,
-  web: undefined,
-  team: undefined,
-  agentwork: "_blank",
-};
-
-function ProductFeatureCard({ product, index }: { product: Product; index: number }) {
+function ProductFeatureCard({ product, index, onSelectProduct }: { product: Product; index: number; onSelectProduct?: (id: string) => void }) {
   const { t } = useTranslation();
   const isAW = product.id === "agentwork";
   const prefix = productI18nPrefix[product.id];
-  const href = sectionAnchors[product.id] ?? "#";
-  const target = linkTargets[product.id];
 
   const cardBorder = isAW
     ? "border-[var(--color-aw-primary)]/20 hover:border-[var(--color-aw-primary)]/40"
@@ -90,6 +78,14 @@ function ProductFeatureCard({ product, index }: { product: Product; index: numbe
     ? "bg-[var(--color-aw-primary)]/10"
     : "bg-[var(--color-border)]";
 
+  const handleClick = () => {
+    if (isAW) {
+      window.open("https://aw.yunjii.cn", "_blank");
+    } else {
+      onSelectProduct?.(product.id);
+    }
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 28 }}
@@ -97,7 +93,8 @@ function ProductFeatureCard({ product, index }: { product: Product; index: numbe
       viewport={{ once: true, margin: "-40px" }}
       transition={{ duration: 0.45, delay: index * 0.08 }}
       whileHover={{ y: -4 }}
-      className={`group relative rounded-2xl border ${cardBorder} ${cardBg} p-6 sm:p-7 transition-all duration-300 hover:shadow-[var(--shadow-card-hover)] flex flex-col`}
+      onClick={handleClick}
+      className={`group relative rounded-2xl border ${cardBorder} ${cardBg} p-6 sm:p-7 transition-all duration-300 hover:shadow-[var(--shadow-card-hover)] flex flex-col cursor-pointer`}
     >
       {/* Top row: icon + status */}
       <div className="flex items-start justify-between mb-4">
@@ -110,17 +107,17 @@ function ProductFeatureCard({ product, index }: { product: Product; index: numbe
         </div>
       </div>
 
-      {/* Product name — bigger */}
+      {/* Product name */}
       <h3 className={`text-xl font-bold text-[var(--color-text)] mb-3 ${isAW ? "group-hover:text-[var(--color-aw-soft)]" : "group-hover:text-[var(--color-yj-red)]"} transition-colors`}>
         {t(`${prefix}.name`)}
       </h3>
 
-      {/* Description — fuller */}
+      {/* Description */}
       <p className="text-sm text-[var(--color-text-muted)] leading-relaxed mb-5 flex-1">
         {t(`${prefix}.desc`)}
       </p>
 
-      {/* Feature chips — show all highlights */}
+      {/* Feature chips */}
       <div className="flex flex-wrap gap-1.5 mb-6">
         {product.highlights.map((h, i) => (
           <span
@@ -134,27 +131,24 @@ function ProductFeatureCard({ product, index }: { product: Product; index: numbe
         ))}
       </div>
 
-      {/* Detail button — prominent */}
-      <a
-        href={href}
-        target={target}
-        rel={target ? "noopener" : undefined}
-        className={`group/btn inline-flex items-center justify-center gap-2 w-full py-3 rounded-xl font-semibold text-sm transition-all ${
+      {/* Action button */}
+      <div
+        className={`inline-flex items-center justify-center gap-2 w-full py-3 rounded-xl font-semibold text-sm transition-all ${
           isAW
             ? "bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white shadow-[0_0_20px_rgba(30,108,240,0.2)]"
-            : "border border-[var(--color-border)] text-[var(--color-text)] hover:border-[var(--color-yj-red)]/30 hover:text-[var(--color-yj-red)] hover:bg-[var(--color-yj-red)]/[0.03]"
+            : "border border-[var(--color-border)] text-[var(--color-text)] group-hover:border-[var(--color-yj-red)]/30 group-hover:text-[var(--color-yj-red)] group-hover:bg-[var(--color-yj-red)]/[0.03]"
         }`}
       >
-        {isAW ? "访问 AgentWork 官网" : "查看详情"}
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="group-hover/btn:translate-x-0.5 transition-transform">
+        {isAW ? "了解 AgentWork" : "了解详情"}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="group-hover:translate-x-0.5 transition-transform">
           <path d="M5 12h14M12 5l7 7-7 7" />
         </svg>
-      </a>
+      </div>
     </motion.div>
   );
 }
 
-export default function ProductMatrix() {
+export default function ProductMatrix({ onSelectProduct }: Props) {
   const { t } = useTranslation();
 
   return (
@@ -180,7 +174,7 @@ export default function ProductMatrix() {
 
         <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-4 sm:gap-5">
           {products.map((p, i) => (
-            <ProductFeatureCard key={p.id} product={p} index={i} />
+            <ProductFeatureCard key={p.id} product={p} index={i} onSelectProduct={onSelectProduct} />
           ))}
         </div>
       </div>

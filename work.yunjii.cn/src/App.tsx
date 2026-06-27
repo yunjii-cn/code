@@ -1,10 +1,10 @@
-import { useEffect } from "react";
+import { useState, useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { ThemeProvider } from "./context/ThemeContext";
 import Navbar from "./components/Navbar";
 import Hero from "./components/Hero";
 import ProductMatrix from "./components/ProductMatrix";
-import { DesktopDetail, WebDetail, TeamDetail } from "./components/ProductDetail";
+import ProductDetailPage from "./components/ProductDetailPage";
 import PriceComparison from "./components/PriceComparison";
 import AccountInfo from "./components/AccountInfo";
 import DownloadSection from "./components/DownloadSection";
@@ -12,6 +12,7 @@ import Footer from "./components/Footer";
 
 function AppContent() {
   const { t } = useTranslation();
+  const [selectedProduct, setSelectedProduct] = useState<string | null>(null);
 
   useEffect(() => {
     document.title = t("app.title");
@@ -22,15 +23,19 @@ function AppContent() {
       <Navbar />
       <main>
         <Hero />
-        <ProductMatrix />
-        <DesktopDetail />
-        <WebDetail />
-        <TeamDetail />
+        <ProductMatrix onSelectProduct={setSelectedProduct} />
         <PriceComparison />
         <AccountInfo />
         <DownloadSection />
       </main>
       <Footer />
+
+      {selectedProduct && (
+        <ProductDetailPage
+          productId={selectedProduct}
+          onClose={() => setSelectedProduct(null)}
+        />
+      )}
     </div>
   );
 }
