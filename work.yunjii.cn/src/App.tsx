@@ -19,9 +19,18 @@ function AppContent() {
   }, [t]);
 
   if (selectedProduct) {
+    const handleNavigate = (href: string) => {
+      setSelectedProduct(null);
+      // Scroll to anchor after React re-renders the homepage
+      setTimeout(() => {
+        const el = document.querySelector(href);
+        el?.scrollIntoView({ behavior: "smooth" });
+      }, 100);
+    };
+
     return (
       <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] transition-colors duration-300">
-        <Navbar onLogoClick={() => setSelectedProduct(null)} />
+        <Navbar onLogoClick={() => setSelectedProduct(null)} onNavigate={handleNavigate} />
         <ProductDetailPage productId={selectedProduct} />
         <Footer />
       </div>

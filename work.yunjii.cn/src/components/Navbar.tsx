@@ -30,7 +30,7 @@ const themeIcons = {
   ),
 };
 
-export default function Navbar({ onLogoClick }: { onLogoClick?: () => void }) {
+export default function Navbar({ onLogoClick, onNavigate }: { onLogoClick?: () => void; onNavigate?: (href: string) => void }) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
@@ -103,7 +103,8 @@ export default function Navbar({ onLogoClick }: { onLogoClick?: () => void }) {
             {navLinks.map((link) => (
               <a
                 key={link.labelKey}
-                href={link.href}
+                href={onNavigate ? "#" : link.href}
+                onClick={onNavigate ? ((e) => { e.preventDefault(); onNavigate(link.href); }) : undefined}
                 className="px-3 py-2 text-sm text-[var(--color-text-muted)] hover:text-[var(--color-text)] rounded-lg hover:bg-[var(--color-border)] transition-colors"
               >
                 {t(link.labelKey)}
@@ -212,8 +213,8 @@ export default function Navbar({ onLogoClick }: { onLogoClick?: () => void }) {
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: 0.05 * i }}
-                  href={link.href}
-                  onClick={() => setOpen(false)}
+                  href={onNavigate ? "#" : link.href}
+                  onClick={() => { setOpen(false); if (onNavigate) onNavigate(link.href); }}
                   className="text-xl text-[var(--color-text-muted)] hover:text-[var(--color-text)] py-3 transition-colors"
                 >
                   {t(link.labelKey)}
