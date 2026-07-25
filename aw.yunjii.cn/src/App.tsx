@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ThemeProvider } from "./context/ThemeContext";
 import Navbar from "./components/Navbar";
@@ -8,11 +8,15 @@ import Features from "./components/Features";
 import Templates from "./components/Templates";
 import Architecture from "./components/Architecture";
 import Pricing from "./components/Pricing";
+import Roadmap from "./components/Roadmap";
 import CtaSection from "./components/CtaSection";
+import DemoForm from "./components/DemoForm";
+import Faq from "./components/Faq";
 import Footer from "./components/Footer";
 
 function AppContent() {
   const { t } = useTranslation();
+  const [demoOpen, setDemoOpen] = useState(false);
 
   useEffect(() => {
     document.title = t("app.title");
@@ -20,17 +24,20 @@ function AppContent() {
 
   return (
     <div className="min-h-screen bg-[var(--color-bg)] text-[var(--color-text)] transition-colors duration-300">
-      <Navbar />
+      <Navbar onOpenDemo={() => setDemoOpen(true)} />
       <main>
-        <Hero />
+        <Hero onOpenDemo={() => setDemoOpen(true)} />
         <ProductShowcase />
         <Features />
         <Templates />
         <Architecture />
-        <Pricing />
-        <CtaSection />
+        <Pricing onOpenDemo={() => setDemoOpen(true)} />
+        <Roadmap />
+        <CtaSection onOpenDemo={() => setDemoOpen(true)} />
+        <Faq />
       </main>
       <Footer />
+      <DemoForm isOpen={demoOpen} onClose={() => setDemoOpen(false)} />
     </div>
   );
 }

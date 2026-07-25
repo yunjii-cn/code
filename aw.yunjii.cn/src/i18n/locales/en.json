@@ -7,6 +7,8 @@
     "templates": "Templates",
     "architecture": "Architecture",
     "pricing": "Pricing",
+    "roadmap": "Roadmap",
+    "faq": "FAQ",
     "login": "Sign In",
     "cta": "Request Demo"
   },
@@ -16,7 +18,8 @@
     "title2a": "Cultivate Self-Evolving AI Employees",
     "title2b": "Build Digitally Collaborative Teams",
     "description": "Yunjii AgentWork is a modern intelligent digital workspace. Multi-Agent DAG truly parallel collaboration, AST-Native code cognition engine, and compile-time verification guardrails — elevating AI from an assistant to real productivity.",
-    "cta": "Request Demo"
+    "cta": "Request Demo",
+    "cta2": "Explore Features"
   },
   "features": {
     "title": "Core Capabilities",
@@ -54,6 +57,7 @@
     ]
   },
   "architecture": {
+    "badge": "Architecture",
     "title": "Technical Architecture",
     "subtitle": "Tauri 2 + Rust + React — desktop performance meets web flexibility.",
     "layers": [
@@ -64,6 +68,7 @@
     ]
   },
   "pricing": {
+    "badge": "Pricing",
     "title": "Pricing",
     "subtitle": "Flat monthly pricing. No per-seat charges. From individual dev to enterprise customization.",
     "recommended": "Recommended",
@@ -150,6 +155,36 @@
     "title": "Ready to level up your R&D team?",
     "subtitle": "Book a 30-minute demo to see how AgentWork can be tailored for your business.",
     "button": "Request Demo"
+  },
+  "roadmap": {
+    "badge": "Roadmap",
+    "title": "Product Roadmap",
+    "subtitle": "From M0 to GA — 20 weeks to build the AI R&D team collaboration platform.",
+    "milestones": [
+      { "name": "M0 · Kickoff", "date": "2026-06", "tag": "Done", "status": "done", "items": ["Repo init + toolchain ready", "4-gen product line contract", "5-layer ARCHITECTURE design", "Cargo workspace + Tauri scaffold"] },
+      { "name": "M1 · TimeFlow VCS", "date": "2026-06 ~ 07", "tag": "In Progress", "status": "active", "items": ["Tauri 2 desktop skeleton", "TimeFlow snapshot/rollback/branch", "Timeline visualization UI", "Git dual-mode (stealth/sync/release)"] },
+      { "name": "M2 · AI Semantic Versioning", "date": "2026-07 ~ 08", "tag": "Planned", "status": "planned", "items": ["AI auto commit messages", "Snapshot classification (WIP/candidate/release)", "Semantic search versions", "Auto candidate version detection"] },
+      { "name": "M3 · AI Team Collaboration ⭐", "date": "2026-08", "tag": "Planned", "status": "planned", "items": ["Multi-Agent DAG true parallelism", "Qwen3.7 + GLM5.2 heterogeneous models", "Orchestrator + Coder dual-agent MVP", "Git branch isolation + auto conflict resolution"] },
+      { "name": "M4 · AST-Native Cognition ⭐", "date": "2026-08 ~ 09", "tag": "Planned", "status": "planned", "items": ["Tree-sitter multi-language AST parsing", "LanceDB code knowledge graph", "Smart context extraction (Token -70%)", "Cross-language call chain + contract listener"] },
+      { "name": "M5 · Guardrails + Release ⭐", "date": "2026-09 ~ 10", "tag": "Planned", "status": "planned", "items": ["5-stage verification pipeline", "Trigger + Docker sandbox", "Multi-platform release matrix", "Zero hallucination delivery"] },
+      { "name": "M6 · Beta", "date": "2026-10 ~ 11", "tag": "Planned", "status": "planned", "items": ["Full pipeline integration", "Internal Beta (100 users)", "Public Beta (1000 users)", "Performance tuning + docs"] },
+      { "name": "M7+ · GA + Enterprise", "date": "2026-11+", "tag": "Future", "status": "future", "items": ["GA 1.0 official release", "Enterprise private deployment", "Skills marketplace beta", "Mobile PoC"] }
+    ]
+  },
+  "faq": {
+    "badge": "FAQ",
+    "title": "Frequently Asked Questions",
+    "subtitle": "Common questions about AgentWork.",
+    "items": [
+      { "q": "How is AgentWork different from traditional AI coding tools?", "a": "AgentWork goes beyond code completion. It's an AI agent workstation with multi-Agent DAG parallel collaboration, AST-Native code cognition engine, and compile-time verification guardrails — elevating AI from assistant to real productivity." },
+      { "q": "Which programming languages does AgentWork support?", "a": "Through the AST-Native engine, AgentWork supports 20+ mainstream programming languages including Rust, TypeScript, Python, Go, Java, with cross-language contract listening." },
+      { "q": "How is data security ensured?", "a": "AgentWork runs natively via Tauri 2 desktop. TimeFlow version control is fully local. Enterprise plans support private deployment — your data never leaves your infrastructure." },
+      { "q": "Are 2 AI Employees in Starter enough?", "a": "Starter (¥399/month) includes 2 AI employees + 1 industry template, ideal for individual developers or small projects. For team collaboration, consider Team or Professional plans." },
+      { "q": "Can I try before buying?", "a": "All plans include a 14-day free trial with no credit card required. Full core features are available during the trial." },
+      { "q": "Are custom industry templates supported?", "a": "Professional and above plans support custom industry templates. Enterprise plans include dedicated customization services." },
+      { "q": "How do AI employees and AI teams actually work?", "a": "You describe your requirement → the Orchestrator agent decomposes it into a DAG → distributes tasks to Coder, Reviewer, and other role agents for parallel execution. Each agent works in its own Git branch. Results are auto-merged and verified. Just like a real dev team." },
+      { "q": "What's the private deployment process?", "a": "Contact sales for a proposal → technical environment assessment → deployment and installation → acceptance and training. The full process takes 2-4 weeks. All data and models run on your servers. Enterprise plan (from ¥1,999/month) includes private deployment option." }
+    ]
   },
   "footer": {
     "tagline": "AgentWork is the 4th-gen product of Yunji Work, providing AI-driven next-gen R&D workspaces for 50+ person enterprises.",

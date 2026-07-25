@@ -32,6 +32,7 @@ export default function Architecture() {
         >
           <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 backdrop-blur-md text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
             技术架构
+            {t("architecture.badge")}
           </div>
           <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-[var(--color-text)] mb-5 tracking-tight">
             {t("architecture.title")}

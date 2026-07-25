@@ -1,3 +1,4 @@
+import type { MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
@@ -10,7 +11,7 @@ interface Tier {
   highlighted: boolean;
 }
 
-export default function Pricing() {
+export default function Pricing({ onOpenDemo }: { onOpenDemo: () => void }) {
   const { t } = useTranslation();
   const tiers = t("pricing.tiers", { returnObjects: true }) as Tier[];
 
@@ -36,6 +37,7 @@ export default function Pricing() {
         >
           <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full border border-[var(--color-aw-primary)]/8 bg-[var(--color-aw-primary)]/3 backdrop-blur-md text-[var(--color-aw-soft)] text-xs font-semibold tracking-wider uppercase mb-7">
             定价
+            {t("pricing.badge")}
           </div>
           <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-[var(--color-text)] mb-5 tracking-tight">
             {t("pricing.title")}
@@ -69,6 +71,10 @@ export default function Pricing() {
 
 function PricingCard({ tier, index }: { tier: Tier; index: number }) {
   const { t } = useTranslation();
+  const ctaHref = tier.name === "Enterprise" ? "mailto:sales@yunjii.cn" : "#cta";
+  const ctaOnClick = (tier.name === "Professional" || tier.name === "Enterprise")
+    ? (e: MouseEvent) => { e.preventDefault(); onOpenDemo(); }
+    : undefined;
 
   const cardBase = tier.highlighted
     ? "border-[var(--color-aw-primary)]/30 bg-[var(--color-aw-primary)]/[0.03] backdrop-blur-sm aw-ring-glow hover:shadow-[0_0_60px_rgba(30,108,240,0.18)] scale-[1.02] lg:scale-105 z-10"
@@ -130,7 +136,8 @@ function PricingCard({ tier, index }: { tier: Tier; index: number }) {
       <motion.a
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.97 }}
-        href="#"
+        href={ctaHref}
+        onClick={ctaOnClick}
         className={`block text-center py-3 rounded-xl font-semibold text-sm transition-all ${btnBase}`}
       >
         {tier.cta}

@@ -1,8 +1,8 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
-type Theme = "dark" | "light" | "system";
+export type Theme = "dark" | "light" | "system";
 
-interface ThemeState {
+export interface ThemeState {
   theme: Theme;
   resolved: "dark" | "light";
   setTheme: (t: Theme) => void;

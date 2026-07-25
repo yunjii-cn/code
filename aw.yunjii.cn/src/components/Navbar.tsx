@@ -8,6 +8,8 @@ const navLinks = [
   { labelKey: "nav.templates", href: "#templates" },
   { labelKey: "nav.architecture", href: "#architecture" },
   { labelKey: "nav.pricing", href: "#pricing" },
+  { labelKey: "nav.roadmap", href: "#roadmap" },
+  { labelKey: "nav.faq", href: "#faq" },
 ];
 
 const themeIcons = {
@@ -16,7 +18,7 @@ const themeIcons = {
   system: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8"><rect x="2" y="3" width="20" height="14" rx="2" /><path d="M8 21h8M12 17v4" /></svg>,
 };
 
-export default function Navbar() {
+export default function Navbar({ onOpenDemo }: { onOpenDemo: () => void }) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme } = useTheme();
   const [open, setOpen] = useState(false);
@@ -99,7 +101,7 @@ export default function Navbar() {
               </AnimatePresence>
             </div>
 
-            <motion.button whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="hidden md:inline-flex ml-2 text-sm px-4 py-2 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-lg font-medium transition-colors shadow-[var(--shadow-glow)]">
+            <motion.button onClick={onOpenDemo} whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} className="hidden md:inline-flex ml-2 text-sm px-4 py-2 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-lg font-medium transition-colors shadow-[var(--shadow-glow)]">
               {t("nav.cta")}
             </motion.button>
 

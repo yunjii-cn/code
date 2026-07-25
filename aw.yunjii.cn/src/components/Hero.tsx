@@ -10,7 +10,7 @@ const fadeUp = (delay: number) => ({
   transition: { duration: 0.7, delay, ease: [0.22, 1, 0.36, 1] as const },
 });
 
-export default function Hero() {
+export default function Hero({ onOpenDemo }: { onOpenDemo: () => void }) {
   const { t } = useTranslation();
 
   return (
@@ -85,7 +85,8 @@ export default function Hero() {
           <motion.a
             whileHover={{ scale: 1.04 }}
             whileTap={{ scale: 0.97 }}
-            href="#pricing"
+            onClick={(e) => { e.preventDefault(); onOpenDemo(); }}
+            href="#"
             className="group w-full sm:w-auto inline-flex items-center gap-3 px-10 py-4 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-xl font-semibold text-lg transition-all aw-ring-glow hover:shadow-[0_0_40px_rgba(30,108,240,0.35)]"
           >
             {t("hero.cta")}
@@ -98,7 +99,7 @@ export default function Hero() {
             href="#features"
             className="w-full sm:w-auto px-9 py-4 border border-[var(--color-aw-primary)]/15 text-[var(--color-aw-soft)] rounded-xl font-medium text-base hover:border-[var(--color-aw-primary)]/35 hover:bg-[var(--color-aw-primary)]/5 transition-all"
           >
-            探索能力
+            {t("hero.cta2")}
           </motion.a>
         </motion.div>
 

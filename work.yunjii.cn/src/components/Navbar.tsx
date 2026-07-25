@@ -5,8 +5,10 @@ import { useTheme } from "../context/ThemeContext";
 
 const navLinks = [
   { labelKey: "nav.products", href: "#products" },
+  { labelKey: "nav.wizard", href: "#wizard" },
   { labelKey: "nav.pricing", href: "#pricing" },
   { labelKey: "nav.download", href: "#download" },
+  { labelKey: "nav.faq", href: "#faq" },
   { labelKey: "nav.docs", href: "#" },
 ];
 

@@ -8,6 +8,8 @@
     "products": "Products",
     "pricing": "Pricing",
     "download": "Download",
+    "wizard": "Finder",
+    "faq": "FAQ",
     "docs": "Docs",
     "login": "Sign In",
     "startFree": "Start Free"
@@ -133,6 +135,59 @@
   "download": {
     "title": "Download & Access",
     "subtitle": "Choose your product and get started. All products accessible from a single entry point."
+  },
+  "wizard": {
+    "badge": "Product Finder",
+    "title": "Not sure which to choose?",
+    "subtitle": "Answer 3 questions and we'll recommend the right product for you.",
+    "start": "Get Started",
+    "restart": "Start Over",
+    "q1": {
+      "title": "What's your use case?",
+      "options": [
+        { "label": "Individual", "desc": "Students, indie devs, personal projects" },
+        { "label": "Small Team", "desc": "2-10 people, basic collaboration" },
+        { "label": "Medium Team", "desc": "10-50 people, knowledge management + workflows" },
+        { "label": "Enterprise", "desc": "50+ people, AI employees + industry solutions" }
+      ]
+    },
+    "q2": {
+      "title": "Your data privacy requirements?",
+      "options": [
+        { "label": "Must stay local", "desc": "Code and data cannot leave the device" },
+        { "label": "Cloud is fine", "desc": "Accept cloud processing and storage" },
+        { "label": "Flexible", "desc": "Either way works" }
+      ]
+    },
+    "q3": {
+      "title": "Which devices do you use?",
+      "options": [
+        { "label": "Single computer", "desc": "Work on one fixed device" },
+        { "label": "Multiple desktops", "desc": "Switch between desktop and laptop" },
+        { "label": "All platforms", "desc": "Desktop, phone, tablet — all needed" }
+      ]
+    },
+    "result": {
+      "title": "Recommended Product",
+      "pc": { "name": "Yunji Work Desktop", "tag": "Free · Always free", "reason": "Perfect for local programming. All data stays on your device, Ollama native offline AI, double-click to start." },
+      "web": { "name": "Yunji Work Web", "tag": "Pro · from ¥99/mo", "reason": "Cross-platform AI workspace. Seamless switching across desktop, phone, and tablet with one-click cloud AI." },
+      "team": { "name": "Yunji Work Team", "tag": "Business · from ¥199/mo", "reason": "Full-featured team collaboration. 5-role workflow + knowledge engine + real-time collaboration for medium teams." },
+      "agentwork": { "name": "AgentWork", "tag": "Enterprise · from ¥399/mo", "reason": "AI agent workstation. Multi-Agent DAG, AST code cognition, verification guardrails — enterprise-grade AI teams." }
+    }
+  },
+  "faq": {
+    "badge": "FAQ",
+    "title": "Frequently Asked Questions",
+    "items": [
+      { "q": "Is Yunji Work Desktop really free forever?", "a": "Yes. The Desktop edition is permanently free with no feature limitations. Local Ollama models cost you nothing. Cloud models will be pay-as-you-go in the future. No hidden fees, no forced upgrades." },
+      { "q": "What's the difference between Desktop and Web editions?", "a": "Desktop is a native PyQt6 Windows app — data stays 100% local, works offline. Web is a browser-based cross-platform service — desktop, phone, tablet all work, with one-click cloud AI. Desktop prioritizes privacy; Web prioritizes multi-device convenience." },
+      { "q": "How many users does Team edition support?", "a": "Team edition has no hard user cap, starting at ¥199/month. 5-role team collaboration with Yjs real-time editing. For 50+ users or private deployment, consider Enterprise." },
+      { "q": "How is AgentWork different from Team edition?", "a": "Team edition is a collaboration upgrade for traditional coding tools. AgentWork is an entirely new AI agent workstation — multi-Agent DAG parallel collaboration, AST-Native code cognition, compile-time verification guardrails. AI becomes real productivity, not just an assistant." },
+      { "q": "Is data secure? Can I deploy privately?", "a": "Desktop edition keeps all data local. Web and Team encrypt all data in transit, with optional Ollama local mode. AgentWork Enterprise supports private deployment (from ¥500K), keeping data within your infrastructure." },
+      { "q": "How do I upgrade from Free to a paid plan?", "a": "Desktop users can download Web or Team editions directly. Existing accounts can upgrade in Settings — all data and projects migrate seamlessly. New users get ¥30 free credit upon signup." },
+      { "q": "Which operating systems are supported?", "a": "Desktop currently supports Windows 10+, with macOS/Linux planned. Web and Team editions work cross-platform via browser. AgentWork (Tauri 2) launches with Windows/macOS/Linux support." },
+      { "q": "Can I get a refund?", "a": "All paid plans include a 14-day free trial with no charges. After subscribing, refunds are prorated by unused days. Contact support for processing." }
+    ]
   },
   "footer": {
     "tagline": "Yunji Work is an AI-native workspace brand. Four generations of products covering individual to enterprise scenarios.",

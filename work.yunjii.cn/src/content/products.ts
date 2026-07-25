@@ -39,7 +39,7 @@ export const products: Product[] = [
       "隐私第一，数据 100% 留本地",
       "PyQt6 原生窗口，响应更快",
     ],
-    cta: { label: "下载使用", href: "#", primary: false },
+    cta: { label: "下载使用", href: "#download", primary: false },
   },
   {
     id: "web",
@@ -57,7 +57,7 @@ export const products: Product[] = [
       "PWA / 桌面壳多端覆盖",
       "新人送 ¥30 体验金",
     ],
-    cta: { label: "开始试用", href: "#", primary: false },
+    cta: { label: "开始试用", href: "#pricing", primary: false },
   },
   {
     id: "team",
@@ -75,15 +75,15 @@ export const products: Product[] = [
       "4 层知识引擎 + 强度演化",
       "SSO + 审计 + 多租户合规",
     ],
-    cta: { label: "了解更多", href: "#", primary: false },
+    cta: { label: "了解更多", href: "#products", primary: false },
   },
   {
     id: "agentwork",
     name: "AgentWork",
     tagline: "AI 智能体工作台，AI 员工 + AI 团队 + 行业模板",
     tier: "Enterprise",
-    price: "¥999/月/席位",
-    priceNote: "企业定制单独议价，私有化部署 ¥50 万起",
+    price: "¥399/月起",
+    priceNote: "非按席位，固定月费。企业定制单独议价",
     status: "coming",
     tech: "Tauri 2 + Rust + React",
     targetUsers: "企业研发团队 / 50+ 人企业",
@@ -166,7 +166,9 @@ export const tiers: Tier[] = [
 
 export const navLinks = [
   { label: "产品", href: "#products" },
+  { label: "向导", href: "#wizard" },
   { label: "价格", href: "#pricing" },
   { label: "下载", href: "#download" },
+  { label: "FAQ", href: "#faq" },
   { label: "文档", href: "#" },
 ];

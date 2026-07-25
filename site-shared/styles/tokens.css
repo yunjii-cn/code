@@ -1,0 +1,72 @@
+/* ============================================
+   Yunjii Shared Brand Tokens
+   Used by work.yunjii.cn and aw.yunjii.cn
+   ============================================ */
+
+/* ── Brand Colors ── */
+:root {
+  --yj-red: #e61912;
+  --yj-red-deep: #b81410;
+  --aw-primary: #1e6cf0;
+  --aw-hover: #1553c7;
+  --aw-soft: #5b9bff;
+  --aw-glow: rgba(30, 108, 240, 0.28);
+  --aw-glow-strong: rgba(30, 108, 240, 0.40);
+}
+
+/* ── Dark Theme (default) ── */
+.dark,
+:root {
+  --color-bg: #0b0d12;
+  --color-surface: #121620;
+  --color-surface-alt: #0f131b;
+  --color-elevated: #171c28;
+  --color-nav-bg: rgba(11, 13, 18, 0.82);
+  --color-border: rgba(255, 255, 255, 0.10);
+  --color-border-hover: rgba(255, 255, 255, 0.18);
+  --color-text: #f8fafc;
+  --color-text-muted: #a1a8b3;
+  --color-text-faint: #697282;
+  --shadow-card-hover: 0 8px 32px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 24px rgba(30, 108, 240, 0.28);
+
+  /* Brand aliases */
+  --color-yj-red: var(--yj-red);
+  --color-yj-red-deep: var(--yj-red-deep);
+  --color-aw-primary: var(--aw-primary);
+  --color-aw-hover: var(--aw-hover);
+  --color-aw-soft: var(--aw-soft);
+}
+
+/* ── Light Theme ── */
+.light {
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-surface-alt: #f1f5f9;
+  --color-elevated: #ffffff;
+  --color-nav-bg: rgba(248, 250, 252, 0.82);
+  --color-border: rgba(0, 0, 0, 0.08);
+  --color-border-hover: rgba(0, 0, 0, 0.14);
+  --color-text: #0f172a;
+  --color-text-muted: #475569;
+  --color-text-faint: #94a3b8;
+  --shadow-card-hover: 0 8px 32px rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 0 24px rgba(30, 108, 240, 0.15);
+}
+
+/* ── Utility animations ── */
+@keyframes aw-glow-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.aw-ring-glow {
+  box-shadow: 0 0 24px rgba(30, 108, 240, 0.28);
+}
+
+.bg-aw-mesh {
+  background:
+    radial-gradient(ellipse 80% 30% at 50% 0%, rgba(30, 108, 240, 0.08) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 60%, rgba(91, 155, 255, 0.04) 0%, transparent 60%),
+    var(--color-bg);
+}

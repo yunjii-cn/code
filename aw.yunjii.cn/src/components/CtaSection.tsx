@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
-export default function CtaSection() {
+export default function CtaSection({ onOpenDemo }: { onOpenDemo: () => void }) {
   const { t } = useTranslation();
 
   return (
@@ -37,6 +37,7 @@ export default function CtaSection() {
             <motion.a
               whileHover={{ scale: 1.04 }}
               whileTap={{ scale: 0.96 }}
+              onClick={(e) => { e.preventDefault(); onOpenDemo(); }}
               href="#"
               className="group w-full sm:w-auto inline-flex items-center gap-3 px-12 py-4 bg-[var(--color-aw-primary)] hover:bg-[var(--color-aw-hover)] text-white rounded-xl font-bold text-lg transition-all aw-ring-glow hover:shadow-[0_0_40px_rgba(30,108,240,0.35)]"
             >

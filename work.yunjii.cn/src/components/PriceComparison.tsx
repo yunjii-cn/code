@@ -84,6 +84,7 @@ export default function PriceComparison() {
 function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index: number; compact?: boolean }) {
   const { t } = useTranslation();
   const tierKey = tier.name.toLowerCase();
+  const ctaHref = tier.name === "Free" ? "#download" : tier.name === "Enterprise" ? "#" : "#pricing";
 
   return (
     <motion.div
@@ -132,7 +133,7 @@ function TierCard({ tier, index, compact }: { tier: typeof tiers[number]; index:
       <motion.a
         whileHover={{ scale: 1.02 }}
         whileTap={{ scale: 0.98 }}
-        href="#"
+        href={ctaHref}
         className={`block text-center py-3 rounded-xl font-semibold text-sm transition-all mt-auto ${
           tier.highlighted
             ? "bg-[var(--color-yj-red)] hover:bg-[var(--color-yj-red-deep)] text-white"

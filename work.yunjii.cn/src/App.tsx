@@ -8,6 +8,8 @@ import ProductDetailPage from "./components/ProductDetailPage";
 import PriceComparison from "./components/PriceComparison";
 import AccountInfo from "./components/AccountInfo";
 import DownloadSection from "./components/DownloadSection";
+import SelectorWizard from "./components/SelectorWizard";
+import Faq from "./components/Faq";
 import Footer from "./components/Footer";
 
 function AppContent() {
@@ -43,9 +45,11 @@ function AppContent() {
       <main>
         <Hero />
         <ProductMatrix onSelectProduct={setSelectedProduct} />
+        <SelectorWizard />
         <PriceComparison />
         <AccountInfo />
         <DownloadSection />
+        <Faq />
       </main>
       <Footer />
     </div>
