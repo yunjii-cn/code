@@ -5,7 +5,7 @@ edition = { workspace = true }
 rust-version = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
-description = "AgentWork MCP 协议桥 - 独立 stdio MCP 服务器（最小版：health / status）"
+description = "AgentWork MCP 协议桥 - 独立 stdio MCP 服务器（health / status / task.execute / receipt.get）"
 publish = false
 
 [[bin]]
@@ -14,6 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

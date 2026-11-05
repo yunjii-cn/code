@@ -1,6 +1,10 @@
-// aw-mcp-bridge 方法分发：MCP 工具 health / status（只读）
+// aw-mcp-bridge 方法分发：只读 health/status + 执行层 task.execute/receipt.get
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "aw-mcp-bridge";
@@ -11,11 +15,19 @@ pub const DESKTOP_BUILD_TIME: &str = env!("AW_DESKTOP_BUILD_TIME");
 
 pub struct Server {
     settings_path: PathBuf,
+    runs_dir: PathBuf,
 }
 
 impl Server {
     pub fn new(settings_path: PathBuf) -> Self {
-        Self { settings_path }
+        Self::with_runs_dir(settings_path, default_runs_dir())
+    }
+
+    pub fn with_runs_dir(settings_path: PathBuf, runs_dir: PathBuf) -> Self {
+        Self {
+            settings_path,
+            runs_dir,
+        }
     }
 
     pub fn settings_path(&self) -> &Path {
@@ -73,17 +85,27 @@ impl Server {
             .and_then(|value| value.get("name"))
             .and_then(|value| value.as_str())
             .unwrap_or("");
+        let arguments = params
+            .and_then(|value| value.get("arguments"))
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+
         let payload = match name {
-            "health" => Some(self.health_payload()),
-            "status" => Some(self.status_payload()),
-            _ => None,
+            "health" => Ok(self.health_payload()),
+            "status" => Ok(self.status_payload()),
+            "task.execute" => self.execute_task(&arguments),
+            "receipt.get" => self.receipt_payload(&arguments),
+            _ => {
+                return tool_result(
+                    &json!({ "error": format!("未知工具：{name}") }),
+                    true,
+                )
+            }
         };
+
         match payload {
-            Some(payload) => tool_result(&payload, false),
-            None => tool_result(
-                &json!({ "error": format!("未知工具：{name}") }),
-                true,
-            ),
+            Ok(payload) => tool_result(&payload, false),
+            Err(error) => tool_result(&json!({ "error": error }), true),
         }
     }
 
@@ -109,6 +131,217 @@ impl Server {
             }
         })
     }
+
+    /// 接单执行：命令与判据由派单方给出，AW 只运行并产出可审计回执
+    fn execute_task(&self, args: &Value) -> Result<Value, String> {
+        let task_id = required_str(args, "task_id")?;
+        if !is_valid_task_id(task_id) {
+            return Err(format!(
+                "task_id 非法（需以字母或数字开头，仅含字母数字 . _ -，长度 ≤64）：{task_id}"
+            ));
+        }
+        let cmd = required_str(args, "cmd")?;
+        let cwd = match args.get("cwd").and_then(Value::as_str).map(str::trim) {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => std::env::current_dir().map_err(|e| format!("获取当前目录失败：{e}"))?,
+        };
+        if !cwd.is_dir() {
+            return Err(format!("cwd 不是目录：{}", cwd.display()));
+        }
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(Value::as_u64)
+            .unwrap_or(120);
+        if !(1..=600).contains(&timeout_secs) {
+            return Err("timeout_secs 必须在 1..=600 之间".to_string());
+        }
+
+        let run_dir = self.runs_dir.join(&task_id);
+        fs::create_dir_all(&run_dir).map_err(|e| format!("创建运行目录失败：{e}"))?;
+        let stdout_path = run_dir.join("stdout.txt");
+        let stderr_path = run_dir.join("stderr.txt");
+        let stdout_file =
+            fs::File::create(&stdout_path).map_err(|e| format!("创建 stdout 失败：{e}"))?;
+        let stderr_file =
+            fs::File::create(&stderr_path).map_err(|e| format!("创建 stderr 失败：{e}"))?;
+
+        let before = git_paths(&cwd);
+        let commit = git_output(&cwd, &["rev-parse", "--short", "HEAD"])
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let mut command = shell_command(cmd);
+        command
+            .current_dir(&cwd)
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+
+        let started = Instant::now();
+        let mut child = command.spawn().map_err(|e| format!("启动命令失败：{e}"))?;
+        let deadline = Duration::from_secs(timeout_secs);
+        let mut timed_out = false;
+        let exit_status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {
+                    if started.elapsed() >= deadline {
+                        timed_out = true;
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => return Err(format!("等待进程失败：{error}")),
+            }
+        };
+        let duration_ms = started.elapsed().as_millis() as u64;
+
+        let stdout_digest = digest_file(&stdout_path)?;
+        let stderr_digest = digest_file(&stderr_path)?;
+        let exit_code = exit_status.and_then(|status| status.code());
+        let status = if timed_out {
+            "blocked"
+        } else if exit_code == Some(0) {
+            "ok"
+        } else {
+            "failed"
+        };
+        let blocked_reason = timed_out.then(|| {
+            format!("timeout：超过 {timeout_secs}s 未结束，已终止进程")
+        });
+
+        let changed_files = {
+            let after = git_paths(&cwd);
+            let mut changed: Vec<String> = after.difference(&before).cloned().collect();
+            changed.sort();
+            changed.truncate(20);
+            changed
+        };
+
+        let handback = json!({
+            "task_id": task_id,
+            "status": status,
+            "changed_files": changed_files,
+            "verify_cmd": cmd,
+            "exit_code": exit_code,
+            "stdout_digest": stdout_digest,
+            "stderr_digest": stderr_digest,
+            "commit": commit,
+            "duration_ms": duration_ms,
+            "blocked_reason": blocked_reason,
+            "artifacts": [
+                {
+                    "kind": "stdout",
+                    "locator": format!("runs/{task_id}/stdout.txt"),
+                    "hash": stdout_digest.clone()
+                },
+                {
+                    "kind": "stderr",
+                    "locator": format!("runs/{task_id}/stderr.txt"),
+                    "hash": stderr_digest.clone()
+                }
+            ]
+        });
+        write_handback(&run_dir, &handback)?;
+        Ok(handback)
+    }
+
+    /// 按 task_id 读回已持久化的回执，供 PM 复核
+    fn receipt_payload(&self, args: &Value) -> Result<Value, String> {
+        let task_id = required_str(args, "task_id")?;
+        if !is_valid_task_id(task_id) {
+            return Err(format!("task_id 非法：{task_id}"));
+        }
+        let path = self.runs_dir.join(task_id).join("handback.json");
+        let raw = fs::read_to_string(&path).map_err(|_| format!("回执不存在：{task_id}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("回执解析失败：{e}"))
+    }
+}
+
+fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("缺少 {field}（必填字符串）"))
+}
+
+fn is_valid_task_id(value: &str) -> bool {
+    if value.len() > 64 {
+        return false;
+    }
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+fn shell_command(cmd: &str) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(cmd);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(cmd);
+        command
+    }
+}
+
+fn digest_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    let bytes = fs::read(path).map_err(|e| format!("读取证据失败：{e}"))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn write_handback(run_dir: &Path, handback: &Value) -> Result<(), String> {
+    let path = run_dir.join("handback.json");
+    let text =
+        serde_json::to_string_pretty(handback).map_err(|e| format!("序列化回执失败：{e}"))?;
+    fs::write(&path, text).map_err(|e| format!("写入回执失败：{e}"))
+}
+
+fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// 取工作区变更路径快照，用于对比执行前后新增的改动
+fn git_paths(cwd: &Path) -> HashSet<String> {
+    git_output(cwd, &["status", "--porcelain"])
+        .map(|raw| {
+            raw.lines()
+                .filter_map(|line| line.get(3..))
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 运行目录默认放在可执行文件旁，保证回执里的 locator 始终是相对路径
+fn default_runs_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("runs")
 }
 
 fn tools() -> Value {
@@ -122,6 +355,33 @@ fn tools() -> Value {
             "name": "status",
             "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置；不回显任何配置值",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "task.execute",
+            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执；AW 不定义判据、不做验收",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "派单标识（字母或数字开头，仅含字母数字 . _ -，≤64）" },
+                    "cmd": { "type": "string", "description": "派单方指定的执行/验证命令" },
+                    "cwd": { "type": "string", "description": "工作目录，默认进程当前目录；回执中的 locator 始终为相对路径" },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因" }
+                },
+                "required": ["task_id", "cmd"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "receipt.get",
+            "description": "按 task_id 读回已持久化的执行回执，供 PM 复核证据",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "task.execute 使用的派单标识" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }
         }
     ])
 }

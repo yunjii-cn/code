@@ -135,11 +135,13 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "futures-util",
+ "hex",
  "image",
  "qrcode",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
@@ -173,7 +175,10 @@ dependencies = [
 name = "aw-mcp-bridge"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "hex",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
