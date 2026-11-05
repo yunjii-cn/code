@@ -1721,7 +1721,6 @@ fn invalid_path_prepend_is_rejected_before_claiming_attempt() {
         many.push(format!("/opt/{index}"));
     }
     let cases = vec![
-        ("t-pp-bad-0", json!([])),
         ("t-pp-bad-1", json!([""])),
         ("t-pp-bad-2", json!(["/opt/one\0two"])),
         ("t-pp-bad-3", json!("a;b")),
@@ -1807,5 +1806,108 @@ fn legacy_dispatch_without_path_prepend_still_replays() {
     assert!(
         after.get("path_prepend").is_none(),
         "旧派单不得被补写 path_prepend：{after}"
+    );
+}
+
+// ---- 空集合口径一致：path_prepend: [] ≡ 缺省（v1.10，选 A）----
+
+#[test]
+fn empty_path_prepend_is_equivalent_to_omitted() {
+    let (server, _settings, runs) = server_with_runs();
+    let first = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-pp-empty", "cmd": "echo empty", "path_prepend": [] }),
+    ));
+    assert_eq!(first["attempt"], 1, "空数组必须被接受，不得判非法");
+
+    let replay = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-pp-empty", "cmd": "echo empty" }),
+    ));
+    assert_eq!(
+        replay["attempt"], 1,
+        "[] 与缺省同签名：同 id 重投必须命中同一 attempt，不得判冲突"
+    );
+    assert_eq!(first["stdout_digest"], replay["stdout_digest"]);
+    assert!(
+        !runs.path()
+            .join("t-pp-empty")
+            .join("attempt-2")
+            .exists(),
+        "等价空集合不得产生新 attempt"
+    );
+
+    let dispatch: Value = serde_json::from_str(
+        &fs::read_to_string(
+            runs.path()
+                .join("t-pp-empty")
+                .join("attempt-1")
+                .join("dispatch.json"),
+        )
+        .expect("读取派单记录"),
+    )
+    .expect("派单记录必须是 JSON");
+    assert_eq!(
+        dispatch["path_prepend"],
+        json!([]),
+        "签名里空集合必须归一为空数组"
+    );
+    assert_eq!(
+        first["path_prepend"],
+        json!([]),
+        "回执必须给空列表，而不是省略字段"
+    );
+}
+
+#[test]
+fn empty_env_and_path_prepend_combinations_share_one_signature() {
+    let (server, _settings, runs) = server_with_runs();
+    let dispatch_path = runs
+        .path()
+        .join("t-pp-matrix")
+        .join("attempt-1")
+        .join("dispatch.json");
+    let combos = [
+        json!({ "task_id": "t-pp-matrix", "cmd": "echo matrix" }),
+        json!({ "task_id": "t-pp-matrix", "cmd": "echo matrix", "env": {}, "path_prepend": [] }),
+        json!({ "task_id": "t-pp-matrix", "cmd": "echo matrix", "env": {} }),
+        json!({ "task_id": "t-pp-matrix", "cmd": "echo matrix", "path_prepend": [] }),
+    ];
+    let mut baseline = String::new();
+    for (index, arguments) in combos.into_iter().enumerate() {
+        let payload = tool_payload(&call_tool(&server, "task.execute", arguments));
+        assert_eq!(
+            payload["attempt"], 1,
+            "第 {} 种空/缺省组合必须命中同一 attempt",
+            index + 1
+        );
+        let text = fs::read_to_string(&dispatch_path).expect("读取派单记录");
+        if index == 0 {
+            baseline = text;
+        } else {
+            assert_eq!(
+                text, baseline,
+                "第 {} 种组合改写了签名，说明空集合没有归一",
+                index + 1
+            );
+        }
+        assert!(
+            !runs
+                .path()
+                .join("t-pp-matrix")
+                .join("attempt-2")
+                .exists(),
+            "第 {} 种组合产生了新 attempt",
+            index + 1
+        );
+    }
+    let dispatch: Value = serde_json::from_str(&baseline).expect("派单记录必须是 JSON");
+    assert_eq!(dispatch["env"], json!({}), "缺省 env 必须归一到空 map");
+    assert_eq!(
+        dispatch["path_prepend"],
+        json!([]),
+        "缺省 path_prepend 必须归一到空数组"
     );
 }

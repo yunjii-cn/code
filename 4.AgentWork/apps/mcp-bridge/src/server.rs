@@ -769,9 +769,8 @@ fn parse_path_prepend(args: &Value) -> Result<Vec<String>, String> {
         );
     };
     if items.is_empty() {
-        return Err(
-            "invalid_path_prepend: 空数组没有意义；不需要前插目录时请省略该字段".to_string(),
-        );
+        // 与缺省等价（与 env: {} 口径一致）：空集合表示"不追加"，不是错误
+        return Ok(Vec::new());
     }
     if items.len() > MAX_ENTRIES {
         return Err(format!(
