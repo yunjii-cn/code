@@ -279,7 +279,7 @@ test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ## 11. 仍存在的已知缺口（不在本批范围，不得被本批描述"修好"所掩盖）
 
-1. **`#3` 进程树杀灭未实现**：超时只杀直接子进程，孙进程存活未验证（`NOT_PROVEN`）。`timeout:` 文案与契约 §4 已如实说明。
+1. **`#3` 整棵进程树杀灭仍不可判定**：v1.16 已按窄定义实现**受控集合**清理（POSIX 进程组 / Windows Job），但逃逸后代（`setsid`、`spawn → Assign` 窗口、`BREAKAWAY`）不可见；`#3` 仍为 `NOT_PROVEN`。`timeout:` 文案与契约 §4 已如实说明。
 2. **`additionalProperties: false` 服务端不强制**：见 §7.2，属声明性约束。
 3. **清理的阈值/分档/`task_id` 退役纪律未由 PM 定**：`runs.prune` 入口已落地，但契约 §10 仍标"待定"。
 4. **认证/准入/并发上限不存在**：`clientInfo` 仅审计、不参与准入；`initialize` 多份记录不等于多会话、不构成身份。

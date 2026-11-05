@@ -1,36 +1,40 @@
-# 超时进程树杀灭（`#3`）设计评估
+# 超时进程树杀灭（`#3`）设计评估与窄定义实现
 
-- 状态：**仅设计评估，未实现**。`#3` 在契约中仍为 **`NOT_PROVEN`**。
-- 本批边界：**代码零改动、用例零改动、回执字段零改动、超时文案零改动**；本文件只是把 `NOT_PROVEN` 拆成"哪些可判定、哪些不可判定"，供 PM 决定是否立项。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.15 起 G9 行指向本文件，状态不变）。
+- 状态：**v1.16 已按窄定义实现**：只清理并判定"**受控集合**"（POSIX 进程组 / Windows Job Object）；**整棵进程树仍不可判定，`#3` 在契约中保持 `NOT_PROVEN`**。
+- 实现边界：代码改 `apps/mcp-bridge/src/server.rs`（`process_scope` 模块 + 超时路径 + `timeout_reason`）；用例改 `apps/mcp-bridge/tests/mcp_contract.rs` 与 `server.rs` 内单元测试；契约升到 v1.16；依赖仅把已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖，**未新增包、未改版本**。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.16 起 G9 行指向本文件）。
+- Windows 取舍：**未走 W2c**（自举 launcher 成本高、回归面大），选择 W2d——接受 `spawn → Assign` 竞态窗口；该窗口在回执文案与本文 §4.2 明写，**不假装不存在**。
 
 ---
 
 ## 0. 结论先行
 
 1. **"整棵进程树已终止"在当前环境仍不可判定**，`#3` 应继续保持 `NOT_PROVEN`。理由见 §6.4：两个平台都缺少对"逃逸后代"的可靠、可移植、无竞态观测点。
-2. **可以给出一个可执行的窄判据**：只证明"**受控集合**（Windows Job Object / POSIX 进程组）内没有存活进程"。它**不等于**整棵树，但能真正区分"进程不存在"与"进程还活着但不写盘"（§3、§6.2）。
-3. **明确否掉"超时后两次 `stat` 无变化"**：它测的是"是否写盘"，不是"是否存在"，会把 SIGSTOP、IO 阻塞、活着但本就不写盘的进程判成"已退出"（§2）。
-4. 平台方案与代价：Windows 用 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`），但用 `std::process::Command` 只能在 `spawn` **之后**加入作业，存在竞态窗口；POSIX 用 `process_group(0)` 可在 exec 前建组、无竞态，但 `setsid`/`setpgid` 可逃逸（§4、§5）。
-5. 依赖：`windows-sys 0.61.2` 与 `libc 0.2.186` **已在 `Cargo.lock`**（当前仅经 dev-dependency `tempfile` 出现在测试构建），新增为 **target-specific 直接依赖不新增包、不改版本**；许可均为 `MIT OR Apache-2.0`；源码体积 17.34 MB / 4.17 MB（registry 全特性）；MSRV 1.71 / 1.65，均低于 workspace 的 1.85（§7）。
+2. **已实现可执行的窄判据**：只证明"**受控集合**（Windows Job Object / POSIX 进程组）内没有存活进程"。它**不等于**整棵树，但能真正区分"进程不存在"与"进程还活着但不写盘"（§3、§6.2）。
+3. **明确否掉"超时后两次 `stat` 无变化"**：它测的是"是否写盘"，不是"是否存在"，会把 SIGSTOP、IO 阻塞、活着但本就不写盘的进程判成"已退出"（§2）。实现与用例均未使用该判据。
+4. 平台实现：POSIX 用 `process_group(0)` 在 **exec 前**建组、无加入竞态；Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，但 `std::process::Command` 只能在 `spawn` **之后** `Assign`，**竞态窗口存在且已披露**（§4.2、§4.5）。
+5. 依赖：`windows-sys 0.61.2` 与 `libc 0.2.186` **已在 `Cargo.lock`**，转为 **target-specific 直接依赖后不新增包、不改版本**；许可均为 `MIT OR Apache-2.0`；MSRV 1.71 / 1.65，均低于 workspace 的 1.85（§7）。
 
 ---
 
 ## 1. 当前事实
 
-### 1.1 实现现状（已核实）
+### 1.1 实现现状（v1.16，已核实）
 
-超时路径在 [`apps/mcp-bridge/src/server.rs`](../apps/mcp-bridge/src/server.rs) 的 `execute_task` 内（约 L777-L797）：
+超时路径在 [`apps/mcp-bridge/src/server.rs`](../apps/mcp-bridge/src/server.rs) 的 `execute_task` 内（约 L773-L808）：
 
-- 以 20 ms 间隔轮询 `child.try_wait()`；
-- 到达 `timeout_secs` 后：`timed_out = true` → `child.kill()` → `child.wait()` → `break`；
-- 随后生成的 `blocked_reason` 为（约 L805-L808）：
+- `process_scope::Supervisor::new()` → `supervisor.configure(&mut command)` → `spawn` → `supervisor.attach(&child)`；
+- 以 20 ms 间隔轮询 `child.try_wait()`；到达 `deadline` 后 `timed_out = true`，调用 `supervisor.terminate(&mut child)` 并据返回值生成文案；
+- `timeout_reason(timeout_secs, outcome)`（约 L1496-L1518）按三态分流，**只有 `Cleaned` 才说"已清理受控集合"**。
 
-  ```text
-  timeout：超过 {timeout_secs}s 未结束，已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证
-  ```
+`process_scope` 模块（约 L1075-L1492）：
 
-- 回执文案在 v1.11 已改为"只描述已执行的动作"，不再写"已终止进程"。
+- 公共类型 `CleanupOutcome { Cleaned, StillAlive, Unavailable }`；
+- Unix：`process_group(0)`（exec 前建组）→ 超时 `SIGTERM` → 500 ms 宽限期 → 仍存在则 `SIGKILL` → `child.wait()` → 轮询 `kill(-pgid, 0)` 至 `ESRCH`（3 s 上限）；
+- Windows：`CreateJobObjectW` + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`；`spawn` 后 `AssignProcessToJobObject`；超时 `TerminateJobObject` → `child.wait()` → 轮询 `ActiveProcesses` 至 0（3 s 上限）；查询失败按 `Unavailable`，**绝不当 0**；
+- 其他平台：只 `child.kill()`，返回 `Unavailable`。
+
+历史（v1.15 及以前）：超时路径只 `child.kill()` + `child.wait()`，文案为"已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"。
 
 ### 1.2 `child.kill()` 的实际作用域
 
@@ -50,18 +54,20 @@
 
 补充说明（避免把这条读成"已证明"）：
 
-- 这条是**一次性观测**，不是自动化回归证据。现有测试只覆盖**文案**（[`tests/mcp_contract.rs`](../apps/mcp-bridge/tests/mcp_contract.rs) 约 L2110-L2140 的 `timeout_reason_states_action_not_tree_death` 与 `legacy_timeout_reason_...`），**没有任何用例断言进程是否真的退出**。
+- 这条是**一次性观测**，不是自动化回归证据；v1.15 时测试只覆盖文案。v1.16 起新增了断言进程/作业状态的用例（§6.5），但**上述"上一轮实测"仍只作为历史观测保留**，不当作自动化证据。
 - 观测到的"仍存活"与本文的机制解释（§1.2、§1.3）一致，但**机制一致不等于已证明**：要证明，需要 §6.6 的观测点与已知 PID 的对照实验。
 
 ### 1.5 已有诚实性约束（不得回退）
 
-契约 §4、§6 与 v1.11 变更记录已写死：
+契约 §4、§6 与 v1.11 / v1.16 变更记录已写死：
 
-- `timeout` 文案只代表"已向直接子进程发送终止信号"；
-- 孙进程是否存活**未验证**；
-- 调用方需自行确认残留进程。
+- `timeout` 文案的作用域**写死为"受控集合"，不是整棵进程树**；
+- 只有判据返回 `Cleaned` 才能写"已清理受控集合；逃逸进程是否仍在运行未验证"；
+- 仍存活 / 不可用各有独立文案，**不得把失败或不可观测升级为"已清理"**；
+- 任何分支都**不得**出现"已终止进程树 / 无残留"；
+- 调用方需自行确认受控集合之外的残留进程。
 
-**本设计不改变上述任何措辞与状态。**
+状态约束：**`#3` 仍为 `NOT_PROVEN`**；实现窄定义不改变该状态，状态变更只能由用例结果另行决定。
 
 ---
 
@@ -139,7 +145,13 @@ CloseHandle(job)                                   // 最后句柄关闭时，KI
 | W2c | bridge 建作业（可继承句柄），把句柄值经环境变量传给一个小型 launcher；launcher **先把自己加入作业，再启动 `cmd`** | 新增一个辅助可执行文件；句柄继承与生命周期管理；打包/安装多一个产物 | 后代在 launcher 入作业之后才产生，窗口基本闭合；但显式 `BREAKAWAY` 仍可能逃逸 |
 | W2d | 接受竞态，只做"尽量加入" | 实现小 | **不能宣称确定性**；只能报"已清理作业内成员" |
 
-**当前没有实现任何一种**。若未来立项，推荐先评估 W2c（闭合主竞态且不改现有 spawn 语义），W2b 作为"要做到创建即入作业"的唯一严格路径。
+**v1.16 的实际选择：W2d（接受竞态，只做"尽量加入"）。** 未走 W2c 的原因：需要新增辅助可执行文件、句柄继承/生命周期管理与打包产物变更，代价与回归面都远大于收益；W2b 更是替换 spawn 路径的大段 `unsafe` FFI。因此本批继续使用 `std::process::Command`，在 `spawn` 后立即 `AssignProcessToJobObject`：
+
+- 若 `Assign` 失败（`ACCESS_DENIED` / `INVALID_PARAMETER` / 进程已退出），`attached = false`，`terminate` 只 `child.kill()` 并返回 `Unavailable`，**不宣称已清理**；
+- `spawn → Assign` 之间派生的后代**不在作业内**，`TerminateJobObject` 与 `ActiveProcesses` 都看不到；
+- 该窗口**存在**，已在回执文案（`Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业`）与本节明写，**不默认它不存在**。
+
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 仍在 `Supervisor::new` 设置，`Drop` 关闭最后一个句柄时由操作系统兜底清理作业成员（**设计意图；本批未做崩溃场景实测**）。
 
 ### 4.3 失败情形（逐条写死，均不得当作成功）
 
@@ -173,18 +185,21 @@ CloseHandle(job)                                   // 最后句柄关闭时，KI
 
 ## 5. POSIX 方案：独立进程组（`setsid`/`setpgid` + `kill(-pgid, ...)`）
 
-### 5.1 设计步骤（伪代码，不是实现）
+### 5.1 实现（v1.16，已落地）
 
 ```text
 Command::new("sh").arg("-c").arg(cmd)
-    .process_group(0)          // std::os::unix::process::CommandExt，Rust 1.64+，exec 前建组
+    .process_group(0)          // std::os::unix::process::CommandExt，exec 前建组
     .spawn()
 超时:
     kill(-pgid, SIGTERM)       // 先礼
-    等待 500 ms（轮询直接子进程与组状态）
-    kill(-pgid, SIGKILL)       // 后兵
+    等待最多 500 ms（轮询 kill(-pgid, 0)）
+    仍存在 → kill(-pgid, SIGKILL)
     child.wait()
-    轮询 kill(-pgid, 0) 直到 ESRCH 或清理期限
+    轮询 kill(-pgid, 0) 直到 ESRCH 或 3 s 期限
+      ESRCH        → Cleaned
+      0 / EPERM    → 仍存在（EPERM 按存在处理）
+      超期仍非 ESRCH → StillAlive
 ```
 
 优点：
@@ -233,7 +248,7 @@ Command::new("sh").arg("-c").arg(cmd)
 
 理由见 §2。**任何以文件副作用为代理的判据都不进入验收。**
 
-### 6.2 可判定的窄判据（仅证明"受控集合"清空）
+### 6.2 可判定的窄判据（仅证明"受控集合"清空；v1.16 已实现）
 
 **C1（POSIX）**：
 
@@ -281,19 +296,19 @@ TerminateJobObject 成功后，轮询 O4：
 5. **Windows 的逃逸**：`Assign` 在 `spawn` 之后的窗口、`BREAKAWAY`、`Assign` 失败，都会让成员不在作业内；`ActiveProcesses` 只数作业成员。
 6. **"某一时刻看不到"不等于"以后不会出现"**：只要还有逃逸的父进程活着，它可以在观测之后继续派生。没有对逃逸父进程的追踪，就无法用"多次采样为 0"推出"整树不存在"。
 
-**结论：`#3` 应保持 `NOT_PROVEN`。** 如果未来实现 C1/C2，能诚实宣称的只有："已清理**受控集合**（进程组/作业）；逃逸进程未验证"——这与 v1.11 文案的诚实口径同向，但**需要另一批契约变更**，不在本批。
+**结论：`#3` 应保持 `NOT_PROVEN`。** v1.16 实现 C1/C2 后，能诚实宣称的只有："已清理**受控集合**（进程组/作业）；逃逸进程是否仍在运行未验证"——这正是当前回执文案；它**不等于**整棵树，状态也不因此升级。
 
-### 6.5 判据的可执行性：如何落地为测试（未来立项时，本批不写）
+### 6.5 判据的可执行性：已落地的用例（v1.16）
 
-> 以下只描述测试设计，**本批用例零改动**。
+| 测试目的 | 用例（位置） | 夹具 | 断言 | Windows 结果 | POSIX 结果 |
+|---|---|---|---|---|---|
+| 正向：孙进程在受控集合内 | 集成 `timeout_cleans_controlled_set_including_grandchild`（`tests/mcp_contract.rs`） | POSIX `echo $$ > pids.txt; sleep 30 & echo $! >> pids.txt; wait`；Windows PowerShell `Start-Process ping -n 30` 并写 PID | 超时后文案含"已清理受控集合"；记录的 PID 均不再存活；POSIX 另查 `kill(-pgid,0)` 为 `ESRCH` | **通过（8.32 s）** | 代码已编译，运行未在本机执行 |
+| **反假通过**：活着但不写盘 | 单元 `stopped_process_still_counts_as_alive`（Unix）/ `alive_but_idle_process_is_counted_in_job`（Windows） | POSIX `sleep 30` + `SIGSTOP`；Windows `ping -n 30`（活着但不写盘） | 判据必须判"存在"（`kill(-pgid,0)` 为 0 / `ActiveProcesses > 0`），清空后才转 `Cleaned` | **通过** | 代码已编译，运行未在本机执行 |
+| 反向：已退出 | 单元 `exited_process_group_has_no_members`（Unix）/ `exited_process_leaves_job_empty`（Windows） | POSIX `sh -c 'exit 0'`；Windows `cmd /C "ping -n 2 ..."` 自然退出 | `ESRCH` / `ActiveProcesses == 0` → 判"不存在" | **通过** | 代码已编译，运行未在本机执行 |
+| **作用域负例**：逃逸 | 单元 `setsid_escape_is_outside_the_observed_group`（`#[cfg(target_os="linux")]`） | `setsid sleep 30 &`，PID 写入临时文件 | 组判据返回 `ESRCH`，但 `kill(已知PID, 0)` 为 0 → **证明 C1 是窄判据**（不断言"#3 解决"） | 不适用（Windows 无等价确定性夹具，记为 `UNPROVEN`） | 代码已编译，运行未在本机执行 |
+| 文案门禁 | 集成 `timeout_reason_states_action_not_tree_death` + `legacy_timeout_reason_is_returned_verbatim_and_not_rewritten` | 真实超时任务 + 旧 `handback.json` | 含"已清理受控集合"与"逃逸进程是否仍在运行未验证"；不含"已终止进程树 / 无残留"；Windows 另断言 `spawn→Assign` 窗口；旧回执原样返回、字节不变 | **通过** | 代码已编译，运行未在本机执行 |
 
-| 测试目的 | 夹具 | 断言 |
-|---|---|---|
-| 正向：孙进程在受控集合内 | POSIX `sh -c 'sleep 30 & wait'`；Windows `cmd /C "ping -n 30 127.0.0.1"` | 超时后 C1/C2 PASS；直接子进程 `wait` 已返回 |
-| **反假通过**：活着但不写盘 | 先启动 `sleep 30`，对其发 `SIGSTOP`（POSIX），或让它阻塞在读取空管道 | **C1 必须判"存在"**（`kill(-pgid,0)` 为 0），不得因为"没写盘"判"退出" |
-| 反向：已退出 | 启动短命进程，等其自然退出 | `ESRCH` / `ActiveProcesses == 0` → 判"不存在" |
-| **作用域负例**：逃逸 | POSIX `sh -c 'setsid sleep 30 &'`，把孙进程 PID 写入文件 | 组判据返回 `ESRCH`，但 `kill(已知PID, 0)` 仍为 0 → **证明 C1 是窄判据**（该测试断言"作用域有限"，不是断言"#3 解决"） |
-| Windows 逃逸 | 难以确定性复现 `Assign` 窗口/`BREAKAWAY` | 记录为 `UNPROVEN`，不做"已覆盖"断言 |
+**如实说明**：Windows 的 `spawn → Assign` 窗口与 `BREAKAWAY` 无法确定性复现，按 §6.6 记为 `UNPROVEN`，不做"已覆盖"断言。POSIX 用例在本机只做了交叉编译核对（`cargo check --tests --target x86_64-unknown-linux-gnu`），**运行期结果不在本机 Windows 环境产生**。
 
 ### 6.6 判据的判定边界（写死）
 
@@ -307,16 +322,16 @@ TerminateJobObject 成功后，轮询 O4：
 
 | 平台 | 能力 | 当前依赖状态 | 建议新增 | 版本 | 许可 | 源码体积 | MSRV | 是否新增包 | 构建影响 |
 |---|---|---|---|---|---|---|---|---|---|
-| Windows | Job Object API | `windows-sys 0.61.2` 仅在 dev（tempfile） | `[target.'cfg(windows)'.dependencies] windows-sys` | 0.61.2 | MIT OR Apache-2.0 | 17.34 MB（全特性源码） | 1.71 | 否（已锁定） | 仅 Windows 编译更多模块；未实测二进制增量 |
+| Windows | Job Object API | v1.16 起为 `[target.'cfg(windows)'.dependencies]` 正常依赖 | `windows-sys`（已加入 `Cargo.toml`） | 0.61.2 | MIT OR Apache-2.0 | 17.34 MB（全特性源码） | 1.71 | 否（已锁定） | 仅 Windows 编译更多模块；未实测二进制增量 |
 | Windows（备选） | Job Object API | `winapi` 不在树 | 不推荐 | — | — | — | — | 是 | 新增包 |
 | POSIX | 建进程组 | `std` 自带 `process_group` | 无 | — | — | — | 1.64+ | 否 | 无 |
-| POSIX | `kill(-pgid)` | `libc 0.2.186` 仅在 dev（tempfile） | `[target.'cfg(unix)'.dependencies] libc` | 0.2.186 | MIT OR Apache-2.0 | 4.17 MB | 1.65 | 否（已锁定） | 仅 Unix 编译 libc；未实测二进制增量 |
+| POSIX | `kill(-pgid)` | v1.16 起为 `[target.'cfg(unix)'.dependencies]` 正常依赖 | `libc`（已加入 `Cargo.toml`） | 0.2.186 | MIT OR Apache-2.0 | 4.17 MB | 1.65 | 否（已锁定） | 仅 Unix 编译 libc；未实测二进制增量 |
 
 补充事实：
 
 - workspace `rust-version = "1.85"`，上述 MSRV 全部满足；
 - workspace 许可为 `Apache-2.0`，两个候选依赖均为 `MIT OR Apache-2.0`，兼容；
-- `cargo tree -e normal -p aw-mcp-bridge` 当前**不包含** `windows-sys` / `libc`，它们只出现在测试构建（经 `tempfile`）。
+- 转换前 `cargo tree -e normal -p aw-mcp-bridge` 不含 `windows-sys` / `libc`（只经 dev `tempfile`）；v1.16 改为 target-specific 正常依赖后**仍不新增包、不改版本**，`Cargo.lock` 版本不变。
 
 ---
 
@@ -329,29 +344,38 @@ TerminateJobObject 成功后，轮询 O4：
 | C. 引入 Linux cgroup v2 委派 | 接近整棵树（Linux） | 很高（部署/权限/容器适配） | 非 Linux 平台无等价物；可被移出 cgroup | **否**（跨平台仍不成立） |
 | D. 不实现 | 无 | 零 | 维持现状 | 否（保持 `NOT_PROVEN`） |
 
-**建议**：
+**v1.16 的选择与结果**：
 
-1. **本批不实现**，`#3` 保持 `NOT_PROVEN`。
-2. 若 PM 希望把 `NOT_PROVEN` 变成"有可执行判据"，**先接受窄定义**：把目标改为"超时后清理受控集合，并以 C1/C2 验收"，同时明确"逃逸进程不在判据内"；这需要契约另开版本，且超时文案要改为"已清理受控集合；逃逸进程未验证"（**本批不改**）。
-3. 若 PM 要求"整棵树"承诺，则当前环境**不应立项实现**：只能先补 cgroup/launcher 级基础设施与跨平台观测方案，否则实现出来仍然是"看不见的逃逸"。
+1. 采用**方案 A**（受控集合清理 + C1/C2），**不做方案 B/C**：W2c/W2b 与 cgroup 委派的成本与回归面超出本批范围。
+2. 窄定义已由 PM 接受并落地；超时文案已改为"已清理受控集合；逃逸进程是否仍在运行未验证"（三态分流），契约升到 v1.16。
+3. **`#3` 保持 `NOT_PROVEN`**：窄判据通过不改变"整棵树不可判定"的事实；若未来要把状态升级，必须先给出整棵树的可靠观测方案（当前不存在）。
 
 ---
 
-## 9. 本批明确不做
+## 9. 边界：本批做了什么、明确没做什么
 
-- 不实现 Job Object、不改 `shell_command`/`spawn`/超时路径；
-- 不引入 `windows-sys`/`libc` 依赖；
-- 不改 `timeout` 文案、不改回执字段、不改任何测试；
-- 不把本设计写成"已实现"或"已解决"；
-- 契约中 `#3` 状态保持 `NOT_PROVEN`，仅新增指向本文件的设计链接与 v1.15 变更记录（文档级）。
+**做了**：
+
+- POSIX 用 `process_group(0)` + `kill(-pgid, SIGTERM → SIGKILL)` 清理受控集合；
+- Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，`spawn` 后 `Assign`（W2d，竞态窗口已披露）；
+- 判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`，作用域写死"受控集合"；
+- 超时文案三态分流（Cleaned / StillAlive / Unavailable），旧回执原样返回、不改写；
+- 契约 v1.16 + 四类用例（正向 / 反假通过 / 反向 / 作用域负例）。
+
+**明确没做**：
+
+- 不实现 W2b/W2c，不闭合 `spawn → Assign` 竞态窗口；
+- 不引入 cgroup v2 委派、不实现整棵树枚举；
+- 不把 `#3` 改成已证明，不改 `NOT_PROVEN` 状态；
+- 不写"已终止进程树 / 无残留"，也不在任何分支把 `StillAlive` / `Unavailable` 升级为"已清理"。
 
 ---
 
 ## 10. 事实来源
 
-- 超时路径与文案：[`server.rs`](../apps/mcp-bridge/src/server.rs) 约 L777-L808；`shell_command` 约 L1060-L1066。
-- 现有超时测试（仅文案）：[`mcp_contract.rs`](../apps/mcp-bridge/tests/mcp_contract.rs) 约 L2110-L2174。
-- 契约 v1.11 文案约束：`PM-AW-DISPATCH-CONTRACT.md` §4（L155）、§5 G9（L192）、§6（L196-L202）、§11（L381）。
-- 依赖事实：`apps/mcp-bridge/Cargo.toml`（仅 `serde_json`/`sha2`/`hex`/`chrono` + dev `tempfile`）；`cargo tree -e normal/-e dev`、`cargo tree -i windows-sys/winapi/libc`；`Cargo.lock` 中 `windows-sys 0.61.2`、`libc 0.2.186`、`windows-link 0.2.1`。
+- 超时路径：[`server.rs`](../apps/mcp-bridge/src/server.rs) 约 L773-L808；`process_scope` 约 L1075-L1492；`timeout_reason` 约 L1496-L1518；`shell_command` 约 L1060-L1073。
+- 超时用例：[`mcp_contract.rs`](../apps/mcp-bridge/tests/mcp_contract.rs) 约 L2108-L2250（文案门禁、正向孙进程清理、旧回执原样返回、PID 观测辅助）。
+- 契约 v1.16 文案约束：`PM-AW-DISPATCH-CONTRACT.md` §4（L155-L160）、§5 第 15 行 / G9（L180、L196）、§6（L200-L206）、§11（v1.16 行）。
+- 依赖事实：`apps/mcp-bridge/Cargo.toml`（`serde_json`/`sha2`/`hex`/`chrono` + dev `tempfile` + v1.16 的 target-specific `windows-sys` / `libc`）；`Cargo.lock` 中 `windows-sys 0.61.2`、`libc 0.2.186`、`windows-link 0.2.1` 版本未变。
 - `windows-sys 0.61.2` 源码核对：`Win32/Foundation/mod.rs`（`HANDLE = *mut c_void`）、`Win32/System/JobObjects/mod.rs`（`CreateJobObjectW` / `AssignProcessToJobObject` / `TerminateJobObject` / `QueryInformationJobObject` / `SetInformationJobObject`、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 8192`、`JobObjectExtendedLimitInformation = 9`、`JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.ActiveProcesses`）。
 - 实测观测：上一轮超时实测记录（由调用方转述）：超时返回后父/子进程仍存活，由测试脚本以 `SIGKILL` 等价手段清理；**单次观测，未固化为自动化用例**。

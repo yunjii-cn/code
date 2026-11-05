@@ -773,23 +773,28 @@ impl Server {
         let started = Instant::now();
         let deadline = Duration::from_secs(timeout_secs);
         let mut timed_out = false;
+        let mut cleanup_outcome = None;
         let mut spawn_error: Option<String> = None;
+        let mut supervisor = process_scope::Supervisor::new();
+        supervisor.configure(&mut command);
         let exit_status = match command.spawn() {
-            Ok(mut child) => loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) => {
-                        if started.elapsed() >= deadline {
-                            timed_out = true;
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break None;
+            Ok(mut child) => {
+                supervisor.attach(&child);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Some(status),
+                        Ok(None) => {
+                            if started.elapsed() >= deadline {
+                                timed_out = true;
+                                cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                break None;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
                         }
-                        std::thread::sleep(Duration::from_millis(20));
+                        Err(error) => return Err(format!("等待进程失败：{error}")),
                     }
-                    Err(error) => return Err(format!("等待进程失败：{error}")),
                 }
-            },
+            }
             Err(error) => {
                 spawn_error = Some(format!("command_not_found: 启动命令失败：{error}"));
                 None
@@ -799,14 +804,8 @@ impl Server {
 
         let stdout_digest = digest_file(&stdout_path)?;
         let stderr_digest = digest_file(&stderr_path)?;
-        let blocked_reason = spawn_error.or_else(|| {
-            timed_out.then(|| {
-                // 只描述已执行的动作：child.kill() 只作用于直接子进程，孙进程是否存活未经观测
-                format!(
-                    "timeout：超过 {timeout_secs}s 未结束，已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
-                )
-            })
-        });
+        let blocked_reason = spawn_error
+            .or_else(|| timed_out.then(|| timeout_reason(timeout_secs, cleanup_outcome)));
         let exit_code = exit_status.and_then(|status| status.code());
         let status = if blocked_reason.is_some() {
             "blocked"
@@ -1069,6 +1068,445 @@ fn shell_command(cmd: &str) -> Command {
         let mut command = Command::new("sh");
         command.arg("-c").arg(cmd);
         command
+    }
+}
+
+/// 超时清理只承诺"受控集合"（POSIX 进程组 / Windows Job Object）内无存活进程。
+/// 逃逸后代（setsid、breakaway、spawn→Assign 窗口）不在判据内，`#3` 仍为 `NOT_PROVEN`。
+mod process_scope {
+    /// 受控集合内的清理结果。`Unavailable` 表示机制未建立/无法观测，绝不等于"已清理"。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum CleanupOutcome {
+        Cleaned,
+        StillAlive,
+        Unavailable,
+    }
+
+    #[cfg(unix)]
+    mod imp {
+        use super::CleanupOutcome;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Child, Command};
+        use std::time::{Duration, Instant};
+
+        const TERM_GRACE: Duration = Duration::from_millis(500);
+        const CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
+
+        pub(crate) struct Supervisor {
+            pgid: Option<i32>,
+        }
+
+        impl Supervisor {
+            pub(crate) fn new() -> Self {
+                Self { pgid: None }
+            }
+
+            /// 在 exec 之前建组：`process_group(0)` 让子进程成为新进程组的组长，
+            /// 因此不存在 Windows 那种"spawn 之后再加入"的竞态窗口。
+            pub(crate) fn configure(&mut self, command: &mut Command) {
+                command.process_group(0);
+            }
+
+            pub(crate) fn attach(&mut self, child: &Child) {
+                self.pgid = i32::try_from(child.id()).ok().filter(|pgid| *pgid > 0);
+            }
+
+            pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
+                let Some(pgid) = self.pgid else {
+                    let _ = child.kill();
+                    return CleanupOutcome::Unavailable;
+                };
+                // 先礼后兵：SIGTERM 给宽限期，再 SIGKILL
+                unsafe {
+                    libc::kill(-pgid, libc::SIGTERM);
+                }
+                let grace_deadline = Instant::now() + TERM_GRACE;
+                while Instant::now() < grace_deadline && group_exists(pgid) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                if group_exists(pgid) {
+                    unsafe {
+                        libc::kill(-pgid, libc::SIGKILL);
+                    }
+                }
+                let _ = child.wait();
+
+                // 判据：只查"进程组内是否还有进程"，不查文件是否写盘
+                let deadline = Instant::now() + CLEANUP_DEADLINE;
+                loop {
+                    if !group_exists(pgid) {
+                        return CleanupOutcome::Cleaned;
+                    }
+                    if Instant::now() >= deadline {
+                        return CleanupOutcome::StillAlive;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
+
+        fn group_exists(pgid: i32) -> bool {
+            let rc = unsafe { libc::kill(-pgid, 0) };
+            if rc == 0 {
+                return true;
+            }
+            match std::io::Error::last_os_error().raw_os_error() {
+                Some(libc::ESRCH) => false,
+                // EPERM 等：存在但不可信号，按"存在"处理，绝不能当成功
+                _ => true,
+            }
+        }
+
+        #[cfg(test)]
+        fn pid_exists(pid: i32) -> bool {
+            if pid <= 0 {
+                return false;
+            }
+            let rc = unsafe { libc::kill(pid, 0) };
+            rc == 0
+                || !matches!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                )
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            use std::os::unix::process::CommandExt;
+            use std::process::{Command, Stdio};
+
+            fn wait_group_empty(pgid: i32) -> bool {
+                for _ in 0..150 {
+                    if !group_exists(pgid) {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                false
+            }
+
+            // 反假通过：活着但被暂停、不写盘的进程，必须仍被判为"存在"
+            #[test]
+            fn stopped_process_still_counts_as_alive() {
+                let mut command = Command::new("sleep");
+                command
+                    .arg("30")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0);
+                let mut child = command.spawn().expect("spawn sleep");
+                let pgid = child.id() as i32;
+                unsafe {
+                    libc::kill(pgid, libc::SIGSTOP);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+                assert!(
+                    group_exists(pgid),
+                    "SIGSTOP 的进程仍然存在，不能被文件 stat 式判据误判为已退出"
+                );
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                assert!(wait_group_empty(pgid), "SIGKILL 后进程组应最终清空");
+            }
+
+            // 反向：进程已退出，组判据应为空
+            #[test]
+            fn exited_process_group_has_no_members() {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg("exit 0").process_group(0);
+                let mut child = command.spawn().expect("spawn sh");
+                let pgid = child.id() as i32;
+                let _ = child.wait();
+                assert!(wait_group_empty(pgid), "进程退出后进程组应为空");
+            }
+
+            // 作用域负例：setsid 逃逸进程不在原进程组内 → 组判据看不到它（仅证明作用域有限）
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn setsid_escape_is_outside_the_observed_group() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-setsid-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let pid_file = dir.join("pid.txt");
+                let script = format!(
+                    "if command -v setsid >/dev/null 2>&1; then setsid sleep 30 & echo $! > '{}'; else echo skip > '{}'; fi",
+                    pid_file.display(),
+                    pid_file.display()
+                );
+                let mut command = Command::new("sh");
+                command.arg("-c").arg(script).process_group(0);
+                let mut child = command.spawn().expect("spawn setsid fixture");
+                let pgid = child.id() as i32;
+                let mut content = None;
+                for _ in 0..100 {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        content = Some(text.trim().to_string());
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let _ = child.wait();
+                let Some(content) = content else {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                };
+                if content == "skip" {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                let escaped: i32 = content.parse().expect("setsid 子进程 PID");
+                assert!(pid_exists(escaped), "setsid 逃逸进程应仍存活");
+                assert!(
+                    !group_exists(pgid),
+                    "逃逸进程不在原进程组内：组判据为空，证明作用域仅为受控集合"
+                );
+                unsafe {
+                    libc::kill(escaped, libc::SIGKILL);
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    mod imp {
+        use super::CleanupOutcome;
+        use std::os::windows::io::AsRawHandle;
+        use std::process::{Child, Command};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+            TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        const CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
+
+        /// 作业句柄由 bridge 持有；`KILL_ON_JOB_CLOSE` 在最后一个句柄关闭时兜底清理。
+        ///
+        /// 已知窗口：`std::process::Command` 只能在 `spawn` 之后调用
+        /// `AssignProcessToJobObject`。若子进程在这之前已经派生了孙进程，
+        /// 那些孙进程不在作业内，本判据看不到它们。该窗口存在，文档与回执必须写明。
+        pub(crate) struct Supervisor {
+            job: Option<HANDLE>,
+            attached: bool,
+        }
+
+        impl Supervisor {
+            pub(crate) fn new() -> Self {
+                unsafe {
+                    let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                    if job.is_null() {
+                        return Self {
+                            job: None,
+                            attached: false,
+                        };
+                    }
+                    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                    let ok = SetInformationJobObject(
+                        job,
+                        JobObjectExtendedLimitInformation,
+                        &info as *const _ as *const core::ffi::c_void,
+                        std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                    );
+                    if ok == 0 {
+                        CloseHandle(job);
+                        return Self {
+                            job: None,
+                            attached: false,
+                        };
+                    }
+                    Self {
+                        job: Some(job),
+                        attached: false,
+                    }
+                }
+            }
+
+            pub(crate) fn configure(&mut self, _command: &mut Command) {}
+
+            pub(crate) fn attach(&mut self, child: &Child) {
+                if let Some(job) = self.job {
+                    let ok =
+                        unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+                    self.attached = ok != 0;
+                }
+            }
+
+            pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
+                let Some(job) = self.job else {
+                    let _ = child.kill();
+                    return CleanupOutcome::Unavailable;
+                };
+                if !self.attached {
+                    // 加入作业失败：不得假定成员已受控，也不能宣称已清理
+                    let _ = child.kill();
+                    return CleanupOutcome::Unavailable;
+                }
+                unsafe {
+                    TerminateJobObject(job, 1);
+                }
+                let _ = child.wait();
+
+                let deadline = Instant::now() + CLEANUP_DEADLINE;
+                loop {
+                    match active_processes(job) {
+                        Some(0) => return CleanupOutcome::Cleaned,
+                        Some(_) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        Some(_) => return CleanupOutcome::StillAlive,
+                        // 查询失败不等于 0：按不可观测处理
+                        None => return CleanupOutcome::Unavailable,
+                    }
+                }
+            }
+
+            #[cfg(test)]
+            fn active_processes(&self) -> Option<u32> {
+                self.job.and_then(active_processes)
+            }
+        }
+
+        impl Drop for Supervisor {
+            fn drop(&mut self) {
+                if let Some(job) = self.job.take() {
+                    unsafe {
+                        CloseHandle(job);
+                    }
+                }
+            }
+        }
+
+        fn active_processes(job: HANDLE) -> Option<u32> {
+            unsafe {
+                let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+                let ok = QueryInformationJobObject(
+                    job,
+                    JobObjectBasicAccountingInformation,
+                    &mut info as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                );
+                (ok != 0).then_some(info.ActiveProcesses)
+            }
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+            use std::process::{Command, Stdio};
+
+            // 反假通过：活着但不写盘的进程，ActiveProcesses 必须 > 0
+            #[test]
+            fn alive_but_idle_process_is_counted_in_job() {
+                let mut supervisor = Supervisor::new();
+                assert!(supervisor.job.is_some(), "作业应创建成功");
+                let mut command = Command::new("ping");
+                command
+                    .args(["-n", "30", "127.0.0.1"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let mut child = command.spawn().expect("spawn ping");
+                supervisor.attach(&child);
+                assert!(supervisor.attached, "进程应成功加入作业");
+                assert!(
+                    supervisor.active_processes().unwrap_or(0) > 0,
+                    "活着但不写盘的进程必须计入 ActiveProcesses"
+                );
+                assert_eq!(
+                    supervisor.terminate(&mut child),
+                    CleanupOutcome::Cleaned,
+                    "作业内成员应被清空"
+                );
+                assert_eq!(supervisor.active_processes(), Some(0));
+            }
+
+            // 反向：进程已退出，作业内活动进程数应为 0
+            #[test]
+            fn exited_process_leaves_job_empty() {
+                let mut supervisor = Supervisor::new();
+                let mut command = Command::new("cmd");
+                command
+                    .args(["/C", "ping -n 2 127.0.0.1 > NUL"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let mut child = command.spawn().expect("spawn cmd");
+                supervisor.attach(&child);
+                let _ = child.wait();
+                let mut observed = None;
+                for _ in 0..100 {
+                    if let Some(count) = supervisor.active_processes() {
+                        observed = Some(count);
+                        if count == 0 {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert_eq!(observed, Some(0), "进程退出后作业内活动进程数应为 0");
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    mod imp {
+        use super::CleanupOutcome;
+        use std::process::{Child, Command};
+
+        pub(crate) struct Supervisor;
+
+        impl Supervisor {
+            pub(crate) fn new() -> Self {
+                Self
+            }
+            pub(crate) fn configure(&mut self, _command: &mut Command) {}
+            pub(crate) fn attach(&mut self, _child: &Child) {}
+            pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
+                let _ = child.kill();
+                CleanupOutcome::Unavailable
+            }
+        }
+    }
+
+    pub(crate) use imp::Supervisor;
+}
+
+/// 超时回执措辞按清理结果分流：只有 `Cleaned` 才能说"已清理受控集合"。
+/// 任何分支都不得出现"已终止进程树 / 无残留"。
+fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutcome>) -> String {
+    use process_scope::CleanupOutcome;
+    match outcome {
+        Some(CleanupOutcome::Cleaned) => {
+            #[cfg(windows)]
+            {
+                format!(
+                    "timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业"
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                format!("timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证")
+            }
+        }
+        Some(CleanupOutcome::StillAlive) => format!(
+            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程；逃逸进程是否仍在运行未验证"
+        ),
+        _ => format!(
+            "timeout：超过 {timeout_secs}s 未结束，受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
+        ),
     }
 }
 

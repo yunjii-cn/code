@@ -177,9 +177,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
+ "libc",
  "serde_json",
  "sha2",
  "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 10 节的 4 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在并已在文案披露），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -152,7 +152,11 @@
 - **年龄判定只认这两个时间戳**：`dispatchedAt` / `finishedAt` 之外的一切信号（mtime、目录顺序、文件名、`attempt` 编号）都不得用于推断年龄或作为清理判据。全文档只有这一套说法，§8 与本节一致。
 - **`env_keys` 行为不变**：它只列"本次实际生效的 env 键名"。`env` 被拒（含 `env.PATH`）的派单**不占号、不落盘、不产生回执**，因此不会出现在任何回执或 `runs.list` 中。
 - `attempt=null` 的 `blocked` 预检回执（缺命令 / cwd 不存在）不落盘，也不带执行上下文（没有实际执行目录与超时）。
-- **`blocked_reason` 只描述"已执行的动作"，不描述"已达成的结果"**：`timeout:` 文案代表"已向**直接子进程**发送终止信号"，**不代表整棵进程树已终止**。子进程派生的孙进程是否存活**未验证**（`#3` 进程树杀灭仍未实现、状态为 `NOT_PROVEN`），调用方不得据此认为超时任务已彻底停止，需自行确认残留进程。
+- **`blocked_reason` 只描述"已执行的动作"，不描述"已达成的结果"**：`timeout:` 文案的作用域**写死为"受控集合"**（POSIX 进程组 / Windows Job Object），**不是整棵进程树**。三态与逐字文案：
+  - 受控集合已清空：`timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证`；Windows 额外写明 `Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业`；
+  - 受控集合内仍有存活进程：`timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程；逃逸进程是否仍在运行未验证`；
+  - 受控集合未能建立或无法查询：`timeout：超过 {timeout_secs}s 未结束，受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证`。
+  - 判据只有两个可判定观测点：POSIX `kill(-pgid, 0)` 返回 `ESRCH`；Windows Job 的 `ActiveProcesses == 0`。**任何分支都不写"已终止进程树 / 无残留"**。`#3` 整棵进程树杀灭仍不可判定、状态为 `NOT_PROVEN`，调用方不得据此认为超时任务已彻底停止，需自行确认受控集合之外的残留进程（含 POSIX `setsid` 逃逸与 Windows `spawn → Assign` 窗口内派生的进程）。
 - **历史回执不回填**：旧 `handback.json` 里已有的旧文案（含"已终止进程"这类完成式断言）**原样返回、不推断、不改写**；但那些旧文案**本身不准确**，读到时按上一行的真实语义理解。
 
 ## 5. 契约 vs 现有实现
@@ -173,7 +177,7 @@
 | 12 | `env.PATH` fail-closed（§3.2） | **一致** | 大小写任意变体一律 `invalid_env`，占号前拒绝；继承 PATH 永远保留；不静默忽略 |
 | 13 | `runs.list` 的 `total` 与 `attempts` 一致性（第 7 节） | **一致** | `total == Σ attempts`（attempt 目录数，非任务数）；分页不改变 `total`；新增 `total_tasks` 供换算页数 |
 | 14 | `path_prepend`（§3.5） | **一致** | 目录数组前插、继承 PATH 在后、分隔符按平台；参与幂等签名；占号前校验；回执只给目录名 |
-| 15 | `timeout` 文案诚实性（第 4 / 6 节） | **一致** | `blocked_reason` 只描述"已向直接子进程发送终止信号"，明写孙进程"未验证"；不出现"已终止进程"完成式断言 |
+| 15 | `timeout` 文案诚实性（第 4 / 6 节） | **一致** | v1.16：文案只描述**受控集合**（POSIX 进程组 / Windows Job）的清理结果，三态分流（已清理 / 仍存活 / 不可用），明写"逃逸进程是否仍在运行未验证"与 Windows `spawn → Assign` 窗口；任何分支都不出现"已终止进程树 / 无残留"；整树 `#3` 仍 `NOT_PROVEN` |
 
 统计：**已一致 14 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证仍待通道归属拍板）。
 
@@ -189,17 +193,17 @@
 | G6 上游拒单 | PM 侧，不进入 AW | AW 不感知 | 归 PM 侧 |
 | G7 证据清理 | `runs.prune` 显式入口（默认 dry-run、无自动清理） | 只按 `finishedAt` 判龄、只删非最新 attempt 整目录、先记账后删除 | **已落地（v1.12）**；自动清理与按结果分档阈值**明确不做**（§8.8） |
 | G8 `env.PATH` fail-closed | `task.execute` 参数校验层（占号之前） | `env` 中出现 `PATH`（任意大小写）一律 `invalid_env`；不静默忽略 | **已落地（v1.7）** |
-| G9 超时文案诚实 | `task.execute` 回执生成处 | 文案只写"已向直接子进程发送终止信号"，孙进程标"未验证"；不写完成式断言 | **已落地（v1.11）；进程树杀灭仍未实现（`NOT_PROVEN`）**；设计评估见 [`TIMEOUT-PROCESS-TREE-DESIGN.md`](./TIMEOUT-PROCESS-TREE-DESIGN.md)（v1.15，**仅设计、未实现**） |
+| G9 超时文案诚实 | `task.execute` 回执生成处 | 文案只写**受控集合**（POSIX 进程组 / Windows Job）的清理结果与可判定判据（`kill(-pgid,0)==ESRCH` / `ActiveProcesses==0`），逃逸进程标"未验证"；不写"已终止进程树 / 无残留" | **已落地（v1.11 文案诚实；v1.16 受控集合清理）**；整树杀灭仍不可判定，`#3` 保持 `NOT_PROVEN`；设计评估与现实证据见 [`TIMEOUT-PROCESS-TREE-DESIGN.md`](./TIMEOUT-PROCESS-TREE-DESIGN.md)（v1.16：窄定义已实现、Windows 接受 `spawn → Assign` 窗口） |
 
 ## 6. `blocked` 失败码分类
 
-分类以 `blocked_reason` 的**前缀**表达（如 `timeout: 超过 120s 未结束，已向直接子进程发送终止信号`），不新增字段。**前缀码后面的文案描述"已执行的动作"，不是"已达成的结果"**。
+分类以 `blocked_reason` 的**前缀**表达（如 `timeout: 超过 120s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证`），不新增字段。**前缀码后面的文案描述对受控集合已执行的动作与可判定结果，作用域不是整棵进程树**。
 
 | 分类 | 产生方 | 触发条件 | 调用方（PM）处置 |
 |---|---|---|---|
 | `command_not_found` | AW | 命令不存在、不可执行，或缺少 `cmd`（占号之前判定，不产生 attempt） | 修正 `cmd` 或环境；**不得原样重投**，修正后换新 `task_id` 重派 |
 | `cwd_not_found` | AW | `cwd` 不存在或不是目录（占号之前判定，不产生 attempt） | 修正工作目录/仓库路径；换新 `task_id` 重派 |
-| `timeout` | AW | 超过 `timeout_secs` 未结束，**已向直接子进程发送终止信号**；其派生的孙进程是否仍在运行**未验证**（进程树杀灭 `#3` 未实现，`NOT_PROVEN`） | 评估拆小任务或延长超时；**换新 `task_id` + 新参数**，不得假设原任务可续跑；**需自行确认残留进程** |
+| `timeout` | AW | 超过 `timeout_secs` 未结束；对**受控集合**（POSIX 进程组 / Windows Job）发送 `SIGTERM → SIGKILL` / `TerminateJobObject`，并按 `kill(-pgid, 0) == ESRCH` / `ActiveProcesses == 0` 判定是否清空；逃逸进程未验证（整树 `#3` 仍 `NOT_PROVEN`） | 评估拆小任务或延长超时；**换新 `task_id` + 新参数**，不得假设原任务可续跑；**需自行确认受控集合之外的残留进程**（含 POSIX `setsid` 逃逸与 Windows `spawn → Assign` 窗口内派生的进程） |
 | `upstream_rejected` | PM | PM 在派单前拒绝（判据不成立、权限不足、依赖未就绪） | 不派单；记录 blocker；条件解除后再派 |
 | `concurrency_limit` | AW（未来） | AW 达到并发上限，**未占号、未执行** | 可安全地以**同 `task_id` 重投**（幂等），按退避重试 |
 
@@ -383,3 +387,4 @@
 | v1.13 | 2026-11-06 | 修正 `initialize` 审计的多进程覆盖缺陷：落盘从单文件覆盖改为**每次一份 `_session/initialize-<pid>-<毫秒>-<序号>.json`**（tmp + rename 原子可见），并发/先后写入都不丢；`status.session` 聚合全部记录（含旧版 `initialize.json`），新增 `total` 与 `records[]`（每条带 `source` 文件名）；**边界不放宽**：多份记录不等于多会话、不构成身份、不参与准入；旧记录只读聚合、不回填 |
 | v1.14 | 2026-11-06 | **仅修工具描述与契约措辞，不改任何行为**：`tools/list` 的 `env` 描述从"PATH 会整体覆盖"改为 v1.7 的 fail-closed 口径（任意大小写一律拒绝、继承 PATH 永远保留、不静默忽略）；schema 补上已实现的 `path_prepend`（数组、字面顺序、平台分隔符、空数组等价缺省、参与幂等签名、16 项/4096 字符上限、不校验目录存在性）；`status` 描述补"initialize 记录可能多份、按 receivedAt 聚合"；§3.1 的签名口径补上 `path_prepend`（与 §3.5 单一措辞）、§3.2/§3.5 各加"工具描述同步"行；全量对照见 `docs/TOOLS-DESCRIPTION-AUDIT.md` |
 | v1.15 | 2026-11-06 | **仅文档、未实现代码、未改用例**：新增 `docs/TIMEOUT-PROCESS-TREE-DESIGN.md`，评估 `#3` 超时进程树杀灭。写清当前事实（`child.kill()` 只作用于直接子进程；上一轮实测超时返回后进程仍存活、由测试脚本强制清理——单次观测）；否定"两次 `stat` 无变化"的坏判据（会假通过）；给出两个平台的可判定窄判据（POSIX `kill(-pgid, 0)` 为 `ESRCH`、Windows Job `ActiveProcesses == 0`，均只覆盖受控集合）；说明"整棵树"在当前环境**仍不可判定**（逃逸后代无可靠观测点），因此 **`#3` 保持 `NOT_PROVEN`**；依赖事实：`windows-sys 0.61.2` / `libc 0.2.186` 已在 lock、仅 dev 传递，转正常依赖不新增包与版本 |
+| v1.16 | 2026-11-06 | **按 PM 接受的窄定义实现 `#3`（受控集合，不是整棵树）**：POSIX 用 `process_group(0)` 在 exec 前建组、超时 `kill(-pgid, SIGTERM → SIGKILL)`；Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，**采用 W2d（接受 `spawn → Assign` 竞态窗口，未走 W2c）**，窗口已在回执文案与 `TIMEOUT-PROCESS-TREE-DESIGN.md` 明写；判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`（查询失败按不可用，绝不当 0），**不使用超时后 `stat` 比较**；超时文案三态分流（`已清理受控集合；逃逸进程是否仍在运行未验证` / 仍存活 / 不可用），任何分支都不写"已终止进程树 / 无残留"；旧回执原样返回、不改写；依赖仅将已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖（**不新增包、不改版本**）；**整棵树仍不可判定，`#3` 保持 `NOT_PROVEN`** |

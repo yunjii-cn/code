@@ -2105,7 +2105,7 @@ fn empty_env_and_path_prepend_combinations_share_one_signature() {
     );
 }
 
-// ---- 超时文案诚实性：只描述已执行动作，不宣称进程树已终止（v1.11）----
+// ---- 超时文案诚实性：只描述已执行动作，不宣称整棵树已终止（v1.11；v1.16 窄定义）----
 
 #[test]
 fn timeout_reason_states_action_not_tree_death() {
@@ -2126,17 +2126,124 @@ fn timeout_reason_states_action_not_tree_death() {
         "必须保留 timeout 前缀码：{reason}"
     );
     assert!(
-        !reason.contains("已终止进程"),
-        "不得保留完成式断言（实际只对直接子进程发信号）：{reason}"
+        reason.contains("已清理受控集合"),
+        "清理成功时必须只宣称受控集合：{reason}"
     );
     assert!(
-        reason.contains("直接子进程"),
-        "必须说明动作对象是直接子进程：{reason}"
+        reason.contains("逃逸进程是否仍在运行未验证"),
+        "必须明写逃逸进程未验证：{reason}"
     );
     assert!(
-        reason.contains("未验证"),
-        "必须明写孙进程存活未验证：{reason}"
+        !reason.contains("已终止进程树") && !reason.contains("无残留"),
+        "永远不得宣称整棵树已终止：{reason}"
     );
+    #[cfg(windows)]
+    assert!(
+        reason.contains("spawn→Assign") && reason.contains("窗口"),
+        "Windows 必须写明 spawn→Assign 竞态窗口：{reason}"
+    );
+}
+
+// 正向：受控集合内的孙进程必须被清理，并用 OS 观测点复核（不是 stat/写盘代理）
+#[test]
+fn timeout_cleans_controlled_set_including_grandchild() {
+    let (server, _settings, _runs) = server_with_runs();
+    let work = tempfile::tempdir().expect("临时工作目录");
+    #[cfg(windows)]
+    let cmd = "powershell -NoProfile -Command $p=Start-Process ping -ArgumentList '-n','30','127.0.0.1' -PassThru -WindowStyle Hidden; Set-Content -Path pids.txt -Value $p.Id; Wait-Process -Id $p.Id";
+    #[cfg(not(windows))]
+    let cmd = "echo $$ > pids.txt; sleep 30 & echo $! >> pids.txt; wait";
+    #[cfg(windows)]
+    let timeout_secs = 8;
+    #[cfg(not(windows))]
+    let timeout_secs = 1;
+
+    let payload = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-to-grandchild",
+            "cmd": cmd,
+            "cwd": work.path(),
+            "timeout_secs": timeout_secs
+        }),
+    ));
+    assert_eq!(payload["status"], "blocked");
+    let reason = payload["blocked_reason"].as_str().unwrap_or("");
+    assert!(
+        reason.contains("已清理受控集合"),
+        "受控集合内清理应成功：{reason}"
+    );
+
+    let pid_text = fs::read_to_string(work.path().join("pids.txt")).expect("命令必须写出 PID");
+    #[cfg(windows)]
+    {
+        let pid: u32 = pid_text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .parse()
+            .expect("PowerShell 子进程 PID");
+        assert!(
+            !process_exists(pid),
+            "作业内的孙进程必须已被清理，PID {pid} 仍存活"
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let pids: Vec<i32> = pid_text
+            .lines()
+            .filter_map(|line| line.trim().parse::<i32>().ok())
+            .collect();
+        assert!(pids.len() >= 2, "必须同时记录 shell 与 sleep 的 PID");
+        let pgid = pids[0];
+        assert!(!process_exists(pids[0]), "直接子进程应已被清理");
+        assert!(!process_exists(pids[1]), "孙进程应已被清理");
+        assert!(group_is_empty(pgid), "受控集合（进程组）判据必须为 ESRCH");
+    }
+}
+
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0
+        || !matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        )
+}
+
+#[cfg(unix)]
+fn group_is_empty(pgid: i32) -> bool {
+    let rc = unsafe { libc::kill(-pgid, 0) };
+    rc != 0
+        && matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        )
+}
+
+#[cfg(windows)]
+fn process_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+    let mut code = 0u32;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut code) };
+    unsafe {
+        CloseHandle(handle);
+    }
+    // STILL_ACTIVE = 259
+    ok != 0 && code == 259
 }
 
 #[test]
