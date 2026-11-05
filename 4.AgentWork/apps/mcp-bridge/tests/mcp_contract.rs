@@ -3,6 +3,7 @@ use aw_mcp_bridge::Server;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
 fn server_with_settings(content: Option<&str>) -> (Server, TempDir) {
@@ -406,4 +407,94 @@ fn same_task_id_rerun_keeps_history_and_reports_attempts() {
             "历史记录必须保留日志摘要"
         );
     }
+}
+
+#[test]
+fn concurrent_same_task_id_gets_distinct_contiguous_attempts() {
+    let (server, _settings, runs) = server_with_runs();
+    let task_root = runs.path().join("t-7");
+    fs::create_dir_all(&task_root).unwrap();
+    // 预置 800 条历史：旧实现"先扫描最大值"的窗口被放大，两个并发调用必然撞号
+    for number in 1..=800u64 {
+        let dir = task_root.join(format!("attempt-{number}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("handback.json"),
+            format!(
+                "{{\"task_id\":\"t-7\",\"attempt\":{number},\"status\":\"ok\",\"exit_code\":0,\"duration_ms\":0}}"
+            ),
+        )
+        .unwrap();
+    }
+
+    let server = Arc::new(server);
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for cmd in ["echo first", "echo second"] {
+        let server = Arc::clone(&server);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            tool_payload(&call(
+                &server,
+                json!({
+                    "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {
+                        "name": "task.execute",
+                        "arguments": { "task_id": "t-7", "cmd": cmd }
+                    }
+                }),
+            ))
+        }));
+    }
+    let results: Vec<Value> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("并发线程不应 panic"))
+        .collect();
+
+    let mut attempts: Vec<u64> = results
+        .iter()
+        .map(|payload| payload["attempt"].as_u64().expect("回执必须带 attempt"))
+        .collect();
+    attempts.sort();
+    assert_eq!(attempts, vec![801, 802], "并发执行必须各自占号，不得共享或覆盖");
+
+    let history = tool_payload(&call(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {
+                "name": "receipt.get",
+                "arguments": { "task_id": "t-7", "include_history": true }
+            }
+        }),
+    ));
+    assert_eq!(history["attempts"], 802, "并发两次都必须留下回执");
+    let records = history["history"].as_array().expect("history 必须是数组");
+    assert_eq!(records.len(), 802);
+
+    let numbers: Vec<u64> = records
+        .iter()
+        .filter_map(|record| record["attempt"].as_u64())
+        .collect();
+    for (index, number) in numbers.iter().enumerate() {
+        assert_eq!(*number, (index + 1) as u64, "编号必须连续无洞");
+    }
+
+    let mut hashes = Vec::new();
+    for record in records {
+        let Some(number) = record["attempt"].as_u64() else {
+            continue;
+        };
+        if number < 801 {
+            continue;
+        }
+        let stdout_file = task_root.join(format!("attempt-{number}")).join("stdout.txt");
+        assert!(stdout_file.exists(), "第 {number} 次的 stdout 必须独立落盘");
+        let digest = record["stdout_digest"].as_str().expect("摘要必须是字符串");
+        assert_eq!(digest, sha256_prefixed(&stdout_file), "哈希必须可独立重算");
+        hashes.push(digest.to_string());
+    }
+    assert_eq!(hashes.len(), 2);
+    assert_ne!(hashes[0], hashes[1], "两次并发执行的日志不得互相覆盖");
 }

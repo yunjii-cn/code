@@ -158,10 +158,8 @@ impl Server {
 
         let task_root = self.runs_dir.join(&task_id);
         fs::create_dir_all(&task_root).map_err(|e| format!("创建运行目录失败：{e}"))?;
-        // 同一 task_id 重跑追加为新的一次尝试，历史回执与日志一律保留
-        let attempt = next_attempt(&task_root);
-        let run_dir = task_root.join(format!("attempt-{attempt}"));
-        fs::create_dir_all(&run_dir).map_err(|e| format!("创建尝试目录失败：{e}"))?;
+        // 以独占创建目录作为占位：并发调用只会有一个拿到同一序号，其余顺延
+        let (attempt, run_dir) = claim_attempt(&task_root)?;
         let stdout_path = run_dir.join("stdout.txt");
         let stderr_path = run_dir.join("stderr.txt");
         let stdout_file =
@@ -181,39 +179,45 @@ impl Server {
             .stderr(Stdio::from(stderr_file));
 
         let started = Instant::now();
-        let mut child = command.spawn().map_err(|e| format!("启动命令失败：{e}"))?;
         let deadline = Duration::from_secs(timeout_secs);
         let mut timed_out = false;
-        let exit_status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => {
-                    if started.elapsed() >= deadline {
-                        timed_out = true;
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break None;
+        let mut spawn_error: Option<String> = None;
+        let exit_status = match command.spawn() {
+            Ok(mut child) => loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) => {
+                        if started.elapsed() >= deadline {
+                            timed_out = true;
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break None;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
                     }
-                    std::thread::sleep(Duration::from_millis(20));
+                    Err(error) => return Err(format!("等待进程失败：{error}")),
                 }
-                Err(error) => return Err(format!("等待进程失败：{error}")),
+            },
+            Err(error) => {
+                spawn_error = Some(format!("启动命令失败：{error}"));
+                None
             }
         };
         let duration_ms = started.elapsed().as_millis() as u64;
 
         let stdout_digest = digest_file(&stdout_path)?;
         let stderr_digest = digest_file(&stderr_path)?;
+        let blocked_reason = spawn_error.or_else(|| {
+            timed_out.then(|| format!("timeout：超过 {timeout_secs}s 未结束，已终止进程"))
+        });
         let exit_code = exit_status.and_then(|status| status.code());
-        let status = if timed_out {
+        let status = if blocked_reason.is_some() {
             "blocked"
         } else if exit_code == Some(0) {
             "ok"
         } else {
             "failed"
         };
-        let blocked_reason = timed_out.then(|| {
-            format!("timeout：超过 {timeout_secs}s 未结束，已终止进程")
-        });
 
         let changed_files = {
             let after = git_paths(&cwd);
@@ -282,13 +286,17 @@ impl Server {
     }
 }
 
-/// 同一 task_id 的下一次尝试序号；历史目录即事实来源，不做覆盖
-fn next_attempt(root: &Path) -> u64 {
-    collect_attempts(root)
-        .last()
-        .map(|(number, _)| *number)
-        .unwrap_or(0)
-        + 1
+/// 以独占创建目录原子占号：已存在即顺延，保证并发下不共享编号、不覆盖彼此文件
+fn claim_attempt(root: &Path) -> Result<(u64, PathBuf), String> {
+    for number in 1u64..=100_000 {
+        let candidate = root.join(format!("attempt-{number}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok((number, candidate)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("创建尝试目录失败：{error}")),
+        }
+    }
+    Err("attempt 序号已达上限 100000".to_string())
 }
 
 /// 读取某 task_id 下全部 attempt-N/handback.json，按尝试序号升序
