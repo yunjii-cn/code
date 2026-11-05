@@ -1326,3 +1326,127 @@ fn failed_and_timeout_attempts_record_finished_at_but_preflight_does_not() {
     );
     assert!(!runs.path().join("t-35").exists(), "预检 blocked 不得落盘");
 }
+
+// ---- env.PATH fail-closed：不许整体覆盖继承 PATH（v1.7）----
+
+#[test]
+fn env_path_is_rejected_before_claiming_attempt() {
+    let (server, _settings, runs) = server_with_runs();
+    for (index, key) in ["PATH", "Path", "path", "PaTh"].iter().enumerate() {
+        let task_id = format!("t-path-{index}");
+        let mut env = serde_json::Map::new();
+        env.insert((*key).to_string(), json!("/tmp/only-this-dir"));
+        let response = call_tool(
+            &server,
+            "task.execute",
+            json!({
+                "task_id": task_id,
+                "cmd": "echo should-not-run",
+                "env": Value::Object(env)
+            }),
+        );
+        assert_eq!(
+            response["result"]["isError"],
+            true,
+            "env.{key} 必须在占号之前被拒，不得整体覆盖继承 PATH：{}",
+            tool_text(&response)
+        );
+        let text = tool_text(&response);
+        assert!(
+            text.contains("invalid_env"),
+            "必须给具名错误码 invalid_env：{text}"
+        );
+        assert!(
+            text.contains("PATH") && text.contains("覆盖"),
+            "错误必须说明 PATH 不可整体覆盖：{text}"
+        );
+        assert!(
+            !runs.path().join(&task_id).exists(),
+            "被拒的派单不得建目录：{task_id}"
+        );
+    }
+}
+
+#[test]
+fn legacy_dispatch_with_env_path_stays_readable_but_input_is_rejected() {
+    let (server, _settings, runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let canonical = fs::canonicalize(workdir.path()).expect("规范化工作目录");
+    let attempt = runs.path().join("t-path-legacy").join("attempt-1");
+    fs::create_dir_all(&attempt).expect("创建旧格式 attempt");
+    fs::write(
+        attempt.join("dispatch.json"),
+        json!({
+            "task_id": "t-path-legacy",
+            "cmd": "echo legacy-path",
+            "cwd": canonical.to_string_lossy(),
+            "timeout_secs": 120,
+            "env": { "PATH": "sha256:legacy-path-override" },
+            "dispatchedAt": "2026-11-06T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式派单记录");
+    fs::write(
+        attempt.join("handback.json"),
+        json!({
+            "task_id": "t-path-legacy",
+            "attempt": 1,
+            "status": "ok",
+            "exit_code": 0,
+            "stdout_digest": "sha256:legacy-path",
+            "env_keys": ["PATH"],
+            "finishedAt": "2026-11-06T00:00:01Z"
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式回执");
+
+    // 只读路径不受影响：旧记录原样返回，不因含 env.PATH 而被改写或抹掉
+    let receipt = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-path-legacy" }),
+    ));
+    assert_eq!(receipt["stdout_digest"], "sha256:legacy-path");
+    assert_eq!(
+        receipt["env_keys"][0], "PATH",
+        "旧记录的 env_keys 必须原样返回"
+    );
+
+    // 但入参里的 env.PATH 一律拒绝：旧覆盖行为属已知缺陷，不追认
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-path-legacy",
+            "cmd": "echo legacy-path",
+            "cwd": workdir.path().to_string_lossy(),
+            "env": { "PATH": "/tmp/legacy-only" }
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "旧记录不得成为 env.PATH 的放行通道：{}",
+        tool_text(&response)
+    );
+    assert!(
+        tool_text(&response).contains("invalid_env"),
+        "必须给 invalid_env 而不是参数冲突：{}",
+        tool_text(&response)
+    );
+
+    let dispatch_after: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("dispatch.json")).expect("重读旧派单记录"),
+    )
+    .expect("派单记录必须是 JSON");
+    assert_eq!(
+        dispatch_after["env"]["PATH"], "sha256:legacy-path-override",
+        "旧记录不得被改写"
+    );
+    assert_eq!(
+        dispatch_after["dispatchedAt"], "2026-11-06T00:00:00Z",
+        "旧记录时间戳不得被回填或改写"
+    );
+}

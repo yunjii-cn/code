@@ -691,6 +691,13 @@ fn parse_env(args: &Value) -> Result<Vec<(String, String)>, String> {
         if key.is_empty() {
             return Err("invalid_env: env 的键不能为空".to_string());
         }
+        // fail-closed：PATH 不许整体覆盖。看见就拒绝，不静默忽略，否则调用方会误以为自己的 PATH 生效。
+        // 大小写变体一并拒绝：Windows 下 PATH / Path / path 指向同一变量。
+        if key.eq_ignore_ascii_case("PATH") {
+            return Err(format!(
+                "invalid_env: 不接受 env.{key}，PATH 不可整体覆盖（继承的 PATH 始终保留）；如需追加目录请等显式 path_prepend 字段，env 不承担该职责"
+            ));
+        }
         if key.contains('=') {
             return Err(format!("invalid_env: env 的键不能含 '='：{key}"));
         }
