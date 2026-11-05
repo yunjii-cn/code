@@ -85,7 +85,7 @@ export default function UpdateManager() {
       setDownloadProgress(null);
       setError(null);
       try {
-        await downloadVersion(version.version, version.download_url);
+        await downloadVersion(version.version, version.download_url, version.sha256);
         // 刷新本地版本列表
         const res = await checkForUpdates("auto");
         setResult(res);

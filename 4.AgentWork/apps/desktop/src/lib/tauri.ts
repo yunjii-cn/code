@@ -707,6 +707,7 @@ export interface VersionInfo {
   changes: string[];
   name: string;
   download_url?: string;
+  sha256?: string;
   size?: number;
 }
 
@@ -734,9 +735,10 @@ export async function checkForUpdates(
 
 export async function downloadVersion(
   version: string,
-  downloadUrl: string
+  downloadUrl: string,
+  sha256?: string
 ): Promise<string> {
-  return invoke<string>("download_version", { version, downloadUrl });
+  return invoke<string>("download_version", { version, downloadUrl, sha256 });
 }
 
 export async function switchVersion(version: string): Promise<string> {
