@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 10 节的 4 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -34,15 +34,17 @@
 
 **不新造凭据**：不使用自定义 header、token、签名或独立握手字段。
 
-**审计落点与边界（写死）**：`initialize` 收到的 `clientInfo` 原样落盘到 `runs/_session/initialize.json`（含 `receivedAt`），并由 `status.session` 只读回显。该记录：
+**审计落点与边界（写死）**：`initialize` 收到的 `clientInfo` 原样落盘为 `runs/_session/initialize-<pid>-<毫秒时间戳>-<序号>.json`（含 `receivedAt`），**每次 initialize 一份独立文件、互不覆盖**；`status.session` 只读聚合全部记录（含旧版单文件 `initialize.json`）。这些记录：
 
-- **不构成身份**，不产生任何凭据或会话标识；
+- **不构成身份**，不产生任何凭据或会话标识；**多份记录不等于多个可信会话**，也不等于"已认证"；
 - 调用方可任意自称/伪造，内容与真实调用方无关；
 - **任何拒绝/放行（准入）逻辑都不得读取它**；它只用于事后审计与问题追溯。
 
+**为什么改为逐份留存（v1.13，写死取舍）**：多 bridge 共享同一 `runs/` 后，旧的单文件 `initialize.json` 是覆盖写——两个 bridge 同时启动会**静默丢掉**先写的那条，且双方都不报错。覆盖语义天生只能留"最后一次"，**不是完整审计**。v1.13 起每次 `initialize` 写一份新文件（文件名含 pid、毫秒时间戳与进程内序号，`create_new` 语义避免覆盖，tmp + rename 保证可见时内容完整），因此并发与先后写入都**不丢**。旧 `initialize.json` 保留可读并纳入聚合，**不回填、不改写**。
+
 ### 2.2 当前强度声明
 
-- v1 不做密码学认证，不做准入拦截；`clientInfo` 已记录（`runs/_session/initialize.json` + `status.session`），但**仅用于审计追溯，不参与任何准入判断**。
+- v1 不做密码学认证，不做准入拦截；`clientInfo` 已记录（`runs/_session/initialize*.json` 逐份留存，`status.session` 聚合回显），但**仅用于审计追溯，不参与任何准入判断**。
 - 真正的准入边界是“本地进程由谁启动 + 本地配置由谁可写”，本轮不在契约内展开。
 - 引入认证时只允许在**会话层**（`initialize` 之后、`tools/call` 之前）加一次性凭据，且必须复用 PM/MH 已有通道；不得在每条请求体里新造字段。
 
@@ -180,7 +182,7 @@
 | G1 重投幂等 | `mcp-bridge` 的 `tools/call` 入口，先查同 id+同参的签名，命中即回放 | 零执行、零新 attempt | **已落地** |
 | G2 同 id 异参拒绝 | 同上，比对签名后返回 `task_id_conflict` | 不改 schema | **已落地** |
 | G3 失败码分类 | 参数校验层：`command_not_found`/`cwd_not_found` 转为 `blocked` + 前缀码；`timeout` 复用 | 只约定 `blocked_reason` 前缀，不加字段 | **已落地** |
-| G4 身份记录 | MCP `initialize` 会话层，记录 `clientInfo` 供审计 | **仅审计，不做准入**；记录不得被放行逻辑读取 | **已落地（仅审计）** |
+| G4 身份记录 | MCP `initialize` 会话层，记录 `clientInfo` 供审计 | **仅审计，不做准入**；记录不得被放行逻辑读取；每次 initialize 一份文件，`status.session` 聚合 | **已落地（仅审计；v1.13 起逐份留存、并发不丢）** |
 | G5 并发上限 | PM 侧排队产生（AW 不内置闸门） | 拒单时不占用 attempt | 归 PM 侧 |
 | G6 上游拒单 | PM 侧，不进入 AW | AW 不感知 | 归 PM 侧 |
 | G7 证据清理 | `runs.prune` 显式入口（默认 dry-run、无自动清理） | 只按 `finishedAt` 判龄、只删非最新 attempt 整目录、先记账后删除 | **已落地（v1.12）**；自动清理与按结果分档阈值**明确不做**（§8.8） |
@@ -376,3 +378,4 @@
 | v1.10 | 2026-11-06 | 消除空集合口径不一致（选 A）：`path_prepend: []` 改为**与缺省完全等价**（执行相同、签名相同、重投命中同一 attempt），与 §3.2 的 `env: {}` 一致；两字段各自独立归一，"都缺省/都为空/一空一缺/一缺一空"四种组合签名全等 |
 | v1.11 | 2026-11-06 | 修正超时文案的诚实性：`blocked_reason` 从"已终止进程"改为"已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"；契约明写文案只代表已执行动作、不代表进程树已终止，与 `#3` 的 `NOT_PROVEN` 对齐；历史旧文案原样返回、标注为不准确 |
 | v1.12 | 2026-11-06 | 实现证据清理 `runs.prune`（§8）：**只有显式调用、无任何自动清理**；`dry_run` 默认零写入、`dry_run=false + confirm=true` 才真删；年龄只认 `finishedAt`（缺字段一律不删）；**最新 attempt 永不进入候选**（单 attempt 的 task 永远删不掉）；只删整个 `attempt-<N>` 目录；`runs/prune.jsonl` 先记账（`plan`+`result` 两行）后删除；部分失败报 `partial` 且 `isError=true`，不自动重试；不删 `_` 前缀目录与任务外路径；本批**未删除任何既有证据** |
+| v1.13 | 2026-11-06 | 修正 `initialize` 审计的多进程覆盖缺陷：落盘从单文件覆盖改为**每次一份 `_session/initialize-<pid>-<毫秒>-<序号>.json`**（tmp + rename 原子可见），并发/先后写入都不丢；`status.session` 聚合全部记录（含旧版 `initialize.json`），新增 `total` 与 `records[]`（每条带 `source` 文件名）；**边界不放宽**：多份记录不等于多会话、不构成身份、不参与准入；旧记录只读聚合、不回填 |

@@ -559,6 +559,35 @@ fn concurrent_duplicate_dispatch_executes_once() {
 
 // ---- 会话审计：clientInfo 只记录、只展示，不构成身份、不参与准入 ----
 
+/// 读取全部 initialize 审计记录（含旧版单文件 `initialize.json` 与逐份 `initialize-*.json`）
+fn initialize_records(runs: &Path) -> Vec<Value> {
+    let mut records = Vec::new();
+    let Ok(entries) = fs::read_dir(runs.join("_session")) else {
+        return records;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_initialize = name == "initialize.json"
+            || (name.starts_with("initialize-") && name.ends_with(".json"));
+        if !is_initialize {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        if let Ok(record) = serde_json::from_str::<Value>(&raw) {
+            records.push(record);
+        }
+    }
+    records.sort_by(|left, right| {
+        left["receivedAt"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(right["receivedAt"].as_str().unwrap_or(""))
+    });
+    records
+}
+
 #[test]
 fn initialize_records_client_info_as_audit_only() {
     let (server, _settings, runs) = server_with_runs();
@@ -579,10 +608,9 @@ fn initialize_records_client_info_as_audit_only() {
     );
     assert_eq!(response["result"]["serverInfo"]["name"], "aw-mcp-bridge");
 
-    let audit_path = runs.path().join("_session").join("initialize.json");
-    assert!(audit_path.exists(), "initialize 必须落审计记录");
-    let audit: Value =
-        serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
+    let records = initialize_records(runs.path());
+    assert_eq!(records.len(), 1, "initialize 必须落审计记录：{records:?}");
+    let audit = &records[0];
     assert_eq!(audit["clientInfo"]["name"], "pm-dispatcher");
     assert_eq!(audit["clientInfo"]["version"], "1.2.3");
     assert_eq!(
@@ -616,12 +644,10 @@ fn initialize_without_client_info_does_not_crash_and_records_null() {
         "缺 clientInfo 不得影响 initialize 的既有权能"
     );
 
-    let audit_path = runs.path().join("_session").join("initialize.json");
-    assert!(audit_path.exists(), "缺 clientInfo 也要落审计记录");
-    let audit: Value =
-        serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
+    let records = initialize_records(runs.path());
+    assert_eq!(records.len(), 1, "缺 clientInfo 也要落审计记录");
     assert!(
-        audit["clientInfo"].is_null(),
+        records[0]["clientInfo"].is_null(),
         "缺失时记为 null，不得伪造内容"
     );
 
@@ -651,10 +677,87 @@ fn client_info_is_never_used_for_admission() {
     );
     assert_eq!(tool_payload(&response)["status"], "ok");
 
-    let audit_path = runs.path().join("_session").join("initialize.json");
-    let audit: Value =
-        serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
-    assert_eq!(audit["clientInfo"]["name"], "../../untrusted", "只记录、不解释");
+    let records = initialize_records(runs.path());
+    assert_eq!(records.len(), 1, "initialize 必须落审计记录");
+    assert_eq!(records[0]["clientInfo"]["name"], "../../untrusted", "只记录、不解释");
+}
+
+#[test]
+fn concurrent_initialize_writers_keep_every_record_and_status_aggregates() {
+    let settings = TempDir::new().expect("创建设置目录");
+    let runs = TempDir::new().expect("创建 runs 目录");
+    // 旧版单文件记录：必须被聚合读取，且不得被回填或改写
+    let legacy = runs.path().join("_session").join("initialize.json");
+    fs::create_dir_all(runs.path().join("_session")).expect("创建审计目录");
+    let legacy_text = json!({
+        "clientInfo": { "name": "legacy-bridge" },
+        "receivedAt": "2026-01-01T00:00:00+00:00"
+    })
+    .to_string();
+    fs::write(&legacy, &legacy_text).expect("写入旧版记录");
+
+    let writers = 6;
+    let barrier = Arc::new(Barrier::new(writers));
+    let mut handles = Vec::new();
+    for index in 0..writers {
+        let settings_path = settings.path().join("settings.json");
+        let runs_path = runs.path().to_path_buf();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            // 每个 writer 一个独立 Server 实例，模拟多个 bridge 共享同一 runs/
+            let server = Server::with_runs_dir(settings_path, runs_path);
+            barrier.wait();
+            let response = server.handle_message(&json!({
+                "jsonrpc": "2.0", "id": index, "method": "initialize",
+                "params": { "clientInfo": { "name": format!("writer-{index}") } }
+            }));
+            assert!(response.is_some(), "并发 initialize 必须应答");
+        }));
+    }
+    for handle in handles {
+        handle.join().expect("并发 initialize 不得 panic");
+    }
+
+    let records = initialize_records(runs.path());
+    let mut names: Vec<String> = records
+        .iter()
+        .filter_map(|record| record["clientInfo"]["name"].as_str().map(str::to_string))
+        .collect();
+    names.sort();
+    let mut expected: Vec<String> = (0..writers).map(|index| format!("writer-{index}")).collect();
+    expected.push("legacy-bridge".to_string());
+    expected.sort();
+    assert_eq!(
+        names, expected,
+        "并发写必须保留每一条 initialize 记录，不许静默覆盖：{records:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&legacy).expect("旧记录仍可读"),
+        legacy_text,
+        "旧版 initialize.json 不得被回填或改写"
+    );
+
+    let server = Server::with_runs_dir(
+        settings.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    );
+    let status = tool_payload(&call_tool(&server, "status", json!({})));
+    assert_eq!(
+        status["session"]["total"], writers + 1,
+        "status 必须聚合全部 initialize 记录"
+    );
+    let listed = status["session"]["records"]
+        .as_array()
+        .expect("status.session.records 必须是数组");
+    assert_eq!(listed.len(), writers + 1);
+    assert_eq!(listed[0]["source"], "initialize.json", "聚合必须包含旧版单文件");
+    assert!(
+        status["session"]["clientInfo"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("writer-"),
+        "status.session 顶层仍回显最近一条：{status}"
+    );
 }
 
 // ---- 回执自证：执行上下文必须可复算、截断必须显式 ----

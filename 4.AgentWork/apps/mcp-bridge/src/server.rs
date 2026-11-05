@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -163,9 +164,10 @@ impl Server {
             .and_then(|value| value.get("clientInfo"))
             .cloned()
             .unwrap_or(Value::Null);
+        let received = chrono::Utc::now();
         let record = json!({
             "clientInfo": client_info,
-            "receivedAt": chrono::Utc::now().to_rfc3339()
+            "receivedAt": received.to_rfc3339()
         });
         let session_dir = self.runs_dir.join(SESSION_DIR);
         if fs::create_dir_all(&session_dir).is_err() {
@@ -175,22 +177,64 @@ impl Server {
             Ok(text) => text,
             Err(_) => return,
         };
-        let _ = fs::write(session_dir.join("initialize.json"), text);
+        // 每次 initialize 一份独立文件：单文件覆盖写会让多 bridge 共享 runs/ 时静默丢掉先前记录
+        static INITIALIZE_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = INITIALIZE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let file_name = format!(
+            "initialize-{}-{}-{}.json",
+            std::process::id(),
+            received.timestamp_millis(),
+            seq
+        );
+        // tmp + rename：读取方只会看到完整 JSON，不会看到写了一半的记录
+        let tmp_path = session_dir.join(format!("{file_name}.tmp"));
+        if fs::write(&tmp_path, text).is_err() {
+            return;
+        }
+        if fs::rename(&tmp_path, session_dir.join(&file_name)).is_err() {
+            let _ = fs::remove_file(&tmp_path);
+        }
     }
 
-    /// 只读回审计记录：供 status 展示"最近一次 initialize 的 clientInfo"
+    /// 只读聚合 initialize 审计：每次 initialize 一份，按 receivedAt 升序；含旧版单文件
     fn session_audit(&self) -> Value {
-        let path = self.runs_dir.join(SESSION_DIR).join("initialize.json");
-        let record = fs::read_to_string(&path)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
-        match record {
-            Some(record) => json!({
-                "clientInfo": record.get("clientInfo").cloned().unwrap_or(Value::Null),
-                "receivedAt": record.get("receivedAt").cloned().unwrap_or(Value::Null)
-            }),
-            None => json!({ "clientInfo": null, "receivedAt": null }),
+        let session_dir = self.runs_dir.join(SESSION_DIR);
+        let mut records: Vec<Value> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&session_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_initialize = name == "initialize.json"
+                    || (name.starts_with("initialize-") && name.ends_with(".json"));
+                if !is_initialize {
+                    continue;
+                }
+                let Ok(raw) = fs::read_to_string(entry.path()) else {
+                    continue;
+                };
+                let Ok(mut record) = serde_json::from_str::<Value>(&raw) else {
+                    continue;
+                };
+                if let Some(object) = record.as_object_mut() {
+                    // source 只是文件名，便于对账；不构成身份
+                    object.insert("source".to_string(), json!(name));
+                }
+                records.push(record);
+            }
         }
+        records.sort_by(|left, right| {
+            left.get("receivedAt")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .cmp(right.get("receivedAt").and_then(Value::as_str).unwrap_or(""))
+        });
+        let total = records.len() as u64;
+        let latest = records.last().cloned().unwrap_or(Value::Null);
+        json!({
+            "clientInfo": latest.get("clientInfo").cloned().unwrap_or(Value::Null),
+            "receivedAt": latest.get("receivedAt").cloned().unwrap_or(Value::Null),
+            "total": total,
+            "records": records
+        })
     }
 
     /// 只读枚举 runs 目录：不写盘、不创建目录，排除 `_session` 等预留目录
