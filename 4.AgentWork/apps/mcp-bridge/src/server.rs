@@ -222,13 +222,18 @@ impl Server {
             return Err("timeout_secs 必须在 1..=600 之间".to_string());
         }
 
-        // 幂等签名：同 task_id 重投必须 cmd / cwd / timeout_secs 完全一致
+        // env 透传：只在子进程环境里追加/覆盖同名变量，不做任何推断；非法键值在占号之前拒绝
+        let env_pairs = parse_env(args)?;
+
+        // 幂等签名：同 task_id 重投必须 cmd / cwd / timeout_secs / env 完全一致；
+        // env 只存值摘要，不把可能的密钥明文写进 dispatch.json
         let canonical_cwd = fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
         let signature = json!({
             "task_id": task_id,
             "cmd": cmd,
             "cwd": canonical_cwd.to_string_lossy(),
-            "timeout_secs": timeout_secs
+            "timeout_secs": timeout_secs,
+            "env": env_signature_value(&env_pairs)
         });
 
         let task_root = self.runs_dir.join(&task_id);
@@ -265,6 +270,14 @@ impl Server {
             .current_dir(&cwd)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file));
+        // 显式 env 覆盖同名继承变量；未列出的变量照常继承父进程环境
+        if !env_pairs.is_empty() {
+            command.envs(
+                env_pairs
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            );
+        }
 
         let started = Instant::now();
         let deadline = Duration::from_secs(timeout_secs);
@@ -324,6 +337,7 @@ impl Server {
             "changed_files_truncated": changed_files_truncated,
             "cwd": canonical_cwd.to_string_lossy(),
             "timeout_secs": timeout_secs,
+            "env_keys": env_pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
             "verify_cmd": cmd,
             "exit_code": exit_code,
             "stdout_digest": stdout_digest,
@@ -365,9 +379,16 @@ impl Server {
                 )
             })?,
         };
+        // 升级前的签名没有 env 字段：其语义等价于 env 为空，补齐后再比对（非空 env 仍会判冲突）
+        let mut stored = stored;
+        if let Some(object) = stored.as_object_mut() {
+            if !object.contains_key("env") {
+                object.insert("env".to_string(), json!({}));
+            }
+        }
         if &stored != signature {
             return Err(format!(
-                "task_id_conflict: task_id `{task_id}` 已存在且派单参数不一致（cmd / cwd / timeout_secs 必须完全一致）；重跑请使用新 task_id"
+                "task_id_conflict: task_id `{task_id}` 已存在且派单参数不一致（cmd / cwd / timeout_secs / env 必须完全一致）；重跑请使用新 task_id"
             ));
         }
 
@@ -536,10 +557,53 @@ fn shell_command(cmd: &str) -> Command {
     }
 }
 
-fn digest_file(path: &Path) -> Result<String, String> {
+fn digest_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
+    format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+fn digest_file(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| format!("读取证据失败：{e}"))?;
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    Ok(digest_bytes(&bytes))
+}
+
+/// env 明细：只透传，不做任何推断；返回原样 (键, 值)
+fn parse_env(args: &Value) -> Result<Vec<(String, String)>, String> {
+    let Some(raw) = args.get("env") else {
+        return Ok(Vec::new());
+    };
+    let Some(map) = raw.as_object() else {
+        return Err("invalid_env: env 必须是字符串到字符串的对象".to_string());
+    };
+    let mut pairs = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        if key.is_empty() {
+            return Err("invalid_env: env 的键不能为空".to_string());
+        }
+        if key.contains('=') {
+            return Err(format!("invalid_env: env 的键不能含 '='：{key}"));
+        }
+        if key.contains('\0') {
+            return Err("invalid_env: env 的键不能含空字节".to_string());
+        }
+        let Some(text) = value.as_str() else {
+            return Err(format!("invalid_env: env 键 {key} 的值必须是字符串"));
+        };
+        if text.contains('\0') {
+            return Err(format!("invalid_env: env 键 {key} 的值不能含空字节"));
+        }
+        pairs.push((key.clone(), text.to_string()));
+    }
+    Ok(pairs)
+}
+
+/// env 的幂等摘要：键 -> "sha256:<hex>"，只用于比对，不把可能的密钥明文落盘
+fn env_signature_value(pairs: &[(String, String)]) -> Value {
+    let mut map = serde_json::Map::new();
+    for (key, value) in pairs {
+        map.insert(key.clone(), Value::String(digest_bytes(value.as_bytes())));
+    }
+    Value::Object(map)
 }
 
 fn write_handback(run_dir: &Path, handback: &Value) -> Result<(), String> {
@@ -598,14 +662,19 @@ fn tools() -> Value {
         },
         {
             "name": "task.execute",
-            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、changed_files 是否截断）；AW 不定义判据、不做验收",
+            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string", "description": "派单标识（字母或数字开头，仅含字母数字 . _ -，≤64）" },
                     "cmd": { "type": "string", "description": "派单方指定的执行/验证命令" },
                     "cwd": { "type": "string", "description": "工作目录，默认进程当前目录；回执中的 locator 始终为相对路径" },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因" }
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因" },
+                    "env": {
+                        "type": "object",
+                        "description": "可选：追加/覆盖子进程环境变量（字符串 map）。未列出的变量继承 bridge 进程环境；显式同名变量覆盖继承值；PATH 会整体覆盖继承值；值为空串表示置空，不是 unset；不做任何自动推断",
+                        "additionalProperties": { "type": "string" }
+                    }
                 },
                 "required": ["task_id", "cmd"],
                 "additionalProperties": false

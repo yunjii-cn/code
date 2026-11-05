@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 8 节的 3 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §9）；v1.3 起回执补充执行上下文；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §9）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -51,15 +51,35 @@
 ### 3.1 规则
 
 1. `task_id` 是唯一幂等键，格式沿用实现校验：字母或数字开头，仅含字母数字 `. _ -`，长度 ≤ 64。
-2. **重投**（`task_id` + `cmd` + `cwd` + `timeout_secs` 全等）必须：
+2. **重投**（`task_id` + `cmd` + `cwd` + `timeout_secs` + `env` 全等）必须：
    - 直接返回该 `task_id` 的最新回执；
    - 不启动新进程、不创建新 attempt 目录；
    - `attempt` 与被重投的那次完全一致。
-3. 同一 `task_id` 但 `cmd`/`cwd`/`timeout_secs` 任一不同 → **拒绝**（视为契约违规），不得覆盖或追加，必须显式报错并要求新 `task_id`。
+3. 同一 `task_id` 但 `cmd`/`cwd`/`timeout_secs`/`env` 任一不同 → **拒绝**（视为契约违规），不得覆盖或追加，必须显式报错并要求新 `task_id`。
 4. **重跑**一律使用新 `task_id`（建议后缀 `-r2`、`-r3`，由 PM 生成），不得用“同 id 再调一次”表达重跑。
 5. 一个 `task_id` 对应 PM 侧一条派单记录；AW 侧 `attempt > 1` 仅允许出现在：崩溃恢复、人工运维重试、或未来由 PM 显式授权的重试语义（v1 未定义该输入）。
 
-### 3.2 与“保留历史”的关系
+### 3.2 派单参数 `env` 的语义（v1.4）
+
+`task.execute` 可选 `env`：字符串 map。规则逐条写死，不留“按常理”：
+
+| 项 | 规则 |
+|---|---|
+| 类型 | 可选对象；键与值都必须是字符串，否则 `invalid_env` |
+| 缺省 | 不传 `env` = 不覆盖任何变量，只继承 bridge 进程环境 |
+| 空 map | `env: {}` 与缺省**完全等价**：执行行为相同，且**签名相同**（同 `task_id` 重投命中同一 attempt） |
+| 继承 | 未在 `env` 中列出的变量照常继承父进程（bridge）环境 |
+| 覆盖 | `env` 中与父进程同名的键**覆盖**继承值；子进程只看到显式值 |
+| 空串值 | `env: {"K": ""}` 表示 K 存在且为空串，**不是 unset**；不提供“删除变量”能力 |
+| 键校验 | 拒绝空键、含 `=` 的键、含空字节的键；值必须为字符串且不含空字节 → 错误码 `invalid_env`（工具错误，**占号之前**拒绝，不创建目录） |
+| 大小写 | 原样透传；Windows 下变量名不区分大小写，不同大小写的同名写法会互相覆盖 |
+| 明文 | `env` 值可能承载密钥：`dispatch.json` 只记 `键 -> sha256:<hex>` 摘要，**不落明文**；回执只列 `env_keys`，**不回显值** |
+| 幂等 | `env` 参与签名：同 `task_id` 且 `env` 不同 → `task_id_conflict`，不追加 attempt、不返回旧回执 |
+| 不做推断 | 不自动注入任何变量（不注入密钥、代理、PATH 前缀）；只透传调用方给的值 |
+| PATH | AW **没有** PATH 注入/前缀逻辑（全仓核实，无 `Command::env` 补丁）。因此 `env.PATH` 会**整体覆盖**继承 PATH，这是真实风险，由 PM 自行负责。将来若引入 PATH 注入，必须在本节新增明确优先级，不得隐式合并 |
+| 升级兼容 | v1.4 之前的 `dispatch.json` 无 `env` 字段，比对时视为 `env: {}`；旧派单同参重投仍可回放，非空 `env` 仍判冲突 |
+
+### 3.3 与“保留历史”的关系
 
 上一轮实现的“同 id 重跑追加 attempt、历史不覆盖”仍然成立，但它保护的是**执行记录**，不是**传输重投**。v1 已把两者分开：重投命中 `dispatch.json` 签名即回放既有回执，不产生新 attempt；有意重跑必须换新 `task_id`，因此 `attempt > 1` 只可能来自历史数据或人工运维。
 
@@ -78,6 +98,7 @@
 | `changed_files_truncated` | boolean | 差集是否超过 20 条而被截断；`true` 表示还有未列出的改动 | 已实现 |
 | `cwd` | string | 本次实际执行目录（规范化绝对路径；Windows 下可能带 `\\?\` 前缀），供 PM 复算 `changed_files` / `commit` | 已实现 |
 | `timeout_secs` | integer | 本次实际生效的超时秒数（含默认值 120），用于解释 `timeout` 类 `blocked_reason` | 已实现 |
+| `env_keys` | string[] | 本次实际覆盖/追加的 env **键名**（不含值），让 PM 知道哪些变量被改写 | 已实现（v1.4） |
 | `commit` | string / null | 执行时工作目录的短 HEAD | 已实现 |
 | `stdout_digest` | `sha256:<hex>` | stdout 原始日志摘要 | 已实现 |
 | `artifacts` | object[] | `{kind, locator, hash}`，locator 为相对路径 `runs/<task_id>/attempt-<N>/stdout.txt` 等 | 已实现 |
@@ -90,7 +111,7 @@
 - PM **不采信 `status` 自述**，只按 `exit_code`、`verify_cmd` 与判据的逐字一致性、`stdout_digest` 与 `artifacts` 中原始日志的重算一致性判定。
 - `status=ok` 只表示进程退出码为 0，不表示验收通过。
 - 历史读取：`receipt.get` 默认返回最新一次；`include_history=true` 返回 `attempts / latest / history[]`，用于回答“执行过几次、每次 exit_code 与耗时”。
-- `cwd` / `timeout_secs` / `changed_files_truncated` 于 v1.3 新增，属**纯增量字段**：既有字段语义未变；v1.3 之前的旧 `handback.json` 不含这三个字段，`receipt.get` 原样返回、**不回填、不改写**。
+- `cwd` / `timeout_secs` / `changed_files_truncated`（v1.3）与 `env_keys`（v1.4）属**纯增量字段**：既有字段语义未变；旧 `handback.json` 不含这些字段，`receipt.get` 原样返回、**不回填、不改写**。
 - `attempt=null` 的 `blocked` 预检回执（缺命令 / cwd 不存在）不落盘，也不带执行上下文（没有实际执行目录与超时）。
 
 ## 5. 契约 vs 现有实现
@@ -133,6 +154,7 @@
 
 约束：
 
+- 本节只列 `blocked` 回执。参数非法属**工具错误**（`isError=true`、不落盘、不占号），具名错误码：`task_id_conflict`（同 id 异参）、`invalid_env`（env 键/值非法）、`timeout_secs` 越界（无前缀，沿用既有报错）。
 - `blocked` 必须带 `blocked_reason`，禁止空字符串；空原因视为契约违规。
 - `blocked` 的 `exit_code` 为 null；`status` 只描述进程结果，不构成验收。
 - 未被识别的 `blocked_reason` 前缀按最严格策略处理：不自动重试，由 PM 人工裁定。
@@ -162,3 +184,4 @@
 | v1.1 | 2026-11-05 | 落地 G1 / G2 / G3：重投按 `dispatch.json` 签名回放、异参返回 `task_id_conflict`、失败码转 `blocked` 前缀；身份与并发上限未动 |
 | v1.2 | 2026-11-06 | 落地 G4：`initialize` 的 `clientInfo` 落盘 `runs/_session/initialize.json` 并由 `status.session` 只读回显；措辞由“身份”改为“审计弱识别”，通道假设不变 |
 | v1.3 | 2026-11-06 | 回执补充 `cwd` / `timeout_secs` / `changed_files_truncated`（纯增量，旧记录不回填）；修复 20 条截断静默问题 |
+| v1.4 | 2026-11-06 | `task.execute` 增加可选 `env` 透传（覆盖/继承/空串/键校验/不落明文/参与幂等签名）；回执增加 `env_keys` |

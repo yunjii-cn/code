@@ -732,3 +732,229 @@ fn changed_files_truncation_is_explicit_not_silent() {
         "超过上限被截断时必须显式告知，不能静默丢弃改动"
     );
 }
+
+// ---- env 透传：只追加/覆盖，不推断，不落明文 ----
+
+#[test]
+fn env_values_are_passed_to_child() {
+    let (server, _settings, runs) = server_with_runs();
+    #[cfg(windows)]
+    let cmd = "echo %AW_TEST_ENV_VALUE%";
+    #[cfg(not(windows))]
+    let cmd = "echo $AW_TEST_ENV_VALUE";
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-15",
+            "cmd": cmd,
+            "env": { "AW_TEST_ENV_VALUE": "visible-value" }
+        }),
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "ok");
+    let stdout = fs::read_to_string(
+        runs.path()
+            .join("t-15")
+            .join("attempt-1")
+            .join("stdout.txt"),
+    )
+    .expect("读取 stdout");
+    assert_eq!(stdout.trim(), "visible-value", "env 必须对子进程真实可见");
+    assert_eq!(
+        payload["env_keys"],
+        json!(["AW_TEST_ENV_VALUE"]),
+        "回执必须列出实际覆盖的 env 键（不含值）"
+    );
+}
+
+#[test]
+fn explicit_env_overrides_inherited_value() {
+    let (server, _settings, runs) = server_with_runs();
+    std::env::set_var("AW_TEST_INHERITED_VALUE", "from-parent");
+    #[cfg(windows)]
+    let cmd = "echo %AW_TEST_INHERITED_VALUE%";
+    #[cfg(not(windows))]
+    let cmd = "echo $AW_TEST_INHERITED_VALUE";
+
+    let inherited = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-16", "cmd": cmd }),
+    ));
+    assert_eq!(inherited["status"], "ok");
+    let inherited_stdout = fs::read_to_string(
+        runs.path()
+            .join("t-16")
+            .join("attempt-1")
+            .join("stdout.txt"),
+    )
+    .expect("读取继承场景 stdout");
+    assert_eq!(
+        inherited_stdout.trim(),
+        "from-parent",
+        "缺省 env 时子进程必须继承父进程环境"
+    );
+
+    let overridden = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-17",
+            "cmd": cmd,
+            "env": { "AW_TEST_INHERITED_VALUE": "from-explicit-env" }
+        }),
+    ));
+    assert_eq!(overridden["status"], "ok");
+    let overridden_stdout = fs::read_to_string(
+        runs.path()
+            .join("t-17")
+            .join("attempt-1")
+            .join("stdout.txt"),
+    )
+    .expect("读取覆盖场景 stdout");
+    assert_eq!(
+        overridden_stdout.trim(),
+        "from-explicit-env",
+        "显式 env 必须覆盖同名继承变量"
+    );
+    std::env::remove_var("AW_TEST_INHERITED_VALUE");
+}
+
+#[test]
+fn omitted_env_and_empty_env_map_are_equivalent() {
+    let (server, _settings, runs) = server_with_runs();
+    let first = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-18", "cmd": "echo same" }),
+    ));
+    assert_eq!(first["env_keys"], json!([]), "缺省 env 的回执应给出空键列表");
+
+    // 同 task_id 换成显式空 map：行为一致，且签名相同，必须复用同一 attempt
+    let second = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-18", "cmd": "echo same", "env": {} }),
+    ));
+    assert_eq!(second["attempt"], 1);
+    assert_eq!(second["env_keys"], json!([]));
+    assert!(!runs.path().join("t-18").join("attempt-2").exists());
+}
+
+#[test]
+fn different_env_is_rejected_as_conflict_without_storing_values() {
+    let (server, _settings, runs) = server_with_runs();
+    let secret = "s3cr3t-value-9f2a";
+    let first = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-19",
+            "cmd": "echo env",
+            "env": { "AW_TEST_SECRET": secret }
+        }),
+    );
+    assert_eq!(first["result"]["isError"], false);
+
+    let dispatch_path = runs.path().join("t-19").join("attempt-1").join("dispatch.json");
+    let dispatch_raw = fs::read_to_string(&dispatch_path).expect("读取派单签名");
+    let dispatch: Value = serde_json::from_str(&dispatch_raw).unwrap();
+    assert!(
+        dispatch["env"]["AW_TEST_SECRET"]
+            .as_str()
+            .map(|value| value.starts_with("sha256:"))
+            .unwrap_or(false),
+        "dispatch.json 必须记录 env 摘要，供幂等比对"
+    );
+    assert!(
+        !dispatch_raw.contains(secret),
+        "派单签名不得落盘 env 明文（env 常承载密钥）"
+    );
+
+    let second = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-19",
+            "cmd": "echo env",
+            "env": { "AW_TEST_SECRET": "another-value" }
+        }),
+    );
+    assert_eq!(
+        second["result"]["isError"], true,
+        "同 id 不同 env 必须拒绝，不能静默返回旧回执"
+    );
+    let text = tool_text(&second);
+    assert!(text.contains("task_id_conflict"), "必须给具名错误码：{text}");
+    assert!(!runs.path().join("t-19").join("attempt-2").exists());
+    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-19" })));
+    assert_eq!(latest["attempt"], 1, "拒绝异参不得覆盖既有回执");
+}
+
+#[test]
+fn invalid_env_is_rejected_before_claiming_attempt() {
+    let (server, _settings, runs) = server_with_runs();
+    let cases = vec![
+        ("t-20a", json!({ "": "empty-key" })),
+        ("t-20b", json!({ "A=B": "equals-in-key" })),
+        ("t-20c", json!({ "A": 1 })),
+        ("t-20d", json!({ "A": "bad\u{0}value" })),
+    ];
+    for (task_id, env) in cases {
+        let response = call_tool(
+            &server,
+            "task.execute",
+            json!({ "task_id": task_id, "cmd": "echo x", "env": env }),
+        );
+        assert_eq!(response["result"]["isError"], true, "非法 env 必须拒绝：{task_id}");
+        let text = tool_text(&response);
+        assert!(text.contains("invalid_env"), "必须给具名错误码 invalid_env：{text}");
+        assert!(
+            !runs.path().join(task_id).exists(),
+            "非法 env 必须在占号之前拒绝，不得创建目录"
+        );
+    }
+}
+
+#[test]
+fn legacy_dispatch_without_env_is_still_replayed() {
+    let (server, _settings, runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let canonical = fs::canonicalize(workdir.path()).expect("规范化工作目录");
+    let attempt = runs.path().join("t-21").join("attempt-1");
+    fs::create_dir_all(&attempt).expect("创建旧格式 attempt");
+    fs::write(
+        attempt.join("dispatch.json"),
+        json!({
+            "task_id": "t-21",
+            "cmd": "echo legacy",
+            "cwd": canonical.to_string_lossy(),
+            "timeout_secs": 120
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式派单签名");
+    fs::write(
+        attempt.join("handback.json"),
+        json!({ "task_id": "t-21", "attempt": 1, "status": "ok", "stdout_digest": "sha256:legacy" })
+            .to_string(),
+    )
+    .expect("写入旧格式回执");
+
+    let payload = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-21",
+            "cmd": "echo legacy",
+            "cwd": workdir.path().to_string_lossy()
+        }),
+    ));
+    assert_eq!(payload["attempt"], 1);
+    assert_eq!(
+        payload["stdout_digest"], "sha256:legacy",
+        "升级前的派单（dispatch.json 无 env）应视为 env 为空并回放"
+    );
+    assert!(!runs.path().join("t-21").join("attempt-2").exists());
+}
