@@ -460,10 +460,11 @@ CI 重跑 → 通过 → 通知用户
 用户电脑
 ├── AgentWork Desktop (Tauri 2 主程序)
 │   ├── 前端 (React, 渲染在 WebView2/WKWebView)
-│   ├── 后端 (Rust, 单进程)
-│   └── 调 aw-mcp-bridge (子进程, stdio)
-├── aw-mcp-bridge (独立 Rust 二进制, 9090)
-│   └── 调 aw-git, aw-store, aw-mcp servers
+│   └── 后端 (Rust, 单进程) — 不启动、也不调用 aw-mcp-bridge
+├── aw-mcp-bridge (独立 Rust 二进制, 手工 cargo run -p aw-mcp-bridge 启动)
+│   ├── MCP over stdio, 不监听任何端口
+│   ├── tools: health / status / task.execute / receipt.get
+│   └── 证据落盘 runs/<task_id>/attempt-N/ (stdout.txt, stderr.txt, dispatch.json, handback.json)
 ├── Docker Desktop (必需, 沙箱执行)
 │   └── agentwork/sandbox:0.1 (按任务启动/销毁)
 └── ~/.agentwork/ (本地数据目录)
@@ -471,6 +472,12 @@ CI 重跑 → 通过 → 通知用户
     ├── db.sqlite (任务历史)
     └── repos/ (本地 clone 的仓库缓存)
 ```
+
+现状说明（与代码一致）：
+
+- 桌面端 `src-tauri` 中没有任何拉起 bridge 的路径；`Command::new` 只出现在 `updater.rs` / `system.rs`，用于 explorer/open/xdg-open。
+- bridge 当前是**外部手工启动的独立二进制**（`cargo run -p aw-mcp-bridge`），通过 stdio MCP 提供上述 4 个工具，不监听端口，也不内嵌 `aw-git` / `aw-store` 等其他 crate。
+- 派单方与 bridge 的进程关系由启动方决定，bridge 自身不感知调用方身份（见 `PM-AW-DISPATCH-CONTRACT.md` 第 2 节）。
 
 ### 4.2 云端（自部署 Web 版）
 

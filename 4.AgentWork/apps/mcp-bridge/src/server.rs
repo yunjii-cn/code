@@ -133,6 +133,9 @@ impl Server {
     }
 
     /// 接单执行：命令与判据由派单方给出，AW 只运行并产出可审计回执
+    ///
+    /// 幂等口径：task_id 即派单标识。同参重投复用既有 attempt（零执行、零新目录）；
+    /// 异参重投返回具名错误 task_id_conflict；有意重跑必须换新 task_id。
     fn execute_task(&self, args: &Value) -> Result<Value, String> {
         let task_id = required_str(args, "task_id")?;
         if !is_valid_task_id(task_id) {
@@ -140,13 +143,28 @@ impl Server {
                 "task_id 非法（需以字母或数字开头，仅含字母数字 . _ -，长度 ≤64）：{task_id}"
             ));
         }
-        let cmd = required_str(args, "cmd")?;
+
+        // 前置判定一律在占号之前完成：只返回 blocked 回执，不创建任何 attempt 目录
+        let cmd = match required_str(args, "cmd") {
+            Ok(cmd) => cmd,
+            Err(_) => {
+                return Ok(blocked_receipt(
+                    task_id,
+                    "",
+                    "command_not_found: 缺少 cmd（必填字符串）".to_string(),
+                ))
+            }
+        };
         let cwd = match args.get("cwd").and_then(Value::as_str).map(str::trim) {
             Some(value) if !value.is_empty() => PathBuf::from(value),
             _ => std::env::current_dir().map_err(|e| format!("获取当前目录失败：{e}"))?,
         };
         if !cwd.is_dir() {
-            return Err(format!("cwd 不是目录：{}", cwd.display()));
+            return Ok(blocked_receipt(
+                task_id,
+                cmd,
+                format!("cwd_not_found: cwd 不是目录：{}", cwd.display()),
+            ));
         }
         let timeout_secs = args
             .get("timeout_secs")
@@ -156,10 +174,32 @@ impl Server {
             return Err("timeout_secs 必须在 1..=600 之间".to_string());
         }
 
+        // 幂等签名：同 task_id 重投必须 cmd / cwd / timeout_secs 完全一致
+        let canonical_cwd = fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
+        let signature = json!({
+            "task_id": task_id,
+            "cmd": cmd,
+            "cwd": canonical_cwd.to_string_lossy(),
+            "timeout_secs": timeout_secs
+        });
+
         let task_root = self.runs_dir.join(&task_id);
+        if let Some((_, existing)) = latest_attempt_dir(&task_root) {
+            return self.replay_existing(task_id, &existing, &signature, timeout_secs);
+        }
+
         fs::create_dir_all(&task_root).map_err(|e| format!("创建运行目录失败：{e}"))?;
-        // 以独占创建目录作为占位：并发调用只会有一个拿到同一序号，其余顺延
-        let (attempt, run_dir) = claim_attempt(&task_root)?;
+        let attempt = 1u64;
+        let run_dir = task_root.join(format!("attempt-{attempt}"));
+        // 独占创建仍是并发闸门：没抢到的调用方按重投处理，等待并复用胜者回执
+        match fs::create_dir(&run_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return self.replay_existing(task_id, &run_dir, &signature, timeout_secs);
+            }
+            Err(error) => return Err(format!("创建尝试目录失败：{error}")),
+        }
+        write_dispatch(&run_dir, &signature)?;
         let stdout_path = run_dir.join("stdout.txt");
         let stderr_path = run_dir.join("stderr.txt");
         let stdout_file =
@@ -199,7 +239,7 @@ impl Server {
                 }
             },
             Err(error) => {
-                spawn_error = Some(format!("启动命令失败：{error}"));
+                spawn_error = Some(format!("command_not_found: 启动命令失败：{error}"));
                 None
             }
         };
@@ -256,6 +296,38 @@ impl Server {
         Ok(handback)
     }
 
+    /// 同 task_id 重投：参数一致则回放既有回执，不一致则具名拒绝
+    fn replay_existing(
+        &self,
+        task_id: &str,
+        attempt_dir: &Path,
+        signature: &Value,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        let dispatch_path = attempt_dir.join("dispatch.json");
+        let stored = match read_json(&dispatch_path) {
+            Ok(stored) => stored,
+            Err(_) => wait_for_json(&dispatch_path, Duration::from_secs(5)).ok_or_else(|| {
+                format!(
+                    "task_id_conflict: task_id `{task_id}` 已有运行记录但缺少派单签名（dispatch.json），无法证明参数一致；重跑请使用新 task_id"
+                )
+            })?,
+        };
+        if &stored != signature {
+            return Err(format!(
+                "task_id_conflict: task_id `{task_id}` 已存在且派单参数不一致（cmd / cwd / timeout_secs 必须完全一致）；重跑请使用新 task_id"
+            ));
+        }
+
+        let handback_path = attempt_dir.join("handback.json");
+        if let Ok(handback) = read_json(&handback_path) {
+            return Ok(handback);
+        }
+        wait_for_json(&handback_path, Duration::from_secs(timeout_secs + 5)).ok_or_else(|| {
+            format!("task_in_progress: task_id `{task_id}` 的既有尝试仍在执行中，请稍后重试")
+        })
+    }
+
     /// 按 task_id 读回回执：默认最新一次，include_history 时给出全部尝试
     fn receipt_payload(&self, args: &Value) -> Result<Value, String> {
         let task_id = required_str(args, "task_id")?;
@@ -286,17 +358,69 @@ impl Server {
     }
 }
 
-/// 以独占创建目录原子占号：已存在即顺延，保证并发下不共享编号、不覆盖彼此文件
-fn claim_attempt(root: &Path) -> Result<(u64, PathBuf), String> {
-    for number in 1u64..=100_000 {
-        let candidate = root.join(format!("attempt-{number}"));
-        match fs::create_dir(&candidate) {
-            Ok(()) => return Ok((number, candidate)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("创建尝试目录失败：{error}")),
+/// 写派单签名：作为“同 task_id 是否同参”的唯一判据，先于执行落盘
+fn write_dispatch(run_dir: &Path, signature: &Value) -> Result<(), String> {
+    let path = run_dir.join("dispatch.json");
+    let text = serde_json::to_string_pretty(signature)
+        .map_err(|e| format!("序列化派单签名失败：{e}"))?;
+    fs::write(&path, text).map_err(|e| format!("写入派单签名失败：{e}"))
+}
+
+fn read_json(path: &Path) -> Result<Value, String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("解析 {} 失败：{e}", path.display()))
+}
+
+/// 等待文件出现且可解析：并发重投落败的一方据此等待胜者先落盘签名/回执
+fn wait_for_json(path: &Path, timeout: Duration) -> Option<Value> {
+    let started = Instant::now();
+    loop {
+        if let Ok(value) = read_json(path) {
+            return Some(value);
+        }
+        if started.elapsed() >= timeout {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// 取该 task_id 下序号最大的 attempt 目录，用于重投回放
+fn latest_attempt_dir(root: &Path) -> Option<(u64, PathBuf)> {
+    let mut latest: Option<(u64, PathBuf)> = None;
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(number) = name
+                .strip_prefix("attempt-")
+                .and_then(|rest| rest.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if latest.as_ref().map(|(seen, _)| number > *seen).unwrap_or(true) {
+                latest = Some((number, entry.path()));
+            }
         }
     }
-    Err("attempt 序号已达上限 100000".to_string())
+    latest
+}
+
+/// 未占号即拒绝时的回执：attempt 为 null，不落盘、不产生证据
+fn blocked_receipt(task_id: &str, cmd: &str, reason: String) -> Value {
+    json!({
+        "task_id": task_id,
+        "attempt": null,
+        "status": "blocked",
+        "changed_files": [],
+        "verify_cmd": cmd,
+        "exit_code": null,
+        "stdout_digest": null,
+        "stderr_digest": null,
+        "commit": null,
+        "duration_ms": 0,
+        "blocked_reason": reason,
+        "artifacts": []
+    })
 }
 
 /// 读取某 task_id 下全部 attempt-N/handback.json，按尝试序号升序

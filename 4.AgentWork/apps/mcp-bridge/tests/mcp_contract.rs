@@ -342,95 +342,160 @@ fn invalid_task_id_is_rejected_before_execution() {
 }
 
 #[test]
-fn missing_cmd_is_rejected() {
-    let (server, _settings, _runs) = server_with_runs();
+fn missing_cmd_returns_blocked_command_not_found_without_consuming_attempt() {
+    let (server, _settings, runs) = server_with_runs();
     let response = call_tool(&server, "task.execute", json!({ "task_id": "t-5" }));
-    assert_eq!(response["result"]["isError"], true);
-    assert!(tool_text(&response).contains("cmd"));
+    assert_eq!(
+        response["result"]["isError"], false,
+        "缺命令应返回 blocked 回执，而不是工具错误"
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        payload["blocked_reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("command_not_found:")
+    );
+    assert!(payload["attempt"].is_null(), "拒绝发生在占号之前");
+    assert!(!runs.path().join("t-5").exists(), "不得创建 attempt 目录");
 }
 
 #[test]
-fn same_task_id_rerun_keeps_history_and_reports_attempts() {
+fn missing_cwd_returns_blocked_cwd_not_found_without_consuming_attempt() {
     let (server, _settings, runs) = server_with_runs();
-
-    let first = tool_payload(&call_tool(
+    let missing = runs.path().join("no-such-cwd");
+    let response = call_tool(
         &server,
         "task.execute",
-        json!({ "task_id": "t-6", "cmd": "exit 3" }),
-    ));
-    let second = tool_payload(&call_tool(
-        &server,
-        "task.execute",
-        json!({ "task_id": "t-6", "cmd": "echo second" }),
-    ));
+        json!({ "task_id": "t-5b", "cmd": "echo hi", "cwd": missing.to_string_lossy() }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        payload["blocked_reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("cwd_not_found:")
+    );
+    assert!(payload["attempt"].is_null(), "拒绝发生在占号之前");
+    assert!(!runs.path().join("t-5b").exists(), "不得创建 attempt 目录");
+}
 
-    assert_eq!(first["attempt"], 1, "首次执行应记为第 1 次");
-    assert_eq!(second["attempt"], 2, "重跑必须追加为第 2 次，而不是覆盖");
+#[test]
+fn duplicate_dispatch_reuses_attempt_without_executing_again() {
+    let (server, _settings, runs) = server_with_runs();
+    let args = json!({ "task_id": "t-6", "cmd": "exit 3" });
+
+    let first = tool_payload(&call_tool(&server, "task.execute", args.clone()));
+    assert_eq!(first["attempt"], 1);
     assert_eq!(first["status"], "failed");
-    assert_eq!(second["status"], "ok");
 
-    // 旧回执与旧日志都必须留痕
-    for attempt in 1..=2 {
-        let dir = runs.path().join("t-6").join(format!("attempt-{attempt}"));
-        assert!(dir.join("handback.json").exists(), "第 {attempt} 次回执应保留");
-        assert!(dir.join("stdout.txt").exists(), "第 {attempt} 次日志应保留");
-    }
+    let stdout_path = runs.path().join("t-6").join("attempt-1").join("stdout.txt");
+    let log_before = fs::read(&stdout_path).expect("首次日志应存在");
 
-    // 默认返回最新一条
-    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-6" })));
-    assert_eq!(latest["attempt"], 2);
-    assert_eq!(latest["exit_code"], 0);
+    let replay = tool_payload(&call_tool(&server, "task.execute", args));
+    assert_eq!(replay["attempt"], 1, "重投必须复用既有 attempt");
+    assert_eq!(replay["exit_code"], 3);
+    assert_eq!(
+        replay["stdout_digest"].as_str(),
+        first["stdout_digest"].as_str()
+    );
+    assert_eq!(
+        fs::read(&stdout_path).expect("日志仍应存在"),
+        log_before,
+        "重投不得重新执行或覆盖证据"
+    );
+    assert!(
+        !runs.path().join("t-6").join("attempt-2").exists(),
+        "重投不得创建新 attempt 目录"
+    );
 
-    // 可显式取历史：次数、每次 exit_code 与耗时都要能回答
     let history = tool_payload(&call_tool(
         &server,
         "receipt.get",
         json!({ "task_id": "t-6", "include_history": true }),
     ));
-    assert_eq!(history["attempts"], 2);
-    let records = history["history"].as_array().expect("history 必须是数组");
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0]["attempt"], 1);
-    assert_eq!(records[0]["exit_code"], 3);
-    assert_eq!(records[1]["attempt"], 2);
-    assert_eq!(records[1]["exit_code"], 0);
-    for record in records {
-        assert!(
-            record["duration_ms"].as_u64().is_some(),
-            "历史记录也必须带耗时"
-        );
-        assert!(
-            record["stdout_digest"]
-                .as_str()
-                .map(|digest| digest.starts_with("sha256:"))
-                .unwrap_or(false),
-            "历史记录必须保留日志摘要"
-        );
-    }
+    assert_eq!(history["attempts"], 1, "重投不得增加执行次数");
 }
 
 #[test]
-fn concurrent_same_task_id_gets_distinct_contiguous_attempts() {
+fn same_task_id_with_different_params_is_rejected() {
     let (server, _settings, runs) = server_with_runs();
-    let task_root = runs.path().join("t-7");
+    call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-8", "cmd": "echo one" }),
+    );
+
+    let different_cmd = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-8", "cmd": "echo two" }),
+    );
+    assert_eq!(different_cmd["result"]["isError"], true);
+    assert!(
+        tool_text(&different_cmd).contains("task_id_conflict"),
+        "异参必须给出具名错误码，实际: {}",
+        tool_text(&different_cmd)
+    );
+
+    let different_timeout = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-8", "cmd": "echo one", "timeout_secs": 30 }),
+    );
+    assert_eq!(different_timeout["result"]["isError"], true);
+    assert!(tool_text(&different_timeout).contains("task_id_conflict"));
+
+    assert!(
+        !runs.path().join("t-8").join("attempt-2").exists(),
+        "异参不得静默追加 attempt"
+    );
+    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-8" })));
+    assert_eq!(latest["attempt"], 1);
+    assert_eq!(latest["verify_cmd"], "echo one", "旧回执必须保持原参数");
+}
+
+#[test]
+fn receipt_history_is_still_readable() {
+    let (server, _settings, runs) = server_with_runs();
+    let task_root = runs.path().join("t-9");
     fs::create_dir_all(&task_root).unwrap();
-    // 预置 800 条历史：旧实现"先扫描最大值"的窗口被放大，两个并发调用必然撞号
-    for number in 1..=800u64 {
+    for number in 1..=2u64 {
         let dir = task_root.join(format!("attempt-{number}"));
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("handback.json"),
             format!(
-                "{{\"task_id\":\"t-7\",\"attempt\":{number},\"status\":\"ok\",\"exit_code\":0,\"duration_ms\":0}}"
+                "{{\"task_id\":\"t-9\",\"attempt\":{number},\"status\":\"ok\",\"exit_code\":0,\"duration_ms\":10}}"
             ),
         )
         .unwrap();
     }
 
+    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-9" })));
+    assert_eq!(latest["attempt"], 2);
+    let history = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-9", "include_history": true }),
+    ));
+    assert_eq!(history["attempts"], 2);
+    let records = history["history"].as_array().unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["attempt"], 1);
+    assert_eq!(records[1]["attempt"], 2);
+}
+
+#[test]
+fn concurrent_duplicate_dispatch_executes_once() {
+    let (server, _settings, runs) = server_with_runs();
     let server = Arc::new(server);
     let barrier = Arc::new(Barrier::new(2));
     let mut handles = Vec::new();
-    for cmd in ["echo first", "echo second"] {
+    for _ in 0..2 {
         let server = Arc::clone(&server);
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
@@ -441,7 +506,7 @@ fn concurrent_same_task_id_gets_distinct_contiguous_attempts() {
                     "jsonrpc": "2.0", "id": 7, "method": "tools/call",
                     "params": {
                         "name": "task.execute",
-                        "arguments": { "task_id": "t-7", "cmd": cmd }
+                        "arguments": { "task_id": "t-7", "cmd": "echo once" }
                     }
                 }),
             ))
@@ -452,12 +517,15 @@ fn concurrent_same_task_id_gets_distinct_contiguous_attempts() {
         .map(|handle| handle.join().expect("并发线程不应 panic"))
         .collect();
 
-    let mut attempts: Vec<u64> = results
-        .iter()
-        .map(|payload| payload["attempt"].as_u64().expect("回执必须带 attempt"))
-        .collect();
-    attempts.sort();
-    assert_eq!(attempts, vec![801, 802], "并发执行必须各自占号，不得共享或覆盖");
+    for payload in &results {
+        assert_eq!(payload["attempt"], 1, "并发重投只能有一个 attempt");
+        assert_eq!(payload["status"], "ok");
+        assert_eq!(
+            payload["stdout_digest"].as_str(),
+            results[0]["stdout_digest"].as_str(),
+            "两个调用方应拿到同一份回执证据"
+        );
+    }
 
     let history = tool_payload(&call(
         &server,
@@ -469,32 +537,15 @@ fn concurrent_same_task_id_gets_distinct_contiguous_attempts() {
             }
         }),
     ));
-    assert_eq!(history["attempts"], 802, "并发两次都必须留下回执");
-    let records = history["history"].as_array().expect("history 必须是数组");
-    assert_eq!(records.len(), 802);
-
-    let numbers: Vec<u64> = records
-        .iter()
-        .filter_map(|record| record["attempt"].as_u64())
-        .collect();
-    for (index, number) in numbers.iter().enumerate() {
-        assert_eq!(*number, (index + 1) as u64, "编号必须连续无洞");
-    }
-
-    let mut hashes = Vec::new();
-    for record in records {
-        let Some(number) = record["attempt"].as_u64() else {
-            continue;
-        };
-        if number < 801 {
-            continue;
-        }
-        let stdout_file = task_root.join(format!("attempt-{number}")).join("stdout.txt");
-        assert!(stdout_file.exists(), "第 {number} 次的 stdout 必须独立落盘");
-        let digest = record["stdout_digest"].as_str().expect("摘要必须是字符串");
-        assert_eq!(digest, sha256_prefixed(&stdout_file), "哈希必须可独立重算");
-        hashes.push(digest.to_string());
-    }
-    assert_eq!(hashes.len(), 2);
-    assert_ne!(hashes[0], hashes[1], "两次并发执行的日志不得互相覆盖");
+    assert_eq!(history["attempts"], 1, "并发重投不得执行两次");
+    assert!(
+        !runs.path().join("t-7").join("attempt-2").exists(),
+        "并发重投不得创建第二个 attempt"
+    );
+    let stdout_file = runs.path().join("t-7").join("attempt-1").join("stdout.txt");
+    assert!(stdout_file.exists());
+    assert_eq!(
+        results[0]["stdout_digest"].as_str().unwrap(),
+        sha256_prefixed(&stdout_file)
+    );
 }
