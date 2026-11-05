@@ -1911,3 +1911,71 @@ fn empty_env_and_path_prepend_combinations_share_one_signature() {
         "缺省 path_prepend 必须归一到空数组"
     );
 }
+
+// ---- 超时文案诚实性：只描述已执行动作，不宣称进程树已终止（v1.11）----
+
+#[test]
+fn timeout_reason_states_action_not_tree_death() {
+    let (server, _settings, _runs) = server_with_runs();
+    #[cfg(windows)]
+    let slow = "ping -n 4 127.0.0.1 > NUL";
+    #[cfg(not(windows))]
+    let slow = "sleep 3";
+    let payload = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-to-honest", "cmd": slow, "timeout_secs": 1 }),
+    ));
+    assert_eq!(payload["status"], "blocked");
+    let reason = payload["blocked_reason"].as_str().unwrap_or("");
+    assert!(
+        reason.starts_with("timeout"),
+        "必须保留 timeout 前缀码：{reason}"
+    );
+    assert!(
+        !reason.contains("已终止进程"),
+        "不得保留完成式断言（实际只对直接子进程发信号）：{reason}"
+    );
+    assert!(
+        reason.contains("直接子进程"),
+        "必须说明动作对象是直接子进程：{reason}"
+    );
+    assert!(
+        reason.contains("未验证"),
+        "必须明写孙进程存活未验证：{reason}"
+    );
+}
+
+#[test]
+fn legacy_timeout_reason_is_returned_verbatim_and_not_rewritten() {
+    let (server, _settings, runs) = server_with_runs();
+    let attempt = runs
+        .path()
+        .join("t-to-legacy")
+        .join("attempt-1");
+    fs::create_dir_all(&attempt).expect("创建旧格式 attempt");
+    let legacy_reason = "timeout：超过 120s 未结束，已终止进程";
+    let handback = json!({
+        "task_id": "t-to-legacy",
+        "attempt": 1,
+        "status": "blocked",
+        "exit_code": null,
+        "blocked_reason": legacy_reason,
+        "stdout_digest": "sha256:legacy-timeout"
+    })
+    .to_string();
+    fs::write(attempt.join("handback.json"), &handback).expect("写入旧格式回执");
+
+    let receipt = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-to-legacy" }),
+    ));
+    assert_eq!(
+        receipt["blocked_reason"].as_str().unwrap_or(""),
+        legacy_reason,
+        "旧文案必须原样返回，不推断、不改写"
+    );
+    let after = fs::read_to_string(attempt.join("handback.json")).expect("重读旧回执");
+    assert_eq!(after, handback, "旧回执文件不得被改写");
+}

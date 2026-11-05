@@ -420,7 +420,12 @@ impl Server {
         let stdout_digest = digest_file(&stdout_path)?;
         let stderr_digest = digest_file(&stderr_path)?;
         let blocked_reason = spawn_error.or_else(|| {
-            timed_out.then(|| format!("timeout：超过 {timeout_secs}s 未结束，已终止进程"))
+            timed_out.then(|| {
+                // 只描述已执行的动作：child.kill() 只作用于直接子进程，孙进程是否存活未经观测
+                format!(
+                    "timeout：超过 {timeout_secs}s 未结束，已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
+                )
+            })
         });
         let exit_code = exit_status.and_then(|status| status.code());
         let status = if blocked_reason.is_some() {
