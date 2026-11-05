@@ -92,6 +92,89 @@ fn tools_list_exposes_read_and_execution_tools() {
 }
 
 #[test]
+fn env_description_is_fail_closed_like_implementation() {
+    let (server, _dir) = server_with_settings(None);
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组");
+    let execute = tools
+        .iter()
+        .find(|tool| tool["name"] == "task.execute")
+        .expect("task.execute 必须存在");
+    let env = execute["inputSchema"]["properties"]["env"]["description"]
+        .as_str()
+        .expect("env 必须有描述");
+
+    // 只查"肯定式"说法：negation（"不会整体覆盖"）是 fail-closed 的正确措辞
+    for claim in [
+        "PATH 会整体覆盖",
+        "PATH 可整体覆盖",
+        "会整体覆盖继承值",
+        "覆盖继承值；PATH",
+    ] {
+        assert!(
+            !env.contains(claim),
+            "描述不得声称 PATH 可整体覆盖（实现是 fail-closed）：命中 `{claim}`；原文：{env}"
+        );
+    }
+    assert!(
+        env.contains("不会整体覆盖"),
+        "描述必须显式否定整体覆盖，避免调用方误读：{env}"
+    );
+    assert!(env.contains("PATH"), "描述必须点名 PATH：{env}");
+    assert!(
+        env.contains("拒绝") || env.contains("不接受"),
+        "描述必须写明 PATH 任意大小写变体被拒绝：{env}"
+    );
+    assert!(
+        env.contains("继承") && env.contains("保留"),
+        "描述必须写明继承的 PATH 始终保留：{env}"
+    );
+    assert!(
+        env.contains("path_prepend"),
+        "描述必须指明追加目录走 path_prepend：{env}"
+    );
+}
+
+#[test]
+fn schema_declares_path_prepend_with_contract_limits() {
+    let (server, _dir) = server_with_settings(None);
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组");
+    let execute = tools
+        .iter()
+        .find(|tool| tool["name"] == "task.execute")
+        .expect("task.execute 必须存在");
+    let properties = execute["inputSchema"]["properties"]
+        .as_object()
+        .expect("properties 必须是对象");
+    let path_prepend = properties
+        .get("path_prepend")
+        .expect("schema 必须声明 path_prepend（实现已支持且参与幂等签名）");
+
+    assert_eq!(path_prepend["type"], "array");
+    assert_eq!(path_prepend["items"]["type"], "string");
+    let description = path_prepend["description"]
+        .as_str()
+        .expect("path_prepend 必须有描述");
+    for keyword in ["字面顺序", "分隔符", "幂等", "16", "4096", "存在性"] {
+        assert!(
+            description.contains(keyword),
+            "path_prepend 描述缺少 `{keyword}`：{description}"
+        );
+    }
+}
+
+#[test]
 fn health_reports_version_and_build_time() {
     let (server, _dir) = server_with_settings(None);
     let response = call(

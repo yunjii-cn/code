@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 10 节的 4 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -53,11 +53,11 @@
 ### 3.1 规则
 
 1. `task_id` 是唯一幂等键，格式沿用实现校验：字母或数字开头，仅含字母数字 `. _ -`，长度 ≤ 64。
-2. **重投**（`task_id` + `cmd` + `cwd` + `timeout_secs` + `env` 全等）必须：
+2. **重投**（`task_id` + `cmd` + `cwd` + `timeout_secs` + `env` + `path_prepend` 全等）必须：
    - 直接返回该 `task_id` 的最新回执；
    - 不启动新进程、不创建新 attempt 目录；
    - `attempt` 与被重投的那次完全一致。
-3. 同一 `task_id` 但 `cmd`/`cwd`/`timeout_secs`/`env` 任一不同 → **拒绝**（视为契约违规），不得覆盖或追加，必须显式报错并要求新 `task_id`。
+3. 同一 `task_id` 但 `cmd`/`cwd`/`timeout_secs`/`env`/`path_prepend` 任一不同 → **拒绝**（视为契约违规），不得覆盖或追加，必须显式报错并要求新 `task_id`。
 4. **重跑**一律使用新 `task_id`（建议后缀 `-r2`、`-r3`，由 PM 生成），不得用“同 id 再调一次”表达重跑。
 5. 一个 `task_id` 对应 PM 侧一条派单记录；AW 侧 `attempt > 1` 仅允许出现在：崩溃恢复、人工运维重试、或未来由 PM 显式授权的重试语义（v1 未定义该输入）。
 
@@ -80,7 +80,8 @@
 | 不做推断 | 不自动注入任何变量（不注入密钥、代理、PATH 前缀）；只透传调用方给的值 |
 | PATH（v1.7 fail-closed） | `env` 中出现 `PATH`（**大小写任意变体**：`PATH` / `Path` / `path`，Windows 下同一变量）**一律拒绝**：错误码 `invalid_env`，reason 必须写明"PATH 不可整体覆盖"；在**占号之前**拒绝——不建目录、不写 `dispatch.json`、不产生回执。**继承的 PATH 永远保留** |
 | 不静默降级 | 禁止"看见了 `env.PATH` 但悄悄忽略"：那会让调用方误以为自己设的 PATH 生效。**看见即拒绝**，不降级、不警告后放行 |
-| 追加目录 | 若确实需要往 PATH 追加目录，必须用独立显式字段 `path_prepend`（名字在此写死），由 AW 显式拼接并在本节另起一行写明顺序；**当前未实现**，`env.PATH` 永远不承担这件事 |
+| 追加目录 | 若确实需要往 PATH 追加目录，必须用独立显式字段 `path_prepend`（名字在此写死），由 AW 显式拼接；实现与顺序见 §3.5（v1.9 起已落地）；`env.PATH` 永远不承担这件事 |
+| 工具描述同步（v1.14） | `tools/list` 中 `env` 的 description 与本节**逐句一致**：PATH 任意大小写变体一律拒绝（`invalid_env`）、继承的 PATH 永远保留、不整体覆盖、不静默忽略；追加目录只走 `path_prepend`。**禁止**描述里出现"PATH 会整体覆盖"这类与 fail-closed 相反的措辞 |
 | 旧记录 | v1.7 之前的 `dispatch.json` 里可能已有 `env.PATH` 摘要（旧实现允许整体覆盖）。这类记录的覆盖行为属**已知缺陷，不追认**：只读接口原样返回、不改写不补；但同参重投会因入参 `env.PATH` 被拒而不再回放 |
 | 升级兼容 | v1.4 之前的 `dispatch.json` 无 `env` 字段，比对时视为 `env: {}`；旧派单同参重投仍可回放，非空 `env` 仍判冲突 |
 
@@ -114,6 +115,7 @@
 | 两字段独立归一 | `env` 与 `path_prepend` **各自**归一到空集合后再比对（`{}` / `[]`），因此"都缺省 / 都为空 / 一空一缺 / 一缺一空"**四种组合签名全等** |
 | 目录是否存在 | **不校验**：AW 不假设目标机文件系统布局。不存在的目录原样写进 PATH，子进程找不到可执行时的表现与系统一致（不额外报错、不改写） |
 | 回执呈现 | 回执新增 `path_prepend` 字段：**只回目录名列表**（原样、不做规范化），与 `env_keys` 并列；不回任何 env 值 |
+| 工具描述同步（v1.14） | `tools/list` 中 `path_prepend` 的 schema 与 description 与本节一致：`type=array` / `items=string`、字面顺序前插、平台分隔符、空数组等价缺省、参与幂等签名、上限 16 项/单项 4096 字符、不校验目录存在性 |
 
 ## 4. 回执
 
@@ -374,8 +376,9 @@
 | v1.6 | 2026-11-06 | 派单记录补 `dispatchedAt`、回执补 `finishedAt`（RFC3339/UTC/秒级，纯增量、旧记录不回填、不参与幂等签名）；**清理仍未实现**，年龄判据只认这两个字段、不认 mtime |
 | v1.7 | 2026-11-06 | `env.PATH` 改为 fail-closed：大小写任意变体一律 `invalid_env`，占号前拒绝、不落盘；继承 PATH 永远保留，不再允许整体覆盖；`path_prepend` 仅作预留命名（未实现）；旧记录中的 `env.PATH` 覆盖行为记为已知缺陷、不追认 |
 | v1.8 | 2026-11-06 | `runs.list` 定死计数口径：`attempts` = 真实 attempt 目录数（不看回执、不按最大编号），`total` = **Σ attempts**（非任务数）且分页无关，新增 `total_tasks`；三种边界（回执缺失/损坏、编号不连续、占号前拒单）各有结论 |
-| v1.9 | 2026-11-06 | 实现 `path_prepend`（§3.5）：字符串数组按字面顺序前插、继承 PATH 在后、分隔符按平台（Windows `;` / POSIX `:`）；参与幂等签名；空数组/空元素/NUL/超 16 个/单项超 4096 字符 → `invalid_path_prepend`（占号前拒绝）；目录存在性不校验；回执新增 `path_prepend` 目录列表 |
+| v1.9 | 2026-11-06 | 实现 `path_prepend`（§3.5）：字符串数组按字面顺序前插、继承 PATH 在后、分隔符按平台（Windows `;` / POSIX `:`）；参与幂等签名；空元素/NUL/超 16 个/单项超 4096 字符 → `invalid_path_prepend`（占号前拒绝；**空数组在 v1.10 改为与缺省等价**）；目录存在性不校验；回执新增 `path_prepend` 目录列表 |
 | v1.10 | 2026-11-06 | 消除空集合口径不一致（选 A）：`path_prepend: []` 改为**与缺省完全等价**（执行相同、签名相同、重投命中同一 attempt），与 §3.2 的 `env: {}` 一致；两字段各自独立归一，"都缺省/都为空/一空一缺/一缺一空"四种组合签名全等 |
 | v1.11 | 2026-11-06 | 修正超时文案的诚实性：`blocked_reason` 从"已终止进程"改为"已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"；契约明写文案只代表已执行动作、不代表进程树已终止，与 `#3` 的 `NOT_PROVEN` 对齐；历史旧文案原样返回、标注为不准确 |
 | v1.12 | 2026-11-06 | 实现证据清理 `runs.prune`（§8）：**只有显式调用、无任何自动清理**；`dry_run` 默认零写入、`dry_run=false + confirm=true` 才真删；年龄只认 `finishedAt`（缺字段一律不删）；**最新 attempt 永不进入候选**（单 attempt 的 task 永远删不掉）；只删整个 `attempt-<N>` 目录；`runs/prune.jsonl` 先记账（`plan`+`result` 两行）后删除；部分失败报 `partial` 且 `isError=true`，不自动重试；不删 `_` 前缀目录与任务外路径；本批**未删除任何既有证据** |
 | v1.13 | 2026-11-06 | 修正 `initialize` 审计的多进程覆盖缺陷：落盘从单文件覆盖改为**每次一份 `_session/initialize-<pid>-<毫秒>-<序号>.json`**（tmp + rename 原子可见），并发/先后写入都不丢；`status.session` 聚合全部记录（含旧版 `initialize.json`），新增 `total` 与 `records[]`（每条带 `source` 文件名）；**边界不放宽**：多份记录不等于多会话、不构成身份、不参与准入；旧记录只读聚合、不回填 |
+| v1.14 | 2026-11-06 | **仅修工具描述与契约措辞，不改任何行为**：`tools/list` 的 `env` 描述从"PATH 会整体覆盖"改为 v1.7 的 fail-closed 口径（任意大小写一律拒绝、继承 PATH 永远保留、不静默忽略）；schema 补上已实现的 `path_prepend`（数组、字面顺序、平台分隔符、空数组等价缺省、参与幂等签名、16 项/4096 字符上限、不校验目录存在性）；`status` 描述补"initialize 记录可能多份、按 receivedAt 聚合"；§3.1 的签名口径补上 `path_prepend`（与 §3.5 单一措辞）、§3.2/§3.5 各加"工具描述同步"行；全量对照见 `docs/TOOLS-DESCRIPTION-AUDIT.md` |

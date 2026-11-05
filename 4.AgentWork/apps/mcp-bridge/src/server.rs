@@ -1140,7 +1140,7 @@ fn attempt_numbers(task_root: &Path) -> Vec<u64> {
     numbers
 }
 
-/// path_prepend：字符串数组，按字面顺序前插；空数组/空元素/NUL/超量/超长一律在占号之前拒绝
+/// path_prepend：字符串数组，按字面顺序前插；空数组与缺省等价，空元素/NUL/超量/超长一律在占号之前拒绝
 fn parse_path_prepend(args: &Value) -> Result<Vec<String>, String> {
     const MAX_ENTRIES: usize = 16;
     const MAX_ENTRY_LEN: usize = 4096;
@@ -1274,7 +1274,7 @@ fn tools() -> Value {
         },
         {
             "name": "status",
-            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，以及最近一次 initialize 的 clientInfo（仅审计弱识别，不构成身份）；不回显任何配置值",
+            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，以及 initialize 审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo；仅审计弱识别，不构成身份）；不回显任何配置值",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -1289,8 +1289,13 @@ fn tools() -> Value {
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因" },
                     "env": {
                         "type": "object",
-                        "description": "可选：追加/覆盖子进程环境变量（字符串 map）。未列出的变量继承 bridge 进程环境；显式同名变量覆盖继承值；PATH 会整体覆盖继承值；值为空串表示置空，不是 unset；不做任何自动推断",
+                        "description": "可选：追加/覆盖子进程环境变量（字符串 map，仅非 PATH 变量）。未列出的变量继承 bridge 进程环境；显式同名变量覆盖继承值。PATH 任意大小写变体一律拒绝（invalid_env）：继承的 PATH 永远保留、不会整体覆盖、也不会被静默忽略；需要追加目录请用 path_prepend。值为空串表示置空，不是 unset；不做任何自动推断",
                         "additionalProperties": { "type": "string" }
+                    },
+                    "path_prepend": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "可选：前插到子进程 PATH 的目录列表（字符串数组）。按数组字面顺序排在最前，其后才是继承的 PATH；平台分隔符自动使用（Windows 为分号，其他平台为冒号）。空数组与缺省完全等价（签名相同）。参与幂等签名：同 task_id 重投必须完全一致。上限 16 项、单项 ≤4096 字符；不做目录存在性校验。非法形态（非字符串数组/空元素/NUL/超量/超长）在占号前以 invalid_path_prepend 拒绝"
                     }
                 },
                 "required": ["task_id", "cmd"],
