@@ -205,7 +205,12 @@ impl Server {
             }
         }
         task_ids.sort();
-        let total = task_ids.len() as u64;
+        let total_tasks = task_ids.len() as u64;
+        // total 是 attempt 目录总数、不是任务数：必须等于逐条 attempts 之和，且不受分页影响
+        let total: u64 = task_ids
+            .iter()
+            .map(|task_id| attempt_numbers(&self.runs_dir.join(task_id)).len() as u64)
+            .sum();
         let tasks: Vec<Value> = task_ids
             .iter()
             .skip(offset as usize)
@@ -214,8 +219,9 @@ impl Server {
             .collect();
 
         Ok(json!({
-            "state": if !exists { "missing" } else if total == 0 { "empty" } else { "ready" },
+            "state": if !exists { "missing" } else if total_tasks == 0 { "empty" } else { "ready" },
             "total": total,
+            "total_tasks": total_tasks,
             "offset": offset,
             "limit": limit,
             "tasks": tasks
@@ -225,22 +231,7 @@ impl Server {
     /// 单个任务的只读摘要：只给状态与 env 键名，不回显 env 值
     fn task_summary(&self, task_id: &str) -> Value {
         let root = self.runs_dir.join(task_id);
-        let mut numbers: Vec<u64> = Vec::new();
-        if let Ok(entries) = fs::read_dir(&root) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let Some(number) = name
-                    .strip_prefix("attempt-")
-                    .and_then(|rest| rest.parse::<u64>().ok())
-                else {
-                    continue;
-                };
-                if entry.path().is_dir() {
-                    numbers.push(number);
-                }
-            }
-        }
-        numbers.sort_unstable();
+        let numbers = attempt_numbers(&root);
         let latest = numbers.last().copied();
 
         let mut handback = false;
@@ -713,6 +704,27 @@ fn parse_env(args: &Value) -> Result<Vec<(String, String)>, String> {
         pairs.push((key.clone(), text.to_string()));
     }
     Ok(pairs)
+}
+
+/// 该 task 下真实存在的 attempt 目录编号：按目录个数计，不假设编号连续，也不看 handback.json
+fn attempt_numbers(task_root: &Path) -> Vec<u64> {
+    let mut numbers: Vec<u64> = Vec::new();
+    if let Ok(entries) = fs::read_dir(task_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(number) = name
+                .strip_prefix("attempt-")
+                .and_then(|rest| rest.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if entry.path().is_dir() {
+                numbers.push(number);
+            }
+        }
+    }
+    numbers.sort_unstable();
+    numbers
 }
 
 /// 分页参数：缺省 offset=0 / limit=20；类型或范围不合法时给具名错误

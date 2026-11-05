@@ -1450,3 +1450,154 @@ fn legacy_dispatch_with_env_path_stays_readable_but_input_is_rejected() {
         "旧记录时间戳不得被回填或改写"
     );
 }
+
+// ---- runs.list：total == Σ attempts（v1.8）----
+
+/// 构造：t-a 真实派单（1 个 attempt）；t-b 手工制造 1/3/5/7 且 7 的回执损坏；
+/// t-c 只有 task 目录、0 个 attempt；t-reject 是占号前被拒的派单（不得留下任何目录）
+fn runs_list_totals_fixture() -> (Server, TempDir, TempDir) {
+    let (server, settings, runs) = server_with_runs();
+    let ok = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-a", "cmd": "echo a" }),
+    );
+    assert_eq!(
+        ok["result"]["isError"],
+        false,
+        "t-a 派单应成功：{}",
+        tool_text(&ok)
+    );
+
+    let b1 = runs.path().join("t-b").join("attempt-1");
+    fs::create_dir_all(&b1).expect("创建 t-b/attempt-1");
+    fs::write(
+        b1.join("handback.json"),
+        json!({ "task_id": "t-b", "attempt": 1, "status": "ok", "exit_code": 0 }).to_string(),
+    )
+    .expect("写入 t-b/attempt-1 回执");
+    for number in [3u64, 5, 7] {
+        let dir = runs.path().join("t-b").join(format!("attempt-{number}"));
+        fs::create_dir_all(&dir).expect("创建 t-b 的跳号 attempt");
+    }
+    fs::write(
+        runs.path().join("t-b").join("attempt-7").join("handback.json"),
+        "{ this is not json",
+    )
+    .expect("写入损坏回执");
+
+    fs::create_dir_all(runs.path().join("t-c")).expect("创建只有目录的 task");
+
+    let rejected = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-reject", "cmd": "echo nope", "env": { "PATH": "/tmp/x" } }),
+    );
+    assert_eq!(
+        rejected["result"]["isError"],
+        true,
+        "占号前必须拒绝：{}",
+        tool_text(&rejected)
+    );
+    assert!(
+        !runs.path().join("t-reject").exists(),
+        "占号前拒绝不得留下任何目录"
+    );
+
+    (server, settings, runs)
+}
+
+#[test]
+fn runs_list_total_equals_sum_of_attempts_and_ignores_pagination() {
+    let (server, _settings, _runs) = runs_list_totals_fixture();
+    let mut totals = Vec::new();
+    let mut summed = 0u64;
+    for offset in 0..4 {
+        let page = runs_list_payload(&server, json!({ "offset": offset, "limit": 1 }));
+        totals.push(page["total"].as_u64().unwrap_or(u64::MAX));
+        if let Some(tasks) = page["tasks"].as_array() {
+            for task in tasks {
+                summed += task["attempts"].as_u64().unwrap_or(u64::MAX);
+            }
+        }
+    }
+    assert_eq!(
+        totals,
+        vec![5u64, 5, 5, 5],
+        "分页不得改变 total：{totals:?}"
+    );
+    assert_eq!(summed, 5, "Σ 条目.attempts 必须等于 total");
+
+    let whole = runs_list_payload(&server, json!({}));
+    assert_eq!(
+        whole["total"], 5,
+        "total 是 attempt 目录总数，不是任务数（任务只有 3 个）"
+    );
+    assert_eq!(whole["total_tasks"], 3, "total_tasks 才是任务数");
+    assert_eq!(
+        whole["tasks"].as_array().map(|tasks| tasks.len()),
+        Some(3)
+    );
+
+    let mut attempts = Vec::new();
+    for task in whole["tasks"].as_array().expect("tasks 必须是数组") {
+        attempts.push((
+            task["task_id"].as_str().unwrap_or("").to_string(),
+            task["attempts"].as_u64().unwrap_or(u64::MAX),
+        ));
+    }
+    assert_eq!(
+        attempts,
+        vec![
+            ("t-a".to_string(), 1u64),
+            ("t-b".to_string(), 4u64),
+            ("t-c".to_string(), 0u64),
+        ],
+        "逐条 attempts 必须是真实 attempt 目录数（跳号按目录个数计）"
+    );
+}
+
+#[test]
+fn runs_list_counts_attempt_dirs_regardless_of_handback_and_gaps() {
+    let (server, _settings, _runs) = runs_list_totals_fixture();
+    let payload = runs_list_payload(&server, json!({}));
+    let tasks = payload["tasks"].as_array().expect("tasks 必须是数组");
+    let by_id = |id: &str| -> Value {
+        tasks
+            .iter()
+            .find(|task| task["task_id"] == id)
+            .unwrap_or_else(|| panic!("缺少任务 {id}：{payload}"))
+            .clone()
+    };
+
+    let ok_task = by_id("t-a");
+    assert_eq!(ok_task["attempts"], 1);
+    assert_eq!(ok_task["latest_attempt"], 1);
+    assert_eq!(ok_task["handback"], true, "真实回执必须可解析");
+
+    let gap_task = by_id("t-b");
+    assert_eq!(
+        gap_task["attempts"], 4,
+        "attempts 按目录个数计：1/3/5/7 存在、2/4/6 不存在 → 4"
+    );
+    assert_eq!(
+        gap_task["latest_attempt"], 7,
+        "latest_attempt 是编号最大值，不等于 attempts"
+    );
+    assert_eq!(
+        gap_task["handback"], false,
+        "最新 attempt 的回执损坏，必须判为不可解析"
+    );
+    assert!(gap_task["status"].is_null(), "回执损坏时 status 必须为 null");
+    assert!(gap_task["exit_code"].is_null());
+
+    let empty_task = by_id("t-c");
+    assert_eq!(empty_task["attempts"], 0, "无 attempt 目录即为 0");
+    assert!(empty_task["latest_attempt"].is_null());
+    assert_eq!(empty_task["handback"], false);
+
+    assert!(
+        !tasks.iter().any(|task| task["task_id"] == "t-reject"),
+        "占号前拒绝的 task 不得出现在列表里"
+    );
+}

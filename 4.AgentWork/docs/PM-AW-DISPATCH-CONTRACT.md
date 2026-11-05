@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 10 节的 4 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；证据保留与清理**只有方案、未实现、默认关闭**（见 §8）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；证据保留与清理**只有方案、未实现、默认关闭**（见 §8）；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -148,8 +148,9 @@
 | 10 | 证据保留与清理（第 8 节） | **缺（仅有方案）** | 本批只出方案：默认关闭、按结果分档、先记账后删除；代码未实现 |
 | 11 | 证据时间戳 `dispatchedAt` / `finishedAt`（§3.4 / 第 4 节） | **一致** | v1.6 起随派单与回执落盘（UTC/秒级）；不参与幂等签名；旧记录不回填、缺失即未知 |
 | 12 | `env.PATH` fail-closed（§3.2） | **一致** | 大小写任意变体一律 `invalid_env`，占号前拒绝；继承 PATH 永远保留；不静默忽略 |
+| 13 | `runs.list` 的 `total` 与 `attempts` 一致性（第 7 节） | **一致** | `total == Σ attempts`（attempt 目录数，非任务数）；分页不改变 `total`；新增 `total_tasks` 供换算页数 |
 
-统计：**已一致 10 条、缺 2 条**（第 8 条按分工归 PM 侧，AW 不做；第 10 条方案待拍板、未实现；认证仍待通道归属拍板）。
+统计：**已一致 11 条、缺 2 条**（第 8 条按分工归 PM 侧，AW 不做；第 10 条方案待拍板、未实现；认证仍待通道归属拍板）。
 
 ### 5.1 缺口补齐规划（后续批次）
 
@@ -200,7 +201,7 @@
 
 判据：分类只依据**确定性事实**（命令压根没启动），不做启发式猜测。**误判比不判更糟。**
 
-## 7. `runs.list`（只读枚举，非权威）
+## 7. `runs.list`（只读枚举，非权威；v1.5，v1.8 定死 `total` 口径）
 
 `runs.list` 只读枚举 `runs/` 目录，让 PM 看到“本机有哪些派单痕迹”，不新增任何写路径。
 
@@ -211,7 +212,15 @@
 | 范围 | 仅列 `task_id` 合法（字母或数字开头、长度 ≤64）的目录；`_session` 等 `_` 开头预留目录一律排除 |
 | 排序 | 按 `task_id` 升序，与目录创建顺序无关；同一状态多次调用结果逐字段一致 |
 | 分页 | `offset` 默认 0；`limit` 默认 20、范围 1..=100；类型/范围越界 → `invalid_pagination`（工具错误） |
-| 条目 | `task_id` / `attempts`（attempt 目录数，含未完成）/ `latest_attempt` / `handback`（最新 attempt 是否可解析回执）/ `status` / `exit_code` / `duration_ms` / `blocked_reason` / `env_keys` |
+| 条目 | `task_id` / `attempts`（**真实存在的 `attempt-<N>` 目录数**）/ `latest_attempt`（编号最大值，**不等于** `attempts`）/ `handback`（最新 attempt 是否可解析回执）/ `status` / `exit_code` / `duration_ms` / `blocked_reason` / `env_keys` |
+| `attempts` 计数口径（v1.8） | 按**目录个数**计，不按最大编号计，也**不看 `handback.json`**：目录存在即"占号成立"，回执缺失或损坏只让 `handback=false`，不影响计数。编号不连续（有 1、3 无 2）时 `attempts=2`、`latest_attempt=3`，不推断缺失编号、不补目录、不视为异常 |
+| `total` 口径（v1.8） | **不是任务数**，而是**所有匹配任务的 attempt 目录数总和**：`total == Σ 条目.attempts`（对全体匹配任务，不限于当前页）。恒等式是本接口的硬约束，不成立即视为契约违规 |
+| `total` 与分页 | **分页不改变 `total`**：`offset`/`limit` 只影响 `tasks[]`，`total` 在同一次查询的各页之间恒定 |
+| `total_tasks`（新增，v1.8） | 匹配的 task 目录数，用于换算页数；恒等式不涉及该字段。`state` 的 `empty`/`ready` 由 `total_tasks` 判定，不由 `total` 判定 |
+| 边界：目录存在但回执缺失或损坏 | **计入** `attempts` 与 `total`（占号已成立）；该条 `handback=false`，`status`/`exit_code`/`duration_ms`/`blocked_reason` 为 null；`latest_attempt` 仍指向编号最大的目录 |
+| 边界：编号不连续（1、3 无 2） | 计入 **2**（按目录数），`latest_attempt=3`；不推断、不补、不报错 |
+| 边界：派单被拒（占号前拒绝，如 `invalid_env` / `invalid_pagination`） | **不产生 attempt 目录 → 不计入任何条目与 `total`**；若 task 目录也未创建，该 task 不出现在列表里 |
+| 边界：task 目录存在但 0 个 attempt 目录 | 该 task **仍出现**（记录已建立），`attempts=0`、`latest_attempt=null`、`handback=false`，对 `total` 贡献 0 |
 | 敏感信息 | **不回 env 值**：只给 `env_keys`（`dispatch.json` 中的键名），不返回明文，也不返回摘要以外的值 |
 | 权威性 | **目录枚举结果不是执行状态的权威来源**：它只镜像磁盘现状，可能滞后或被人工改动；PM 判定某次派单必须用 `receipt.get`，不得以 `runs.list` 的 `status` 作为验收依据。若将来启用第 8 节的清理，**已清理的 task 是"不出现"，不等于"从未派单"**；`receipt.get` 的"回执不存在"同样只表示本机当前无证据 |
 
@@ -322,3 +331,4 @@
 | v1.5.1 | 2026-11-06 | **仅文档、未实现代码**：新增 §8 证据保留与清理方案（默认关闭、按结果分档、先记账后删除、清理后"不出现≠不存在"）；新增 §6.1 记录「按退出码细分 `command_not_found`」**刻意不做**及其理由；`runs.list` 权威性行补充清理口径 |
 | v1.6 | 2026-11-06 | 派单记录补 `dispatchedAt`、回执补 `finishedAt`（RFC3339/UTC/秒级，纯增量、旧记录不回填、不参与幂等签名）；**清理仍未实现**，年龄判据只认这两个字段、不认 mtime |
 | v1.7 | 2026-11-06 | `env.PATH` 改为 fail-closed：大小写任意变体一律 `invalid_env`，占号前拒绝、不落盘；继承 PATH 永远保留，不再允许整体覆盖；`path_prepend` 仅作预留命名（未实现）；旧记录中的 `env.PATH` 覆盖行为记为已知缺陷、不追认 |
+| v1.8 | 2026-11-06 | `runs.list` 定死计数口径：`attempts` = 真实 attempt 目录数（不看回执、不按最大编号），`total` = **Σ attempts**（非任务数）且分页无关，新增 `total_tasks`；三种边界（回执缺失/损坏、编号不连续、占号前拒单）各有结论 |
