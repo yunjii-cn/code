@@ -156,8 +156,12 @@ impl Server {
             return Err("timeout_secs 必须在 1..=600 之间".to_string());
         }
 
-        let run_dir = self.runs_dir.join(&task_id);
-        fs::create_dir_all(&run_dir).map_err(|e| format!("创建运行目录失败：{e}"))?;
+        let task_root = self.runs_dir.join(&task_id);
+        fs::create_dir_all(&task_root).map_err(|e| format!("创建运行目录失败：{e}"))?;
+        // 同一 task_id 重跑追加为新的一次尝试，历史回执与日志一律保留
+        let attempt = next_attempt(&task_root);
+        let run_dir = task_root.join(format!("attempt-{attempt}"));
+        fs::create_dir_all(&run_dir).map_err(|e| format!("创建尝试目录失败：{e}"))?;
         let stdout_path = run_dir.join("stdout.txt");
         let stderr_path = run_dir.join("stderr.txt");
         let stdout_file =
@@ -221,6 +225,7 @@ impl Server {
 
         let handback = json!({
             "task_id": task_id,
+            "attempt": attempt,
             "status": status,
             "changed_files": changed_files,
             "verify_cmd": cmd,
@@ -233,12 +238,12 @@ impl Server {
             "artifacts": [
                 {
                     "kind": "stdout",
-                    "locator": format!("runs/{task_id}/stdout.txt"),
+                    "locator": format!("runs/{task_id}/attempt-{attempt}/stdout.txt"),
                     "hash": stdout_digest.clone()
                 },
                 {
                     "kind": "stderr",
-                    "locator": format!("runs/{task_id}/stderr.txt"),
+                    "locator": format!("runs/{task_id}/attempt-{attempt}/stderr.txt"),
                     "hash": stderr_digest.clone()
                 }
             ]
@@ -247,16 +252,67 @@ impl Server {
         Ok(handback)
     }
 
-    /// 按 task_id 读回已持久化的回执，供 PM 复核
+    /// 按 task_id 读回回执：默认最新一次，include_history 时给出全部尝试
     fn receipt_payload(&self, args: &Value) -> Result<Value, String> {
         let task_id = required_str(args, "task_id")?;
         if !is_valid_task_id(task_id) {
             return Err(format!("task_id 非法：{task_id}"));
         }
-        let path = self.runs_dir.join(task_id).join("handback.json");
-        let raw = fs::read_to_string(&path).map_err(|_| format!("回执不存在：{task_id}"))?;
-        serde_json::from_str(&raw).map_err(|e| format!("回执解析失败：{e}"))
+        let include_history = args
+            .get("include_history")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let records = collect_attempts(&self.runs_dir.join(task_id));
+        let (_, latest) = records
+            .last()
+            .ok_or_else(|| format!("回执不存在：{task_id}"))?;
+
+        if include_history {
+            let history: Vec<&Value> = records.iter().map(|(_, record)| record).collect();
+            Ok(json!({
+                "task_id": task_id,
+                "attempts": records.len(),
+                "latest": latest,
+                "history": history
+            }))
+        } else {
+            Ok(latest.clone())
+        }
     }
+}
+
+/// 同一 task_id 的下一次尝试序号；历史目录即事实来源，不做覆盖
+fn next_attempt(root: &Path) -> u64 {
+    collect_attempts(root)
+        .last()
+        .map(|(number, _)| *number)
+        .unwrap_or(0)
+        + 1
+}
+
+/// 读取某 task_id 下全部 attempt-N/handback.json，按尝试序号升序
+fn collect_attempts(root: &Path) -> Vec<(u64, Value)> {
+    let mut records = Vec::new();
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(number) = name
+                .strip_prefix("attempt-")
+                .and_then(|rest| rest.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let path = entry.path().join("handback.json");
+            if let Ok(raw) = fs::read_to_string(&path) {
+                if let Ok(record) = serde_json::from_str::<Value>(&raw) {
+                    records.push((number, record));
+                }
+            }
+        }
+    }
+    records.sort_by_key(|(number, _)| *number);
+    records
 }
 
 fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, String> {
@@ -373,11 +429,12 @@ fn tools() -> Value {
         },
         {
             "name": "receipt.get",
-            "description": "按 task_id 读回已持久化的执行回执，供 PM 复核证据",
+            "description": "按 task_id 读回执行回执：默认返回最新一次；include_history=true 时返回 attempts 次数与全部历史（每次 exit_code 与耗时）",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task_id": { "type": "string", "description": "task.execute 使用的派单标识" }
+                    "task_id": { "type": "string", "description": "task.execute 使用的派单标识" },
+                    "include_history": { "type": "boolean", "description": "是否返回全部尝试记录，默认 false" }
                 },
                 "required": ["task_id"],
                 "additionalProperties": false

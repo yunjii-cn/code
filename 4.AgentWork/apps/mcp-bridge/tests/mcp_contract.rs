@@ -240,7 +240,7 @@ fn execute_returns_auditable_handback() {
         "回执必须包含耗时"
     );
 
-    let stdout_file = runs.path().join("t-1").join("stdout.txt");
+    let stdout_file = runs.path().join("t-1").join("attempt-1").join("stdout.txt");
     assert!(stdout_file.exists(), "stdout 必须落盘作为证据");
     assert_eq!(
         payload["stdout_digest"].as_str().unwrap(),
@@ -249,7 +249,7 @@ fn execute_returns_auditable_handback() {
 
     let artifacts = payload["artifacts"].as_array().expect("artifacts 必须是数组");
     assert_eq!(artifacts.len(), 2, "stdout 与 stderr 都应作为证据");
-    assert_eq!(artifacts[0]["locator"], "runs/t-1/stdout.txt");
+    assert_eq!(artifacts[0]["locator"], "runs/t-1/attempt-1/stdout.txt");
     assert_eq!(
         artifacts[0]["hash"].as_str().unwrap(),
         payload["stdout_digest"].as_str().unwrap(),
@@ -263,7 +263,11 @@ fn execute_returns_auditable_handback() {
         );
     }
     assert!(
-        runs.path().join("t-1").join("handback.json").exists(),
+        runs.path()
+            .join("t-1")
+            .join("attempt-1")
+            .join("handback.json")
+            .exists(),
         "回执必须持久化，供 PM 读取"
     );
 }
@@ -342,4 +346,64 @@ fn missing_cmd_is_rejected() {
     let response = call_tool(&server, "task.execute", json!({ "task_id": "t-5" }));
     assert_eq!(response["result"]["isError"], true);
     assert!(tool_text(&response).contains("cmd"));
+}
+
+#[test]
+fn same_task_id_rerun_keeps_history_and_reports_attempts() {
+    let (server, _settings, runs) = server_with_runs();
+
+    let first = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-6", "cmd": "exit 3" }),
+    ));
+    let second = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-6", "cmd": "echo second" }),
+    ));
+
+    assert_eq!(first["attempt"], 1, "首次执行应记为第 1 次");
+    assert_eq!(second["attempt"], 2, "重跑必须追加为第 2 次，而不是覆盖");
+    assert_eq!(first["status"], "failed");
+    assert_eq!(second["status"], "ok");
+
+    // 旧回执与旧日志都必须留痕
+    for attempt in 1..=2 {
+        let dir = runs.path().join("t-6").join(format!("attempt-{attempt}"));
+        assert!(dir.join("handback.json").exists(), "第 {attempt} 次回执应保留");
+        assert!(dir.join("stdout.txt").exists(), "第 {attempt} 次日志应保留");
+    }
+
+    // 默认返回最新一条
+    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-6" })));
+    assert_eq!(latest["attempt"], 2);
+    assert_eq!(latest["exit_code"], 0);
+
+    // 可显式取历史：次数、每次 exit_code 与耗时都要能回答
+    let history = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-6", "include_history": true }),
+    ));
+    assert_eq!(history["attempts"], 2);
+    let records = history["history"].as_array().expect("history 必须是数组");
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["attempt"], 1);
+    assert_eq!(records[0]["exit_code"], 3);
+    assert_eq!(records[1]["attempt"], 2);
+    assert_eq!(records[1]["exit_code"], 0);
+    for record in records {
+        assert!(
+            record["duration_ms"].as_u64().is_some(),
+            "历史记录也必须带耗时"
+        );
+        assert!(
+            record["stdout_digest"]
+                .as_str()
+                .map(|digest| digest.starts_with("sha256:"))
+                .unwrap_or(false),
+            "历史记录必须保留日志摘要"
+        );
+    }
 }
