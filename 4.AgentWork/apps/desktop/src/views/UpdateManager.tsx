@@ -26,6 +26,16 @@ import {
   type DownloadProgress,
 } from "@/lib/tauri";
 import { listen } from "@tauri-apps/api/event";
+import {
+  resolveUpdateAvailability,
+  type UpdateAvailability,
+} from "@/lib/update-availability";
+
+const AVAILABLE: UpdateAvailability = {
+  disabled: false,
+  reasonKey: null,
+  detail: "",
+};
 
 export default function UpdateManager() {
   const { t } = useI18n();
@@ -33,6 +43,7 @@ export default function UpdateManager() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<UpdateCheckResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [availability, setAvailability] = useState<UpdateAvailability>(AVAILABLE);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
   const [switching, setSwitching] = useState<string | null>(null);
@@ -55,8 +66,10 @@ export default function UpdateManager() {
     try {
       const res = await checkForUpdates("auto");
       setResult(res);
+      setAvailability(resolveUpdateAvailability({ ok: true }));
     } catch (err) {
       setError(String(err));
+      setAvailability(resolveUpdateAvailability({ ok: false, error: String(err) }));
     } finally {
       setLoading(false);
     }
@@ -137,11 +150,12 @@ export default function UpdateManager() {
           </button>
           <button
             onClick={handleCheck}
-            disabled={loading}
+            disabled={loading || availability.disabled}
+            title={availability.reasonKey ? t(availability.reasonKey) : undefined}
             className={clsx(
               "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
               "bg-brand-600 hover:bg-brand-500 text-white",
-              loading && "opacity-50 cursor-wait"
+              (loading || availability.disabled) && "opacity-50 cursor-not-allowed"
             )}
           >
             {loading ? (
@@ -156,6 +170,26 @@ export default function UpdateManager() {
 
       {/* 内容区 */}
       <div className="flex-1 overflow-auto p-4 sm:p-6 space-y-4">
+        {/* 发布流不可用（fail-closed）：禁用更新入口并给出明确原因，不静默失败 */}
+        {availability.disabled && (
+          <div className="flex items-start gap-2 px-4 py-3 rounded-lg bg-amber-950/30 border border-amber-900/50 text-amber-400 text-sm">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="font-medium">
+                {availability.reasonKey && t(availability.reasonKey)}
+              </div>
+              <div className="text-xs text-amber-500/80">
+                {t("update.publishStreamMissingHint")}
+              </div>
+              {availability.detail && (
+                <div className="text-xs font-mono text-amber-500/60">
+                  {availability.detail}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* 错误提示 */}
         {error && (
           <div className="flex items-center gap-2 px-4 py-3 rounded-lg bg-red-950/30 border border-red-900/50 text-red-400 text-sm">
@@ -326,7 +360,7 @@ export default function UpdateManager() {
                       {status !== "current" && version.download_url && !isDownloaded && (
                         <button
                           onClick={() => handleDownload(version)}
-                          disabled={isDownloading}
+                          disabled={isDownloading || availability.disabled}
                           className={clsx(
                             "flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-colors",
                             "bg-brand-600 hover:bg-brand-500 text-white",
@@ -346,7 +380,7 @@ export default function UpdateManager() {
                       {isDownloaded && status !== "current" && (
                         <button
                           onClick={() => handleSwitch(version.version)}
-                          disabled={isSwitching}
+                          disabled={isSwitching || availability.disabled}
                           className={clsx(
                             "flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-colors",
                             "bg-green-700 hover:bg-green-600 text-white",

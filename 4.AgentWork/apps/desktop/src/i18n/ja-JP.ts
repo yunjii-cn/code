@@ -379,6 +379,8 @@ const jaJP: TranslationKeys = {
   "update.current": "現在",
   "update.new": "新",
   "update.downloaded": "ダウンロード済",
+  "update.publishStreamMissing": "配布元が未設定",
+  "update.publishStreamMissingHint": "バージョンマニフェスト（versions.json）にアクセスできないため、オンライン更新は無効です",
   "update.available": "利用可能",
   "update.source": "ソース",
   "update.source.auto": "自動競速",

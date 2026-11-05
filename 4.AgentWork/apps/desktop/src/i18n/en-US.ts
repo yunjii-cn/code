@@ -378,6 +378,8 @@ const enUS: TranslationKeys = {
   "update.current": "Current",
   "update.new": "New",
   "update.downloaded": "Downloaded",
+  "update.publishStreamMissing": "Publisher not configured",
+  "update.publishStreamMissingHint": "Version manifest (versions.json) is unreachable; online updates are disabled",
   "update.available": "Available",
   "update.source": "Source",
   "update.source.auto": "Auto race",

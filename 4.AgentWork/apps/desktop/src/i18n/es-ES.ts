@@ -379,6 +379,8 @@ const esES: TranslationKeys = {
   "update.current": "Actual",
   "update.new": "Nuevo",
   "update.downloaded": "Descargado",
+  "update.publishStreamMissing": "Canal de publicación no configurado",
+  "update.publishStreamMissingHint": "No se puede acceder al manifiesto de versiones (versions.json); las actualizaciones en línea están deshabilitadas",
   "update.available": "Disponible",
   "update.source": "Fuente",
   "update.source.auto": "Auto race",

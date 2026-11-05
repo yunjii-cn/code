@@ -379,6 +379,8 @@ const zhCN: TranslationKeys = {
   "update.current": "当前版本",
   "update.new": "新版本",
   "update.downloaded": "已下载",
+  "update.publishStreamMissing": "发布流未配置",
+  "update.publishStreamMissingHint": "无法访问版本清单（versions.json），在线更新已禁用",
   "update.available": "可下载",
   "update.source": "更新源",
   "update.source.auto": "自动竞速",

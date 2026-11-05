@@ -379,6 +379,8 @@ const koKR: TranslationKeys = {
   "update.current": "현재",
   "update.new": "신규",
   "update.downloaded": "다운로드됨",
+  "update.publishStreamMissing": "배포 스트림 미설정",
+  "update.publishStreamMissingHint": "버전 목록(versions.json)에 접속할 수 없어 온라인 업데이트가 비활성화되었습니다",
   "update.available": "사용 가능",
   "update.source": "소스",
   "update.source.auto": "자동 경쟁",

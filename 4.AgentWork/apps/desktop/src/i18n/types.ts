@@ -382,6 +382,8 @@ export interface TranslationKeys {
   "update.source.github": string;
   "update.source.gitee": string;
   "update.source.githubMirror": string;
+  "update.publishStreamMissing": string;
+  "update.publishStreamMissingHint": string;
 
   // 生态模块
   "nav.skills": string;
