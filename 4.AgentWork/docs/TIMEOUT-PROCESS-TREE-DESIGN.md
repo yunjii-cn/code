@@ -1,9 +1,9 @@
 # 超时进程树杀灭（`#3`）设计评估与窄定义实现
 
-- 状态：**v1.16 已按窄定义实现**：只清理并判定"**受控集合**"（POSIX 进程组 / Windows Job Object）；**v1.16.1 起超时回执文案退回 v1.11 旧版**（状态门未满足：POSIX 四类用例未实跑、Windows 逃逸负例 `UNPROVEN`）；**整棵进程树仍不可判定，`#3` 在契约中保持 `NOT_PROVEN`**。
-- 实现边界：代码改 `apps/mcp-bridge/src/server.rs`（`process_scope` 模块 + 超时路径 + `timeout_reason`）；用例改 `apps/mcp-bridge/tests/mcp_contract.rs` 与 `server.rs` 内单元测试；契约升到 v1.16；依赖仅把已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖，**未新增包、未改版本**。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.16 起 G9 行指向本文件）。
-- Windows 取舍：**未走 W2c**（自举 launcher 成本高、回归面大），选择 W2d——接受 `spawn → Assign` 竞态窗口；该窗口在本文 §4.2 明写。**v1.16.1 的旧版回执不含该披露**（旧文案未提及窗口），新措辞启用后才会写入回执；此处不假装窗口不存在。
+- 状态：**v1.16 已按窄定义实现**：只清理并判定"**受控集合**"（POSIX 进程组 / Windows Job Object）；v1.16.1 曾退回旧文案，**v1.17 状态门满足后已启用新措辞**（POSIX 四类实跑 + Windows 三类 + 版本递增）；**整棵进程树仍不可判定，`#3` 在契约中保持 `NOT_PROVEN`**。
+- 实现边界：代码改 `apps/mcp-bridge/src/server.rs`（`process_scope` 模块 + 超时路径 + `timeout_reason`）；用例改 `apps/mcp-bridge/tests/mcp_contract.rs` 与 `server.rs` 内单元测试；契约升到 v1.16、回执文案门禁满足后升到 v1.17；依赖仅把已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖，**未新增包、未改版本**。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.16 起 G9 行指向本文件，当前 v1.17）。
+- Windows 取舍：**未走 W2c**（自举 launcher 成本高、回归面大），选择 W2d——接受 `spawn → Assign` 竞态窗口；该窗口在本文 §4.2 明写。**v1.17 起该披露已写入 Windows 回执**（`Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业`）；此处不假装窗口不存在。
 
 ---
 
@@ -11,7 +11,7 @@
 
 1. **"整棵进程树已终止"在当前环境仍不可判定**，`#3` 应继续保持 `NOT_PROVEN`。理由见 §6.4：两个平台都缺少对"逃逸后代"的可靠、可移植、无竞态观测点。
 2. **已实现可执行的窄判据**：只证明"**受控集合**（Windows Job Object / POSIX 进程组）内没有存活进程"。它**不等于**整棵树，但能真正区分"进程不存在"与"进程还活着但不写盘"（§3、§6.2）。
-3. **回执文案仍为 v1.11 旧版**：受控集合清理已实现，但新措辞"已清理受控集合；逃逸进程是否仍在运行未验证"**尚未启用**；解锁条件是 POSIX 四类用例**实跑**通过 + Windows 三类通过 + 契约版本递增（v1.16.1 记录本次退回）。
+3. **回执文案已按状态门启用（v1.17）**："已清理受控集合；逃逸进程是否仍在运行未验证"，三态分流；解锁依据是 POSIX 四类用例实跑通过 + Windows 三类通过 + 契约版本递增（v1.16.1 记录退回、v1.17 记录启用）。
 4. **明确否掉"超时后两次 `stat` 无变化"**：它测的是"是否写盘"，不是"是否存在"，会把 SIGSTOP、IO 阻塞、活着但本就不写盘的进程判成"已退出"（§2）。实现与用例均未使用该判据。
 5. 平台实现：POSIX 用 `process_group(0)` 在 **exec 前**建组、无加入竞态；Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，但 `std::process::Command` 只能在 `spawn` **之后** `Assign`，**竞态窗口存在且已披露**（§4.2）。
 6. 依赖：`windows-sys 0.61.2` 与 `libc 0.2.186` **已在 `Cargo.lock`**，转为 **target-specific 直接依赖后不新增包、不改版本**；许可均为 `MIT OR Apache-2.0`；MSRV 1.71 / 1.65，均低于 workspace 的 1.85（§7）。
@@ -20,15 +20,15 @@
 
 ## 1. 当前事实
 
-### 1.1 实现现状（v1.16，已核实）
+### 1.1 实现现状（v1.16 实现、v1.17 启用文案，已核实）
 
 超时路径在 [`apps/mcp-bridge/src/server.rs`](../apps/mcp-bridge/src/server.rs) 的 `execute_task` 内（约 L773-L808）：
 
 - `process_scope::Supervisor::new()` → `supervisor.configure(&mut command)` → `spawn` → `supervisor.attach(&child)`；
-- 以 20 ms 间隔轮询 `child.try_wait()`；到达 `deadline` 后 `timed_out = true`，调用 `supervisor.terminate(&mut child)` 并记录返回值；
-- `timeout_reason(timeout_secs, _outcome)`（约 L1520-L1527）**当前返回 v1.11 旧版文案**，受控集合结果暂不进入回执（v1.16.1 状态门未满足）。
+- 以 20 ms 间隔轮询 `child.try_wait()`；到达 `deadline` 后 `timed_out = true`，调用 `supervisor.terminate(&mut child)` 并据返回值生成文案；
+- `timeout_reason(timeout_secs, outcome)`（约 L1537-L1559）按三态分流，**只有 `Cleaned` 才说"已清理受控集合"**（v1.17 已启用）。
 
-`process_scope` 模块（约 L1075-L1492）：
+`process_scope` 模块（约 L1076-L1531）：
 
 - 公共类型 `CleanupOutcome { Cleaned, StillAlive, Unavailable }`；
 - Unix：`process_group(0)`（exec 前建组）→ 超时 `SIGTERM` → 500 ms 宽限期 → 仍存在则 `SIGKILL` → `child.wait()` → 轮询 `kill(-pgid, 0)` 至 `ESRCH`（3 s 上限）；
@@ -63,8 +63,8 @@
 契约 §4、§6 与 v1.11 / v1.16 变更记录已写死：
 
 - `timeout` 文案的作用域**写死为"受控集合"，不是整棵进程树**；
-- **当前回执仍为 v1.11 旧版**："已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"；
-- 新措辞"已清理受控集合；逃逸进程是否仍在运行未验证"**只在状态门满足后启用**（POSIX 四类实跑 + Windows 三类通过 + 契约版本递增）；
+- 当前回执（v1.17）三态：`已清理受控集合；逃逸进程是否仍在运行未验证`（Cleaned）/ 仍存活 / 不可用；Windows 额外明写 `spawn→Assign` 窗口；
+- 只有判据返回 `Cleaned` 才能写"已清理受控集合"；`StillAlive` / `Unavailable` **不得升级为"已清理"**；
 - 任何分支都**不得**出现"已终止进程树 / 无残留"；
 - 调用方需自行确认受控集合之外的残留进程。
 
@@ -297,19 +297,19 @@ TerminateJobObject 成功后，轮询 O4：
 5. **Windows 的逃逸**：`Assign` 在 `spawn` 之后的窗口、`BREAKAWAY`、`Assign` 失败，都会让成员不在作业内；`ActiveProcesses` 只数作业成员。
 6. **"某一时刻看不到"不等于"以后不会出现"**：只要还有逃逸的父进程活着，它可以在观测之后继续派生。没有对逃逸父进程的追踪，就无法用"多次采样为 0"推出"整树不存在"。
 
-**结论：`#3` 应保持 `NOT_PROVEN`。** v1.16 实现 C1/C2 后，能诚实宣称的只有："已清理**受控集合**（进程组/作业）；逃逸进程是否仍在运行未验证"——但这句**尚未进入回执**（v1.16.1 文案退回旧版），且它**不等于**整棵树，状态不升级。
+**结论：`#3` 应保持 `NOT_PROVEN`。** v1.16 实现 C1/C2 后，能诚实宣称的只有："已清理**受控集合**（进程组/作业）；逃逸进程是否仍在运行未验证"。该句在 v1.17 状态门满足后**已进入回执**（只有 `Cleaned` 分支使用），且它**不等于**整棵树，状态不升级。
 
-### 6.5 判据的可执行性：已落地的用例（v1.16）
+### 6.5 判据的可执行性：已落地的用例（v1.16 实现，v1.17 两平台实跑）
 
 | 测试目的 | 用例（位置） | 夹具 | 断言 | Windows 结果 | POSIX 结果 |
 |---|---|---|---|---|---|
-| 正向：孙进程在受控集合内 | 集成 `timeout_cleans_controlled_set_including_grandchild`；单元 `job_counts_grandchild_and_empties_after_terminate`（Windows） | POSIX `echo $$ > pids.txt; sleep 30 & echo $! >> pids.txt; wait`；Windows PowerShell `Start-Process ping -n 30` 并写 PID；Windows 单元 `cmd /C ping` | 超时文案保持旧版；记录的 PID 均不再存活；Windows 单元打印 `ActiveProcesses_before > 0` → `terminate=Cleaned` → `ActiveProcesses_after == 0`；POSIX 另查 `kill(-pgid,0)` 为 `ESRCH` | **通过**：`ActiveProcesses_before=Some(1)` / `terminate=Cleaned` / `ActiveProcesses_after=Some(0)`；集成 PID `121712`，`process_exists_after=false` | 代码已编译，运行未在本机执行 |
-| **反假通过**：活着但不写盘 | 单元 `stopped_process_still_counts_as_alive`（Unix）/ `alive_but_idle_process_is_counted_in_job`（Windows） | POSIX `sleep 30` + `SIGSTOP`；Windows `ping -n 30`（活着但不写盘） | 判据必须判"存在"（`kill(-pgid,0)` 为 0 / `ActiveProcesses > 0`），清空后才转 `Cleaned` | **通过** | 代码已编译，运行未在本机执行 |
-| 反向：已退出 | 单元 `exited_process_group_has_no_members`（Unix）/ `exited_process_leaves_job_empty`（Windows） | POSIX `sh -c 'exit 0'`；Windows `cmd /C "ping -n 2 ..."` 自然退出 | `ESRCH` / `ActiveProcesses == 0` → 判"不存在" | **通过** | 代码已编译，运行未在本机执行 |
-| **作用域负例**：逃逸 | 单元 `setsid_escape_is_outside_the_observed_group`（`#[cfg(target_os="linux")]`） | `setsid sleep 30 &`，PID 写入临时文件 | 组判据返回 `ESRCH`，但 `kill(已知PID, 0)` 为 0 → **证明 C1 是窄判据**（不断言"#3 解决"） | 不适用（Windows 无等价确定性夹具，记为 `UNPROVEN`） | 代码已编译，运行未在本机执行 |
-| 文案门禁 | 集成 `timeout_reason_states_action_not_tree_death` + `legacy_timeout_reason_is_returned_verbatim_and_not_rewritten` | 真实超时任务 + 旧 `handback.json` | **当前必须为旧文案**（"已向直接子进程发送终止信号…未验证"）；**不得**出现"已清理受控集合 / 已终止进程树 / 无残留"；旧回执原样返回、字节不变 | **通过** | 代码已编译，运行未在本机执行 |
+| 正向：孙进程在受控集合内 | 集成 `timeout_cleans_controlled_set_including_grandchild`；单元 `job_counts_grandchild_and_empties_after_terminate`（Windows） | POSIX `echo $$ > pids.txt; sleep 30 & echo $! >> pids.txt; wait`；Windows PowerShell `Start-Process ping -n 30` 并写 PID；Windows 单元 `cmd /C ping` | 回执走 v1.17 `Cleaned` 分支；记录的 PID 均不再存活；POSIX 另断言 `kill(-pgid,0)` 为 `ESRCH`；Windows 单元打印 `ActiveProcesses_before > 0` → `terminate=Cleaned` → `ActiveProcesses_after == 0` | **通过（实跑）**：`grandchild attached=true ActiveProcesses_before=Some(1)` / `terminate=Cleaned ActiveProcesses_after=Some(0)`；集成打印 `grandchild pid=… process_exists_after=false`（PID 随运行变化） | **通过（实跑）**：`running 61 tests` 全通过；`[evidence] grandchild_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证` |
+| **反假通过**：活着但不写盘 | 单元 `stopped_process_still_counts_as_alive`（Unix）/ `alive_but_idle_process_is_counted_in_job`（Windows） | POSIX `sleep 30` + `SIGSTOP`；Windows `ping -n 30`（活着但不写盘） | 判据必须判"存在"（`kill(-pgid,0)` 为 0 / `ActiveProcesses > 0`），清空后才转 `Cleaned` | **通过（实跑）**：`alive_but_idle attached=true ActiveProcesses_before=Some(1)` → `terminate=Cleaned ActiveProcesses_after=Some(0)` | **通过（实跑）**：`stopped pgid=939 kill(-pgid,0)_exists=true` → `stopped after_SIGKILL group_empty=true` |
+| 反向：已退出 | 单元 `exited_process_group_has_no_members`（Unix）/ `exited_process_leaves_job_empty`（Windows） | POSIX `sh -c 'exit 0'`；Windows `cmd /C "ping -n 2 ..."` 自然退出 | `ESRCH` / `ActiveProcesses == 0` → 判"不存在" | **通过（实跑）**：`exited_process ActiveProcesses_final=Some(0)` | **通过（实跑）**：`exited pgid=937 group_empty=true` |
+| **作用域负例**：逃逸 | 单元 `setsid_escape_is_outside_the_observed_group`（`#[cfg(target_os="linux")]`） | `setsid sleep 30 &`，PID 写入临时文件 | 组判据返回 `ESRCH`，但 `kill(已知PID, 0)` 为 0 → **证明 C1 是窄判据**（不断言"#3 解决"） | 不适用（Windows 无等价确定性夹具，记为 `UNPROVEN`） | **通过（实跑）**：`setsid escaped_pid=941 escaped_alive=true original_group_empty=true` |
+| 文案门禁 | 集成 `timeout_reason_states_action_not_tree_death` + `legacy_timeout_reason_is_returned_verbatim_and_not_rewritten` | 真实超时任务 + 旧 `handback.json` | **必须为 v1.17 三态文案**（`Cleaned` 分支含"已清理受控集合…未验证"，Windows 另含 `spawn→Assign` 窗口）；**不得**出现"已终止进程树 / 无残留"；旧回执原样返回、字节不变 | **通过（实跑）**：`[evidence] timeout_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业` | **通过（实跑）**：`[evidence] timeout_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证` |
 
-**如实说明**：Windows 的 `spawn → Assign` 窗口与 `BREAKAWAY` 无法确定性复现，按 §6.6 记为 `UNPROVEN`，不做"已覆盖"断言。POSIX 用例在本机只做了交叉编译核对（`cargo check --tests --target x86_64-unknown-linux-gnu`），**运行期结果不在本机 Windows 环境产生**。
+**如实说明**：POSIX 四类用例已在 WSL（Ubuntu 24.04、Rust 1.88.0、gnu target）真实运行：单元 `3 passed` + 集成 `61 passed`，`0 failed`，退出码 0；日志保留在 `D:\Temp\aw-posix-v117b.log`（本机路径，仅作记录）。Windows 侧单元 `3 passed` + 集成 `62 passed`，`0 failed`（本次复跑，同一判据打印）。Windows 的 `spawn → Assign` 窗口与 `BREAKAWAY` 仍无法确定性复现，按 §6.6 记为 `UNPROVEN`，不做"已覆盖"断言。
 
 ### 6.6 判据的判定边界（写死）
 
@@ -348,7 +348,7 @@ TerminateJobObject 成功后，轮询 O4：
 **v1.16 的选择与结果**：
 
 1. 采用**方案 A**（受控集合清理 + C1/C2），**不做方案 B/C**：W2c/W2b 与 cgroup 委派的成本与回归面超出本批范围。
-2. 窄定义已由 PM 接受并落地实现；**但超时文案在 v1.16.1 退回旧版**（POSIX 四类未实跑、Windows 逃逸负例 `UNPROVEN`），新措辞待门禁满足后启用；契约先升到 v1.16、再以 v1.16.1 记录退回。
+2. 窄定义已由 PM 接受并落地实现；**v1.16.1 曾退回旧版文案**（POSIX 四类未实跑、Windows 逃逸负例 `UNPROVEN`）；**v1.17 状态门满足后启用三态新措辞**（POSIX 四类实跑通过 + Windows 三类通过 + 版本递增）。契约版本轨迹：v1.16（实现）→ v1.16.1（文案退回）→ v1.17（文案启用）。
 3. **`#3` 保持 `NOT_PROVEN`**：窄判据通过不改变"整棵树不可判定"的事实；若未来要把状态升级，必须先给出整棵树的可靠观测方案（当前不存在）。
 
 ---
@@ -360,8 +360,8 @@ TerminateJobObject 成功后，轮询 O4：
 - POSIX 用 `process_group(0)` + `kill(-pgid, SIGTERM → SIGKILL)` 清理受控集合；
 - Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，`spawn` 后 `Assign`（W2d，竞态窗口已披露）；
 - 判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`，作用域写死"受控集合"；
-- 超时文案**保持 v1.11 旧版**（v1.16.1 只保留实现、退回文案），旧回执原样返回、不改写；
-- 契约 v1.16 + v1.16.1 + 四类用例（正向 / 反假通过 / 反向 / 作用域负例）。
+- 超时文案为 v1.17 三态新措辞（只有 `Cleaned` 分支写"已清理受控集合；逃逸进程是否仍在运行未验证"，Windows 另写 `spawn→Assign` 窗口）；旧回执原样返回、不改写；
+- 契约 v1.16 + v1.16.1（文案退回）+ v1.17（文案启用）+ 四类用例（正向 / 反假通过 / 反向 / 作用域负例）。
 
 **明确没做**：
 
@@ -374,9 +374,9 @@ TerminateJobObject 成功后，轮询 O4：
 
 ## 10. 事实来源
 
-- 超时路径：[`server.rs`](../apps/mcp-bridge/src/server.rs) 约 L773-L808；`process_scope` 约 L1075-L1492；`timeout_reason` 约 L1496-L1518；`shell_command` 约 L1060-L1073。
+- 超时路径：[`server.rs`](../apps/mcp-bridge/src/server.rs) 约 L773-L808；`process_scope` 约 L1076-L1531；`timeout_reason` 约 L1537-L1559；`shell_command` 约 L1059-L1073。
 - 超时用例：[`mcp_contract.rs`](../apps/mcp-bridge/tests/mcp_contract.rs) 约 L2108-L2250（文案门禁、正向孙进程清理、旧回执原样返回、PID 观测辅助）。
-- 契约 v1.16 文案约束：`PM-AW-DISPATCH-CONTRACT.md` §4（L155-L160）、§5 第 15 行 / G9（L180、L196）、§6（L200-L206）、§11（v1.16 行）。
+- 契约 v1.17 文案约束：`PM-AW-DISPATCH-CONTRACT.md` §4（L155-L159）、§5 第 15 行 / G9（L180、L196）、§6（L200-L206）、§11（v1.17 行）。
 - 依赖事实：`apps/mcp-bridge/Cargo.toml`（`serde_json`/`sha2`/`hex`/`chrono` + dev `tempfile` + v1.16 的 target-specific `windows-sys` / `libc`）；`Cargo.lock` 中 `windows-sys 0.61.2`、`libc 0.2.186`、`windows-link 0.2.1` 版本未变。
 - `windows-sys 0.61.2` 源码核对：`Win32/Foundation/mod.rs`（`HANDLE = *mut c_void`）、`Win32/System/JobObjects/mod.rs`（`CreateJobObjectW` / `AssignProcessToJobObject` / `TerminateJobObject` / `QueryInformationJobObject` / `SetInformationJobObject`、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 8192`、`JobObjectExtendedLimitInformation = 9`、`JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.ActiveProcesses`）。
 - 实测观测：上一轮超时实测记录（由调用方转述）：超时返回后父/子进程仍存活，由测试脚本以 `SIGKILL` 等价手段清理；**单次观测，未固化为自动化用例**。

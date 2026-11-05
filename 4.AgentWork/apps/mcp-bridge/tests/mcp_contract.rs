@@ -2127,20 +2127,21 @@ fn timeout_reason_states_action_not_tree_death() {
         "必须保留 timeout 前缀码：{reason}"
     );
     assert!(
-        reason.contains("已向直接子进程发送终止信号"),
-        "状态门未满足时必须保持旧版文案：{reason}"
+        reason.contains("已清理受控集合"),
+        "状态门已满足（v1.17）后应只宣称受控集合：{reason}"
     );
     assert!(
-        reason.contains("其派生的子进程是否仍在运行未验证"),
-        "必须明写子进程未验证：{reason}"
-    );
-    assert!(
-        !reason.contains("已清理受控集合"),
-        "POSIX 四类用例未实跑前不得启用新文案：{reason}"
+        reason.contains("逃逸进程是否仍在运行未验证"),
+        "必须明写逃逸进程未验证：{reason}"
     );
     assert!(
         !reason.contains("已终止进程树") && !reason.contains("无残留"),
         "永远不得宣称整棵树已终止：{reason}"
+    );
+    #[cfg(windows)]
+    assert!(
+        reason.contains("spawn→Assign") && reason.contains("窗口"),
+        "Windows 必须写明 spawn→Assign 竞态窗口：{reason}"
     );
 }
 
@@ -2172,8 +2173,8 @@ fn timeout_cleans_controlled_set_including_grandchild() {
     let reason = payload["blocked_reason"].as_str().unwrap_or("");
     println!("[evidence] grandchild_reason={reason}");
     assert!(
-        reason.starts_with("timeout："),
-        "必须保留 timeout 前缀与旧版文案：{reason}"
+        reason.contains("已清理受控集合"),
+        "受控集合内清理应成功：{reason}"
     );
 
     let pid_text = fs::read_to_string(work.path().join("pids.txt")).expect("命令必须写出 PID");

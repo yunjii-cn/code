@@ -1201,6 +1201,10 @@ mod process_scope {
                     libc::kill(pgid, libc::SIGSTOP);
                 }
                 std::thread::sleep(Duration::from_millis(50));
+                println!(
+                    "[evidence] stopped pgid={pgid} kill(-pgid,0)_exists={}",
+                    group_exists(pgid)
+                );
                 assert!(
                     group_exists(pgid),
                     "SIGSTOP 的进程仍然存在，不能被文件 stat 式判据误判为已退出"
@@ -1209,7 +1213,9 @@ mod process_scope {
                     libc::kill(-pgid, libc::SIGKILL);
                 }
                 let _ = child.wait();
-                assert!(wait_group_empty(pgid), "SIGKILL 后进程组应最终清空");
+                let emptied = wait_group_empty(pgid);
+                println!("[evidence] stopped after_SIGKILL group_empty={emptied}");
+                assert!(emptied, "SIGKILL 后进程组应最终清空");
             }
 
             // 反向：进程已退出，组判据应为空
@@ -1220,7 +1226,9 @@ mod process_scope {
                 let mut child = command.spawn().expect("spawn sh");
                 let pgid = child.id() as i32;
                 let _ = child.wait();
-                assert!(wait_group_empty(pgid), "进程退出后进程组应为空");
+                let emptied = wait_group_empty(pgid);
+                println!("[evidence] exited pgid={pgid} group_empty={emptied}");
+                assert!(emptied, "进程退出后进程组应为空");
             }
 
             // 作用域负例：setsid 逃逸进程不在原进程组内 → 组判据看不到它（仅证明作用域有限）
@@ -1264,6 +1272,11 @@ mod process_scope {
                     return;
                 }
                 let escaped: i32 = content.parse().expect("setsid 子进程 PID");
+                println!(
+                    "[evidence] setsid escaped_pid={escaped} escaped_alive={} original_group_empty={}",
+                    pid_exists(escaped),
+                    !group_exists(pgid)
+                );
                 assert!(pid_exists(escaped), "setsid 逃逸进程应仍存活");
                 assert!(
                     !group_exists(pgid),
@@ -1517,13 +1530,32 @@ mod process_scope {
     pub(crate) use imp::Supervisor;
 }
 
-/// 状态门未满足：文案退回 v1.11 旧版（受控集合实现保留，但尚未解锁新措辞）。
-/// 解锁条件：POSIX 四类用例实跑通过 + Windows 三类通过 + 契约版本递增。
-/// 任何版本都不得出现"已终止进程树 / 无残留"。
-fn timeout_reason(timeout_secs: u64, _outcome: Option<process_scope::CleanupOutcome>) -> String {
-    format!(
-        "timeout：超过 {timeout_secs}s 未结束，已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
-    )
+/// 超时回执措辞按清理结果分流：只有 `Cleaned` 才能说"已清理受控集合"。
+/// 状态门已满足（v1.17）：POSIX 四类用例实跑通过 + Windows 三类通过 + 契约版本递增。
+/// Windows 逃逸负例仍为 `UNPROVEN`，回执明写 `spawn → Assign` 窗口。
+/// 任何分支都不得出现"已终止进程树 / 无残留"。
+fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutcome>) -> String {
+    use process_scope::CleanupOutcome;
+    match outcome {
+        Some(CleanupOutcome::Cleaned) => {
+            #[cfg(windows)]
+            {
+                format!(
+                    "timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业"
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                format!("timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证")
+            }
+        }
+        Some(CleanupOutcome::StillAlive) => format!(
+            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程；逃逸进程是否仍在运行未验证"
+        ),
+        _ => format!(
+            "timeout：超过 {timeout_secs}s 未结束，受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
+        ),
+    }
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
