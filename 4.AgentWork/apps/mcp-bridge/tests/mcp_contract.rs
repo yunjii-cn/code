@@ -1102,3 +1102,227 @@ fn runs_list_rejects_invalid_pagination() {
         assert!(text.contains("invalid_pagination"), "必须给具名错误码：{text}");
     }
 }
+
+// ---- 证据时间戳：dispatchedAt / finishedAt（v1.6）----
+
+/// 断言某字段是 RFC3339/UTC/秒级时间戳并返回原文；先给空值断言，红阶段停在断言而不是解析 panic
+fn require_utc_stamp(value: &Value, field: &str, context: &str) -> String {
+    let text = value[field].as_str().unwrap_or("");
+    assert!(!text.is_empty(), "{context} 必须记录 {field}：{value}");
+    assert!(
+        text.ends_with('Z'),
+        "{context} 的 {field} 必须是 UTC（Z 结尾）：{text}"
+    );
+    let parsed = match chrono::DateTime::parse_from_rfc3339(text) {
+        Ok(parsed) => parsed,
+        Err(error) => panic!("{context} 的 {field} 不是 RFC3339：{text}（{error}）"),
+    };
+    assert_eq!(
+        parsed.offset().local_minus_utc(),
+        0,
+        "{context} 的 {field} 必须是 UTC 偏移 0：{text}"
+    );
+    assert_eq!(
+        text.len(),
+        20,
+        "{context} 的 {field} 应为秒级精度（YYYY-MM-DDTHH:MM:SSZ）：{text}"
+    );
+    text.to_string()
+}
+
+#[test]
+fn dispatch_and_handback_record_utc_timestamps() {
+    let (server, _settings, runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-30", "cmd": "echo ts" }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "派单应成功：{}",
+        tool_text(&response)
+    );
+    let attempt = runs.path().join("t-30").join("attempt-1");
+    let dispatch: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("dispatch.json")).expect("读取 dispatch.json"),
+    )
+    .expect("dispatch.json 必须是 JSON");
+    let handback: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("handback.json")).expect("读取 handback.json"),
+    )
+    .expect("handback.json 必须是 JSON");
+
+    let dispatched = require_utc_stamp(&dispatch, "dispatchedAt", "派单记录");
+    let finished = require_utc_stamp(&handback, "finishedAt", "回执");
+    // 同一固定宽度 UTC 格式下，字典序即时间序
+    assert!(
+        dispatched <= finished,
+        "结束时间不得早于派单时间：{dispatched} vs {finished}"
+    );
+    assert_eq!(
+        handback["task_id"], "t-30",
+        "新增时间戳不得改变既有字段"
+    );
+
+    let receipt = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-30" }),
+    ));
+    assert_eq!(
+        require_utc_stamp(&receipt, "finishedAt", "receipt.get"),
+        finished,
+        "receipt.get 必须原样返回落盘时间戳"
+    );
+}
+
+#[test]
+fn identical_retry_replays_without_rewriting_dispatched_at() {
+    let (server, _settings, runs) = server_with_runs();
+    let first = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-31", "cmd": "echo once" }),
+    ));
+    let attempt = runs.path().join("t-31").join("attempt-1");
+    let original: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("dispatch.json")).expect("读取原始派单记录"),
+    )
+    .expect("派单记录必须是 JSON");
+    let dispatched = require_utc_stamp(&original, "dispatchedAt", "派单记录");
+
+    let second = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-31", "cmd": "echo once" }),
+    ));
+    assert_eq!(
+        second["attempt"], 1,
+        "同参重投必须回放，不得追加 attempt，也不得因 dispatchedAt 变化判冲突"
+    );
+    assert_eq!(
+        first["stdout_digest"], second["stdout_digest"],
+        "重投必须回放同一份回执"
+    );
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("dispatch.json")).expect("重读派单记录"),
+    )
+    .expect("派单记录必须是 JSON");
+    assert_eq!(
+        require_utc_stamp(&after, "dispatchedAt", "派单记录"),
+        dispatched,
+        "重投不得改写派单时间戳"
+    );
+    assert!(
+        !runs.path().join("t-31").join("attempt-2").exists(),
+        "重投不得产生新 attempt"
+    );
+}
+
+#[test]
+fn legacy_records_without_timestamps_are_replayed_and_not_backfilled() {
+    let (server, _settings, runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let canonical = fs::canonicalize(workdir.path()).expect("规范化工作目录");
+    let attempt = runs.path().join("t-32").join("attempt-1");
+    fs::create_dir_all(&attempt).expect("创建旧格式 attempt");
+    fs::write(
+        attempt.join("dispatch.json"),
+        json!({
+            "task_id": "t-32",
+            "cmd": "echo legacy-ts",
+            "cwd": canonical.to_string_lossy(),
+            "timeout_secs": 120,
+            "env": {}
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式派单记录");
+    fs::write(
+        attempt.join("handback.json"),
+        json!({
+            "task_id": "t-32",
+            "attempt": 1,
+            "status": "ok",
+            "exit_code": 0,
+            "stdout_digest": "sha256:legacy-ts"
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式回执");
+
+    let replay = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-32",
+            "cmd": "echo legacy-ts",
+            "cwd": workdir.path().to_string_lossy()
+        }),
+    ));
+    assert_eq!(replay["attempt"], 1);
+    assert_eq!(
+        replay["stdout_digest"], "sha256:legacy-ts",
+        "缺时间戳的旧派单仍应按参数回放"
+    );
+    assert!(
+        replay.get("finishedAt").is_none(),
+        "旧回执缺失时间戳时必须原样返回，不回填：{replay}"
+    );
+
+    let dispatch_after: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("dispatch.json")).expect("重读旧派单记录"),
+    )
+    .expect("派单记录必须是 JSON");
+    assert!(
+        dispatch_after.get("dispatchedAt").is_none(),
+        "旧派单缺失时间戳时不得补写：{dispatch_after}"
+    );
+    let handback_after: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("handback.json")).expect("重读旧回执"),
+    )
+    .expect("回执必须是 JSON");
+    assert!(
+        handback_after.get("finishedAt").is_none(),
+        "旧回执不得被回填：{handback_after}"
+    );
+}
+
+#[test]
+fn failed_and_timeout_attempts_record_finished_at_but_preflight_does_not() {
+    let (server, _settings, runs) = server_with_runs();
+    let failed = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-33", "cmd": "exit 3" }),
+    ));
+    assert_eq!(failed["status"], "failed");
+    require_utc_stamp(&failed, "finishedAt", "失败回执");
+
+    #[cfg(windows)]
+    let slow = "ping -n 4 127.0.0.1 > NUL";
+    #[cfg(not(windows))]
+    let slow = "sleep 3";
+    let timed_out = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-34", "cmd": slow, "timeout_secs": 1 }),
+    ));
+    assert_eq!(timed_out["status"], "blocked");
+    require_utc_stamp(&timed_out, "finishedAt", "超时回执");
+
+    let preflight = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-35" }),
+    ));
+    assert_eq!(preflight["status"], "blocked");
+    assert!(preflight["attempt"].is_null(), "预检 blocked 不得占号");
+    assert!(
+        preflight.get("finishedAt").is_none(),
+        "预检 blocked 不落盘，不应带 finishedAt：{preflight}"
+    );
+    assert!(!runs.path().join("t-35").exists(), "预检 blocked 不得落盘");
+}

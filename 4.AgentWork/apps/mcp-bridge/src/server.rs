@@ -430,6 +430,8 @@ impl Server {
         let handback = json!({
             "task_id": task_id,
             "attempt": attempt,
+            // 该 attempt 结束并落盘回执的时刻；ok / failed / blocked 一律写实际结束时间
+            "finishedAt": now_stamp(),
             "status": status,
             "changed_files": changed_files,
             "changed_files_truncated": changed_files_truncated,
@@ -480,6 +482,8 @@ impl Server {
         // 升级前的签名没有 env 字段：其语义等价于 env 为空，补齐后再比对（非空 env 仍会判冲突）
         let mut stored = stored;
         if let Some(object) = stored.as_object_mut() {
+            // dispatchedAt 是时间事实、不是派单参数：必须剔除，否则任何一次重投都会因时间不同误判冲突
+            object.remove("dispatchedAt");
             if !object.contains_key("env") {
                 object.insert("env".to_string(), json!({}));
             }
@@ -529,12 +533,21 @@ impl Server {
     }
 }
 
-/// 写派单签名：作为“同 task_id 是否同参”的唯一判据，先于执行落盘
+/// 写派单记录：签名 + 落盘时间戳 `dispatchedAt`（时间事实不参与同参比对，见 replay_existing）
 fn write_dispatch(run_dir: &Path, signature: &Value) -> Result<(), String> {
+    let mut record = signature.clone();
+    if let Some(object) = record.as_object_mut() {
+        object.insert("dispatchedAt".to_string(), json!(now_stamp()));
+    }
     let path = run_dir.join("dispatch.json");
-    let text = serde_json::to_string_pretty(signature)
+    let text = serde_json::to_string_pretty(&record)
         .map_err(|e| format!("序列化派单签名失败：{e}"))?;
     fs::write(&path, text).map_err(|e| format!("写入派单签名失败：{e}"))
+}
+
+/// 证据时间戳统一口径：RFC3339 / UTC / 秒级（`Z` 结尾），`dispatchedAt` 与 `finishedAt` 共用
+fn now_stamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
