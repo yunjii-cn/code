@@ -1,7 +1,7 @@
-# `tools/list` 描述与实际行为全量对照（v1.14）
+# `tools/list` 描述与实际行为全量对照（v1.14，v1.17 复审见 §12）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.14）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12）。
 - 本批性质：**只修描述与契约措辞，不改任何行为、不改回执字段**。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
@@ -279,7 +279,107 @@ test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ## 11. 仍存在的已知缺口（不在本批范围，不得被本批描述"修好"所掩盖）
 
-1. **`#3` 整棵进程树杀灭仍不可判定**：v1.16 已按窄定义实现**受控集合**清理（POSIX 进程组 / Windows Job），但逃逸后代（`setsid`、`spawn → Assign` 窗口、`BREAKAWAY`）不可见；`#3` 仍为 `NOT_PROVEN`。`timeout:` 文案与契约 §4 已如实说明。
+1. **`#3` 整棵进程树杀灭仍不可判定**：v1.16 已按窄定义实现**受控集合**清理（POSIX 进程组 / Windows Job），但逃逸后代（`setsid`、`spawn → Assign` 窗口、`BREAKAWAY`）不可见；`#3` 仍为 `NOT_PROVEN`。`timeout:` 文案与契约 §4 已如实说明；`tools/list` 描述已同步至同一口径（见 §12）。
 2. **`additionalProperties: false` 服务端不强制**：见 §7.2，属声明性约束。
 3. **清理的阈值/分档/`task_id` 退役纪律未由 PM 定**：`runs.prune` 入口已落地，但契约 §10 仍标"待定"。
 4. **认证/准入/并发上限不存在**：`clientInfo` 仅审计、不参与准入；`initialize` 多份记录不等于多会话、不构成身份。
+
+---
+
+## 12. v1.17 复审：超时 / 回执 / `blocked_reason` 相关描述（2026-11-06）
+
+- 复审对象：`tools/list` 中与超时、回执、`blocked_reason` 相关的描述，对齐 **v1.17 实现**（`timeout_reason` 三态 + Windows `spawn→Assign` 窗口）。
+- 口径：**不删任何基线断言**；本次范围内逐句重判，范围外沿用 v1.14 判定。基线总数仍为 **87**。
+
+### 12.1 结论与基线对账
+
+| 统计 | 数量 |
+|---|---|
+| 上次基线可判定断言总数 | **87**（未增未删） |
+| 本次重判（超时 / 回执 / `blocked_reason` 相关） | **22** |
+| ├ 与实现一致 | **20** |
+| ├ 不一致（已修） | **2**（#2、#17） |
+| ├ 未实现却写了 | **0** |
+| └ 不可判定 | **0** |
+| 未重判（不在本次范围，沿用 v1.14 判定） | 65 |
+| 合计 | 87（22 + 65） |
+
+范围 22 条 = `task.execute` 工具级描述全部 11 条（#1-#11，因本次改动该字符串，需整句复核）+ `timeout_secs` 2 条（#16-#17）+ `receipt.get` 7 条（#43-#49）+ `runs.list` 状态权威 2 条（#56-#57）。
+
+**不可判定 = 0 的理由**：这 22 条都对应可静态定位的代码路径（`execute_task` / `write_handback` / `timeout_reason` / `process_scope` / `receipt_payload` / `runs_list`），没有依赖运行时不可观测信息的断言，因此没有需要标"不可判定"的条目。
+
+**未实现却写了 = 0 的理由**：新描述中的每一句都有实现落点——"只向受控集合发送终止信号"对应 Unix `kill(-pgid)` / Windows `TerminateJobObject`；"仅当观测到集合内无存活进程才写「已清理受控集合」"对应 `CleanupOutcome::Cleaned` 只在 `ESRCH` / `ActiveProcesses == 0` 时产生；"`spawn→Assign` 窗口"对应既有的 W2d 取舍与回执文案；"不承诺终止整棵进程树"是对 `#3` 保持 `NOT_PROVEN` 的如实边界声明。
+
+### 12.2 逐条判定（范围内 22 条）
+
+| # | 位置 | 断言（v1.14 原文） | v1.17 实现依据 | 判定 |
+|---|---|---|---|---|
+| 1 | `task.execute` 描述 | "接单执行：由派单方给出命令" | `execute_task`：`cmd` 由参数给出，经 `shell_command` 执行 | 与实现一致 |
+| 2 | `task.execute` 描述 | "执行并把 stdout/stderr … 写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）" | 回执字段齐全；**但超时分支的清理结果（三态 + Windows 窗口）未在描述中披露** | **不一致（已修）** |
+| 3 | `task.execute` 描述 | "退出码" | `handback.exit_code`（`blocked` 时为 `null`） | 与实现一致 |
+| 4 | `task.execute` 描述 | "耗时" | `handback.duration_ms` | 与实现一致 |
+| 5 | `task.execute` 描述 | "产物哈希" | `handback.artifacts[{kind,locator,hash}]` | 与实现一致 |
+| 6 | `task.execute` 描述 | "可审计回执" | `runs/<task_id>/attempt-N/` + `receipt.get` 可读回 | 与实现一致 |
+| 7 | `task.execute` 描述 | "含实际 cwd" | `handback.cwd` | 与实现一致 |
+| 8 | `task.execute` 描述 | "生效 timeout_secs" | `handback.timeout_secs`（含默认 120） | 与实现一致 |
+| 9 | `task.execute` 描述 | "env_keys" | `handback.env_keys` | 与实现一致 |
+| 10 | `task.execute` 描述 | "changed_files 是否截断" | `handback.changed_files_truncated` | 与实现一致 |
+| 11 | `task.execute` 描述 | "AW 不定义判据、不做验收" | 无验收逻辑；`status` 仅进程结果 | 与实现一致 |
+| 16 | `timeout_secs` 描述 | "超时秒数，默认 120" | `unwrap_or(120)`；范围 `1..=600` | 与实现一致 |
+| 17 | `timeout_secs` 描述 | "超时记 blocked 并给出原因" | 实现按三态给原因（`Cleaned` / `StillAlive` / `Unavailable`），Windows 另写 `spawn→Assign` 窗口；描述未写口径与边界 | **不一致（已修）** |
+| 43 | `receipt.get` 描述 | "按 task_id 读回执行回执" | `receipt_payload` + `is_valid_task_id` | 与实现一致 |
+| 44 | `receipt.get` 描述 | "默认返回最新一次" | `include_history` 缺省 false → `latest` | 与实现一致 |
+| 45 | `receipt.get` 描述 | "include_history=true 时返回 attempts 次数" | `attempts = records.len()` | 与实现一致 |
+| 46 | `receipt.get` 描述 | "全部历史" | `history[]` 为全部 `handback.json` | 与实现一致 |
+| 47 | `receipt.get` 描述 | "每次 exit_code 与耗时" | `history`/`latest` 均为 handback 原文（含 `exit_code`、`duration_ms`、`blocked_reason`） | 与实现一致 |
+| 48 | `receipt.get` schema | "task.execute 使用的派单标识" | 同一 `is_valid_task_id` | 与实现一致 |
+| 49 | `receipt.get` schema | "是否返回全部尝试记录，默认 false" | `as_bool().unwrap_or(false)` | 与实现一致 |
+| 56 | `runs.list` 描述 | "目录枚举不是执行状态的权威来源" | 只镜像磁盘现状 | 与实现一致 |
+| 57 | `runs.list` 描述 | "判定请用 receipt.get" | `task_summary.status` 取自 `handback.json` | 与实现一致 |
+
+补充说明（不改变判定）：`receipt.get` 对历史 `handback.json` **原样返回、不改写**（含旧 `timeout：…已终止进程` 文案），描述未做相反承诺，故 #43-#47 不因 v1.17 文案变更而改变判定。
+
+### 12.3 两条不一致：改前 / 改后原文
+
+**#2 `task.execute` 工具级 `description`**
+
+改前：
+```text
+接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收
+```
+
+改后：
+```text
+接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号，仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业。不承诺终止整棵进程树
+```
+
+**#17 `task.execute` → `timeout_secs.description`**
+
+改前：
+```text
+超时秒数，默认 120；超时记 blocked 并给出原因
+```
+
+改后：
+```text
+超时秒数，默认 120；超时记 blocked 并给出原因。原因按受控集合清理结果三态给出：已清理受控集合 / 受控集合内仍有存活进程 / 受控集合未能建立或无法查询（此时仅向直接子进程发送终止信号）；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树
+```
+
+### 12.4 验证证据
+
+新增用例 `timeout_description_matches_controlled_set_semantics`（用 `tools/list` 实际返回断言，不读源码字符串），固定上表两条措辞与边界；用例只增不减。
+
+```text
+Windows：
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+running 63 tests -> test result: ok. 63 passed; 0 failed（原 62 + 本次 1）
+[evidence] task.execute.description=…超时只向受控集合（POSIX 进程组 / Windows Job Object）…spawn→Assign 窗口…不承诺终止整棵进程树
+[evidence] timeout_secs.description=…三态…已清理受控集合 / 受控集合内仍有存活进程 / 受控集合未能建立或无法查询…不承诺终止整棵进程树
+
+POSIX（WSL，verify.sh run，离线）：
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+running 62 tests -> test result: ok. 62 passed; 0 failed（原 61 + 本次 1）
+[INFO] 四类 POSIX 用例全部通过，证据行齐全
+```
+
+`cargo check -p aw-mcp-bridge` 通过；本次仅改两条描述字符串 + 1 条用例 + 本文档，**未改实现、未改契约**。

@@ -2145,6 +2145,66 @@ fn timeout_reason_states_action_not_tree_death() {
     );
 }
 
+// 描述必须与 v1.17 三态实现同口径：不承诺整棵树，写明受控集合与 Windows 窗口
+#[test]
+fn timeout_description_matches_controlled_set_semantics() {
+    let (server, _dir) = server_with_settings(None);
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}),
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组");
+    let execute = tools
+        .iter()
+        .find(|tool| tool["name"] == "task.execute")
+        .expect("task.execute 必须存在");
+    let tool_desc = execute["description"].as_str().unwrap_or("");
+    let field_desc = execute["inputSchema"]["properties"]["timeout_secs"]["description"]
+        .as_str()
+        .unwrap_or("");
+    println!("[evidence] task.execute.description={tool_desc}");
+    println!("[evidence] timeout_secs.description={field_desc}");
+
+    for (label, text) in [("task.execute", tool_desc), ("timeout_secs", field_desc)] {
+        for token in ["受控集合", "未验证", "不承诺终止整棵进程树"] {
+            assert!(
+                text.contains(token),
+                "{label} 描述缺少 `{token}`：{text}"
+            );
+        }
+        assert!(
+            !text.contains("已终止进程树"),
+            "{label} 描述不得宣称整棵树：{text}"
+        );
+    }
+    for token in [
+        "POSIX 进程组",
+        "Windows Job Object",
+        "已清理受控集合",
+        "spawn→Assign",
+        "窗口",
+    ] {
+        assert!(
+            tool_desc.contains(token),
+            "task.execute 描述缺少 `{token}`：{tool_desc}"
+        );
+    }
+    for token in [
+        "三态",
+        "已清理受控集合",
+        "仍有存活进程",
+        "无法查询",
+        "仅向直接子进程发送终止信号",
+    ] {
+        assert!(
+            field_desc.contains(token),
+            "timeout_secs 描述缺少 `{token}`：{field_desc}"
+        );
+    }
+}
+
 // 正向：受控集合内的孙进程必须被清理，并用 OS 观测点复核（不是 stat/写盘代理）
 #[test]
 fn timeout_cleans_controlled_set_including_grandchild() {
