@@ -8,6 +8,7 @@ members = [
     "platformkit/crates/timeflow-ai",
     "platformkit/crates/agent-team",
     "apps/desktop/src-tauri",
+    "apps/mcp-bridge",
     # 以下成员将在后续里程碑创建:
     # "platformkit/crates/timeflow-workflow",
     # "platformkit/crates/timeflow-release",

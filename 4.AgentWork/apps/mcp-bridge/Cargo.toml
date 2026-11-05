@@ -1,0 +1,19 @@
+[package]
+name = "aw-mcp-bridge"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+description = "AgentWork MCP 协议桥 - 独立 stdio MCP 服务器（最小版：health / status）"
+publish = false
+
+[[bin]]
+name = "aw-mcp-bridge"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
