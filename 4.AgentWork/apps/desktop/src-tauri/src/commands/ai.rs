@@ -82,7 +82,7 @@ pub async fn set_ai_config(
                 LlmProvider::OpenAi => "https://api.openai.com/v1".to_string(),
                 LlmProvider::Ollama => "http://localhost:11434".to_string(),
                 LlmProvider::Mock => "mock://localhost".to_string(),
-                LlmProvider::Mg => "https://mg.yunjii.cn/v1".to_string(),
+                LlmProvider::Mf => "https://mf.yunjii.cn/v1".to_string(),
             };
         }
 
@@ -97,7 +97,7 @@ pub async fn set_ai_config(
                 LlmProvider::OpenAi => "gpt-4o-mini".to_string(),
                 LlmProvider::Ollama => "qwen2.5-coder:7b".to_string(),
                 LlmProvider::Mock => "mock-model".to_string(),
-                LlmProvider::Mg => "deepseek-coder".to_string(),
+                LlmProvider::Mf => "deepseek-coder".to_string(),
             };
         }
 
@@ -118,10 +118,10 @@ pub async fn set_ai_config(
     let new_cfg = state.ai_config.lock().unwrap().clone();
     let engine: Box<dyn LlmEngine> = match new_cfg.provider {
         LlmProvider::Mock => Box::new(MockEngine::conventional_commit()),
-        LlmProvider::Mg => match timeflow_ai::create_engine(new_cfg) {
+        LlmProvider::Mf => match timeflow_ai::create_engine(new_cfg) {
             Ok(e) => e,
             Err(e) => {
-                tracing::warn!("MG 引擎创建失败: {}", e);
+                tracing::warn!("MF 引擎创建失败: {}", e);
                 let mut ae = state.ai_engine.lock().unwrap();
                 *ae = None;
                 return Err(crate::AppError::Ai(e));

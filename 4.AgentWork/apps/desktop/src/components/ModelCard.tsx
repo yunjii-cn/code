@@ -51,7 +51,7 @@ const capabilityLabels: Record<string, string> = {
 
 /// Provider 中文
 const providerLabels: Record<string, string> = {
-  mg: "云集网关",
+  mf: "ModelFlow",
   openai: "OpenAI",
   ollama: "本地",
   anthropic: "Anthropic",
@@ -73,7 +73,7 @@ export default function ModelCard({
 }: ModelCardProps) {
   const isFree = model.pricing === "free";
   const isLocal = model.pricing === "local";
-  const isMg = model.provider === "mg";
+  const isMf = model.provider === "mf";
 
   return (
     <div
@@ -88,22 +88,22 @@ export default function ModelCard({
           <div
             className={clsx(
               "w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0",
-              isMg
+              isMf
                 ? "bg-brand-600/20 text-brand-400"
                 : isLocal
                   ? "bg-zinc-700/50 text-zinc-300"
                   : "bg-zinc-800 text-zinc-400"
             )}
           >
-            {isMg ? <Sparkles className="w-5 h-5" /> : <Cpu className="w-5 h-5" />}
+            {isMf ? <Sparkles className="w-5 h-5" /> : <Cpu className="w-5 h-5" />}
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="font-medium text-zinc-100 truncate">{model.display_name}</h3>
-            <div className="flex items-center gap-1.5 mt-0.5 text-xs text-zinc-500">
-              <Server className="w-3 h-3" />
-              <span>{providerLabels[model.provider] ?? model.provider}</span>
+            <div className="flex items-center gap-1.5 mt-0.5 text-xs text-zinc-500 min-w-0">
+              <Server className="w-3 h-3 flex-shrink-0" />
+              <span className="truncate">{providerLabels[model.provider] ?? model.provider}</span>
               {registered && (
-                <span className="flex items-center gap-0.5 text-green-400">
+                <span className="flex items-center gap-0.5 text-green-400 flex-shrink-0 whitespace-nowrap">
                   · <CheckCircle2 className="w-2.5 h-2.5" /> 已注册
                 </span>
               )}
@@ -216,10 +216,11 @@ export default function ModelCard({
         )}
         <button
           onClick={() => onConfigure(model)}
-          className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center gap-1"
+          className="px-3 py-1.5 text-sm rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 flex items-center justify-center gap-1 flex-shrink-0"
+          title="配置"
         >
           <Settings className="w-4 h-4" />
-          配置
+          <span className="hidden sm:inline">配置</span>
         </button>
       </div>
     </div>

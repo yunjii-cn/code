@@ -1,0 +1,15 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet">
+    <defs>
+      <filter id="strokeRoundFilter" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="1.30" result="blur"/>
+        <feColorMatrix in="blur" type="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -8" result="mask"/>
+        <feFlood flood-color="#FFFFFF" result="paint"/>
+        <feComposite in="paint" in2="mask" operator="in"/>
+      </filter>
+    </defs>
+    <circle cx="50" cy="50" r="48" fill="#1677FF"/>
+    <g>
+    <g transform="translate(35.04, 50.00)"><text x="0" y="0" font-size="78.88" style="font-family:'Cascadia Code', monospace" font-weight="900" text-anchor="middle" dominant-baseline="central" textLength="27.20" lengthAdjust="spacingAndGlyphs" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="2.00" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" filter="url(#strokeRoundFilter)">A</text></g><g transform="translate(63.87, 50.00)"><text x="0" y="0" font-size="78.88" style="font-family:'Cascadia Code', monospace" font-weight="900" text-anchor="middle" dominant-baseline="central" textLength="27.20" lengthAdjust="spacingAndGlyphs" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="2.00" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round" filter="url(#strokeRoundFilter)">W</text></g>
+    </g>
+    
+    </svg>

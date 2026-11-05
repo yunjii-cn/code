@@ -6,3 +6,5 @@ pub mod timeflow;
 pub mod git;
 pub mod ai;
 pub mod team;
+pub mod updater;
+pub mod auth;

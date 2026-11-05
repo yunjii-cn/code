@@ -9,8 +9,24 @@ import {
   ArrowUp,
   ArrowDown,
   Sun,
+  Moon,
   PanelLeft,
   Settings as SettingsIcon,
+  MessageSquare,
+  Clock,
+  GitBranch,
+  Users,
+  ClipboardList,
+  GraduationCap,
+  Store,
+  TrendingUp,
+  Cpu,
+  Zap,
+  Wrench,
+  Lightbulb,
+  Workflow,
+  Bot,
+  LogIn,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
@@ -39,7 +55,7 @@ export default function CommandPalette({
   onToggleSidebar,
 }: CommandPaletteProps) {
   const { t } = useI18n();
-  const { toggleTheme } = useTheme();
+  const { isLight, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -48,18 +64,29 @@ export default function CommandPalette({
 
   // 构建命令列表
   const commands = useMemo<CommandItem[]>(() => {
+    // 导航项（与 Layout.tsx 的 NAV_GROUPS 保持一致）
     const navItems: { to: string; key: string; icon: LucideIcon }[] = [
-      { to: "/chat", key: "nav.chat", icon: Sparkles },
-      { to: "/timeline", key: "nav.timeline", icon: Sparkles },
-      { to: "/branches", key: "nav.branches", icon: Sparkles },
+      // 互动
+      { to: "/chat", key: "nav.chat", icon: MessageSquare },
       { to: "/search", key: "nav.search", icon: Search },
-      { to: "/team", key: "nav.team", icon: Sparkles },
-      { to: "/tasks", key: "nav.tasks", icon: Sparkles },
-      { to: "/training", key: "nav.training", icon: Sparkles },
-      { to: "/marketplace", key: "nav.marketplace", icon: Sparkles },
-      { to: "/modelservice", key: "nav.modelservice", icon: Sparkles },
-      { to: "/evolution", key: "nav.evolution", icon: Sparkles },
-      { to: "/toolbuilder", key: "nav.toolbuilder", icon: Sparkles },
+      // 版本
+      { to: "/timeline", key: "nav.timeline", icon: Clock },
+      { to: "/branches", key: "nav.branches", icon: GitBranch },
+      // 团队
+      { to: "/team", key: "nav.team", icon: Users },
+      { to: "/tasks", key: "nav.tasks", icon: ClipboardList },
+      { to: "/training", key: "nav.training", icon: GraduationCap },
+      { to: "/evolution", key: "nav.evolution", icon: TrendingUp },
+      { to: "/modelservice", key: "nav.modelservice", icon: Cpu },
+      // 生态
+      { to: "/skills", key: "nav.skills", icon: Zap },
+      { to: "/toolbuilder", key: "nav.plugins", icon: Wrench },
+      { to: "/marketplace", key: "nav.templates", icon: Store },
+      { to: "/inspiration", key: "nav.inspiration", icon: Lightbulb },
+      { to: "/automation", key: "nav.automation", icon: Workflow },
+      { to: "/agents", key: "nav.agents", icon: Bot },
+      // 快捷区
+      { to: "/login", key: "nav.login", icon: LogIn },
       { to: "/settings", key: "nav.settings", icon: SettingsIcon },
     ];
 
@@ -80,8 +107,7 @@ export default function CommandPalette({
         id: "action-theme",
         label: t("cmdpalette.action.toggleTheme"),
         group: "actions",
-        icon: Sun,
-        shortcut: "Ctrl+J",
+        icon: isLight ? Moon : Sun,
         action: () => {
           toggleTheme();
           onClose();
@@ -121,7 +147,7 @@ export default function CommandPalette({
     ];
 
     return [...navCommands, ...actionCommands];
-  }, [t, navigate, onClose, toggleTheme, onToggleSidebar]);
+  }, [t, navigate, onClose, toggleTheme, onToggleSidebar, isLight]);
 
   // 过滤
   const filtered = useMemo(() => {

@@ -14,12 +14,17 @@ interface ThemeContextValue {
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
+function getSystemTheme(): ThemeName {
+  if (typeof window === "undefined") return "dark";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [currentTheme, setCurrentTheme] = useState<ThemeName>(() => {
     try {
-      return (localStorage.getItem("yunji-theme") as ThemeName) || "dark";
+      return (localStorage.getItem("yunji-theme") as ThemeName) || getSystemTheme();
     } catch {
-      return "dark";
+      return getSystemTheme();
     }
   });
 

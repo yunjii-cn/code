@@ -18,7 +18,7 @@ export type ModelPricing = "free" | "paid" | "local";
 
 /// 模型卡片数据
 export interface ModelCardData {
-  /// 模型 ID（如 "mg-deepseek-coder"）
+  /// 模型 ID（如 "mf-deepseek-coder"）
   id: string;
   /// 显示名（如 "DeepSeek Coder"）
   display_name: string;
@@ -57,25 +57,25 @@ const categoryLabels: Record<Category, string> = {
 // 前期重点推荐免费 API，吸引用户
 
 const BUILTIN_MODELS: ModelCardData[] = [
-  // === 云集网关（MG）===
+  // === ModelFlow（MF）—— 云集模型网关 ===
   {
-    id: "mg-deepseek-coder",
+    id: "mf-deepseek-coder",
     display_name: "DeepSeek Coder",
     model_name: "deepseek-coder",
-    provider: "mg",
-    base_url: "https://mg.yunjii.cn/v1",
+    provider: "mf",
+    base_url: "https://mf.yunjii.cn/v1",
     pricing: "free",
     price_per_1k: 0,
     capabilities: ["code", "reasoning"],
-    description: "代码生成与补全专家，通过云集网关智能路由，UM 钱包统一计费",
+    description: "代码生成与补全专家，ModelFlow 智能路由，50+ 模型一个 Key 搞定",
     recommended: true,
   },
   {
-    id: "mg-claude",
+    id: "mf-claude",
     display_name: "Claude 3 Opus",
     model_name: "claude-3-opus",
-    provider: "mg",
-    base_url: "https://mg.yunjii.cn/v1",
+    provider: "mf",
+    base_url: "https://mf.yunjii.cn/v1",
     pricing: "paid",
     price_per_1k: 15,
     capabilities: ["reasoning", "code", "chat"],
@@ -83,11 +83,11 @@ const BUILTIN_MODELS: ModelCardData[] = [
     recommended: true,
   },
   {
-    id: "mg-gpt4o",
+    id: "mf-gpt4o",
     display_name: "GPT-4o",
     model_name: "gpt-4o",
-    provider: "mg",
-    base_url: "https://mg.yunjii.cn/v1",
+    provider: "mf",
+    base_url: "https://mf.yunjii.cn/v1",
     pricing: "paid",
     price_per_1k: 5,
     capabilities: ["vision", "reasoning", "chat"],
@@ -95,11 +95,11 @@ const BUILTIN_MODELS: ModelCardData[] = [
     recommended: false,
   },
   {
-    id: "mg-qwen-chat",
+    id: "mf-qwen-chat",
     display_name: "Qwen Max",
     model_name: "qwen-max",
-    provider: "mg",
-    base_url: "https://mg.yunjii.cn/v1",
+    provider: "mf",
+    base_url: "https://mf.yunjii.cn/v1",
     pricing: "free",
     price_per_1k: 0,
     capabilities: ["chat", "code"],
@@ -314,15 +314,15 @@ export default function ModelService() {
   return (
     <div className="h-full flex flex-col bg-zinc-950">
       {/* 顶部标题栏 */}
-      <header className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Server className="w-5 h-5 text-brand-400" />
-          <h1 className="text-lg font-medium text-zinc-100">{t("modelService.title")}</h1>
-          <span className="text-xs text-zinc-500">
+      <header className="px-4 sm:px-6 py-4 border-b border-zinc-800 flex items-center justify-between flex-wrap gap-y-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Server className="w-5 h-5 text-brand-400 flex-shrink-0" />
+          <h1 className="text-lg font-medium text-zinc-100 whitespace-nowrap">{t("modelService.title")}</h1>
+          <span className="text-xs text-zinc-500 whitespace-nowrap">
             ({enabledCount} {t("modelService.enabled")} / {totalCount} {t("modelService.total")})
           </span>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
           {/* 刷新已注册模型 */}
           <button
             onClick={refreshRegistered}
@@ -341,7 +341,7 @@ export default function ModelService() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder={t("modelService.search.placeholder")}
-              className="w-40 sm:w-56 pl-9 pr-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-brand-600"
+              className="w-36 sm:w-48 md:w-56 pl-9 pr-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-brand-600"
             />
           </div>
         </div>
@@ -349,7 +349,7 @@ export default function ModelService() {
 
       {/* 已注册模型提示条 */}
       {registeredCount > 0 && (
-        <div className="px-6 py-2 border-b border-zinc-800 bg-green-950/20 flex items-center gap-2 text-xs">
+        <div className="px-4 sm:px-6 py-2 border-b border-zinc-800 bg-green-950/20 flex items-center gap-2 text-xs">
           <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
           <span className="text-green-300">
             {t("modelService.registered")}: {registeredCount}
@@ -358,7 +358,7 @@ export default function ModelService() {
       )}
 
       {/* 分类标签栏 */}
-      <div className="px-6 py-3 border-b border-zinc-800 flex items-center gap-2 overflow-x-auto">
+      <div className="px-4 sm:px-6 py-3 border-b border-zinc-800 flex items-center gap-2 flex-wrap">
         {(Object.keys(categoryLabels) as Category[]).map((cat) => (
           <button
             key={cat}
@@ -374,7 +374,7 @@ export default function ModelService() {
             {categoryLabels[cat]}
           </button>
         ))}
-        <div className="ml-auto text-xs text-zinc-500 whitespace-nowrap">
+        <div className="ml-auto text-xs text-zinc-500 whitespace-nowrap pl-2">
           {filteredModels.length}
         </div>
       </div>
@@ -387,7 +387,7 @@ export default function ModelService() {
             <p className="text-sm">{t("cmdpalette.empty")}</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 auto-rows-fr">
             {filteredModels.map((model) => (
               <ModelCard
                 key={model.id}
@@ -405,20 +405,20 @@ export default function ModelService() {
       </div>
 
       {/* 底部用量条 */}
-      <footer className="px-4 sm:px-6 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center justify-between text-xs">
+      <footer className="px-4 sm:px-6 py-3 border-t border-zinc-800 bg-zinc-900 flex items-center justify-between text-xs flex-wrap gap-y-2">
         <div className="flex items-center gap-4">
-          <span className="flex items-center gap-1.5 text-zinc-400">
+          <span className="flex items-center gap-1.5 text-zinc-400 whitespace-nowrap">
             <TrendingUp className="w-3.5 h-3.5" />
             {t("modelService.usage.today")}: <span className="text-zinc-200">0 tokens</span>
           </span>
           <span className="text-zinc-600 hidden sm:inline">|</span>
-          <span className="flex items-center gap-1.5 text-zinc-400">
+          <span className="flex items-center gap-1.5 text-zinc-400 whitespace-nowrap">
             <Sparkles className="w-3.5 h-3.5 text-green-400" />
             {t("modelService.usage.free")}: <span className="text-green-400">{freeCount}</span>
           </span>
         </div>
         <div className="flex items-center gap-2 text-zinc-500">
-          <span className="hidden sm:inline">{t("modelService.gateway")}</span>
+          <span className="hidden md:inline">{t("modelService.gateway")}</span>
         </div>
       </footer>
 

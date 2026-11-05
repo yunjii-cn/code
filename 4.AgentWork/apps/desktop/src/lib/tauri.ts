@@ -68,7 +68,7 @@ export interface GitStatusInfo {
 }
 
 export interface AiConfigInfo {
-  provider: "openai" | "ollama" | "mock" | "mg";
+  provider: "openai" | "ollama" | "mock" | "mf";
   base_url: string;
   model: string;
   has_api_key: boolean;
@@ -696,4 +696,101 @@ export async function executeToolFull(
   values: Record<string, string>
 ): Promise<ToolPreviewResult> {
   return invoke<ToolPreviewResult>("execute_tool_full", { tool, values });
+}
+
+// ===== 版本更新 =====
+
+export interface VersionInfo {
+  version: string;
+  date: string;
+  message: string;
+  changes: string[];
+  name: string;
+  download_url?: string;
+  size?: number;
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string | null;
+  has_update: boolean;
+  versions: VersionInfo[];
+  source: string;
+  local_versions: string[];
+}
+
+export interface DownloadProgress {
+  version: string;
+  downloaded: number;
+  total: number;
+  percent: number;
+}
+
+export async function checkForUpdates(
+  source?: string
+): Promise<UpdateCheckResult> {
+  return invoke<UpdateCheckResult>("check_for_updates", { source });
+}
+
+export async function downloadVersion(
+  version: string,
+  downloadUrl: string
+): Promise<string> {
+  return invoke<string>("download_version", { version, downloadUrl });
+}
+
+export async function switchVersion(version: string): Promise<string> {
+  return invoke<string>("switch_version", { version });
+}
+
+export async function openVerDir(): Promise<void> {
+  return invoke<void>("open_ver_dir");
+}
+
+// ===== UM 统一身份认证 =====
+
+export interface UmLoginStartResult {
+  session_id: string;
+  login_url: string;
+  qrcode_url: string;
+  qr_image_url: string;
+  redirect_uri: string;
+  oauth_code: string;
+}
+
+export interface UmUserInfo {
+  social_uid?: string;
+  user_id?: number;
+  nickname?: string;
+  faceimg?: string;
+  avatar?: string;
+  gender?: string;
+  location?: string;
+  access_token?: string;
+  token?: string;
+}
+
+export async function startUmLogin(): Promise<UmLoginStartResult> {
+  return invoke<UmLoginStartResult>("start_um_login");
+}
+
+export async function cancelUmLogin(): Promise<void> {
+  return invoke<void>("cancel_um_login");
+}
+
+export async function getUmUserInfo(token: string): Promise<UmUserInfo> {
+  return invoke<UmUserInfo>("get_um_user_info", { token });
+}
+
+// 打开外部链接（系统默认浏览器）
+export async function openExternalUrl(url: string): Promise<void> {
+  // 必须使用 Tauri 自带的 shell.open 才会在系统默认浏览器里打开
+  // 不要用 window.open —— Tauri webview 会拦截成新页面
+  const { open } = await import("@tauri-apps/plugin-shell");
+  try {
+    await open(url);
+  } catch (err) {
+    console.warn("[tauri] shell.open failed, fallback to invoke:", err);
+    await invoke<void>("plugin:shell|open", { path: url });
+  }
 }

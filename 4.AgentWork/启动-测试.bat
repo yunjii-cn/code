@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul 2>&1
 REM ============================================================
 REM   AgentWork - Test Launcher (Double-click to start Tauri dev)
 REM ============================================================
@@ -20,16 +21,24 @@ timeout /t 3 /nobreak >nul
 
 echo [1/3] Checking environment...
 
-set RUST_PATH=%USERPROFILE%\.cargo\bin
-if exist "%RUST_PATH%\cargo.exe" (
-    set "PATH=%RUST_PATH%;%PATH%"
-    echo [OK] Cargo found
-) else (
-    echo [ERROR] Cargo not found at %RUST_PATH%
+set "RUST_PATH="
+
+if exist "D:\dev-cache\cargo\bin\cargo.exe" set "RUST_PATH=D:\dev-cache\cargo\bin"
+if not defined RUST_PATH if exist "D:\AppData\cargo\bin\cargo.exe" set "RUST_PATH=D:\AppData\cargo\bin"
+if not defined RUST_PATH if defined CARGO_HOME if exist "%CARGO_HOME%\bin\cargo.exe" set "RUST_PATH=%CARGO_HOME%\bin"
+if not defined RUST_PATH if exist "%USERPROFILE%\.cargo\bin\cargo.exe" set "RUST_PATH=%USERPROFILE%\.cargo\bin"
+if not defined RUST_PATH if exist "C:\.cargo\bin\cargo.exe" set "RUST_PATH=C:\.cargo\bin"
+
+if not defined RUST_PATH (
+    echo [ERROR] Cargo not found
+    echo Checked: D:\dev-cache\cargo, D:\AppData\cargo, CARGO_HOME, %%USERPROFILE%%\.cargo, C:\.cargo
     echo.
     pause
     exit /b 1
 )
+
+set "PATH=%RUST_PATH%;%PATH%"
+echo [OK] Cargo found at %RUST_PATH%
 
 where node >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (

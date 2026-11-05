@@ -34,13 +34,24 @@ set PKG=pnpm
 goto PKG_OK
 
 :NO_CARGO
+if defined CARGO_HOME if exist "%CARGO_HOME%\bin\cargo.exe" (
+    set "PATH=%CARGO_HOME%\bin;%PATH%"
+    goto CARGO_OK
+)
 if exist "%USERPROFILE%\.cargo\bin\cargo.exe" (
     set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
-) else (
-    echo [ERROR] Rust/Cargo not found
-    echo         Please install Rust 1.88+ from https://rustup.rs
-    goto END_ERROR
+    goto CARGO_OK
 )
+if exist "D:\AppData\cargo\bin\cargo.exe" (
+    set "PATH=D:\AppData\cargo\bin;%PATH%"
+    goto CARGO_OK
+)
+echo [ERROR] Rust/Cargo not found
+echo         Please install Rust 1.88+ from https://rustup.rs
+goto END_ERROR
+
+:CARGO_OK
+echo        OK cargo found
 
 where node >nul 2>&1
 if %ERRORLEVEL% NEQ 0 goto NO_NODE

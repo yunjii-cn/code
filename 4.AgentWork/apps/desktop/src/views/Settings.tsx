@@ -58,7 +58,7 @@ export default function Settings() {
   const [modeMessage, setModeMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [pushing, setPushing] = useState(false);
   const [aiConfig, setAiConfigState] = useState<AiConfigInfo | null>(null);
-  const [aiProvider, setAiProvider] = useState<"openai" | "ollama" | "mock" | "mg">("ollama");
+  const [aiProvider, setAiProvider] = useState<"openai" | "ollama" | "mock" | "mf">("ollama");
   const [aiApiKey, setAiApiKey] = useState("");
   const [aiModel, setAiModel] = useState("");
   const [aiBaseUrl, setAiBaseUrl] = useState("");
@@ -92,15 +92,42 @@ export default function Settings() {
         setSysInfo(sys);
       })
       .catch(console.error);
-    currentBranch()
-      .then((name) => setCurrentBranchName(name))
-      .catch(() => setCurrentBranchName(null));
+
+    // 自动检测并初始化默认仓库，保证开箱即用
+    autoInitDefaultRepo();
+
     getGitMode()
       .then((m) => setGitModeState(m as GitMode))
       .catch(() => setGitModeState("stealth"));
     refreshGitStatus();
     refreshAiConfig();
   }, []);
+
+  async function autoInitDefaultRepo() {
+    try {
+      const branch = await currentBranch();
+      setCurrentBranchName(branch);
+      // 已有仓库，同步路径显示
+      const defaultPath = await getDefaultRepoPath();
+      setRepoPath(defaultPath);
+    } catch {
+      // 当前没有可用仓库，自动初始化默认路径
+      setCurrentBranchName(null);
+      try {
+        const defaultPath = await getDefaultRepoPath();
+        setRepoPath(defaultPath);
+        const result = await initRepository(defaultPath);
+        setInitStatus("success");
+        setInitMessage(result);
+        const branch = await currentBranch();
+        setCurrentBranchName(branch);
+        refreshGitStatus();
+      } catch (err) {
+        setInitStatus("error");
+        setInitMessage(String(err));
+      }
+    }
+  }
 
   function refreshGitStatus() {
     getGitStatus()
@@ -454,7 +481,7 @@ export default function Settings() {
                 {([
                   { value: "ollama", labelKey: "settings.aiConfig.providers.ollama", icon: Cpu, descKey: "settings.aiConfig.providers.ollamaDesc" },
                   { value: "openai", labelKey: "settings.aiConfig.providers.openai", icon: Cloud, descKey: "settings.aiConfig.providers.openaiDesc" },
-                  { value: "mg", labelKey: "settings.aiConfig.providers.mg", icon: Cloud, descKey: "settings.aiConfig.providers.mgDesc" },
+                  { value: "mf", labelKey: "settings.aiConfig.providers.mf", icon: Cloud, descKey: "settings.aiConfig.providers.mfDesc" },
                   { value: "mock", labelKey: "settings.aiConfig.providers.mock", icon: Brain, descKey: "settings.aiConfig.providers.mockDesc" },
                 ] as const).map(({ value, labelKey, icon: Icon, descKey }) => (
                   <button

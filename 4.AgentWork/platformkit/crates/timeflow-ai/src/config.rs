@@ -14,13 +14,13 @@ pub enum LlmProvider {
     Ollama,
     /// Mock（测试用）
     Mock,
-    /// 云集模型网关（MG）—— 走 UM 钱包统一计费 + 智能路由
-    Mg,
+    /// ModelFlow（MF）—— 云集模型网关，50+ 模型智能路由 + 语义缓存
+    Mf,
 }
 
-/// 模型路由提示（传给 MG BFF 的 X-Model-Preference header）
+/// 模型路由提示（传给 MF BFF 的 X-Model-Preference header）
 ///
-/// MG BFF 根据此提示自动选择最优模型：
+/// MF 根据此提示自动选择最优模型：
 /// - Code → DeepSeek-Coder / Qwen-Coder（便宜快）
 /// - Reasoning → Claude / GPT-4o（贵但准）
 /// - Vision → GPT-4o / Gemini（多模态）
@@ -74,7 +74,7 @@ impl std::fmt::Display for LlmProvider {
             Self::OpenAi => write!(f, "openai"),
             Self::Ollama => write!(f, "ollama"),
             Self::Mock => write!(f, "mock"),
-            Self::Mg => write!(f, "mg"),
+            Self::Mf => write!(f, "mf"),
         }
     }
 }
@@ -87,7 +87,7 @@ impl std::str::FromStr for LlmProvider {
             "openai" | "gpt" => Ok(Self::OpenAi),
             "ollama" | "local" => Ok(Self::Ollama),
             "mock" | "test" => Ok(Self::Mock),
-            "mg" | "yunji" | "gateway" => Ok(Self::Mg),
+            "mf" | "yunji" | "gateway" | "modelflow" => Ok(Self::Mf),
             _ => Err(crate::error::AiError::Config(format!("未知 LLM 提供方: {}", s))),
         }
     }
@@ -102,15 +102,15 @@ pub struct AiConfig {
     ///
     /// - OpenAI: 默认 https://api.openai.com/v1
     /// - Ollama: 默认 http://localhost:11434
-    /// - Mg: 默认 https://mg.yunjii.cn/v1
+    /// - Mf: 默认 https://mf.yunjii.cn/v1
     pub base_url: String,
-    /// API key（OpenAI 必填，Ollama 可空，Mg 用 UM access_token）
+    /// API key（OpenAI 必填，Ollama 可空，Mf 用 MF API Key MF-xxx）
     pub api_key: Option<String>,
     /// 模型名
     ///
     /// - OpenAI: gpt-4o-mini / gpt-4o
     /// - Ollama: qwen2.5-coder:7b / llama3.2
-    /// - Mg: deepseek-coder / claude-3-opus / gpt-4o（MG BFF 智能路由）
+    /// - Mf: deepseek-coder / claude-3-opus / gpt-4o（MF 智能路由）
     pub model: String,
     /// 请求超时
     #[serde(with = "duration_secs")]
@@ -119,7 +119,7 @@ pub struct AiConfig {
     pub max_tokens: u32,
     /// 温度（0.0-1.0，越低越确定性）
     pub temperature: f32,
-    /// 模型路由提示（仅 Mg provider 生效，传给 MG BFF 的 X-Model-Preference header）
+    /// 模型路由提示（仅 Mf provider 生效，传给 MF 的 X-Model-Preference header）
     #[serde(default)]
     pub routing_hint: RoutingHint,
 }
@@ -151,13 +151,13 @@ impl AiConfig {
         }
     }
 
-    /// 创建 MG（云集模型网关）默认配置
+    /// 创建 MF（ModelFlow 模型网关）默认配置
     ///
-    /// api_key 传 UM access_token，base_url 指向 MG BFF
-    pub fn mg(api_key: impl Into<String>, model: impl Into<String>, hint: RoutingHint) -> Self {
+    /// api_key 传 MF API Key（MF-xxx），base_url 指向 mf.yunjii.cn
+    pub fn mf(api_key: impl Into<String>, model: impl Into<String>, hint: RoutingHint) -> Self {
         Self {
-            provider: LlmProvider::Mg,
-            base_url: "https://mg.yunjii.cn/v1".to_string(),
+            provider: LlmProvider::Mf,
+            base_url: "https://mf.yunjii.cn/v1".to_string(),
             api_key: Some(api_key.into()),
             model: model.into(),
             routing_hint: hint,
@@ -202,9 +202,9 @@ mod tests {
         assert_eq!("openai".parse::<LlmProvider>().unwrap(), LlmProvider::OpenAi);
         assert_eq!("ollama".parse::<LlmProvider>().unwrap(), LlmProvider::Ollama);
         assert_eq!("mock".parse::<LlmProvider>().unwrap(), LlmProvider::Mock);
-        assert_eq!("mg".parse::<LlmProvider>().unwrap(), LlmProvider::Mg);
-        assert_eq!("yunji".parse::<LlmProvider>().unwrap(), LlmProvider::Mg);
-        assert_eq!("gateway".parse::<LlmProvider>().unwrap(), LlmProvider::Mg);
+        assert_eq!("mf".parse::<LlmProvider>().unwrap(), LlmProvider::Mf);
+        assert_eq!("yunji".parse::<LlmProvider>().unwrap(), LlmProvider::Mf);
+        assert_eq!("gateway".parse::<LlmProvider>().unwrap(), LlmProvider::Mf);
         assert!("invalid".parse::<LlmProvider>().is_err());
     }
 
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(LlmProvider::OpenAi.to_string(), "openai");
         assert_eq!(LlmProvider::Ollama.to_string(), "ollama");
         assert_eq!(LlmProvider::Mock.to_string(), "mock");
-        assert_eq!(LlmProvider::Mg.to_string(), "mg");
+        assert_eq!(LlmProvider::Mf.to_string(), "mf");
     }
 
     #[test]
@@ -242,11 +242,11 @@ mod tests {
     }
 
     #[test]
-    fn test_config_mg() {
-        let cfg = AiConfig::mg("um-token-xyz", "deepseek-coder", RoutingHint::Code);
-        assert_eq!(cfg.provider, LlmProvider::Mg);
-        assert_eq!(cfg.base_url, "https://mg.yunjii.cn/v1");
-        assert_eq!(cfg.api_key, Some("um-token-xyz".to_string()));
+    fn test_config_mf() {
+        let cfg = AiConfig::mf("MF-test-key", "deepseek-coder", RoutingHint::Code);
+        assert_eq!(cfg.provider, LlmProvider::Mf);
+        assert_eq!(cfg.base_url, "https://mf.yunjii.cn/v1");
+        assert_eq!(cfg.api_key, Some("MF-test-key".to_string()));
         assert_eq!(cfg.model, "deepseek-coder");
         assert_eq!(cfg.routing_hint, RoutingHint::Code);
     }
@@ -254,8 +254,8 @@ mod tests {
     #[test]
     fn test_config_serde_roundtrip() {
         let cfg = AiConfig {
-            provider: LlmProvider::Mg,
-            base_url: "https://mg.yunjii.cn/v1".to_string(),
+            provider: LlmProvider::Mf,
+            base_url: "https://mf.yunjii.cn/v1".to_string(),
             api_key: Some("key".to_string()),
             model: "claude-3-opus".to_string(),
             timeout: Duration::from_secs(30),
@@ -265,7 +265,7 @@ mod tests {
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let parsed: AiConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.provider, LlmProvider::Mg);
+        assert_eq!(parsed.provider, LlmProvider::Mf);
         assert_eq!(parsed.timeout, Duration::from_secs(30));
         assert_eq!(parsed.max_tokens, 512);
         assert_eq!(parsed.routing_hint, RoutingHint::Reasoning);

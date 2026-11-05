@@ -90,10 +90,10 @@ impl OpenAiEngine {
         Self::with_routing_hint(config, None)
     }
 
-    /// 创建带路由提示的引擎（MG 模式用）
+    /// 创建带路由提示的引擎（MF 模式用）
     ///
     /// `hint` 非 None 时，会在请求头注入 `X-Model-Preference: {hint}`，
-    /// MG BFF 据此做智能路由（Code→DeepSeek-Coder, Reasoning→Claude, 等）
+    /// MF 据此做智能路由（Code→DeepSeek-Coder, Reasoning→Claude, 等）
     pub fn with_routing_hint(config: AiConfig, hint: Option<RoutingHint>) -> Result<Self> {
         let api_key = config
             .api_key
@@ -109,7 +109,7 @@ impl OpenAiEngine {
                     reqwest::header::HeaderValue::from_str(&format!("Bearer {}", api_key))
                         .map_err(|e| AiError::Config(format!("无效 API key: {}", e)))?,
                 );
-                // MG 智能路由提示
+                // MF 智能路由提示
                 if let Some(h) = hint {
                     headers.insert(
                         reqwest::header::HeaderName::from_static("x-model-preference"),
@@ -291,7 +291,7 @@ impl LlmEngine for MockEngine {
 pub fn create_engine(config: AiConfig) -> Result<Box<dyn LlmEngine>> {
     match config.provider {
         LlmProvider::OpenAi => Ok(Box::new(OpenAiEngine::new(config)?)),
-        LlmProvider::Mg => {
+        LlmProvider::Mf => {
             let hint = config.routing_hint;
             Ok(Box::new(OpenAiEngine::with_routing_hint(config, Some(hint))?))
         }

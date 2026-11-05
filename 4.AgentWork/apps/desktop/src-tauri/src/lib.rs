@@ -54,6 +54,8 @@ pub struct AppState {
     pub ai_enabled: std::sync::Mutex<bool>,
     /// 团队协作状态（W7 M3.1）
     pub team: commands::team::TeamState,
+    /// UM 登录会话状态
+    pub um_login_session: tokio::sync::Mutex<commands::auth::UmLoginSession>,
 }
 
 impl Default for AppState {
@@ -88,6 +90,7 @@ impl Default for AppState {
             ai_config: std::sync::Mutex::new(ai_config),
             ai_enabled: std::sync::Mutex::new(false),
             team: commands::team::TeamState::default(),
+            um_login_session: tokio::sync::Mutex::new(commands::auth::UmLoginSession::default()),
         }
     }
 }
@@ -184,9 +187,31 @@ pub fn run() {
             commands::team::list_multi_entries,
             commands::team::register_multi_entry,
             commands::team::unregister_multi_entry,
+            // 版本更新命令
+            commands::updater::check_for_updates,
+            commands::updater::download_version,
+            commands::updater::switch_version,
+            commands::updater::open_ver_dir,
+            // UM 统一身份认证命令
+            commands::auth::start_um_login,
+            commands::auth::get_um_user_info,
+            commands::auth::cancel_um_login,
         ])
         .setup(|app| {
             tracing::info!("AgentWork 桌面端启动完成");
+
+            // 设置窗口标题：软件名 + 版本号（日期时间）
+            // 开发模式：以启动时间为准；EXE 模式：以封装时间为准（通过 VER_BUILD_TIME 注入）
+            let version = option_env!("VER_BUILD_TIME")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    chrono::Local::now().format("%Y.%m.%d.%H%M").to_string()
+                });
+            let title = format!("云集智能体工作台 v{}", version);
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&title);
+            }
+            tracing::info!("窗口标题已设置: {}", title);
 
             // 从持久化存储加载配置
             let handle = app.handle();
@@ -222,7 +247,44 @@ fn load_persisted_config(app: &tauri::AppHandle) {
     // 加载仓库路径，如果没有则自动初始化默认仓库
     let repo_path = config_store::load::<String>(app, config_store::keys::REPO_PATH);
     let repo_path = match repo_path {
-        Some(p) if std::path::Path::new(&p).exists() => Some(p),
+        Some(p) if std::path::Path::new(&p).exists() => {
+            // 持久化路径有效，重建 TimeFlow 引擎实例
+            match timeflow_core::TimeFlow::new(&p) {
+                Ok(tf) => {
+                    let state: tauri::State<AppState> = app.state();
+                    *state.timeflow.lock().unwrap() = Some(std::sync::Arc::new(tf));
+                    *state.repo_path.lock().unwrap() = Some(std::path::PathBuf::from(&p));
+                    tracing::info!("已加载仓库: {}", p);
+                    Some(p)
+                }
+                Err(e) => {
+                    tracing::warn!("加载仓库失败，将尝试默认路径: {}", e);
+                    // 走默认路径分支
+                    let default_path = match app.path().app_local_data_dir() {
+                        Ok(dir) => dir.join("data").join("workspace"),
+                        Err(e) => {
+                            tracing::warn!("获取应用目录失败: {}", e);
+                            return;
+                        }
+                    };
+                    let _ = std::fs::create_dir_all(&default_path);
+                    let path_str = default_path.to_string_lossy().to_string();
+                    match timeflow_core::TimeFlow::new(&default_path) {
+                        Ok(tf) => {
+                            let state: tauri::State<AppState> = app.state();
+                            *state.timeflow.lock().unwrap() = Some(std::sync::Arc::new(tf));
+                            *state.repo_path.lock().unwrap() = Some(default_path.clone());
+                            config_store::save(app, config_store::keys::REPO_PATH, &path_str);
+                            Some(path_str)
+                        }
+                        Err(e) => {
+                            tracing::warn!("默认仓库初始化失败: {}", e);
+                            None
+                        }
+                    }
+                }
+            }
+        }
         _ => {
             // 没有持久化路径或路径不存在，自动初始化默认仓库
             let default_path = match app.path().app_local_data_dir() {

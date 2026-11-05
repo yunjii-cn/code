@@ -25,16 +25,15 @@ import {
   AlertCircle,
   CheckCircle2,
   Loader2,
-  Sparkles,
   ClipboardList,
   Trash2,
 } from "lucide-react";
-import {
-  streamAgentThinking,
+import { streamAgentThinking,
   type StreamEvent,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/i18n";
+import { BRAND } from "@/lib/brand";
 
 /** 消息角色 */
 type MessageRole = "user" | "assistant" | "system";
@@ -402,9 +401,7 @@ export default function ChatPanel() {
             )}
           >
             {msg.role === "assistant" && (
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand-500 to-accent-500 flex items-center justify-center flex-shrink-0">
-                <Sparkles className="w-4 h-4 text-white" />
-              </div>
+              <img src={BRAND.logo} alt={BRAND.name} className="w-8 h-8 rounded-full flex-shrink-0" />
             )}
             <div className="flex flex-col items-end gap-1 max-w-[70%]">
               <div

@@ -60,6 +60,7 @@ pub struct WatcherStatus {
 }
 
 /// 初始化 TimeFlow 仓库
+/// 若目录不存在会自动创建，保证开箱即用
 #[tauri::command]
 pub async fn init_repository(
     path: String,
@@ -67,11 +68,15 @@ pub async fn init_repository(
     app: tauri::AppHandle,
 ) -> AppResult<String> {
     let repo_path = PathBuf::from(&path);
+
+    // 自动创建目录（如果不存在）
     if !repo_path.exists() {
-        return Err(crate::AppError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("路径不存在: {path}"),
-        )));
+        std::fs::create_dir_all(&repo_path).map_err(|e| {
+            crate::AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("创建仓库目录失败: {e}"),
+            ))
+        })?;
     }
 
     let timeflow = Arc::new(timeflow_core::TimeFlow::new(&repo_path)?);

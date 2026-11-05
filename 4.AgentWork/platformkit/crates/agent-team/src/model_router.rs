@@ -32,7 +32,7 @@ pub struct ModelConfig {
     pub provider: LlmProvider,
     /// API base URL
     pub base_url: String,
-    /// API key（OpenAI 必填，Ollama 可空，Mg 用 UM access_token）
+    /// API key（OpenAI 必填，Ollama 可空，Mf 用 MF API Key MF-xxx）
     pub api_key: Option<String>,
     /// 模型名（实际传给 API 的，如 "gpt-4o-mini"）
     pub model_name: String,
@@ -42,7 +42,7 @@ pub struct ModelConfig {
     pub max_tokens: u32,
     /// 温度
     pub temperature: f32,
-    /// 模型路由提示（仅 Mg provider 生效）
+    /// 模型路由提示（仅 Mf provider 生效）
     #[serde(default)]
     pub routing_hint: RoutingHint,
 }
@@ -63,16 +63,16 @@ impl ModelConfig {
         }
     }
 
-    /// 创建 MG（云集模型网关）模型配置
+    /// 创建 MF（ModelFlow 模型网关）模型配置
     ///
-    /// - `api_key`: UM access_token（走 UM 钱包统一计费）
-    /// - `model_name`: MG 侧模型名（如 "deepseek-coder" / "claude-3-opus"）
-    /// - `hint`: 路由提示，MG BFF 据此选择最优模型
-    pub fn mg(id: impl Into<String>, api_key: impl Into<String>, model_name: impl Into<String>, hint: RoutingHint) -> Self {
+    /// - `api_key`: MF API Key（MF-xxx 格式）
+    /// - `model_name`: MF 侧模型名（如 "deepseek-coder" / "claude-3-opus"）
+    /// - `hint`: 路由提示，MF 据此选择最优模型
+    pub fn mf(id: impl Into<String>, api_key: impl Into<String>, model_name: impl Into<String>, hint: RoutingHint) -> Self {
         Self {
             id: id.into(),
-            provider: LlmProvider::Mg,
-            base_url: "https://mg.yunjii.cn/v1".to_string(),
+            provider: LlmProvider::Mf,
+            base_url: "https://mf.yunjii.cn/v1".to_string(),
             api_key: Some(api_key.into()),
             model_name: model_name.into(),
             timeout_secs: 90,
@@ -209,7 +209,7 @@ impl ModelRouter {
         let ai_config = config.to_ai_config();
         let engine: Box<dyn LlmEngine> = match config.provider {
             LlmProvider::OpenAi => Box::new(OpenAiEngine::new(ai_config)?),
-            LlmProvider::Mg => Box::new(OpenAiEngine::with_routing_hint(
+            LlmProvider::Mf => Box::new(OpenAiEngine::with_routing_hint(
                 ai_config,
                 Some(config.routing_hint),
             )?),
@@ -395,29 +395,29 @@ pub fn builtin_router() -> ModelRouter {
         "qwen2.5-coder:7b",
     ));
 
-    // 云集模型网关（MG）—— 走 UM 钱包统一计费 + 智能路由
-    // api_key 留空，运行时由 UM SSO token 自动注入
-    // MG BFF 根据 routing_hint 自动选择最优模型
-    router.register(ModelConfig::mg(
-        "mg-deepseek-coder",
+    // ModelFlow（MF）—— 50+ 模型智能路由 + 语义缓存
+    // api_key 留空，运行时由 MF API Key 自动注入
+    // MF 根据 routing_hint 自动选择最优模型
+    router.register(ModelConfig::mf(
+        "mf-deepseek-coder",
         "",
         "deepseek-coder",
         RoutingHint::Code,
     ));
-    router.register(ModelConfig::mg(
-        "mg-claude",
+    router.register(ModelConfig::mf(
+        "mf-claude",
         "",
         "claude-3-opus",
         RoutingHint::Reasoning,
     ));
-    router.register(ModelConfig::mg(
-        "mg-gpt4o",
+    router.register(ModelConfig::mf(
+        "mf-gpt4o",
         "",
         "gpt-4o",
         RoutingHint::Vision,
     ));
-    router.register(ModelConfig::mg(
-        "mg-qwen-chat",
+    router.register(ModelConfig::mf(
+        "mf-qwen-chat",
         "",
         "qwen-max",
         RoutingHint::Chat,
@@ -447,8 +447,8 @@ fn apply_gateway_override(
     );
 
     for (_, config) in router.models.iter_mut() {
-        // 只覆盖 OpenAI 兼容模型和 MG 模型（云端），保留 Ollama 和 Mock
-        if config.provider == LlmProvider::OpenAi || config.provider == LlmProvider::Mg {
+        // 只覆盖 OpenAI 兼容模型和 MF 模型（云端），保留 Ollama 和 Mock
+        if config.provider == LlmProvider::OpenAi || config.provider == LlmProvider::Mf {
             if let Some(url) = gateway_url {
                 // 拼接模型 ID 作为路径后缀，例如 https://gateway.com/api/llm/zhipu
                 // 文档约定：Gateway 路径 /api/llm/{provider}/chat/completions
@@ -625,19 +625,19 @@ mod tests {
         assert!(models.contains(&"glm5.2".to_string()));
         assert!(models.contains(&"qwen3.7".to_string()));
         assert!(models.contains(&"local-llama-3".to_string()));
-        assert!(models.contains(&"mg-deepseek-coder".to_string()));
-        assert!(models.contains(&"mg-claude".to_string()));
-        assert!(models.contains(&"mg-gpt4o".to_string()));
-        assert!(models.contains(&"mg-qwen-chat".to_string()));
+        assert!(models.contains(&"mf-deepseek-coder".to_string()));
+        assert!(models.contains(&"mf-claude".to_string()));
+        assert!(models.contains(&"mf-gpt4o".to_string()));
+        assert!(models.contains(&"mf-qwen-chat".to_string()));
         assert!(models.contains(&"mock-test".to_string()));
     }
 
     #[test]
-    fn test_model_config_mg() {
-        let config = ModelConfig::mg("mg-test", "um-token", "deepseek-coder", RoutingHint::Code);
-        assert_eq!(config.provider, LlmProvider::Mg);
-        assert_eq!(config.base_url, "https://mg.yunjii.cn/v1");
-        assert_eq!(config.api_key, Some("um-token".to_string()));
+    fn test_model_config_mf() {
+        let config = ModelConfig::mf("mf-test", "MF-key", "deepseek-coder", RoutingHint::Code);
+        assert_eq!(config.provider, LlmProvider::Mf);
+        assert_eq!(config.base_url, "https://mf.yunjii.cn/v1");
+        assert_eq!(config.api_key, Some("MF-key".to_string()));
         assert_eq!(config.model_name, "deepseek-coder");
         assert_eq!(config.routing_hint, RoutingHint::Code);
     }
@@ -676,8 +676,8 @@ mod tests {
             "",
             "gpt-4o",
         ));
-        router.register(ModelConfig::mg(
-            "mg-claude",
+        router.register(ModelConfig::mf(
+            "mf-claude",
             "",
             "claude-3-opus",
             RoutingHint::Reasoning,
@@ -700,10 +700,10 @@ mod tests {
         assert_eq!(gpt.base_url, "https://gateway.example.com/api/llm/gpt-4o");
         assert_eq!(gpt.api_key, Some("gateway-token-xyz".to_string()));
 
-        // MG 模型也应被覆盖
-        let mg = router.get("mg-claude").unwrap();
-        assert_eq!(mg.base_url, "https://gateway.example.com/api/llm/mg-claude");
-        assert_eq!(mg.api_key, Some("gateway-token-xyz".to_string()));
+        // MF 模型也应被覆盖
+        let mf = router.get("mf-claude").unwrap();
+        assert_eq!(mf.base_url, "https://gateway.example.com/api/llm/mf-claude");
+        assert_eq!(mf.api_key, Some("gateway-token-xyz".to_string()));
 
         // Ollama 模型不应被覆盖
         let local = router.get("local-llama").unwrap();

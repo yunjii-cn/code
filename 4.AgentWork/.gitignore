@@ -21,6 +21,8 @@ out/
 *.tsbuildinfo
 
 # ---- Tauri ----
+# 打包时间戳（由 apps/desktop/scripts/build-version.mjs 生成，构建产物不应入库）
+apps/desktop/.build-version
 apps/desktop/target/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/

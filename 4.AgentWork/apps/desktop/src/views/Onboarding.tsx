@@ -28,6 +28,7 @@ import {
   executeTeamTask,
   type RoleInfo,
 } from "@/lib/tauri";
+import { BRAND } from "@/lib/brand";
 
 const ONBOARDED_KEY = "yunji-onboarded";
 
@@ -279,9 +280,7 @@ function StepWelcome({
 }) {
   return (
     <div className="text-center space-y-6">
-      <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-gradient-to-br from-brand-500 to-brand-700 shadow-lg shadow-brand-900/50">
-        <Sparkles className="w-10 h-10 text-white" />
-      </div>
+      <img src={BRAND.logo} alt={BRAND.name} className="w-20 h-20 rounded-2xl shadow-lg shadow-brand-900/50" />
       <div className="space-y-3">
         <h1 className="text-3xl font-bold">{t("onboarding.welcome")}</h1>
         <p className="text-zinc-400 max-w-xl mx-auto leading-relaxed">

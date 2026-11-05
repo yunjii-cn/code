@@ -30,7 +30,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+axum = "0.7"
+uuid = { version = "1.0", features = ["v4"] }
+qrcode = "0.14"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
 
 # TimeFlow 引擎（W2 接入，先声明）
 timeflow-core = { path = "../../../platformkit/crates/timeflow-core" }

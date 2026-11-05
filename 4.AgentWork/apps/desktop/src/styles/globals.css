@@ -180,3 +180,166 @@ body {
 .light .bg-brand-950\/30 {
   background-color: rgba(37, 99, 235, 0.08) !important;
 }
+
+/* ── 登录页动画 ──────────────────────────────── */
+@keyframes login-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes login-pulse-glow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.05); }
+}
+
+@keyframes login-fade-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes login-scale-in {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes login-spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes login-scan-line {
+  0% { top: 0; opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+@keyframes login-text-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes login-orbit {
+  from { transform: rotate(0deg) translateX(120px) rotate(0deg); }
+  to { transform: rotate(360deg) translateX(120px) rotate(-360deg); }
+}
+
+.animate-login-float {
+  animation: login-float 6s ease-in-out infinite;
+}
+
+.animate-login-pulse-glow {
+  animation: login-pulse-glow 4s ease-in-out infinite;
+}
+
+.animate-login-fade-up {
+  opacity: 0;
+  animation: login-fade-up 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-login-scale-in {
+  opacity: 0;
+  animation: login-scale-in 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.animate-login-spin-slow {
+  animation: login-spin-slow 12s linear infinite;
+}
+
+.animate-login-scan-line::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(59, 130, 246, 0.8), transparent);
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+  animation: login-scan-line 2.5s ease-in-out infinite;
+}
+
+.animate-login-text-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.9) 0%,
+    rgba(59, 130, 246, 0.9) 25%,
+    rgba(147, 197, 253, 0.9) 50%,
+    rgba(59, 130, 246, 0.9) 75%,
+    rgba(255, 255, 255, 0.9) 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: login-text-shimmer 4s linear infinite;
+}
+
+.animate-login-orbit {
+  animation: login-orbit 20s linear infinite;
+}
+
+/* ── 标题流光 + 脉冲联动动画（与 Canvas 中心节点 ~4.2s 周期呼应）── */
+@keyframes login-title-glow {
+  0%, 100% {
+    background-position: 0% center;
+    text-shadow: 0 0 20px rgba(59, 130, 246, 0.15), 0 0 40px rgba(59, 130, 246, 0.05);
+  }
+  25% {
+    background-position: 100% center;
+  }
+  50% {
+    background-position: 100% center;
+    text-shadow: 0 0 28px rgba(59, 130, 246, 0.35), 0 0 56px rgba(59, 130, 246, 0.12), 0 0 80px rgba(6, 182, 212, 0.08);
+  }
+  75% {
+    background-position: 0% center;
+  }
+}
+
+@keyframes login-title-glow-light {
+  0%, 100% {
+    background-position: 0% center;
+    text-shadow: 0 0 16px rgba(37, 99, 235, 0.12), 0 0 32px rgba(37, 99, 235, 0.04);
+  }
+  25% {
+    background-position: 100% center;
+  }
+  50% {
+    background-position: 100% center;
+    text-shadow: 0 0 24px rgba(37, 99, 235, 0.28), 0 0 48px rgba(37, 99, 235, 0.1), 0 0 64px rgba(6, 182, 212, 0.06);
+  }
+  75% {
+    background-position: 0% center;
+  }
+}
+
+.login-title-glow {
+  background: linear-gradient(
+    90deg,
+    #3b82f6 0%,
+    #22d3ee 25%,
+    #818cf8 50%,
+    #22d3ee 75%,
+    #3b82f6 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: login-title-glow 4.2s ease-in-out infinite;
+}
+
+.light .login-title-glow {
+  background: linear-gradient(
+    90deg,
+    #2563eb 0%,
+    #06b6d4 25%,
+    #6366f1 50%,
+    #06b6d4 75%,
+    #2563eb 100%
+  );
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: login-title-glow-light 4.2s ease-in-out infinite;
+}

@@ -99,8 +99,8 @@ export interface TranslationKeys {
   "settings.aiConfig.providers.ollamaDesc": string;
   "settings.aiConfig.providers.openai": string;
   "settings.aiConfig.providers.openaiDesc": string;
-  "settings.aiConfig.providers.mg": string;
-  "settings.aiConfig.providers.mgDesc": string;
+  "settings.aiConfig.providers.mf": string;
+  "settings.aiConfig.providers.mfDesc": string;
   "settings.aiConfig.providers.mock": string;
   "settings.aiConfig.providers.mockDesc": string;
   "settings.aiConfig.baseUrl": string;
@@ -171,6 +171,8 @@ export interface TranslationKeys {
   "chat.errorReason.typecheck": string;
   "chat.errorReason.llm": string;
   "chat.sendFailed": string;
+  "chat.guestHint": string;
+  "chat.loginNow": string;
 
   // Timeline
   "timeline.repoUninit": string;
@@ -334,6 +336,150 @@ export interface TranslationKeys {
   "language.ja-JP": string;
   "language.ko-KR": string;
   "language.es-ES": string;
+
+  // 侧栏分组
+  "nav.group.interaction": string;
+  "nav.group.version": string;
+  "nav.group.team": string;
+  "nav.group.ecosystem": string;
+  "nav.group.plugins": string;
+
+  // 主题 toggle
+  "theme.toggle": string;
+  "theme.collapseSidebar": string;
+  "theme.expandSidebar": string;
+
+  // 顶部横栏
+  "topbar.searchPlaceholder": string;
+  "topbar.checkUpdate": string;
+  "topbar.newVersion": string;
+  "topbar.upToDate": string;
+
+  // 版本更新
+  "update.title": string;
+  "update.currentVersion": string;
+  "update.latestVersion": string;
+  "update.checkUpdate": string;
+  "update.checking": string;
+  "update.download": string;
+  "update.downloading": string;
+  "update.downloadProgress": string;
+  "update.switchVersion": string;
+  "update.switching": string;
+  "update.upToDate": string;
+  "update.hasUpdate": string;
+  "update.updateFailed": string;
+  "update.releaseNotes": string;
+  "update.versions": string;
+  "update.devLog": string;
+  "update.refresh": string;
+  "update.current": string;
+  "update.new": string;
+  "update.downloaded": string;
+  "update.available": string;
+  "update.source": string;
+  "update.source.auto": string;
+  "update.source.github": string;
+  "update.source.gitee": string;
+  "update.source.githubMirror": string;
+
+  // 生态模块
+  "nav.skills": string;
+  "nav.plugins": string;
+  "nav.templates": string;
+  "nav.inspiration": string;
+  "nav.automation": string;
+  "nav.agents": string;
+  "eco.skills.desc": string;
+  "eco.plugins.desc": string;
+  "eco.templates.desc": string;
+  "eco.inspiration.desc": string;
+  "eco.automation.desc": string;
+  "eco.agents.desc": string;
+  "eco.comingSoon": string;
+  "eco.skills.f1": string;
+  "eco.skills.f2": string;
+  "eco.skills.f3": string;
+  "eco.inspiration.f1": string;
+  "eco.inspiration.f2": string;
+  "eco.inspiration.f3": string;
+  "eco.automation.f1": string;
+  "eco.automation.f2": string;
+  "eco.automation.f3": string;
+  "eco.agents.f1": string;
+  "eco.agents.f2": string;
+  "eco.agents.f3": string;
+
+  // 右侧栏
+  "rightbar.title": string;
+  "rightbar.placeholder": string;
+
+  // 登录
+  "nav.login": string;
+  "login.title": string;
+  "login.desc": string;
+  "login.start": string;
+  "login.loading": string;
+  "login.scanTip": string;
+  "login.refreshQr": string;
+  "login.welcomeBack": string;
+  "login.user": string;
+  "login.successDesc": string;
+  "login.enterWorkspace": string;
+  "login.offlineHint": string;
+
+  // 登录引导弹窗
+  "login.modal.title": string;
+  "login.modal.contextTitle": string;
+  "login.modal.subtitle": string;
+  "login.modal.guideTitle": string;
+  "login.modal.guideDesc": string;
+  "login.modal.startLogin": string;
+  "login.modal.agreement": string;
+  "login.modal.qrTitle": string;
+  "login.modal.qrDesc": string;
+  "login.modal.successTitle": string;
+  "login.modal.successDesc": string;
+  "login.modal.feature1.title": string;
+  "login.modal.feature1.desc": string;
+  "login.modal.feature2.title": string;
+  "login.modal.feature2.desc": string;
+  "login.modal.feature3.title": string;
+  "login.modal.feature3.desc": string;
+
+  // 用户菜单
+  "usermenu.theme": string;
+  "usermenu.settings": string;
+  "usermenu.checkUpdate": string;
+  "usermenu.points": string;
+  "usermenu.events": string;
+  "usermenu.notifications": string;
+  "usermenu.mobile": string;
+  "usermenu.help": string;
+  "usermenu.logout": string;
+  "usermenu.eventCard.title": string;
+  "usermenu.eventCard.desc": string;
+  "usermenu.eventCard.action": string;
+
+  // Agent / 对话配置面板
+  "agentConfig.title": string;
+  "agentConfig.defaultAgent": string;
+  "agentConfig.online": string;
+  "agentConfig.agentDesc": string;
+  "agentConfig.model": string;
+  "agentConfig.currentModel": string;
+  "agentConfig.modelParams": string;
+  "agentConfig.skills": string;
+  "agentConfig.tools": string;
+  "agentConfig.folders": string;
+  "agentConfig.foldersDesc": string;
+  "agentConfig.addFolder": string;
+  "agentConfig.chatSettings": string;
+  "agentConfig.pinChat": string;
+  "agentConfig.pinChatDesc": string;
+  "agentConfig.memory": string;
+  "agentConfig.memoryDesc": string;
+  "agentConfig.comingSoon": string;
 }
 
 export type TranslationDict = Record<string, string>;

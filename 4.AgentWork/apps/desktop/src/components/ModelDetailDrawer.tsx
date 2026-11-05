@@ -18,7 +18,7 @@ export default function ModelDetailDrawer({ model, onClose, onSave }: ModelDetai
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<"idle" | "success" | "fail">("idle");
 
-  const isMg = model.provider === "mg";
+  const isMf = model.provider === "mf";
   const isLocal = model.provider === "ollama";
 
   /// 测试连接（简单 ping /v1/models）
@@ -123,16 +123,16 @@ export default function ModelDetailDrawer({ model, onClose, onSave }: ModelDetai
                 type="text"
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
-                disabled={isMg}
+                disabled={isMf}
                 className={clsx(
                   "w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded text-sm text-zinc-100",
-                  isMg && "opacity-60 cursor-not-allowed"
+                  isMf && "opacity-60 cursor-not-allowed"
                 )}
                 placeholder="https://api.example.com/v1"
               />
-              {isMg && (
+              {isMf && (
                 <p className="text-xs text-brand-400 mt-1">
-                  云集网关地址由系统管理，无需手动配置
+                  ModelFlow 地址由系统管理，无需手动配置
                 </p>
               )}
             </div>
@@ -140,7 +140,7 @@ export default function ModelDetailDrawer({ model, onClose, onSave }: ModelDetai
             {/* API Key */}
             <div className="mb-3">
               <label className="block text-xs text-zinc-500 mb-1">
-                {isMg ? "UM Access Token" : isLocal ? "API Key（可选）" : "API Key"}
+                {isMf ? "MF API Key" : isLocal ? "API Key（可选）" : "API Key"}
               </label>
               <input
                 type="password"
@@ -152,14 +152,14 @@ export default function ModelDetailDrawer({ model, onClose, onSave }: ModelDetai
                   isLocal && "opacity-60 cursor-not-allowed"
                 )}
                 placeholder={
-                  isMg
+                  isMf
                     ? "登录后自动填充"
                     : isLocal
                       ? "本地模型无需 Key"
                       : "sk-..."
                 }
               />
-              {isMg && (
+              {isMf && (
                 <p className="text-xs text-brand-400 mt-1">
                   登录 UM 后自动填充，走统一钱包计费
                 </p>
@@ -189,15 +189,15 @@ export default function ModelDetailDrawer({ model, onClose, onSave }: ModelDetai
             </div>
           </section>
 
-          {/* MG 专属说明 */}
-          {isMg && (
+          {/* MF 专属说明 */}
+          {isMf && (
             <section className="bg-brand-600/10 border border-brand-600/30 rounded-lg p-3">
-              <h3 className="text-xs font-medium text-brand-400 mb-1">云集网关优势</h3>
+              <h3 className="text-xs font-medium text-brand-400 mb-1">ModelFlow 优势</h3>
               <ul className="text-xs text-zinc-400 space-y-1">
-                <li>• UM 钱包统一计费，一处充值全家族共用</li>
-                <li>• 智能路由：自动选择最优模型</li>
-                <li>• 多 Key 池故障切换，无感容灾</li>
-                <li>• 语义缓存，命中率 20-40% 降本</li>
+                <li>• 50+ 主流大模型，一个 Key 搞定</li>
+                <li>• 智能路由：根据任务自动选择最优模型</li>
+                <li>• 语义缓存：相同请求自动命中，降低 40% 成本</li>
+                <li>• 多 Key 负载均衡 + 故障切换，99.9% 可用性</li>
               </ul>
             </section>
           )}
