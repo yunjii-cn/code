@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 10 节的 4 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -189,7 +189,7 @@
 | G6 上游拒单 | PM 侧，不进入 AW | AW 不感知 | 归 PM 侧 |
 | G7 证据清理 | `runs.prune` 显式入口（默认 dry-run、无自动清理） | 只按 `finishedAt` 判龄、只删非最新 attempt 整目录、先记账后删除 | **已落地（v1.12）**；自动清理与按结果分档阈值**明确不做**（§8.8） |
 | G8 `env.PATH` fail-closed | `task.execute` 参数校验层（占号之前） | `env` 中出现 `PATH`（任意大小写）一律 `invalid_env`；不静默忽略 | **已落地（v1.7）** |
-| G9 超时文案诚实 | `task.execute` 回执生成处 | 文案只写"已向直接子进程发送终止信号"，孙进程标"未验证"；不写完成式断言 | **已落地（v1.11）；进程树杀灭仍未实现（`NOT_PROVEN`）** |
+| G9 超时文案诚实 | `task.execute` 回执生成处 | 文案只写"已向直接子进程发送终止信号"，孙进程标"未验证"；不写完成式断言 | **已落地（v1.11）；进程树杀灭仍未实现（`NOT_PROVEN`）**；设计评估见 [`TIMEOUT-PROCESS-TREE-DESIGN.md`](./TIMEOUT-PROCESS-TREE-DESIGN.md)（v1.15，**仅设计、未实现**） |
 
 ## 6. `blocked` 失败码分类
 
@@ -382,3 +382,4 @@
 | v1.12 | 2026-11-06 | 实现证据清理 `runs.prune`（§8）：**只有显式调用、无任何自动清理**；`dry_run` 默认零写入、`dry_run=false + confirm=true` 才真删；年龄只认 `finishedAt`（缺字段一律不删）；**最新 attempt 永不进入候选**（单 attempt 的 task 永远删不掉）；只删整个 `attempt-<N>` 目录；`runs/prune.jsonl` 先记账（`plan`+`result` 两行）后删除；部分失败报 `partial` 且 `isError=true`，不自动重试；不删 `_` 前缀目录与任务外路径；本批**未删除任何既有证据** |
 | v1.13 | 2026-11-06 | 修正 `initialize` 审计的多进程覆盖缺陷：落盘从单文件覆盖改为**每次一份 `_session/initialize-<pid>-<毫秒>-<序号>.json`**（tmp + rename 原子可见），并发/先后写入都不丢；`status.session` 聚合全部记录（含旧版 `initialize.json`），新增 `total` 与 `records[]`（每条带 `source` 文件名）；**边界不放宽**：多份记录不等于多会话、不构成身份、不参与准入；旧记录只读聚合、不回填 |
 | v1.14 | 2026-11-06 | **仅修工具描述与契约措辞，不改任何行为**：`tools/list` 的 `env` 描述从"PATH 会整体覆盖"改为 v1.7 的 fail-closed 口径（任意大小写一律拒绝、继承 PATH 永远保留、不静默忽略）；schema 补上已实现的 `path_prepend`（数组、字面顺序、平台分隔符、空数组等价缺省、参与幂等签名、16 项/4096 字符上限、不校验目录存在性）；`status` 描述补"initialize 记录可能多份、按 receivedAt 聚合"；§3.1 的签名口径补上 `path_prepend`（与 §3.5 单一措辞）、§3.2/§3.5 各加"工具描述同步"行；全量对照见 `docs/TOOLS-DESCRIPTION-AUDIT.md` |
+| v1.15 | 2026-11-06 | **仅文档、未实现代码、未改用例**：新增 `docs/TIMEOUT-PROCESS-TREE-DESIGN.md`，评估 `#3` 超时进程树杀灭。写清当前事实（`child.kill()` 只作用于直接子进程；上一轮实测超时返回后进程仍存活、由测试脚本强制清理——单次观测）；否定"两次 `stat` 无变化"的坏判据（会假通过）；给出两个平台的可判定窄判据（POSIX `kill(-pgid, 0)` 为 `ESRCH`、Windows Job `ActiveProcesses == 0`，均只覆盖受控集合）；说明"整棵树"在当前环境**仍不可判定**（逃逸后代无可靠观测点），因此 **`#3` 保持 `NOT_PROVEN`**；依赖事实：`windows-sys 0.61.2` / `libc 0.2.186` 已在 lock、仅 dev 传递，转正常依赖不新增包与版本 |
