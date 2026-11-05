@@ -3,7 +3,7 @@
 - 状态：**v1.16 已按窄定义实现**：只清理并判定"**受控集合**"（POSIX 进程组 / Windows Job Object）；v1.16.1 曾退回旧文案，**v1.17 状态门满足后已启用新措辞**（POSIX 四类实跑 + Windows 三类 + 版本递增）；**整棵进程树仍不可判定，`#3` 在契约中保持 `NOT_PROVEN`**。
 - 实现边界：代码改 `apps/mcp-bridge/src/server.rs`（`process_scope` 模块 + 超时路径 + `timeout_reason`）；用例改 `apps/mcp-bridge/tests/mcp_contract.rs` 与 `server.rs` 内单元测试；契约升到 v1.16、回执文案门禁满足后升到 v1.17；依赖仅把已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖，**未新增包、未改版本**。
 - 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.16 起 G9 行指向本文件，当前 v1.17）。
-- Windows 取舍：**未走 W2c**（自举 launcher 成本高、回归面大），选择 W2d——接受 `spawn → Assign` 竞态窗口；该窗口在本文 §4.2 明写。**v1.17 起该披露已写入 Windows 回执**（`Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业`）；此处不假装窗口不存在。
+- Windows 取舍：**未走 W2c**（自举 launcher 成本高、回归面大），选择 W2d——接受 `spawn → Assign` 竞态窗口；该窗口在本文 §4.2 明写。**v1.17 起该披露已写入 Windows 回执**（`Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业`）；此处不假装窗口不存在。**W2c 已做专项评估并固定结论：不做（§4.5），不是待办项。**
 
 ---
 
@@ -181,6 +181,82 @@ CloseHandle(job)                                   // 最后句柄关闭时，KI
   - 特性集（预计，以编译器实际要求为准）：`Win32_Foundation`（`HANDLE`/`CloseHandle`）、`Win32_System_JobObjects`（Job API 与常量）；`CreateJobObjectW` 的参数类型引用 `SECURITY_ATTRIBUTES`，可能还需 `Win32_Security`。
   - 构建影响：仅 Windows 目标编译更多 `windows-sys` 模块；`windows-sys` 只提供 `extern` 声明与常量，**不引入额外运行时代码**；二进制增量主要是我们自己新增的少量代码，**未实测**。
 - 不推荐的替代：`winapi`（不在树、需新增包）；手写 `extern "system"` FFI（零依赖但需自己维护 ABI，全部 `unsafe`）。
+
+### 4.5 W2c（自举 launcher）专项评估（2026-11-06，只评估，不实现）
+
+本节回答"要不要做 W2c"。结论先行：**不做**，理由与 `#3` 现状在 §4.5.5 固定。以下评估基于 v1.17 现有实现（`execute_task` + `process_scope`），不假设任何尚未落地的改动。
+
+#### 4.5.1 方案形态（W2c 具体长什么样）
+
+1. bridge 用**可继承句柄**创建作业（`CreateJobObjectW` 传 `SECURITY_ATTRIBUTES{ bInheritHandle: TRUE }`），把句柄数值经环境变量（如 `AW_JOB_HANDLE`）传给 launcher；
+2. bridge 不再直接 spawn `cmd /C <cmd>`，而是 spawn 辅助可执行文件 `aw-exec-launcher`，参数为原始 `cmd` 字符串；
+3. launcher 先用 `AssignProcessToJobObject(job, GetCurrentProcess())` **把自己加入作业**，再把作业句柄标记为不可继承（`SetHandleInformation(HANDLE_FLAG_INHERIT, 0)`）并清掉控制环境变量，然后 spawn `cmd /C <cmd>`；
+4. launcher 等待 `cmd` 结束，把 `cmd` 的退出码原样作为自己的退出码；bridge 仍用 `try_wait` 观察 launcher，超时仍 `TerminateJobObject`；
+5. launcher 的"入作业失败 / 启动 `cmd` 失败"必须与"`cmd` 的退出码"区分开，否则回执会把工具链故障记成命令失败。
+
+与现有 W2d 的差别只在第 1-3 步：**把"bridge spawn 后再 Assign"改成"launcher 先入作业再 spawn"**，从而让 bridge 派生的所有后代（launcher 自己 + `cmd` + 孙进程）都在作业内，`spawn → Assign` 窗口只存在于"launcher 自身被 spawn 到 launcher 执行 Assign"之间（launcher 尚未启动任何后代，因此该窗口对**后代**不再存在）。
+
+#### 4.5.2 真实工作量：要改什么
+
+| 位置 | 改动 | 说明 |
+|---|---|---|
+| `apps/mcp-bridge/src/server.rs` | 作业创建改为可继承句柄；`execute_task` 改为 spawn launcher；新增 launcher 控制文件/错误映射；保留 `ActiveProcesses` 复核 | 改动集中在 `process_scope::Supervisor::new`、`execute_task` 的 spawn 段（约 L741-L802）与 `timeout_reason` 的 `Unavailable` 分支说明；`stdout/stderr` 仍用同一对文件句柄 |
+| 新增 `apps/mcp-bridge/src/bin/aw-exec-launcher.rs`（或独立 crate） | launcher 本体：解析参数、`AssignProcessToJobObject`、`SetHandleInformation`、spawn `cmd`、等待、退出码透传、控制文件写入、句柄关闭 | 全部 `unsafe` FFI（`windows-sys` 已可用）；约百行量级，但每一条都是新的正确性面 |
+| `apps/mcp-bridge/Cargo.toml` | 若 launcher 与 bridge 同 crate：显式 `[[bin]]`；若独立 crate：新增 workspace 成员 | 不新增第三方包；`windows-sys` 特性已够用（`Win32_System_JobObjects` / `Win32_Foundation` / `Win32_Security` / `Win32_System_Threading`） |
+| `apps/mcp-bridge/tests/mcp_contract.rs` | 新增用例：launcher 缺失、launcher 入作业失败、launcher 启动 `cmd` 失败、退出码透传、超时清理、逃逸仍逃逸 | **测试定位问题**：集成测试的可执行文件在 `target/debug/deps`，launcher 在 `target/debug`；bridge 运行时按"自身 exe 同目录"找 launcher 会找不到，必须新增 `AW_LAUNCHER_PATH` 覆盖或测试内复制，测试夹具复杂度上升 |
+| 契约 `PM-AW-DISPATCH-CONTRACT.md` | 新版本（v1.18）：新增 `blocked_reason` 前缀（如 `launcher_unavailable:` / `launcher_failed:`）、`task.execute` 前置条件（launcher 必须随 bridge 分发） | **本轮明确不动契约**；这是 W2c 的额外成本，不是顺带 |
+| `tools/list` 描述 + 审计文档 | 描述要写 launcher 依赖与新失败码；§12 复审需重跑 | 与上一轮刚稳定的描述口径再次分叉 |
+| 仓库外：桌面端打包/安装/签名 | 第二个可执行文件必须随 bridge 一起安装、同版本、签名、过企业 AV/EDR 白名单 | 本仓库没有打包脚本（已核实：只有 `Cargo.toml` 的 `[[bin]]`，无安装器），成本落在消费方 |
+
+**对现有流程 / 回执 / 幂等签名的影响**：
+
+- `task.execute` 流程：多了一跳进程；超时计时仍从 spawn 前开始（launcher 启动耗时计入 `timeout_secs`），命令可用时间略缩短（毫秒级）。
+- **回执字段 JSON 不变**（`exit_code` / `stdout_digest` / `stderr_digest` / `duration_ms` / `blocked_reason` 等结构不动），但**语义必须补丁**：`exit_code` 必须是 `cmd` 的退出码，launcher 自身错误必须走新的 `blocked_reason`，不能混入 `exit_code`，否则回执会说谎。这是 W2c 必须同步改契约的唯一硬理由。
+- **幂等签名不能变**：`signature` 目前是 `task_id/cmd/cwd/timeout_secs/env/path_prepend` 六项（`server.rs` 约 L703-L710）。若把 launcher 路径或版本加入签名，已存在 `task_id` 的重投会因签名不同被拒（`replay_existing` 的语义被破坏）。因此 launcher 只能作为实现细节，签名保持六项——这意味着 launcher 版本漂移不会体现在签名里，需要额外的握手/版本校验，又增加一个失败面。
+- `env_keys` 仍只记录派单方给出的 env；launcher 的控制变量必须在 spawn `cmd` 前删除，否则 `cmd` 的实际环境与 v1.17 不同（可观测行为变化）。
+
+#### 4.5.3 新增失败模式：会不会比竞态更糟
+
+| 失败模式 | 触发点 | 后果 | 与 W2d 竞态相比 |
+|---|---|---|---|
+| **launcher 缺失 / 被杀软隔离** | 分发漏拷、升级只换 bridge、AV/EDR 误报 | **所有 Windows `task.execute` 直接 blocked**（`launcher_unavailable`） | **更糟**：竞态只影响"超时任务里的少数后代"，这是全量不可用 |
+| 可继承句柄创建/继承失败 | `SECURITY_ATTRIBUTES` 或 std 的句柄继承行为变化 | launcher 拿不到有效句柄 → 入作业失败 → 回落成"只有直接子进程被杀" | 更糟：多一层实现却回到甚至弱于 W2d |
+| 作业句柄泄漏进 `cmd` 后代 | 未在 spawn `cmd` 前 `SetHandleInformation` 去掉继承位 | `KILL_ON_JOB_CLOSE` 要等最后一个句柄关闭；bridge 崩溃时清理被拖延；后代还能拿到句柄终止同伴 | 新增风险，W2d 不存在 |
+| launcher 崩溃 / 提前退出 | launcher 自身 bug、被杀 | `cmd` 可能已启动但没人等待：退出码丢失、`status` 误判；若 `cmd` 仍在作业内，超时可清，但正常结束的回执不可信 | **更糟**：回执失真比"披露过的窗口"更难接受 |
+| 退出码语义混淆 | 用哨兵退出码区分 launcher 错误，与 `cmd` 真实退出码碰撞 | 把 launcher 故障记成命令失败，或反之 | 更糟：需要控制文件或带外通道，复杂度继续上升 |
+| 参数/引号二次传递 | 命令含 `"` `%` `!` `^` 等 | 特殊字符命令行为回归 | 新增回归面（两次 argv 解析） |
+| launcher 版本漂移 | 升级只替换其一 | 协议不一致，行为不确定 | 新增风险：需要版本握手 |
+| 安全面扩大 | 可继承作业句柄进入不受信命令的子进程 | 子进程可 `TerminateJobObject` 杀同作业成员 | 新增风险 |
+| 调试/支持成本 | 两进程、两段生命周期、控制文件 | 故障定位更难 | 新增成本 |
+
+关键判断：**竞态是"局部、偶发、已在回执披露"的残余风险；W2c 引入的是"全局、单点、能让所有 Windows 执行不可用"的新风险。** 用全局可用性换一个**无法验证**的窗口收窄，风险收益比不成立。
+
+#### 4.5.4 与 W2d 的对比
+
+| 维度 | W2c（自举 launcher） | W2d（接受竞态 + 披露，现状） |
+|---|---|---|
+| `spawn → Assign` 窗口（对后代） | 基本闭合（launcher 先入作业再生后代） | 存在，已在回执与描述披露 |
+| `BREAKAWAY` / 外层作业策略 | **仍可能逃逸** | 同样可能逃逸 |
+| `#3`（整棵树） | **仍是 `NOT_PROVEN`** | `NOT_PROVEN` |
+| 收益可验证性 | 无法用确定性夹具证明窗口闭合（当前连"逃逸负例"都 `UNPROVEN`） | 不宣称闭合，无需求证 |
+| 失败爆炸半径 | 全局（launcher 缺失 = 所有 Windows 执行 blocked） | 局部（少数超时任务的后代） |
+| 回执真实性风险 | 新增 launcher 错误/退出码混淆面 | 无新增；三态判据已实测 |
+| 分发/签名/AV | 新增可执行文件 + 仓库外打包改造 | 无 |
+| 契约/描述/审计面 | 需 v1.18 + 新失败码 + 描述/审计重跑 | 已稳定在 v1.17 |
+| 实现与回归面积 | launcher FFI + bridge 改造 + 新测试夹具 | 已落地并两平台实测 |
+
+**决定性问题**：即使 W2c 完全成功，`#3` 仍因 `BREAKAWAY`/整树不可判定而保持 `NOT_PROVEN`；而它想收窄的那个窗口，当前**没有任何确定性复现夹具**可以证明"做了就更好"。收益不可度量、代价全局化，因此不值得。
+
+#### 4.5.5 终态结论：不做 W2c（固定，不留待办）
+
+- **决定：不实施 W2c，也不实施 W2b；Windows 继续使用 W2d。** 本节是终态结论，不是"以后再说"。
+- **理由（固定）**：
+  1. 收益不可验证：`spawn → Assign` 无确定性复现夹具，W2c 无法证明窗口已闭合；`BREAKAWAY` 仍逃逸，`#3` 仍是 `NOT_PROVEN`。
+  2. 失败模式更糟：launcher 缺失/被隔离会让**全部** Windows 执行 blocked，爆炸半径远大于局部竞态。
+  3. 代价外溢：需新可执行文件、分发/签名/AV、契约 v1.18、新失败码、描述与审计重跑；其中分发成本不在本仓库可控。
+  4. 回执风险：launcher 错误与 `cmd` 退出码混淆会直接破坏"回执不说谎"的底线，而现状三态判据已实测。
+- **`#3` 现状固定**：契约与文档保持 `NOT_PROVEN`（整棵树不可判定）；Windows 逃逸负例 `UNPROVEN`；回执只在 `Cleaned` 分支写"已清理受控集合；逃逸进程是否仍在运行未验证"并披露 `spawn→Assign` 窗口；任何分支不写"已终止进程树 / 无残留"。
+- **重新开题的门槛（不是待办）**：只有同时出现 ①确定性复现夹具、②可验证的闭合判据、③launcher 分发/签名方案、④新的契约版本，才重新评估；四者缺一即维持现状。**不把 W2c 列入任何待办或候选清单。**
 
 ---
 
@@ -392,7 +468,7 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 
 **明确没做**：
 
-- 不实现 W2b/W2c，不闭合 `spawn → Assign` 竞态窗口；
+- 不实现 W2b/W2c：W2c 已在 §4.5 专项评估并固定结论（不做，非待办），`spawn → Assign` 窗口保持披露；
 - 不引入 cgroup v2 委派、不实现整棵树枚举；
 - 不把 `#3` 改成已证明，不改 `NOT_PROVEN` 状态；
 - 不写"已终止进程树 / 无残留"，也不在任何分支把 `StillAlive` / `Unavailable` 升级为"已清理"。
