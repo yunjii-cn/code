@@ -549,3 +549,103 @@ fn concurrent_duplicate_dispatch_executes_once() {
         sha256_prefixed(&stdout_file)
     );
 }
+
+// ---- 会话审计：clientInfo 只记录、只展示，不构成身份、不参与准入 ----
+
+#[test]
+fn initialize_records_client_info_as_audit_only() {
+    let (server, _settings, runs) = server_with_runs();
+    let response = call(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 10, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "clientInfo": {
+                    "name": "pm-dispatcher",
+                    "version": "1.2.3",
+                    "title": "PM 派单器",
+                    "extraField": "kept-as-is"
+                }
+            }
+        }),
+    );
+    assert_eq!(response["result"]["serverInfo"]["name"], "aw-mcp-bridge");
+
+    let audit_path = runs.path().join("_session").join("initialize.json");
+    assert!(audit_path.exists(), "initialize 必须落审计记录");
+    let audit: Value =
+        serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
+    assert_eq!(audit["clientInfo"]["name"], "pm-dispatcher");
+    assert_eq!(audit["clientInfo"]["version"], "1.2.3");
+    assert_eq!(
+        audit["clientInfo"]["title"], "PM 派单器",
+        "clientInfo 其余字段应原样保留"
+    );
+    assert_eq!(audit["clientInfo"]["extraField"], "kept-as-is");
+    assert!(
+        audit["receivedAt"].as_str().map(|value| !value.is_empty()).unwrap_or(false),
+        "审计记录必须带接收时间"
+    );
+
+    let status = tool_payload(&call_tool(&server, "status", json!({})));
+    assert_eq!(
+        status["session"]["clientInfo"]["name"], "pm-dispatcher",
+        "status 必须只读回显最近一次 initialize 的 clientInfo"
+    );
+    assert_eq!(status["session"]["clientInfo"]["version"], "1.2.3");
+    assert_eq!(status["session"]["clientInfo"]["extraField"], "kept-as-is");
+}
+
+#[test]
+fn initialize_without_client_info_does_not_crash_and_records_null() {
+    let (server, _settings, runs) = server_with_runs();
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 11, "method": "initialize", "params": {}}),
+    );
+    assert_eq!(
+        response["result"]["serverInfo"]["name"], "aw-mcp-bridge",
+        "缺 clientInfo 不得影响 initialize 的既有权能"
+    );
+
+    let audit_path = runs.path().join("_session").join("initialize.json");
+    assert!(audit_path.exists(), "缺 clientInfo 也要落审计记录");
+    let audit: Value =
+        serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
+    assert!(
+        audit["clientInfo"].is_null(),
+        "缺失时记为 null，不得伪造内容"
+    );
+
+    let status = tool_payload(&call_tool(&server, "status", json!({})));
+    assert!(status["session"]["clientInfo"].is_null());
+}
+
+#[test]
+fn client_info_is_never_used_for_admission() {
+    let (server, _settings, runs) = server_with_runs();
+    // 故意给一个"不可信/可疑"的声明：它只应出现在审计记录里，不得改变放行结果
+    call(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 12, "method": "initialize",
+            "params": { "clientInfo": { "name": "../../untrusted", "version": "" } }
+        }),
+    );
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-11", "cmd": "echo pass", "cwd": runs.path().to_string_lossy() }),
+    );
+    assert_eq!(
+        response["result"]["isError"], false,
+        "clientInfo 不得参与准入判断：工具调用照常放行"
+    );
+    assert_eq!(tool_payload(&response)["status"], "ok");
+
+    let audit_path = runs.path().join("_session").join("initialize.json");
+    let audit: Value =
+        serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
+    assert_eq!(audit["clientInfo"]["name"], "../../untrusted", "只记录、不解释");
+}

@@ -478,6 +478,7 @@ CI 重跑 → 通过 → 通知用户
 - 桌面端 `src-tauri` 中没有任何拉起 bridge 的路径；`Command::new` 只出现在 `updater.rs` / `system.rs`，用于 explorer/open/xdg-open。
 - bridge 当前是**外部手工启动的独立二进制**（`cargo run -p aw-mcp-bridge`），通过 stdio MCP 提供上述 4 个工具，不监听端口，也不内嵌 `aw-git` / `aw-store` 等其他 crate。
 - 派单方与 bridge 的进程关系由启动方决定，bridge 自身不感知调用方身份（见 `PM-AW-DISPATCH-CONTRACT.md` 第 2 节）。
+- `initialize` 收到的 `clientInfo` 原样落盘到 `runs/_session/initialize.json`，并由 `status.session` 只读回显；它**只是审计弱识别，不是身份、不参与任何准入判断**，任何拒绝/放行逻辑都不得读取它。
 
 ### 4.2 云端（自部署 Web 版）
 

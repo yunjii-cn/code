@@ -2,11 +2,11 @@
 
 状态：草案，待 PM 侧确认第 8 节的 3 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：v1 的 G1 / G2 / G3 已落地（见 §9）；身份与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §9）；认证与并发上限仍未实现
 
 ## 0. 结论
 
-- 身份复用 MCP 已有的 `initialize.params.clientInfo` 与 stdio 进程归属，**不新造 token/凭据格式**；当前只作为审计与弱识别，不构成准入。
+- 复用 MCP 已有的 `initialize.params.clientInfo` 与 stdio 进程归属，**不新造 token/凭据格式**；`clientInfo` 只作**审计弱识别**，不构成身份、不构成准入。
 - `task_id` 是唯一幂等键。**重投 = 返回既有回执、复用既有 attempt 编号，零执行、零新目录**；有意重跑必须换新 `task_id`。
 - 回执完全映射到已实现字段，不新增第二套字段；失败原因只借用既有的 `blocked_reason` 字符串前缀做分类。
 - 一句话边界：**AW 只执行，不验收、不判停、不定义判据、不写 L0/事件；PM 是唯一写权威。**
@@ -21,22 +21,28 @@
 | attempt | 同一 `task_id` 下的一次执行记录，落盘于 `runs/<task_id>/attempt-<N>/` |
 | 回执 | `task.execute` 的返回值，持久化为 `handback.json`，可由 `receipt.get` 读回 |
 
-## 2. 身份
+## 2. 调用方标识（审计弱识别）
 
-### 2.1 身份来源与传递形式
+### 2.1 来源与传递形式
 
 | 项 | 定义 |
 |---|---|
-| 派单方身份 | PM。以 MCP `initialize` 的 `params.clientInfo{name, version}` 随会话传递（协议既有字段） |
-| 执行方身份 | AW。以 `health` 返回的 `server.name` / `server.version` / `server.buildTime` 标识 |
+| 调用方自称 | MCP `initialize` 的 `params.clientInfo{name, version, ...}`（协议既有字段）。**仅作审计弱识别，不是身份、不构成准入** |
+| 执行方标识 | AW。以 `health` 返回的 `server.name` / `server.version` / `server.buildTime` 标识 |
 | 通道 | MCP stdio，一问一答；一个 bridge 进程同一时刻只服务一个启动方（1:1） |
 | 进程归属 | 谁拉起 bridge 进程即谁是调用方；这是当前的**事实准入边界** |
 
-**不新造凭据**：不使用自定义 header、token、签名或独立握手字段。身份以 `clientInfo` 记录在原会话内，属于弱识别，可被自称伪造，因此**不得单独作为授权依据**。
+**不新造凭据**：不使用自定义 header、token、签名或独立握手字段。
+
+**审计落点与边界（写死）**：`initialize` 收到的 `clientInfo` 原样落盘到 `runs/_session/initialize.json`（含 `receivedAt`），并由 `status.session` 只读回显。该记录：
+
+- **不构成身份**，不产生任何凭据或会话标识；
+- 调用方可任意自称/伪造，内容与真实调用方无关；
+- **任何拒绝/放行（准入）逻辑都不得读取它**；它只用于事后审计与问题追溯。
 
 ### 2.2 当前强度声明
 
-- v1 不做密码学认证，不做准入拦截；`clientInfo` 仅用于回执关联与审计追溯。
+- v1 不做密码学认证，不做准入拦截；`clientInfo` 已记录（`runs/_session/initialize.json` + `status.session`），但**仅用于审计追溯，不参与任何准入判断**。
 - 真正的准入边界是“本地进程由谁启动 + 本地配置由谁可写”，本轮不在契约内展开。
 - 引入认证时只允许在**会话层**（`initialize` 之后、`tools/call` 之前）加一次性凭据，且必须复用 PM/MH 已有通道；不得在每条请求体里新造字段。
 
@@ -90,12 +96,12 @@
 | 2 | attempt 编号连续无洞、并发不撞号 | **一致** | `create_dir` 原子占位，并发取号已在实现中 |
 | 3 | 边界（不验收、不写 L0/事件、不成为写权威） | **一致** | bridge 无任何写权威接口，只落本地 `runs/` |
 | 4 | `blocked_reason` 分类（第 6 节） | **一致** | `command_not_found` / `cwd_not_found` / `timeout` 均为 `blocked` 回执 + 前缀码；前两者在占号之前判定 |
-| 5 | 身份传递与记录（第 2 节） | **缺** | `initialize` 未读取/记录 `clientInfo`；无会话身份审计。补在 MCP 会话层 |
+| 5 | `clientInfo` 审计记录（第 2 节） | **一致（仅审计）** | `initialize` 落盘 `runs/_session/initialize.json`，`status.session` 只读回显；不参与任何准入 |
 | 6 | 重投幂等（第 3 节） | **一致** | 同 `task_id` + 同签名命中 `dispatch.json` 即回放既有 `handback.json`，零执行、零新目录 |
 | 7 | 同 id 异参拒绝 | **一致** | 签名不一致返回 `task_id_conflict`，不追加 attempt、不覆盖旧回执 |
 | 8 | 超并发上限、上游拒单 | **缺（不在 AW）** | AW 无并发闸门；上游拒单属 PM 侧，AW 不产生该码 |
 
-统计：**已一致 6 条、缺 2 条**（第 5 条待通道归属拍板，第 8 条按分工归 PM 侧）。
+统计：**已一致 7 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证仍待通道归属拍板）。
 
 ### 5.1 缺口补齐规划（后续批次）
 
@@ -104,7 +110,7 @@
 | G1 重投幂等 | `mcp-bridge` 的 `tools/call` 入口，先查同 id+同参的签名，命中即回放 | 零执行、零新 attempt | **已落地** |
 | G2 同 id 异参拒绝 | 同上，比对签名后返回 `task_id_conflict` | 不改 schema | **已落地** |
 | G3 失败码分类 | 参数校验层：`command_not_found`/`cwd_not_found` 转为 `blocked` + 前缀码；`timeout` 复用 | 只约定 `blocked_reason` 前缀，不加字段 | **已落地** |
-| G4 身份记录 | MCP `initialize` 会话层，记录 `clientInfo` 供审计 | 不做准入 | 待通道归属拍板 |
+| G4 身份记录 | MCP `initialize` 会话层，记录 `clientInfo` 供审计 | **仅审计，不做准入**；记录不得被放行逻辑读取 | **已落地（仅审计）** |
 | G5 并发上限 | PM 侧排队产生（AW 不内置闸门） | 拒单时不占用 attempt | 归 PM 侧 |
 | G6 上游拒单 | PM 侧，不进入 AW | AW 不感知 | 归 PM 侧 |
 
@@ -149,3 +155,4 @@
 |---|---|---|
 | v1 | 2026-11-05 | 首版：身份、幂等、回执映射、失败码分类、边界、实现对照 |
 | v1.1 | 2026-11-05 | 落地 G1 / G2 / G3：重投按 `dispatch.json` 签名回放、异参返回 `task_id_conflict`、失败码转 `blocked` 前缀；身份与并发上限未动 |
+| v1.2 | 2026-11-06 | 落地 G4：`initialize` 的 `clientInfo` 落盘 `runs/_session/initialize.json` 并由 `status.session` 只读回显；措辞由“身份”改为“审计弱识别”，通道假设不变 |

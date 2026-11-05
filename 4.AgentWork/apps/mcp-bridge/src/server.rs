@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "aw-mcp-bridge";
+/// 会话审计目录名：以 _ 开头，与合法 task_id（必须字母或数字开头）不可能撞名
+const SESSION_DIR: &str = "_session";
 
 // 由 build.rs 注入，缺失时为 "unknown"（不使用当前时间兜底，保证可复现构建）
 pub const BUILD_TIME: &str = env!("AW_BUILD_TIME");
@@ -59,15 +61,19 @@ impl Server {
         let id = id?;
 
         let result = match method {
-            "initialize" => Some(json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": {
-                    "name": SERVER_NAME,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "title": "AgentWork MCP Bridge"
-                }
-            })),
+            "initialize" => {
+                // clientInfo 只落审计记录：它是调用方自称，不是身份，任何准入逻辑都不得读它
+                self.record_client_info(message.get("params"));
+                Some(json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": {
+                        "name": SERVER_NAME,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "title": "AgentWork MCP Bridge"
+                    }
+                }))
+            }
             "ping" => Some(json!({})),
             "tools/list" => Some(json!({ "tools": tools() })),
             "tools/call" => Some(self.call_tool(message.get("params"))),
@@ -123,6 +129,7 @@ impl Server {
     fn status_payload(&self) -> Value {
         json!({
             "desktop": summarize_settings(&self.settings_path),
+            "session": self.session_audit(),
             "server": {
                 "name": SERVER_NAME,
                 "version": env!("CARGO_PKG_VERSION"),
@@ -130,6 +137,47 @@ impl Server {
                 "desktopBuildTime": DESKTOP_BUILD_TIME
             }
         })
+    }
+
+    /// 记录最近一次 initialize 的 clientInfo（只审计，不鉴权）
+    ///
+    /// 边界写死：clientInfo 是调用方**自称**，可任意伪造，因此
+    /// 1. 不构成身份，不产生任何凭据；
+    /// 2. 任何拒绝/放行逻辑都不得读取本记录；
+    /// 3. 写审计失败不影响 initialize 应答（审计不得成为可用性前提）。
+    fn record_client_info(&self, params: Option<&Value>) {
+        let client_info = params
+            .and_then(|value| value.get("clientInfo"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let record = json!({
+            "clientInfo": client_info,
+            "receivedAt": chrono::Utc::now().to_rfc3339()
+        });
+        let session_dir = self.runs_dir.join(SESSION_DIR);
+        if fs::create_dir_all(&session_dir).is_err() {
+            return;
+        }
+        let text = match serde_json::to_string_pretty(&record) {
+            Ok(text) => text,
+            Err(_) => return,
+        };
+        let _ = fs::write(session_dir.join("initialize.json"), text);
+    }
+
+    /// 只读回审计记录：供 status 展示"最近一次 initialize 的 clientInfo"
+    fn session_audit(&self) -> Value {
+        let path = self.runs_dir.join(SESSION_DIR).join("initialize.json");
+        let record = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        match record {
+            Some(record) => json!({
+                "clientInfo": record.get("clientInfo").cloned().unwrap_or(Value::Null),
+                "receivedAt": record.get("receivedAt").cloned().unwrap_or(Value::Null)
+            }),
+            None => json!({ "clientInfo": null, "receivedAt": null }),
+        }
     }
 
     /// 接单执行：命令与判据由派单方给出，AW 只运行并产出可审计回执
@@ -541,7 +589,7 @@ fn tools() -> Value {
         },
         {
             "name": "status",
-            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置；不回显任何配置值",
+            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，以及最近一次 initialize 的 clientInfo（仅审计弱识别，不构成身份）；不回显任何配置值",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
