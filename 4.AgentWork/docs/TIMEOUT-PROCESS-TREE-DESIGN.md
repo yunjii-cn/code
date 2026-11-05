@@ -309,13 +309,40 @@ TerminateJobObject 成功后，轮询 O4：
 | **作用域负例**：逃逸 | 单元 `setsid_escape_is_outside_the_observed_group`（`#[cfg(target_os="linux")]`） | `setsid sleep 30 &`，PID 写入临时文件 | 组判据返回 `ESRCH`，但 `kill(已知PID, 0)` 为 0 → **证明 C1 是窄判据**（不断言"#3 解决"） | 不适用（Windows 无等价确定性夹具，记为 `UNPROVEN`） | **通过（实跑）**：`setsid escaped_pid=941 escaped_alive=true original_group_empty=true` |
 | 文案门禁 | 集成 `timeout_reason_states_action_not_tree_death` + `legacy_timeout_reason_is_returned_verbatim_and_not_rewritten` | 真实超时任务 + 旧 `handback.json` | **必须为 v1.17 三态文案**（`Cleaned` 分支含"已清理受控集合…未验证"，Windows 另含 `spawn→Assign` 窗口）；**不得**出现"已终止进程树 / 无残留"；旧回执原样返回、字节不变 | **通过（实跑）**：`[evidence] timeout_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业` | **通过（实跑）**：`[evidence] timeout_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证` |
 
-**如实说明**：POSIX 四类用例已在 WSL（Ubuntu 24.04、Rust 1.88.0、gnu target）真实运行：单元 `3 passed` + 集成 `61 passed`，`0 failed`，退出码 0；日志保留在 `D:\Temp\aw-posix-v117b.log`（本机路径，仅作记录）。Windows 侧单元 `3 passed` + 集成 `62 passed`，`0 failed`（本次复跑，同一判据打印）。Windows 的 `spawn → Assign` 窗口与 `BREAKAWAY` 仍无法确定性复现，按 §6.6 记为 `UNPROVEN`，不做"已覆盖"断言。
+**如实说明**：POSIX 四类用例已在 WSL（Ubuntu 24.04、Rust 1.88.0、gnu target）真实运行：单元 `3 passed` + 集成 `61 passed`，`0 failed`，退出码 0；日志保留在 `D:\Temp\aw-posix-v117b.log`（本机路径，仅作记录）。Windows 侧单元 `3 passed` + 集成 `62 passed`，`0 failed`（本次复跑，同一判据打印）。Windows 的 `spawn → Assign` 窗口与 `BREAKAWAY` 仍无法确定性复现，按 §6.6 记为 `UNPROVEN`，不做"已覆盖"断言。可复跑脚本见 §6.7。
 
 ### 6.6 判据的判定边界（写死）
 
 - **PASS** 只表示"受控集合内无进程"；不得在任何文档/回执里升级为"整棵树已终止"。
 - **FAIL** 表示"受控集合内仍有进程"或"观测不可用"；必须如实报告，不得自动重试、不得降级为"已清理"。
 - **UNPROVEN** 表示观测点不可用（作业创建/加入失败、查询失败、权限不足）；必须原样暴露。
+
+### 6.7 POSIX 用例复跑（脚本，v1.17 固化）
+
+**先说清一条环境限制（不是"用例不存在"）**：Windows 本机直接 `cargo test` 跑不到这四类 POSIX 用例——三个 Unix 单元用例在 `#[cfg(unix)]` 下编译，Windows 目标根本不会生成它们；集成用例 `timeout_cleans_controlled_set_including_grandchild` 的 POSIX 分支依赖 `sh -c` + `kill(-pgid, 0)`。四类用例在源码中真实存在（[`server.rs`](../apps/mcp-bridge/src/server.rs) 的三个 Unix 单元 + [`mcp_contract.rs`](../apps/mcp-bridge/tests/mcp_contract.rs) 的该集成用例），必须在 Linux 主机（WSL 也算）上编译运行。本机 Windows 只跑 Windows 侧（3 unit + 62 integration）。
+
+**一行复跑**：
+
+```powershell
+wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.AgentWork/scripts/posix-timeout-verify/verify.sh run
+```
+
+（已进入 WSL 时：`cd <仓库根> && bash scripts/posix-timeout-verify/verify.sh run`。）
+
+**脚本**：[`scripts/posix-timeout-verify/verify.sh`](../scripts/posix-timeout-verify/verify.sh)
+
+| 子命令 | 联网 | 行为 |
+|---|---|---|
+| `check` | 不需要 | 自检：Linux 平台、`setsid`、rustc >= 1.85（推荐 1.88.0）、rustc host 为 `linux-*`、cc/gcc、vendor 完整性、仓库完整性 |
+| `prepare` | **需要** | 缺 Rust 时用 rustup / rustup-init 安装 1.88.0；生成只含 `apps/mcp-bridge` 的裁剪 workspace；`cargo vendor --versioned-dirs` 生成 vendor；写 `.cargo/config.toml` 指向 vendor |
+| `run` | 不需要（强制 `--offline`） | 把当前仓库源码复制进 work 目录 → 裁剪 workspace → `cargo test --offline -p aw-mcp-bridge -- --nocapture` → 校验四类用例名与 9 条证据串 → 打印日志路径 |
+| `all` | 同 `prepare` | `prepare` + `run` |
+
+- 环境变量：`AW_WORK`（默认 `$HOME/.aw-posix-verify`，持久目录，不用 `/tmp`）、`AW_VENDOR`（默认 `$AW_WORK/vendor`）、`AW_OFFLINE=1`（禁止联网）。
+- **离线预置清单**（`--help` 与 `check` 原样打印）：① Rust >= 1.85；② `cc`/`gcc` + libc 头文件（Ubuntu：`sudo apt install -y gcc libc6-dev`）；③ vendor 目录（含 `libc-*` / `serde-*` / `serde_json-*` / `sha2-*` / `hex-*` / `chrono-*` / `tempfile-*`，每个 crate 带 `.cargo-checksum.json`）；④ 本仓库 checkout（根 `Cargo.toml` / `Cargo.lock` / `apps/mcp-bridge`）。
+- **失败原因码**：所有失败统一 `[FAIL] reason=<码> hint=<处置>`、退出码 2，不静默失败、不跳过用例：`wrong_platform` / `wrong_target` / `missing_setsid` / `rust_missing` / `rust_broken` / `rust_too_old` / `rust_install_failed` / `missing_linker` / `repo_incomplete` / `vendor_missing` / `vendor_incomplete` / `vendor_failed` / `test_failed` / `missing_evidence` / `bad_usage`。
+- **本次脚本自检（2026-11-06，现有 WSL Ubuntu 24.04）**：`check` 通过（`rustc 1.88.0`、`host=x86_64-unknown-linux-gnu`、vendor 完整）；`all` 在全新 work 目录上离线跑通 `3 passed` + `61 passed`，四类证据齐全、退出码 0；负例三条均给出明确原因：无 Rust → `rust_missing`、vendor 缺失 → `vendor_missing`、伪造 `host: x86_64-pc-windows-msvc` → `wrong_target`。
+- **本机网络限制（如实说明）**：该 WSL 对外网络受限（apt 源指向不可用代理、`static.rust-lang.org` 极慢），本次验证使用**预置** Rust 与 vendor（`AW_VENDOR=/root/vendor`），未在本机重跑 `prepare` 的下载分支；缺 vendor 且 `AW_OFFLINE=1` 时脚本按 `vendor_missing` 明确失败，不会联网猜测或静默跳过。
 
 ---
 
@@ -377,6 +404,7 @@ TerminateJobObject 成功后，轮询 O4：
 - 超时路径：[`server.rs`](../apps/mcp-bridge/src/server.rs) 约 L773-L808；`process_scope` 约 L1076-L1531；`timeout_reason` 约 L1537-L1559；`shell_command` 约 L1059-L1073。
 - 超时用例：[`mcp_contract.rs`](../apps/mcp-bridge/tests/mcp_contract.rs) 约 L2108-L2250（文案门禁、正向孙进程清理、旧回执原样返回、PID 观测辅助）。
 - 契约 v1.17 文案约束：`PM-AW-DISPATCH-CONTRACT.md` §4（L155-L159）、§5 第 15 行 / G9（L180、L196）、§6（L200-L206）、§11（v1.17 行）。
+- POSIX 复跑脚本：[`scripts/posix-timeout-verify/verify.sh`](../scripts/posix-timeout-verify/verify.sh)（`check` / `prepare` / `run` / `all`）；自检输出见 §6.7。
 - 依赖事实：`apps/mcp-bridge/Cargo.toml`（`serde_json`/`sha2`/`hex`/`chrono` + dev `tempfile` + v1.16 的 target-specific `windows-sys` / `libc`）；`Cargo.lock` 中 `windows-sys 0.61.2`、`libc 0.2.186`、`windows-link 0.2.1` 版本未变。
 - `windows-sys 0.61.2` 源码核对：`Win32/Foundation/mod.rs`（`HANDLE = *mut c_void`）、`Win32/System/JobObjects/mod.rs`（`CreateJobObjectW` / `AssignProcessToJobObject` / `TerminateJobObject` / `QueryInformationJobObject` / `SetInformationJobObject`、`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 8192`、`JobObjectExtendedLimitInformation = 9`、`JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.ActiveProcesses`）。
 - 实测观测：上一轮超时实测记录（由调用方转述）：超时返回后父/子进程仍存活，由测试脚本以 `SIGKILL` 等价手段清理；**单次观测，未固化为自动化用例**。
