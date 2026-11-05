@@ -69,8 +69,8 @@ fn tools_list_exposes_read_and_execution_tools() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert_eq!(
         names,
-        vec!["health", "status", "task.execute", "receipt.get"],
-        "执行层至少需要接单与回执读取两个入口"
+        vec!["health", "status", "task.execute", "receipt.get", "runs.list"],
+        "执行层至少需要接单、回执读取与只读枚举三个入口"
     );
     for tool in tools {
         assert!(
@@ -957,4 +957,148 @@ fn legacy_dispatch_without_env_is_still_replayed() {
         "升级前的派单（dispatch.json 无 env）应视为 env 为空并回放"
     );
     assert!(!runs.path().join("t-21").join("attempt-2").exists());
+}
+
+// ---- runs.list：只读枚举 runs 目录，分页确定，不泄漏 env 值 ----
+
+/// 先断言调用成功再解析正文，让红阶段停在断言上而不是解析 panic
+fn runs_list_payload(server: &Server, arguments: Value) -> Value {
+    let response = call_tool(server, "runs.list", arguments);
+    assert_eq!(
+        response["result"]["isError"], false,
+        "runs.list 应可用：{}",
+        tool_text(&response)
+    );
+    serde_json::from_str(&tool_text(&response)).expect("runs.list 必须返回 JSON 对象")
+}
+
+#[test]
+fn runs_list_distinguishes_missing_from_empty_without_writing() {
+    let (server, _settings, _runs) = server_with_runs();
+    let empty = runs_list_payload(&server, json!({}));
+    assert_eq!(empty["state"], "empty", "目录存在但无任务应明确为 empty");
+    assert_eq!(empty["total"], 0);
+    assert_eq!(empty["tasks"], json!([]));
+    assert_eq!(empty["offset"], 0);
+    assert_eq!(empty["limit"], 20);
+
+    let settings_dir = TempDir::new().expect("创建设置目录");
+    let base = TempDir::new().expect("创建临时根目录");
+    let absent = base.path().join("absent-runs");
+    let missing_server =
+        Server::with_runs_dir(settings_dir.path().join("settings.json"), absent.clone());
+    let missing = runs_list_payload(&missing_server, json!({}));
+    assert_eq!(missing["state"], "missing", "目录缺失必须与空目录区分");
+    assert_eq!(missing["total"], 0);
+    assert!(!absent.exists(), "只读枚举不得创建 runs 目录");
+}
+
+#[test]
+fn runs_list_sorts_paginates_and_excludes_session() {
+    let (server, _settings, runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    // 故意乱序派单：排序由枚举侧决定，而非目录创建顺序
+    for task_id in ["t-3", "t-1", "t-2"] {
+        let response = call_tool(
+            &server,
+            "task.execute",
+            json!({ "task_id": task_id, "cmd": "echo list", "cwd": workdir.path().to_string_lossy() }),
+        );
+        assert_eq!(response["result"]["isError"], false);
+    }
+    call(
+        &server,
+        json!({
+            "jsonrpc": "2.0", "id": 20, "method": "initialize",
+            "params": { "clientInfo": { "name": "pm" } }
+        }),
+    );
+    assert!(runs.path().join("_session").exists());
+
+    let all = runs_list_payload(&server, json!({}));
+    assert_eq!(all["state"], "ready");
+    assert_eq!(all["total"], 3);
+    let ids: Vec<&str> = all["tasks"]
+        .as_array()
+        .expect("tasks 必须是数组")
+        .iter()
+        .filter_map(|task| task["task_id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["t-1", "t-2", "t-3"], "必须按 task_id 升序");
+    assert!(
+        ids.iter().all(|task_id| !task_id.starts_with('_')),
+        "_session 等预留目录不得被当成任务列出"
+    );
+
+    let page = runs_list_payload(&server, json!({ "offset": 1, "limit": 1 }));
+    assert_eq!(page["total"], 3);
+    assert_eq!(page["offset"], 1);
+    assert_eq!(page["limit"], 1);
+    let page_ids: Vec<&str> = page["tasks"]
+        .as_array()
+        .expect("tasks 必须是数组")
+        .iter()
+        .filter_map(|task| task["task_id"].as_str())
+        .collect();
+    assert_eq!(page_ids, vec!["t-2"]);
+
+    let again = runs_list_payload(&server, json!({ "offset": 1, "limit": 1 }));
+    assert_eq!(again, page, "同一状态多次枚举必须完全一致");
+}
+
+#[test]
+fn runs_list_never_exposes_env_values() {
+    let (server, _settings, _runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let secret = "s3cr3t-list-8c1f";
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-30",
+            "cmd": "echo list",
+            "cwd": workdir.path().to_string_lossy(),
+            "env": { "AW_LIST_SECRET": secret }
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+
+    let listed = runs_list_payload(&server, json!({}));
+    let entry = listed["tasks"]
+        .as_array()
+        .expect("tasks 必须是数组")
+        .iter()
+        .find(|task| task["task_id"] == "t-30")
+        .expect("必须列出已执行任务");
+    assert_eq!(entry["attempts"], 1);
+    assert_eq!(entry["latest_attempt"], 1);
+    assert_eq!(entry["handback"], true);
+    assert_eq!(entry["status"], "ok");
+    assert_eq!(
+        entry["env_keys"],
+        json!(["AW_LIST_SECRET"]),
+        "只给 env 键名，不给值"
+    );
+    assert!(
+        !listed.to_string().contains(secret),
+        "枚举结果不得泄漏 env 值"
+    );
+}
+
+#[test]
+fn runs_list_rejects_invalid_pagination() {
+    let (server, _settings, _runs) = server_with_runs();
+    let cases = vec![
+        json!({ "limit": 0 }),
+        json!({ "limit": 101 }),
+        json!({ "offset": -1 }),
+        json!({ "offset": "x" }),
+        json!({ "limit": 1.5 }),
+    ];
+    for arguments in cases {
+        let response = call_tool(&server, "runs.list", arguments);
+        assert_eq!(response["result"]["isError"], true, "非法分页必须拒绝");
+        let text = tool_text(&response);
+        assert!(text.contains("invalid_pagination"), "必须给具名错误码：{text}");
+    }
 }

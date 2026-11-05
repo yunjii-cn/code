@@ -101,6 +101,7 @@ impl Server {
             "status" => Ok(self.status_payload()),
             "task.execute" => self.execute_task(&arguments),
             "receipt.get" => self.receipt_payload(&arguments),
+            "runs.list" => self.runs_list(&arguments),
             _ => {
                 return tool_result(
                     &json!({ "error": format!("未知工具：{name}") }),
@@ -178,6 +179,103 @@ impl Server {
             }),
             None => json!({ "clientInfo": null, "receivedAt": null }),
         }
+    }
+
+    /// 只读枚举 runs 目录：不写盘、不创建目录，排除 `_session` 等预留目录
+    ///
+    /// 定位：目录枚举只是磁盘现状的镜像，**不是执行状态的权威来源**；
+    /// 判定某次派单的结果必须用 `receipt.get`。
+    fn runs_list(&self, args: &Value) -> Result<Value, String> {
+        let (offset, limit) = pagination_args(args)?;
+        let exists = self.runs_dir.is_dir();
+        let mut task_ids: Vec<String> = Vec::new();
+        if exists {
+            let entries = fs::read_dir(&self.runs_dir)
+                .map_err(|e| format!("读取 runs 目录失败：{e}"))?;
+            for entry in entries.flatten() {
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                // 预留目录（_session 等以 _ 开头）与非法 task_id 一律不当作任务
+                if name.starts_with('_') || !is_valid_task_id(&name) {
+                    continue;
+                }
+                task_ids.push(name);
+            }
+        }
+        task_ids.sort();
+        let total = task_ids.len() as u64;
+        let tasks: Vec<Value> = task_ids
+            .iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|task_id| self.task_summary(task_id))
+            .collect();
+
+        Ok(json!({
+            "state": if !exists { "missing" } else if total == 0 { "empty" } else { "ready" },
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "tasks": tasks
+        }))
+    }
+
+    /// 单个任务的只读摘要：只给状态与 env 键名，不回显 env 值
+    fn task_summary(&self, task_id: &str) -> Value {
+        let root = self.runs_dir.join(task_id);
+        let mut numbers: Vec<u64> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let Some(number) = name
+                    .strip_prefix("attempt-")
+                    .and_then(|rest| rest.parse::<u64>().ok())
+                else {
+                    continue;
+                };
+                if entry.path().is_dir() {
+                    numbers.push(number);
+                }
+            }
+        }
+        numbers.sort_unstable();
+        let latest = numbers.last().copied();
+
+        let mut handback = false;
+        let mut status = Value::Null;
+        let mut exit_code = Value::Null;
+        let mut duration_ms = Value::Null;
+        let mut blocked_reason = Value::Null;
+        let mut env_keys: Vec<String> = Vec::new();
+        if let Some(number) = latest {
+            let run_dir = root.join(format!("attempt-{number}"));
+            if let Ok(record) = read_json(&run_dir.join("handback.json")) {
+                handback = true;
+                status = record.get("status").cloned().unwrap_or(Value::Null);
+                exit_code = record.get("exit_code").cloned().unwrap_or(Value::Null);
+                duration_ms = record.get("duration_ms").cloned().unwrap_or(Value::Null);
+                blocked_reason = record.get("blocked_reason").cloned().unwrap_or(Value::Null);
+            }
+            if let Ok(dispatch) = read_json(&run_dir.join("dispatch.json")) {
+                if let Some(map) = dispatch.get("env").and_then(Value::as_object) {
+                    env_keys = map.keys().cloned().collect();
+                }
+            }
+        }
+
+        json!({
+            "task_id": task_id,
+            "attempts": numbers.len(),
+            "latest_attempt": latest,
+            "handback": handback,
+            "status": status,
+            "exit_code": exit_code,
+            "duration_ms": duration_ms,
+            "blocked_reason": blocked_reason,
+            "env_keys": env_keys
+        })
     }
 
     /// 接单执行：命令与判据由派单方给出，AW 只运行并产出可审计回执
@@ -597,6 +695,26 @@ fn parse_env(args: &Value) -> Result<Vec<(String, String)>, String> {
     Ok(pairs)
 }
 
+/// 分页参数：缺省 offset=0 / limit=20；类型或范围不合法时给具名错误
+fn pagination_args(args: &Value) -> Result<(u64, u64), String> {
+    let offset = match args.get("offset") {
+        None => 0,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| "invalid_pagination: offset 必须是 0 或正整数".to_string())?,
+    };
+    let limit = match args.get("limit") {
+        None => 20,
+        Some(value) => value
+            .as_u64()
+            .ok_or_else(|| "invalid_pagination: limit 必须是 1..=100 的整数".to_string())?,
+    };
+    if !(1..=100).contains(&limit) {
+        return Err("invalid_pagination: limit 必须在 1..=100 之间".to_string());
+    }
+    Ok((offset, limit))
+}
+
 /// env 的幂等摘要：键 -> "sha256:<hex>"，只用于比对，不把可能的密钥明文落盘
 fn env_signature_value(pairs: &[(String, String)]) -> Value {
     let mut map = serde_json::Map::new();
@@ -690,6 +808,18 @@ fn tools() -> Value {
                     "include_history": { "type": "boolean", "description": "是否返回全部尝试记录，默认 false" }
                 },
                 "required": ["task_id"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "runs.list",
+            "description": "只读枚举 runs 目录下的任务：按 task_id 升序，offset/limit 确定分页；排除 _session 等预留目录；只回 env 键名、不回 env 值；目录枚举不是执行状态的权威来源，判定请用 receipt.get",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "offset": { "type": "integer", "minimum": 0, "description": "跳过多少条，默认 0" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本页条数，默认 20" }
+                },
                 "additionalProperties": false
             }
         }
