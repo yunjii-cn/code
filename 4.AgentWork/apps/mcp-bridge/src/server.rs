@@ -1422,16 +1422,48 @@ mod process_scope {
                 let mut child = command.spawn().expect("spawn ping");
                 supervisor.attach(&child);
                 assert!(supervisor.attached, "进程应成功加入作业");
+                let before = supervisor.active_processes();
+                println!("[evidence] alive_but_idle attached={} ActiveProcesses_before={before:?}", supervisor.attached);
                 assert!(
-                    supervisor.active_processes().unwrap_or(0) > 0,
+                    before.unwrap_or(0) > 0,
                     "活着但不写盘的进程必须计入 ActiveProcesses"
                 );
-                assert_eq!(
-                    supervisor.terminate(&mut child),
-                    CleanupOutcome::Cleaned,
-                    "作业内成员应被清空"
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.active_processes();
+                println!("[evidence] alive_but_idle terminate={outcome:?} ActiveProcesses_after={after:?}");
+                assert_eq!(outcome, CleanupOutcome::Cleaned, "作业内成员应被清空");
+                assert_eq!(after, Some(0));
+            }
+
+            // 正向：作业内的孙进程也必须被清理，判据打印 ActiveProcesses
+            #[test]
+            fn job_counts_grandchild_and_empties_after_terminate() {
+                let mut supervisor = Supervisor::new();
+                assert!(supervisor.job.is_some(), "作业应创建成功");
+                let mut command = Command::new("cmd");
+                command
+                    .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let mut child = command.spawn().expect("spawn cmd");
+                supervisor.attach(&child);
+                assert!(supervisor.attached, "cmd 应成功加入作业");
+                let before = supervisor.active_processes();
+                println!(
+                    "[evidence] grandchild attached={} ActiveProcesses_before={before:?}",
+                    supervisor.attached
                 );
-                assert_eq!(supervisor.active_processes(), Some(0));
+                assert!(
+                    before.unwrap_or(0) > 0,
+                    "cmd 派生的孙进程必须计入 ActiveProcesses"
+                );
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.active_processes();
+                println!(
+                    "[evidence] grandchild terminate={outcome:?} ActiveProcesses_after={after:?}"
+                );
+                assert_eq!(outcome, CleanupOutcome::Cleaned, "作业内成员应被清空");
+                assert_eq!(after, Some(0));
             }
 
             // 反向：进程已退出，作业内活动进程数应为 0
@@ -1456,6 +1488,7 @@ mod process_scope {
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
+                println!("[evidence] exited_process ActiveProcesses_final={observed:?}");
                 assert_eq!(observed, Some(0), "进程退出后作业内活动进程数应为 0");
             }
         }
@@ -1484,30 +1517,13 @@ mod process_scope {
     pub(crate) use imp::Supervisor;
 }
 
-/// 超时回执措辞按清理结果分流：只有 `Cleaned` 才能说"已清理受控集合"。
-/// 任何分支都不得出现"已终止进程树 / 无残留"。
-fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutcome>) -> String {
-    use process_scope::CleanupOutcome;
-    match outcome {
-        Some(CleanupOutcome::Cleaned) => {
-            #[cfg(windows)]
-            {
-                format!(
-                    "timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业"
-                )
-            }
-            #[cfg(not(windows))]
-            {
-                format!("timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证")
-            }
-        }
-        Some(CleanupOutcome::StillAlive) => format!(
-            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程；逃逸进程是否仍在运行未验证"
-        ),
-        _ => format!(
-            "timeout：超过 {timeout_secs}s 未结束，受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
-        ),
-    }
+/// 状态门未满足：文案退回 v1.11 旧版（受控集合实现保留，但尚未解锁新措辞）。
+/// 解锁条件：POSIX 四类用例实跑通过 + Windows 三类通过 + 契约版本递增。
+/// 任何版本都不得出现"已终止进程树 / 无残留"。
+fn timeout_reason(timeout_secs: u64, _outcome: Option<process_scope::CleanupOutcome>) -> String {
+    format!(
+        "timeout：超过 {timeout_secs}s 未结束，已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
+    )
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
