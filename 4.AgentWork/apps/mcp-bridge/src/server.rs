@@ -1,6 +1,7 @@
 // aw-mcp-bridge 方法分发：只读 health/status + 执行层 task.execute/receipt.get
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -313,8 +314,10 @@ impl Server {
 
         // env 透传：只在子进程环境里追加/覆盖同名变量，不做任何推断；非法键值在占号之前拒绝
         let env_pairs = parse_env(args)?;
+        // path_prepend：显式前插目录，继承 PATH 永远保留；非法形态同样在占号之前拒绝
+        let path_prepend = parse_path_prepend(args)?;
 
-        // 幂等签名：同 task_id 重投必须 cmd / cwd / timeout_secs / env 完全一致；
+        // 幂等签名：同 task_id 重投必须 cmd / cwd / timeout_secs / env / path_prepend 完全一致；
         // env 只存值摘要，不把可能的密钥明文写进 dispatch.json
         let canonical_cwd = fs::canonicalize(&cwd).unwrap_or_else(|_| cwd.clone());
         let signature = json!({
@@ -322,7 +325,8 @@ impl Server {
             "cmd": cmd,
             "cwd": canonical_cwd.to_string_lossy(),
             "timeout_secs": timeout_secs,
-            "env": env_signature_value(&env_pairs)
+            "env": env_signature_value(&env_pairs),
+            "path_prepend": path_prepend.clone()
         });
 
         let task_root = self.runs_dir.join(&task_id);
@@ -366,6 +370,24 @@ impl Server {
                     .iter()
                     .map(|(key, value)| (key.as_str(), value.as_str())),
             );
+        }
+        // path_prepend 只做前插：数组按字面顺序在前，继承 PATH 原样接在后；分隔符按平台
+        if !path_prepend.is_empty() {
+            let separator = if cfg!(windows) { ';' } else { ':' };
+            let mut joined = OsString::new();
+            for dir in &path_prepend {
+                if !joined.is_empty() {
+                    joined.push(separator.to_string());
+                }
+                joined.push(dir);
+            }
+            if let Some(inherited) = std::env::var_os("PATH").filter(|value| !value.is_empty()) {
+                if !joined.is_empty() {
+                    joined.push(separator.to_string());
+                }
+                joined.push(inherited);
+            }
+            command.env("PATH", joined);
         }
 
         let started = Instant::now();
@@ -429,6 +451,8 @@ impl Server {
             "cwd": canonical_cwd.to_string_lossy(),
             "timeout_secs": timeout_secs,
             "env_keys": env_pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            // 只回目录名列表，不回任何 env 值
+            "path_prepend": path_prepend,
             "verify_cmd": cmd,
             "exit_code": exit_code,
             "stdout_digest": stdout_digest,
@@ -478,10 +502,14 @@ impl Server {
             if !object.contains_key("env") {
                 object.insert("env".to_string(), json!({}));
             }
+            // 升级前的签名没有 path_prepend：其语义等价于空数组，补齐后再比对
+            if !object.contains_key("path_prepend") {
+                object.insert("path_prepend".to_string(), json!([]));
+            }
         }
         if &stored != signature {
             return Err(format!(
-                "task_id_conflict: task_id `{task_id}` 已存在且派单参数不一致（cmd / cwd / timeout_secs / env 必须完全一致）；重跑请使用新 task_id"
+                "task_id_conflict: task_id `{task_id}` 已存在且派单参数不一致（cmd / cwd / timeout_secs / env / path_prepend 必须完全一致）；重跑请使用新 task_id"
             ));
         }
 
@@ -725,6 +753,61 @@ fn attempt_numbers(task_root: &Path) -> Vec<u64> {
     }
     numbers.sort_unstable();
     numbers
+}
+
+/// path_prepend：字符串数组，按字面顺序前插；空数组/空元素/NUL/超量/超长一律在占号之前拒绝
+fn parse_path_prepend(args: &Value) -> Result<Vec<String>, String> {
+    const MAX_ENTRIES: usize = 16;
+    const MAX_ENTRY_LEN: usize = 4096;
+    let Some(value) = args.get("path_prepend") else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        return Err(
+            "invalid_path_prepend: path_prepend 必须是字符串数组（不接受带分隔符的单字符串）"
+                .to_string(),
+        );
+    };
+    if items.is_empty() {
+        return Err(
+            "invalid_path_prepend: 空数组没有意义；不需要前插目录时请省略该字段".to_string(),
+        );
+    }
+    if items.len() > MAX_ENTRIES {
+        return Err(format!(
+            "invalid_path_prepend: 最多 {MAX_ENTRIES} 个目录，收到 {} 个",
+            items.len()
+        ));
+    }
+    let mut dirs = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let Some(dir) = item.as_str() else {
+            return Err(format!(
+                "invalid_path_prepend: 第 {} 个元素不是字符串",
+                index + 1
+            ));
+        };
+        if dir.is_empty() {
+            return Err(format!(
+                "invalid_path_prepend: 第 {} 个元素是空字符串",
+                index + 1
+            ));
+        }
+        if dir.contains('\0') {
+            return Err(format!(
+                "invalid_path_prepend: 第 {} 个元素含 NUL 字符",
+                index + 1
+            ));
+        }
+        if dir.len() > MAX_ENTRY_LEN {
+            return Err(format!(
+                "invalid_path_prepend: 第 {} 个元素超过 {MAX_ENTRY_LEN} 字符",
+                index + 1
+            ));
+        }
+        dirs.push(dir.to_string());
+    }
+    Ok(dirs)
 }
 
 /// 分页参数：缺省 offset=0 / limit=20；类型或范围不合法时给具名错误

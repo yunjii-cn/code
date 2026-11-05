@@ -1601,3 +1601,211 @@ fn runs_list_counts_attempt_dirs_regardless_of_handback_and_gaps() {
         "占号前拒绝的 task 不得出现在列表里"
     );
 }
+
+// ---- path_prepend：显式前插继承 PATH（v1.9）----
+
+#[test]
+fn path_prepend_is_placed_before_inherited_path() {
+    let (server, _settings, runs) = server_with_runs();
+    let extra = TempDir::new().expect("创建前插目录");
+    let prepend_dir = fs::canonicalize(extra.path()).expect("规范化前插目录");
+    let expected = prepend_dir.to_string_lossy().to_string();
+    let echo_path = if cfg!(windows) { "echo %PATH%" } else { "echo $PATH" };
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-pp",
+            "cmd": echo_path,
+            "path_prepend": vec![prepend_dir.to_string_lossy().to_string()]
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "path_prepend 应被接受：{}",
+        tool_text(&response)
+    );
+
+    let stdout = fs::read_to_string(
+        runs.path()
+            .join("t-pp")
+            .join("attempt-1")
+            .join("stdout.txt"),
+    )
+    .expect("读取 stdout");
+    let separator = if cfg!(windows) { ';' } else { ':' };
+    let parts: Vec<&str> = stdout.trim().split(separator).collect();
+    assert!(
+        parts.len() >= 2,
+        "PATH 必须同时含前插目录与继承部分：{stdout}"
+    );
+    assert_eq!(
+        parts[0],
+        expected.as_str(),
+        "prepend 必须排在最前：{stdout}"
+    );
+    assert!(
+        parts[1..].iter().any(|part| !part.is_empty()),
+        "继承的 PATH 不得被丢掉：{stdout}"
+    );
+
+    let handback = tool_payload(&response);
+    assert_eq!(
+        handback["path_prepend"].as_array().map(|items| items.len()),
+        Some(1),
+        "回执必须回目录名列表：{handback}"
+    );
+    assert_eq!(
+        handback["path_prepend"][0].as_str().unwrap_or(""),
+        expected.as_str()
+    );
+}
+
+#[test]
+fn path_prepend_participates_in_idempotency_signature() {
+    let (server, _settings, runs) = server_with_runs();
+    let first = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-pp-idem", "cmd": "echo idem", "path_prepend": ["/opt/one"] }),
+    ));
+    assert_eq!(first["attempt"], 1);
+    let same = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-pp-idem", "cmd": "echo idem", "path_prepend": ["/opt/one"] }),
+    ));
+    assert_eq!(same["attempt"], 1, "同参重投必须回放，不得判冲突");
+
+    let changed = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-pp-idem", "cmd": "echo idem", "path_prepend": ["/opt/two"] }),
+    );
+    assert_eq!(
+        changed["result"]["isError"],
+        true,
+        "改 path_prepend 必须判冲突：{}",
+        tool_text(&changed)
+    );
+    assert!(
+        tool_text(&changed).contains("task_id_conflict"),
+        "必须是具名的 task_id_conflict：{}",
+        tool_text(&changed)
+    );
+
+    let reordered = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-pp-idem", "cmd": "echo idem", "path_prepend": ["/opt/one", "/opt/two"] }),
+    );
+    assert_eq!(
+        reordered["result"]["isError"],
+        true,
+        "元素个数变化也是异参：{}",
+        tool_text(&reordered)
+    );
+    assert!(
+        !runs.path().join("t-pp-idem").join("attempt-2").exists(),
+        "冲突不得产生新 attempt"
+    );
+}
+
+#[test]
+fn invalid_path_prepend_is_rejected_before_claiming_attempt() {
+    let (server, _settings, runs) = server_with_runs();
+    let long_element = "a".repeat(4097);
+    let mut many: Vec<String> = Vec::new();
+    for index in 0..17 {
+        many.push(format!("/opt/{index}"));
+    }
+    let cases = vec![
+        ("t-pp-bad-0", json!([])),
+        ("t-pp-bad-1", json!([""])),
+        ("t-pp-bad-2", json!(["/opt/one\0two"])),
+        ("t-pp-bad-3", json!("a;b")),
+        ("t-pp-bad-4", json!([1])),
+        ("t-pp-bad-5", json!(many)),
+        ("t-pp-bad-6", json!([long_element])),
+    ];
+    for (task_id, path_prepend) in cases {
+        let response = call_tool(
+            &server,
+            "task.execute",
+            json!({ "task_id": task_id, "cmd": "echo nope", "path_prepend": path_prepend }),
+        );
+        assert_eq!(
+            response["result"]["isError"],
+            true,
+            "非法 path_prepend 必须在占号前被拒（{task_id}）：{}",
+            tool_text(&response)
+        );
+        assert!(
+            tool_text(&response).contains("invalid_path_prepend"),
+            "必须给具名错误码 invalid_path_prepend：{}",
+            tool_text(&response)
+        );
+        assert!(
+            !runs.path().join(task_id).exists(),
+            "被拒的派单不得建目录：{task_id}"
+        );
+    }
+}
+
+#[test]
+fn legacy_dispatch_without_path_prepend_still_replays() {
+    let (server, _settings, runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let canonical = fs::canonicalize(workdir.path()).expect("规范化工作目录");
+    let attempt = runs.path().join("t-pp-legacy").join("attempt-1");
+    fs::create_dir_all(&attempt).expect("创建旧格式 attempt");
+    fs::write(
+        attempt.join("dispatch.json"),
+        json!({
+            "task_id": "t-pp-legacy",
+            "cmd": "echo legacy-pp",
+            "cwd": canonical.to_string_lossy(),
+            "timeout_secs": 120,
+            "env": {}
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式派单记录");
+    fs::write(
+        attempt.join("handback.json"),
+        json!({
+            "task_id": "t-pp-legacy",
+            "attempt": 1,
+            "status": "ok",
+            "exit_code": 0,
+            "stdout_digest": "sha256:legacy-pp"
+        })
+        .to_string(),
+    )
+    .expect("写入旧格式回执");
+
+    let replay = tool_payload(&call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-pp-legacy",
+            "cmd": "echo legacy-pp",
+            "cwd": workdir.path().to_string_lossy()
+        }),
+    ));
+    assert_eq!(replay["attempt"], 1, "缺 path_prepend 的旧派单仍应回放");
+    assert_eq!(replay["stdout_digest"], "sha256:legacy-pp");
+    assert!(
+        replay.get("path_prepend").is_none(),
+        "旧回执缺失该字段时必须原样返回，不回填：{replay}"
+    );
+    let after: Value = serde_json::from_str(
+        &fs::read_to_string(attempt.join("dispatch.json")).expect("重读旧派单记录"),
+    )
+    .expect("派单记录必须是 JSON");
+    assert!(
+        after.get("path_prepend").is_none(),
+        "旧派单不得被补写 path_prepend：{after}"
+    );
+}

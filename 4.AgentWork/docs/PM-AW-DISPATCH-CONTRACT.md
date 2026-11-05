@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 10 节的 4 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；证据保留与清理**只有方案、未实现、默认关闭**（见 §8）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；证据保留与清理**只有方案、未实现、默认关闭**（见 §8）；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -97,6 +97,20 @@
 | 失败语义 | 不适用：只要 `dispatch.json` 存在该字段就存在；写入失败即该 attempt 不成立（`task.execute` 返回工具错误，不产生回执） |
 | 缺省语义 | v1.6 之前的 `dispatch.json` 无此字段，**只读不补**；消费方按“**缺失即未知**”处理，**不得用 mtime 反推**（见 §8） |
 
+### 3.5 追加 PATH 的显式字段 `path_prepend`（v1.9）
+
+| 项 | 规则（已写死） |
+|---|---|
+| 取值形态 | **字符串数组** `path_prepend: ["dir1", "dir2"]`；**不接受带分隔符的单字符串**——分隔符由 AW 按平台决定，不允许调用方注入 |
+| 顺序语义 | 数组即**结果顺序**（字面顺序前插）：结果 `PATH = 数组[0] + sep + 数组[1] + … + sep + 继承 PATH`。不支持"反向压栈"语义 |
+| 拼接规则 | prepend 全部在**前**、继承 PATH 全部在**后**；继承部分**原样保留**：不去重、不做路径规范化、不展开 `~` |
+| 分隔符 | **按平台**：Windows `;`、POSIX `:`，不得写死一种。元素内部若含分隔符按普通字符处理（不拆分） |
+| 与 `env` 的关系 | `env` 中**仍禁止** `PATH`（v1.7 不变）；`path_prepend` 与 `env` 独立生效，同现时互不影响 |
+| 幂等签名 | **参与签名**（它是执行输入的一部分）。后果写死：同 id 改 `path_prepend` → `task_id_conflict`；旧记录无此字段 → 视为 `[]`，同参重投仍可回放 |
+| 校验（占号之前） | 非数组 / 元素非字符串 / **空数组** / 空字符串元素 / 含 NUL 元素 / 超过 **16** 个元素 / 单个元素超过 **4096** 字符 → `invalid_path_prepend`，不建目录、不落盘、不产生回执 |
+| 目录是否存在 | **不校验**：AW 不假设目标机文件系统布局。不存在的目录原样写进 PATH，子进程找不到可执行时的表现与系统一致（不额外报错、不改写） |
+| 回执呈现 | 回执新增 `path_prepend` 字段：**只回目录名列表**（原样、不做规范化），与 `env_keys` 并列；不回任何 env 值 |
+
 ## 4. 回执
 
 字段一律沿用已实现 handback，不新增第二套命名。
@@ -120,6 +134,7 @@
 | `stderr_digest` | `sha256:<hex>` | stderr 原始日志摘要 | 已实现（既有附加字段） |
 | `blocked_reason` | string / null | 仅 `blocked` 时非空，见第 6 节 | 已实现（自由文本，未分类） |
 | `finishedAt` | string | 该 attempt **结束并落盘回执**的时刻，RFC3339/UTC/秒级/`Z`；`ok` / `failed` / `blocked` 一律写实际结束时间。**落盘回执中必填、不为 null**；不落盘的预检 `blocked` 回执不含此字段（它没有 attempt） | 已实现（v1.6） |
+| `path_prepend` | string[] | 本次实际前插的目录列表（原样，不做规范化）；未提供时为空数组。只给目录名，不含任何 env 值 | 已实现（v1.9） |
 
 回执使用规则：
 
@@ -149,8 +164,9 @@
 | 11 | 证据时间戳 `dispatchedAt` / `finishedAt`（§3.4 / 第 4 节） | **一致** | v1.6 起随派单与回执落盘（UTC/秒级）；不参与幂等签名；旧记录不回填、缺失即未知 |
 | 12 | `env.PATH` fail-closed（§3.2） | **一致** | 大小写任意变体一律 `invalid_env`，占号前拒绝；继承 PATH 永远保留；不静默忽略 |
 | 13 | `runs.list` 的 `total` 与 `attempts` 一致性（第 7 节） | **一致** | `total == Σ attempts`（attempt 目录数，非任务数）；分页不改变 `total`；新增 `total_tasks` 供换算页数 |
+| 14 | `path_prepend`（§3.5） | **一致** | 目录数组前插、继承 PATH 在后、分隔符按平台；参与幂等签名；占号前校验；回执只给目录名 |
 
-统计：**已一致 11 条、缺 2 条**（第 8 条按分工归 PM 侧，AW 不做；第 10 条方案待拍板、未实现；认证仍待通道归属拍板）。
+统计：**已一致 12 条、缺 2 条**（第 8 条按分工归 PM 侧，AW 不做；第 10 条方案待拍板、未实现；认证仍待通道归属拍板）。
 
 ### 5.1 缺口补齐规划（后续批次）
 
@@ -179,7 +195,7 @@
 
 约束：
 
-- 本节只列 `blocked` 回执。参数非法属**工具错误**（`isError=true`、不落盘、不占号），具名错误码：`task_id_conflict`（同 id 异参）、`invalid_env`（env 键/值非法，**或出现 `PATH` 整体覆盖**）、`invalid_pagination`（`runs.list` 的 `offset`/`limit` 类型或范围越界）、`timeout_secs` 越界（无前缀，沿用既有报错）。
+- 本节只列 `blocked` 回执。参数非法属**工具错误**（`isError=true`、不落盘、不占号），具名错误码：`task_id_conflict`（同 id 异参）、`invalid_env`（env 键/值非法，**或出现 `PATH` 整体覆盖**）、`invalid_path_prepend`（`path_prepend` 形态/元素/数量/长度非法）、`invalid_pagination`（`runs.list` 的 `offset`/`limit` 类型或范围越界）、`timeout_secs` 越界（无前缀，沿用既有报错）。
 - `blocked` 必须带 `blocked_reason`，禁止空字符串；空原因视为契约违规。
 - `blocked` 的 `exit_code` 为 null；`status` 只描述进程结果，不构成验收。
 - 未被识别的 `blocked_reason` 前缀按最严格策略处理：不自动重试，由 PM 人工裁定。
@@ -332,3 +348,4 @@
 | v1.6 | 2026-11-06 | 派单记录补 `dispatchedAt`、回执补 `finishedAt`（RFC3339/UTC/秒级，纯增量、旧记录不回填、不参与幂等签名）；**清理仍未实现**，年龄判据只认这两个字段、不认 mtime |
 | v1.7 | 2026-11-06 | `env.PATH` 改为 fail-closed：大小写任意变体一律 `invalid_env`，占号前拒绝、不落盘；继承 PATH 永远保留，不再允许整体覆盖；`path_prepend` 仅作预留命名（未实现）；旧记录中的 `env.PATH` 覆盖行为记为已知缺陷、不追认 |
 | v1.8 | 2026-11-06 | `runs.list` 定死计数口径：`attempts` = 真实 attempt 目录数（不看回执、不按最大编号），`total` = **Σ attempts**（非任务数）且分页无关，新增 `total_tasks`；三种边界（回执缺失/损坏、编号不连续、占号前拒单）各有结论 |
+| v1.9 | 2026-11-06 | 实现 `path_prepend`（§3.5）：字符串数组按字面顺序前插、继承 PATH 在后、分隔符按平台（Windows `;` / POSIX `:`）；参与幂等签名；空数组/空元素/NUL/超 16 个/单项超 4096 字符 → `invalid_path_prepend`（占号前拒绝）；目录存在性不校验；回执新增 `path_prepend` 目录列表 |
