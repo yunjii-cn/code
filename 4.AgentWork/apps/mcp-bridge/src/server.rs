@@ -307,12 +307,13 @@ impl Server {
             "failed"
         };
 
-        let changed_files = {
+        let (changed_files, changed_files_truncated) = {
             let after = git_paths(&cwd);
             let mut changed: Vec<String> = after.difference(&before).cloned().collect();
             changed.sort();
+            let truncated = changed.len() > 20;
             changed.truncate(20);
-            changed
+            (changed, truncated)
         };
 
         let handback = json!({
@@ -320,6 +321,9 @@ impl Server {
             "attempt": attempt,
             "status": status,
             "changed_files": changed_files,
+            "changed_files_truncated": changed_files_truncated,
+            "cwd": canonical_cwd.to_string_lossy(),
+            "timeout_secs": timeout_secs,
             "verify_cmd": cmd,
             "exit_code": exit_code,
             "stdout_digest": stdout_digest,
@@ -594,7 +598,7 @@ fn tools() -> Value {
         },
         {
             "name": "task.execute",
-            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执；AW 不定义判据、不做验收",
+            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、changed_files 是否截断）；AW 不定义判据、不做验收",
             "inputSchema": {
                 "type": "object",
                 "properties": {

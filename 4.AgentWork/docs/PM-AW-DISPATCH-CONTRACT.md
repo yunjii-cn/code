@@ -2,7 +2,7 @@
 
 状态：草案，待 PM 侧确认第 8 节的 3 个问题（其中第 1 条通道归属已冻结，等用户拍板）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §9）；认证与并发上限仍未实现
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §9）；v1.3 起回执补充执行上下文；认证与并发上限仍未实现
 
 ## 0. 结论
 
@@ -75,6 +75,9 @@
 | `verify_cmd` | string | 实际执行的命令（回显派单参数，供 PM 逐字比对判据） | 已实现 |
 | `exit_code` | integer / null | 进程退出码；`blocked` 时为 null | 已实现 |
 | `changed_files` | string[] | 执行前后 `git status --porcelain` 差集，相对路径，最多 20 条 | 已实现（有 20 条上限） |
+| `changed_files_truncated` | boolean | 差集是否超过 20 条而被截断；`true` 表示还有未列出的改动 | 已实现 |
+| `cwd` | string | 本次实际执行目录（规范化绝对路径；Windows 下可能带 `\\?\` 前缀），供 PM 复算 `changed_files` / `commit` | 已实现 |
+| `timeout_secs` | integer | 本次实际生效的超时秒数（含默认值 120），用于解释 `timeout` 类 `blocked_reason` | 已实现 |
 | `commit` | string / null | 执行时工作目录的短 HEAD | 已实现 |
 | `stdout_digest` | `sha256:<hex>` | stdout 原始日志摘要 | 已实现 |
 | `artifacts` | object[] | `{kind, locator, hash}`，locator 为相对路径 `runs/<task_id>/attempt-<N>/stdout.txt` 等 | 已实现 |
@@ -87,6 +90,8 @@
 - PM **不采信 `status` 自述**，只按 `exit_code`、`verify_cmd` 与判据的逐字一致性、`stdout_digest` 与 `artifacts` 中原始日志的重算一致性判定。
 - `status=ok` 只表示进程退出码为 0，不表示验收通过。
 - 历史读取：`receipt.get` 默认返回最新一次；`include_history=true` 返回 `attempts / latest / history[]`，用于回答“执行过几次、每次 exit_code 与耗时”。
+- `cwd` / `timeout_secs` / `changed_files_truncated` 于 v1.3 新增，属**纯增量字段**：既有字段语义未变；v1.3 之前的旧 `handback.json` 不含这三个字段，`receipt.get` 原样返回、**不回填、不改写**。
+- `attempt=null` 的 `blocked` 预检回执（缺命令 / cwd 不存在）不落盘，也不带执行上下文（没有实际执行目录与超时）。
 
 ## 5. 契约 vs 现有实现
 
@@ -156,3 +161,4 @@
 | v1 | 2026-11-05 | 首版：身份、幂等、回执映射、失败码分类、边界、实现对照 |
 | v1.1 | 2026-11-05 | 落地 G1 / G2 / G3：重投按 `dispatch.json` 签名回放、异参返回 `task_id_conflict`、失败码转 `blocked` 前缀；身份与并发上限未动 |
 | v1.2 | 2026-11-06 | 落地 G4：`initialize` 的 `clientInfo` 落盘 `runs/_session/initialize.json` 并由 `status.session` 只读回显；措辞由“身份”改为“审计弱识别”，通道假设不变 |
+| v1.3 | 2026-11-06 | 回执补充 `cwd` / `timeout_secs` / `changed_files_truncated`（纯增量，旧记录不回填）；修复 20 条截断静默问题 |

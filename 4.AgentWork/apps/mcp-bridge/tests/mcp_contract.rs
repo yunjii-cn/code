@@ -649,3 +649,86 @@ fn client_info_is_never_used_for_admission() {
         serde_json::from_str(&fs::read_to_string(&audit_path).expect("读取审计记录")).unwrap();
     assert_eq!(audit["clientInfo"]["name"], "../../untrusted", "只记录、不解释");
 }
+
+// ---- 回执自证：执行上下文必须可复算、截断必须显式 ----
+
+#[test]
+fn handback_records_execution_context_for_recompute() {
+    let (server, _settings, _runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-12",
+            "cmd": "echo ctx",
+            "cwd": workdir.path().to_string_lossy(),
+            "timeout_secs": 45
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+
+    let expected_cwd = fs::canonicalize(workdir.path()).expect("规范化工作目录");
+    assert_eq!(
+        payload["cwd"].as_str(),
+        Some(expected_cwd.to_string_lossy().as_ref()),
+        "回执必须记录实际执行目录（规范化），PM 才能复算 changed_files / commit"
+    );
+    assert_eq!(
+        payload["timeout_secs"], 45,
+        "回执必须记录本次实际生效的超时，供 PM 解释 timeout 原因"
+    );
+    assert_eq!(
+        payload["changed_files_truncated"], false,
+        "未截断时必须显式给出 false，而不是缺字段"
+    );
+
+    // receipt.get 只读回原记录，不得回填或改写旧回执
+    let readback = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-12" })));
+    assert_eq!(readback["cwd"], payload["cwd"]);
+    assert_eq!(readback["timeout_secs"], 45);
+    assert_eq!(readback["changed_files_truncated"], false);
+}
+
+#[test]
+fn changed_files_truncation_is_explicit_not_silent() {
+    let (server, _settings, _runs) = server_with_runs();
+    let workdir = TempDir::new().expect("创建工作目录");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(workdir.path())
+            .args(args)
+            .output()
+            .expect("执行 git");
+        assert!(
+            output.status.success(),
+            "git {:?} 失败：{}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+
+    #[cfg(windows)]
+    let cmd = "for %i in (1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25) do @echo x > f-%i.txt";
+    #[cfg(not(windows))]
+    let cmd = "for i in $(seq 1 25); do echo x > f-$i.txt; done";
+
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "t-13", "cmd": cmd, "cwd": workdir.path().to_string_lossy() }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+    let files = payload["changed_files"]
+        .as_array()
+        .expect("changed_files 必须是数组");
+    assert_eq!(files.len(), 20, "changed_files 仍按既有上限截断为 20");
+    assert_eq!(
+        payload["changed_files_truncated"], true,
+        "超过上限被截断时必须显式告知，不能静默丢弃改动"
+    );
+}
