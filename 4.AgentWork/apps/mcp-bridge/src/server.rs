@@ -103,6 +103,17 @@ impl Server {
             "task.execute" => self.execute_task(&arguments),
             "receipt.get" => self.receipt_payload(&arguments),
             "runs.list" => self.runs_list(&arguments),
+            "runs.prune" => {
+                // 部分失败必须让调用方看到 isError=true：不许把"删了一半"包装成成功
+                return match self.runs_prune(&arguments) {
+                    Ok(payload) => {
+                        let is_error = payload.get("status").and_then(Value::as_str)
+                            == Some("partial");
+                        tool_result(&payload, is_error)
+                    }
+                    Err(error) => tool_result(&json!({ "error": error }), true),
+                };
+            }
             _ => {
                 return tool_result(
                     &json!({ "error": format!("未知工具：{name}") }),
@@ -227,6 +238,331 @@ impl Server {
             "limit": limit,
             "tasks": tasks
         }))
+    }
+
+    /// 证据清理：默认 dry-run、零写入；只有 dry_run=false + confirm=true 才真删。
+    /// 规则（契约 §8）：只删非最新 attempt；年龄只认 finishedAt；缺字段一律不删。
+    fn runs_prune(&self, args: &Value) -> Result<Value, String> {
+        let older_than_days = match args.get("older_than_days") {
+            Some(value) => value.as_u64().ok_or_else(|| {
+                "invalid_retention: older_than_days 必须是 1..=3650 的整数".to_string()
+            })?,
+            None => {
+                return Err(
+                    "invalid_retention: 缺少 older_than_days（不提供默认阈值：没写阈值不能变成按默认值删）"
+                        .to_string(),
+                )
+            }
+        };
+        if !(1..=3650).contains(&older_than_days) {
+            return Err("invalid_retention: older_than_days 必须在 1..=3650 之间".to_string());
+        }
+        let dry_run = match args.get("dry_run") {
+            None => true,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "invalid_retention: dry_run 必须是布尔值".to_string())?,
+        };
+        let confirm = match args.get("confirm") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                "confirm_required: confirm 必须是布尔值；真删需要显式 confirm=true".to_string()
+            })?,
+        };
+        if !dry_run && !confirm {
+            return Err(
+                "confirm_required: 真删必须同时显式 dry_run=false 与 confirm=true；本轮未删除任何目录，也未写审计"
+                    .to_string(),
+            );
+        }
+        let limit = match args.get("limit") {
+            None => 20,
+            Some(value) => value.as_u64().ok_or_else(|| {
+                "invalid_retention: limit 必须是 1..=100 的整数".to_string()
+            })?,
+        };
+        if !(1..=100).contains(&limit) {
+            return Err("invalid_retention: limit 必须在 1..=100 之间".to_string());
+        }
+
+        let evaluated_at = now_stamp();
+        let now = chrono::Utc::now();
+        let (candidates, skipped, task_count) = self.prune_candidates(older_than_days, now);
+        let total_candidates = candidates.len() as u64;
+        let truncated = total_candidates > limit;
+        let batch: Vec<Value> = candidates.into_iter().take(limit as usize).collect();
+
+        if dry_run {
+            let state = if !self.runs_dir.is_dir() {
+                "missing"
+            } else if task_count == 0 {
+                "empty"
+            } else {
+                "ready"
+            };
+            return Ok(json!({
+                "dry_run": true,
+                "state": state,
+                "older_than_days": older_than_days,
+                "evaluated_at": evaluated_at,
+                "limit": limit,
+                "candidates_total": total_candidates,
+                "truncated": truncated,
+                "candidates": batch,
+                "skipped_total": skipped.len() as u64,
+                "skipped": skipped
+            }));
+        }
+
+        if batch.is_empty() {
+            // 没有删除发生：不写审计，也不创建任何目录（含 .prune-trash）
+            return Ok(json!({
+                "dry_run": false,
+                "status": "ok",
+                "older_than_days": older_than_days,
+                "evaluated_at": evaluated_at,
+                "limit": limit,
+                "candidates_total": total_candidates,
+                "truncated": truncated,
+                "deleted_total": 0,
+                "failed_total": 0,
+                "deleted": [],
+                "failed": []
+            }));
+        }
+
+        let batch_id = format!(
+            "prune-{}-{}",
+            chrono::Utc::now().timestamp_millis(),
+            std::process::id()
+        );
+        let plan = json!({
+            "at": now_stamp(),
+            "phase": "plan",
+            "batch_id": batch_id,
+            "older_than_days": older_than_days,
+            "candidate_count": batch.len() as u64,
+            "candidates": batch.clone()
+        });
+        // 先记账后删除：plan 行写不进去就一个目录都不删
+        self.append_prune_record(&plan)
+            .map_err(|error| format!("{error}；本轮未删除任何目录"))?;
+
+        let mut deleted: Vec<Value> = Vec::new();
+        let mut failed: Vec<Value> = Vec::new();
+        for candidate in &batch {
+            let task_id = candidate["task_id"].as_str().unwrap_or_default().to_string();
+            let attempt = candidate["attempt"].as_u64().unwrap_or_default();
+            match self.delete_attempt_dir(&task_id, attempt, &batch_id) {
+                Ok(()) => deleted.push(candidate.clone()),
+                Err(error) => failed.push(json!({
+                    "task_id": task_id,
+                    "attempt": attempt,
+                    "path": candidate["path"],
+                    "error": error
+                })),
+            }
+        }
+        let deleted_total = deleted.len() as u64;
+        let failed_total = failed.len() as u64;
+        let status = if failed_total == 0 { "ok" } else { "partial" };
+        let result = json!({
+            "at": now_stamp(),
+            "phase": "result",
+            "batch_id": batch_id,
+            "deleted": deleted.clone(),
+            "failed": failed.clone(),
+            "deleted_total": deleted_total,
+            "failed_total": failed_total
+        });
+        if let Err(error) = self.append_prune_record(&result) {
+            return Err(format!(
+                "prune_audit_failed: 已删除 {deleted_total} 个、失败 {failed_total} 个；结果行写入 prune.jsonl 失败：{error}"
+            ));
+        }
+
+        Ok(json!({
+            "dry_run": false,
+            "status": status,
+            "batch_id": batch_id,
+            "older_than_days": older_than_days,
+            "evaluated_at": evaluated_at,
+            "limit": limit,
+            "candidates_total": total_candidates,
+            "truncated": truncated,
+            "deleted_total": deleted_total,
+            "failed_total": failed_total,
+            "deleted": deleted,
+            "failed": failed
+        }))
+    }
+
+    /// 计算清理候选：只认 finishedAt、只碰非最新 attempt、不跟随符号链接
+    fn prune_candidates(
+        &self,
+        older_than_days: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> (Vec<Value>, Vec<Value>, usize) {
+        let mut candidates: Vec<Value> = Vec::new();
+        let mut skipped: Vec<Value> = Vec::new();
+        if !self.runs_dir.is_dir() {
+            return (candidates, skipped, 0);
+        }
+        let mut task_ids: Vec<String> = Vec::new();
+        if let Ok(entries) = fs::read_dir(&self.runs_dir) {
+            for entry in entries.flatten() {
+                // file_type 不跟随符号链接：链接不会被当作任务，避免删到 runs 之外的路径
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_dir() {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('_') || name.starts_with('.') || !is_valid_task_id(&name) {
+                    continue;
+                }
+                task_ids.push(name);
+            }
+        }
+        task_ids.sort();
+        let task_count = task_ids.len();
+
+        for task_id in task_ids {
+            let root = self.runs_dir.join(&task_id);
+            let numbers = attempt_numbers(&root);
+            let Some(latest) = numbers.last().copied() else {
+                continue;
+            };
+            // 最新 attempt 永不进入候选：这是"每个 task 至少保留一次 attempt"的落地方式
+            skipped.push(json!({
+                "task_id": task_id.clone(),
+                "attempt": latest,
+                "reason": "latest_attempt_retained"
+            }));
+            for number in numbers.into_iter().filter(|number| *number < latest) {
+                let dir = root.join(format!("attempt-{number}"));
+                let safe = fs::symlink_metadata(&dir)
+                    .map(|meta| meta.file_type().is_dir())
+                    .unwrap_or(false);
+                if !safe {
+                    skipped.push(json!({
+                        "task_id": task_id.clone(),
+                        "attempt": number,
+                        "reason": "unsafe_attempt_path"
+                    }));
+                    continue;
+                }
+                let dispatch = match read_json(&dir.join("dispatch.json")) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        skipped.push(json!({
+                            "task_id": task_id.clone(),
+                            "attempt": number,
+                            "reason": "missing_dispatch"
+                        }));
+                        continue;
+                    }
+                };
+                let handback = match read_json(&dir.join("handback.json")) {
+                    Ok(record) => record,
+                    Err(_) => {
+                        skipped.push(json!({
+                            "task_id": task_id.clone(),
+                            "attempt": number,
+                            "reason": "unfinished_or_missing_handback"
+                        }));
+                        continue;
+                    }
+                };
+                let Some(finished_at) = handback.get("finishedAt").and_then(Value::as_str) else {
+                    skipped.push(json!({
+                        "task_id": task_id.clone(),
+                        "attempt": number,
+                        "reason": "age_unknown"
+                    }));
+                    continue;
+                };
+                let parsed = match chrono::DateTime::parse_from_rfc3339(finished_at) {
+                    Ok(stamp) => stamp.with_timezone(&chrono::Utc),
+                    Err(_) => {
+                        skipped.push(json!({
+                            "task_id": task_id.clone(),
+                            "attempt": number,
+                            "reason": "invalid_finished_at"
+                        }));
+                        continue;
+                    }
+                };
+                if parsed > now {
+                    skipped.push(json!({
+                        "task_id": task_id.clone(),
+                        "attempt": number,
+                        "reason": "future_timestamp"
+                    }));
+                    continue;
+                }
+                let age_days = now.signed_duration_since(parsed).num_days();
+                if age_days < older_than_days as i64 {
+                    skipped.push(json!({
+                        "task_id": task_id.clone(),
+                        "attempt": number,
+                        "reason": "not_old_enough"
+                    }));
+                    continue;
+                }
+                candidates.push(json!({
+                    "task_id": task_id.clone(),
+                    "attempt": number,
+                    "path": format!("runs/{task_id}/attempt-{number}"),
+                    "dispatchedAt": dispatch.get("dispatchedAt").cloned().unwrap_or(Value::Null),
+                    "finishedAt": finished_at,
+                    "age_days": age_days
+                }));
+            }
+        }
+        (candidates, skipped, task_count)
+    }
+
+    /// 整目录搬进 .prune-trash 后再删：重命名失败则原样不动，避免"只删了一半文件"
+    fn delete_attempt_dir(
+        &self,
+        task_id: &str,
+        attempt: u64,
+        batch_id: &str,
+    ) -> Result<(), String> {
+        let source = self.runs_dir.join(task_id).join(format!("attempt-{attempt}"));
+        let stage_root = self.runs_dir.join(".prune-trash").join(batch_id);
+        fs::create_dir_all(&stage_root)
+            .map_err(|error| format!("创建暂存目录失败：{error}"))?;
+        let staged = stage_root.join(format!("{task_id}-attempt-{attempt}"));
+        fs::rename(&source, &staged).map_err(|error| {
+            format!("整体移动失败（attempt 原样未动）：{error}")
+        })?;
+        fs::remove_dir_all(&staged).map_err(|error| {
+            format!("已整链移至 runs/.prune-trash/{batch_id}，但删除暂存失败（数据未丢）：{error}")
+        })?;
+        // 本批暂存目录空了就顺手移除；失败不影响结果
+        let _ = fs::remove_dir(&stage_root);
+        Ok(())
+    }
+
+    /// 审计落盘：append-only JSONL，写一行并 fsync；失败必须让调用方看到
+    fn append_prune_record(&self, record: &Value) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.runs_dir.join("prune.jsonl");
+        let line = serde_json::to_string(record)
+            .map_err(|error| format!("prune_audit_failed: 序列化审计记录失败：{error}"))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| format!("prune_audit_failed: 打开 runs/prune.jsonl 失败：{error}"))?;
+        writeln!(file, "{line}")
+            .map_err(|error| format!("prune_audit_failed: 写入 runs/prune.jsonl 失败：{error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("prune_audit_failed: 同步 runs/prune.jsonl 失败：{error}"))?;
+        Ok(())
     }
 
     /// 单个任务的只读摘要：只给状态与 env 键名，不回显 env 值
@@ -939,6 +1275,21 @@ fn tools() -> Value {
                     "offset": { "type": "integer", "minimum": 0, "description": "跳过多少条，默认 0" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本页条数，默认 20" }
                 },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "runs.prune",
+            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。系统内没有定时/启动自动清理",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt；不提供默认阈值" },
+                    "dry_run": { "type": "boolean", "description": "默认 true：只列候选、不删不写；false 表示要求真删（还需 confirm=true）" },
+                    "confirm": { "type": "boolean", "description": "默认 false：真删必须显式 true；单独 true 不隐含真删" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 20" }
+                },
+                "required": ["older_than_days"],
                 "additionalProperties": false
             }
         }

@@ -463,7 +463,7 @@ CI 重跑 → 通过 → 通知用户
 │   └── 后端 (Rust, 单进程) — 不启动、也不调用 aw-mcp-bridge
 ├── aw-mcp-bridge (独立 Rust 二进制, 手工 cargo run -p aw-mcp-bridge 启动)
 │   ├── MCP over stdio, 不监听任何端口
-│   ├── tools: health / status / task.execute / receipt.get / runs.list
+│   ├── tools: health / status / task.execute / receipt.get / runs.list / runs.prune
 │   └── 证据落盘 runs/<task_id>/attempt-N/ (stdout.txt, stderr.txt, dispatch.json, handback.json)
 ├── Docker Desktop (必需, 沙箱执行)
 │   └── agentwork/sandbox:0.1 (按任务启动/销毁)

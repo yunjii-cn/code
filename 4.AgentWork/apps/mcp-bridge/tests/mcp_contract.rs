@@ -69,8 +69,15 @@ fn tools_list_exposes_read_and_execution_tools() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert_eq!(
         names,
-        vec!["health", "status", "task.execute", "receipt.get", "runs.list"],
-        "执行层至少需要接单、回执读取与只读枚举三个入口"
+        vec![
+            "health",
+            "status",
+            "task.execute",
+            "receipt.get",
+            "runs.list",
+            "runs.prune"
+        ],
+        "执行层至少需要接单、回执读取、只读枚举与显式清理四个入口"
     );
     for tool in tools {
         assert!(
@@ -1978,4 +1985,468 @@ fn legacy_timeout_reason_is_returned_verbatim_and_not_rewritten() {
     );
     let after = fs::read_to_string(attempt.join("handback.json")).expect("重读旧回执");
     assert_eq!(after, handback, "旧回执文件不得被改写");
+}
+
+// ---- runs.prune：默认不删、两段式、只删非最新 attempt（v1.12）----
+
+fn days_ago_stamp(days: i64) -> String {
+    (chrono::Utc::now() - chrono::Duration::days(days))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn days_ahead_stamp(days: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::days(days))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// 构造一个 attempt 目录：`write_handback=false` 表示未完成（只有 dispatch 与日志）；
+/// `finished_at=None` 且 `write_handback=true` 表示回执存在但缺字段（v1.6 之前的旧记录）
+fn prune_attempt(
+    runs: &Path,
+    task_id: &str,
+    attempt: u64,
+    write_handback: bool,
+    finished_at: Option<&str>,
+    with_dispatch: bool,
+) -> PathBuf {
+    let dir = runs.join(task_id).join(format!("attempt-{attempt}"));
+    fs::create_dir_all(&dir).expect("创建 attempt 目录");
+    if with_dispatch {
+        fs::write(
+            dir.join("dispatch.json"),
+            json!({
+                "task_id": task_id,
+                "cmd": "echo prune-fixture",
+                "cwd": ".",
+                "timeout_secs": 120,
+                "env": { "SECRET_TOKEN": "sha256:prune-fixture" },
+                "path_prepend": [],
+                "dispatchedAt": "2026-01-01T00:00:00Z"
+            })
+            .to_string(),
+        )
+        .expect("写入 dispatch.json");
+    }
+    if write_handback {
+        let mut record = json!({
+            "task_id": task_id,
+            "attempt": attempt,
+            "status": "ok",
+            "exit_code": 0
+        });
+        if let Some(stamp) = finished_at {
+            record["finishedAt"] = json!(stamp);
+        }
+        fs::write(dir.join("handback.json"), record.to_string()).expect("写入 handback.json");
+    }
+    fs::write(dir.join("stdout.txt"), "stdout-fixture").expect("写入 stdout");
+    fs::write(dir.join("stderr.txt"), "stderr-fixture").expect("写入 stderr");
+    dir
+}
+
+#[test]
+fn prune_defaults_to_dry_run_and_lists_candidates_without_writing() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt(runs.path(), "t-old", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-old", 2, true, Some(&old), true);
+    fs::create_dir_all(runs.path().join("_session")).expect("创建审计目录");
+    let entries_before = fs::read_dir(runs.path()).expect("读 runs").count();
+
+    let response = call_tool(&server, "runs.prune", json!({ "older_than_days": 30 }));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "dry-run 应成功：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["dry_run"], true, "未传 dry_run 时必须默认 dry-run");
+    assert_eq!(payload["state"], "ready");
+    assert_eq!(payload["older_than_days"], 30);
+    assert_eq!(payload["candidates_total"], 1);
+    assert_eq!(payload["truncated"], false);
+
+    let candidates = payload["candidates"]
+        .as_array()
+        .expect("candidates 必须是数组");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["task_id"], "t-old");
+    assert_eq!(candidates[0]["attempt"], 1, "最新 attempt 永不进入候选");
+    assert_eq!(candidates[0]["path"], "runs/t-old/attempt-1");
+    assert_eq!(candidates[0]["finishedAt"], old);
+    assert_eq!(candidates[0]["dispatchedAt"], "2026-01-01T00:00:00Z");
+    assert!(
+        candidates[0]["age_days"].as_i64().unwrap_or(0) >= 30,
+        "年龄必须按 finishedAt 计算：{payload}"
+    );
+
+    let skipped = payload["skipped"].as_array().expect("skipped 必须是数组");
+    assert!(
+        skipped.iter().any(|item| item["task_id"] == "t-old"
+            && item["attempt"] == 2
+            && item["reason"] == "latest_attempt_retained"),
+        "必须写明最新 attempt 被保留：{payload}"
+    );
+
+    assert!(
+        !runs.path().join("prune.jsonl").exists(),
+        "dry-run 不得写审计"
+    );
+    assert!(
+        runs.path().join("t-old").join("attempt-1").is_dir(),
+        "dry-run 不得删目录"
+    );
+    assert!(runs.path().join("t-old").join("attempt-2").is_dir());
+    assert!(
+        runs.path().join("_session").is_dir(),
+        "不得动 _ 前缀目录"
+    );
+    assert_eq!(
+        fs::read_dir(runs.path()).expect("读 runs").count(),
+        entries_before,
+        "dry-run 必须零写入"
+    );
+}
+
+#[test]
+fn prune_keeps_latest_attempt_and_single_attempt_tasks_and_records_audit() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt(runs.path(), "t-old", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-old", 2, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-one", 1, true, Some(&old), true);
+    fs::create_dir_all(runs.path().join("_session")).expect("创建审计目录");
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "全部成功时不得报错：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["deleted_total"], 1);
+    assert_eq!(payload["failed_total"], 0);
+    assert_eq!(payload["deleted"][0]["task_id"], "t-old");
+    assert_eq!(payload["deleted"][0]["attempt"], 1);
+
+    assert!(
+        !runs.path().join("t-old").join("attempt-1").exists(),
+        "旧的非最新 attempt 应被删除"
+    );
+    assert!(
+        runs.path().join("t-old").join("attempt-2").is_dir(),
+        "最新 attempt 必须保留"
+    );
+    assert!(
+        runs.path()
+            .join("t-old")
+            .join("attempt-2")
+            .join("handback.json")
+            .is_file(),
+        "整链必须一致（回执仍在）"
+    );
+    assert!(
+        runs.path().join("t-one").join("attempt-1").is_dir(),
+        "只有一个 attempt 的 task 永远删不掉"
+    );
+    assert!(runs.path().join("_session").is_dir());
+
+    let audit = fs::read_to_string(runs.path().join("prune.jsonl"))
+        .expect("真实删除必须写审计");
+    let lines: Vec<&str> = audit.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "每批必须 plan + result 两行：{audit}");
+    let plan: Value = serde_json::from_str(lines[0]).expect("plan 行必须是 JSON");
+    let result: Value = serde_json::from_str(lines[1]).expect("result 行必须是 JSON");
+    assert_eq!(plan["phase"], "plan", "第一行必须是删除之前的计划");
+    assert_eq!(plan["older_than_days"], 30);
+    assert_eq!(plan["candidate_count"], 1);
+    assert_eq!(plan["candidates"][0]["finishedAt"], old);
+    assert_eq!(plan["candidates"][0]["dispatchedAt"], "2026-01-01T00:00:00Z");
+    assert_eq!(result["phase"], "result");
+    assert_eq!(result["batch_id"], plan["batch_id"], "两行必须同批次");
+    assert_eq!(result["deleted_total"], 1);
+    assert_eq!(result["failed_total"], 0);
+    assert!(
+        !audit.contains("SECRET_TOKEN"),
+        "审计不得记录 env 键值：{audit}"
+    );
+
+    let list = runs_list_payload(&server, json!({}));
+    let task = list["tasks"]
+        .as_array()
+        .expect("tasks 必须是数组")
+        .iter()
+        .find(|item| item["task_id"] == "t-old")
+        .cloned()
+        .expect("t-old 仍应在列");
+    assert_eq!(task["attempts"], 1, "runs.list 必须反映真实目录数");
+    assert_eq!(task["latest_attempt"], 2);
+}
+
+#[test]
+fn prune_refuses_real_delete_without_confirm_or_threshold() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt(runs.path(), "t-guard", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-guard", 2, true, Some(&old), true);
+
+    let no_confirm = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false }),
+    );
+    assert_eq!(no_confirm["result"]["isError"], true);
+    assert!(
+        tool_text(&no_confirm).contains("confirm_required"),
+        "必须有 confirm_required：{}",
+        tool_text(&no_confirm)
+    );
+
+    let no_threshold = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "dry_run": false, "confirm": true }),
+    );
+    assert_eq!(no_threshold["result"]["isError"], true);
+    assert!(
+        tool_text(&no_threshold).contains("invalid_retention"),
+        "必须要求显式阈值：{}",
+        tool_text(&no_threshold)
+    );
+
+    let bad_threshold = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 0, "dry_run": false, "confirm": true }),
+    );
+    assert_eq!(bad_threshold["result"]["isError"], true);
+    assert!(tool_text(&bad_threshold).contains("invalid_retention"));
+
+    // confirm 单独出现不隐含真删：仍是 dry-run
+    let confirm_only = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "confirm": true }),
+    );
+    assert_eq!(confirm_only["result"]["isError"], false);
+    assert_eq!(tool_payload(&confirm_only)["dry_run"], true);
+
+    assert!(
+        !runs.path().join("prune.jsonl").exists(),
+        "任何拒绝路径都不得写审计"
+    );
+    assert!(
+        runs.path().join("t-guard").join("attempt-1").is_dir(),
+        "拒绝路径不得删除任何目录"
+    );
+}
+
+#[test]
+fn prune_skips_age_unknown_unfinished_future_and_missing_dispatch() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    let young = days_ago_stamp(5);
+    let future = days_ahead_stamp(5);
+
+    // 回执存在但缺 finishedAt（v1.6 之前的记录）
+    prune_attempt(runs.path(), "t-legacy", 1, true, None, true);
+    prune_attempt(runs.path(), "t-legacy", 2, true, Some(&old), true);
+    // 未完成：只有 dispatch，没有回执
+    prune_attempt(runs.path(), "t-unfinished", 1, false, None, true);
+    prune_attempt(runs.path(), "t-unfinished", 2, true, Some(&old), true);
+    // 时间戳在未来（时钟异常）
+    prune_attempt(runs.path(), "t-future", 1, true, Some(&future), true);
+    prune_attempt(runs.path(), "t-future", 2, true, Some(&old), true);
+    // 缺 dispatch：年龄可判但一致性无法证明
+    prune_attempt(runs.path(), "t-nodispatch", 1, true, Some(&old), false);
+    prune_attempt(runs.path(), "t-nodispatch", 2, true, Some(&old), true);
+    // 未达阈值
+    prune_attempt(runs.path(), "t-young", 1, true, Some(&young), true);
+    prune_attempt(runs.path(), "t-young", 2, true, Some(&old), true);
+
+    let payload = tool_payload(&call_tool(&server, "runs.prune", json!({ "older_than_days": 10 })));
+    assert_eq!(payload["dry_run"], true);
+    assert_eq!(
+        payload["candidates_total"], 0,
+        "未知年龄 / 未完成 / 异常时间一律不删：{payload}"
+    );
+    assert_eq!(payload["candidates"].as_array().map(Vec::len), Some(0));
+
+    let skipped = payload["skipped"].as_array().expect("skipped 必须是数组");
+    let reason_of = |task: &str, attempt: u64| -> String {
+        skipped
+            .iter()
+            .find(|item| item["task_id"] == task && item["attempt"] == attempt)
+            .and_then(|item| item["reason"].as_str())
+            .unwrap_or_else(|| panic!("缺少跳过记录 {task}/attempt-{attempt}：{payload}"))
+            .to_string()
+    };
+    assert_eq!(reason_of("t-legacy", 1), "age_unknown");
+    assert_eq!(reason_of("t-unfinished", 1), "unfinished_or_missing_handback");
+    assert_eq!(reason_of("t-future", 1), "future_timestamp");
+    assert_eq!(reason_of("t-nodispatch", 1), "missing_dispatch");
+    assert_eq!(reason_of("t-young", 1), "not_old_enough");
+}
+
+#[test]
+fn prune_limit_is_deterministic_and_resumable() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    for task in ["t-a", "t-b", "t-c"] {
+        prune_attempt(runs.path(), task, 1, true, Some(&old), true);
+        prune_attempt(runs.path(), task, 2, true, Some(&old), true);
+    }
+
+    let dry = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "limit": 1 }),
+    ));
+    assert_eq!(dry["candidates_total"], 3);
+    assert_eq!(dry["truncated"], true);
+    assert_eq!(
+        dry["candidates"][0]["task_id"], "t-a",
+        "必须按 (task_id, attempt) 升序"
+    );
+
+    let first = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "limit": 1, "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(first["deleted_total"], 1);
+    assert!(!runs.path().join("t-a").join("attempt-1").exists());
+    assert!(
+        runs.path().join("t-b").join("attempt-1").is_dir(),
+        "单批上限外不得删"
+    );
+
+    let second = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "limit": 1, "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(second["deleted_total"], 1);
+    assert!(!runs.path().join("t-b").join("attempt-1").exists());
+    assert!(
+        runs.path().join("t-c").join("attempt-1").is_dir(),
+        "下一批留给下一次调用"
+    );
+    assert!(
+        runs.path().join("t-c").join("attempt-2").is_dir(),
+        "最新 attempt 始终保留"
+    );
+}
+
+#[test]
+fn prune_does_not_create_runs_dir_when_missing() {
+    let settings = TempDir::new().expect("创建设置目录");
+    let parent = TempDir::new().expect("创建父目录");
+    let missing = parent.path().join("runs");
+    let server = Server::with_runs_dir(settings.path().join("settings.json"), missing.clone());
+
+    let dry = call_tool(&server, "runs.prune", json!({ "older_than_days": 30 }));
+    assert_eq!(dry["result"]["isError"], false);
+    let payload = tool_payload(&dry);
+    assert_eq!(payload["state"], "missing");
+    assert_eq!(payload["candidates_total"], 0);
+    assert!(!missing.exists(), "dry-run 不得创建 runs 目录");
+
+    let real = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
+    );
+    assert_eq!(real["result"]["isError"], false);
+    assert_eq!(tool_payload(&real)["deleted_total"], 0);
+    assert!(
+        !missing.exists(),
+        "无候选时不得创建任何目录（含 .prune-trash）"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn prune_partial_failure_is_reported_as_partial_without_retry() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt(runs.path(), "t-partial", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-partial", 2, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-partial", 3, true, Some(&old), true);
+
+    // 以"不带 FILE_SHARE_DELETE"的方式占住 attempt-1 里的文件：
+    // 目录重命名可能成功，但对文件的删除会被拒绝 → 制造真实的"删一半"失败
+    let attempt_one = runs.path().join("t-partial").join("attempt-1");
+    let locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(attempt_one.join("stdout.txt"))
+        .expect("以独占共享模式打开文件");
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "删一半不得报成功：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "partial");
+    assert_eq!(payload["deleted_total"], 1);
+    assert_eq!(payload["failed_total"], 1);
+    assert_eq!(payload["failed"][0]["attempt"], 1);
+    assert!(
+        !payload["failed"][0]["error"].as_str().unwrap_or("").is_empty(),
+        "失败必须带原因：{payload}"
+    );
+    assert!(
+        !runs.path().join("t-partial").join("attempt-2").exists(),
+        "成功项应已删除"
+    );
+
+    // 失败项不得丢数据、也不得只留下半条链：要么原样在原位，要么整链在 .prune-trash
+    let dispatch_at_source = attempt_one.join("dispatch.json").is_file();
+    let handback_at_source = attempt_one.join("handback.json").is_file();
+    assert_eq!(
+        dispatch_at_source, handback_at_source,
+        "失败项不得留下孤立的半个 attempt"
+    );
+    let staged_ok = fs::read_dir(runs.path().join(".prune-trash"))
+        .map(|entries| {
+            entries.flatten().any(|batch| {
+                fs::read_dir(batch.path()).map_or(false, |staged| {
+                    staged.flatten().any(|item| {
+                        item.path().join("dispatch.json").is_file()
+                            && item.path().join("handback.json").is_file()
+                    })
+                })
+            })
+        })
+        .unwrap_or(false);
+    assert!(
+        (dispatch_at_source && handback_at_source) || staged_ok,
+        "失败项必须整链保留（原位或 .prune-trash）"
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(
+        attempt_one.join("dispatch.json").is_file(),
+        dispatch_at_source,
+        "不得自动重试"
+    );
+
+    drop(locked);
 }
