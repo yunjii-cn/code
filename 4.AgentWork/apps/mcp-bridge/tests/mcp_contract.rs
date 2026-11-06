@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 use tempfile::TempDir;
 
 fn server_with_settings(content: Option<&str>) -> (Server, TempDir) {
@@ -5644,5 +5645,209 @@ fn standalone_argv_scan_records_unknown_forms_instead_of_silently_passing() {
             .contains("%USERPROFILE%"),
         "必须记录原样参数：{}",
         unknown[0]
+    );
+}
+
+// ---- v1.30：prune 与执行并发防护 ----
+
+fn inflight_marker(runs: &Path, task_id: &str) -> PathBuf {
+    runs.join(".inflight").join(format!("{task_id}.json"))
+}
+
+/// 执行期间必须存在跨进程可见的活跃标记；结束后必须删除；标记目录不得被当成任务
+#[test]
+fn standalone_inflight_marker_is_visible_then_removed() {
+    let (server, _settings, runs) = server_with_runs();
+    let server = Arc::new(server);
+    let cwd = Arc::new(temp_git_dir());
+    let arguments = json!({
+        "task_id": "sa-inflight",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": slow_write_file_argv("marker.txt", "ok"),
+        "acceptance": [{ "type": "file_exists", "path": "marker.txt" }],
+        "max_attempts": 1
+    });
+    let worker = Arc::clone(&server);
+    let handle = std::thread::spawn(move || {
+        tool_payload(&call_tool(&worker, "task.execute", arguments))
+    });
+
+    let marker = inflight_marker(runs.path(), "sa-inflight");
+    let mut seen = false;
+    for _ in 0..200 {
+        if marker.exists() {
+            seen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(seen, "执行期间必须有 runs/.inflight/sa-inflight.json");
+    let record = read_json_at(&marker);
+    assert_eq!(record["task_id"], "sa-inflight", "{record}");
+    assert!(record["pid"].as_u64().is_some(), "标记必须带 pid：{record}");
+    assert!(
+        record["startedAt"].as_str().is_some() && record["deadlineAt"].as_str().is_some(),
+        "标记必须带时间窗：{record}"
+    );
+
+    let listed = runs_list_payload(&server, json!({}));
+    assert!(
+        listed["tasks"]
+            .as_array()
+            .unwrap_or_else(|| panic!("tasks：{listed}"))
+            .iter()
+            .all(|task| task["task_id"] != ".inflight"),
+        ".inflight 不得被当作任务：{listed}"
+    );
+    let dry = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30 }),
+    ));
+    assert!(
+        !dry["candidates"]
+            .as_array()
+            .unwrap_or_else(|| panic!("candidates：{dry}"))
+            .iter()
+            .any(|candidate| candidate["task_id"] == ".inflight"),
+        ".inflight 不得进入 prune 候选：{dry}"
+    );
+
+    let payload = handle.join().expect("执行线程不应 panic");
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert!(!marker.exists(), "任务结束后必须删除活跃标记：{payload}");
+}
+
+/// prune 看到活跃标记必须跳过该任务，即使该 task 有超龄的非最新 attempt
+#[test]
+fn prune_skips_task_with_live_inflight_marker() {
+    let (server, _settings, runs) = server_with_runs();
+    prune_attempt(runs.path(), "sa-prune-inflight", 1, true, Some(&days_ago_stamp(30)), true);
+    prune_attempt(runs.path(), "sa-prune-inflight", 2, false, None, true);
+    let marker = inflight_marker(runs.path(), "sa-prune-inflight");
+    fs::create_dir_all(marker.parent().expect("标记目录")).expect("创建标记目录");
+    fs::write(
+        &marker,
+        json!({
+            "version": "inflight-marker/1",
+            "task_id": "sa-prune-inflight",
+            "pid": std::process::id(),
+            "mode": "standalone",
+            "startedAt": days_ago_stamp(0),
+            "deadlineAt": days_ahead_stamp(1)
+        })
+        .to_string(),
+    )
+    .expect("写入标记");
+
+    let dry = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30 }),
+    ));
+    assert!(
+        dry["skipped"]
+            .as_array()
+            .unwrap_or_else(|| panic!("dry-run 必须给出 skipped：{dry}"))
+            .iter()
+            .any(|entry| entry["task_id"] == "sa-prune-inflight"
+                && entry["reason"] == "task_inflight"
+                && entry["inflight"]["stale"] == false),
+        "必须具名记录 task_inflight 跳过：{dry}"
+    );
+    let payload = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(payload["deleted_total"], 0, "活跃任务不得被删：{payload}");
+    assert_eq!(payload["candidates_total"], 0, "活跃任务不得进入候选：{payload}");
+    assert!(
+        attempt_dir(&runs, "sa-prune-inflight", 1).exists(),
+        "active 标记存在时 attempt-1 必须原样保留"
+    );
+}
+
+/// 活跃 attempt 目录被外部删除后，必须给出 attempt_dir_lost，不得静默 ok
+#[test]
+fn standalone_active_attempt_deleted_is_reported_not_silent_ok() {
+    let (server, _settings, runs) = server_with_runs();
+    let server = Arc::new(server);
+    let cwd = Arc::new(temp_git_dir());
+    let arguments = json!({
+        "task_id": "sa-vanish",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": slow_write_file_argv("vanish.txt", "ok"),
+        "acceptance": [{ "type": "exit_code", "expected": 0 }],
+        "max_attempts": 1
+    });
+    let handle = std::thread::spawn(move || {
+        call_tool(&server, "task.execute", arguments)
+    });
+
+    let dir = attempt_dir(&runs, "sa-vanish", 1);
+    for _ in 0..200 {
+        if dir.join("stdout.txt").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(dir.exists(), "执行线程必须先创建 attempt-1");
+    std::thread::sleep(Duration::from_millis(300));
+    let mut removed = false;
+    for _ in 0..20 {
+        if fs::remove_dir_all(&dir).is_ok() {
+            removed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(removed, "测试夹具必须能在运行中删除 attempt 目录");
+
+    let response = handle.join().expect("执行线程不应 panic");
+    assert_eq!(
+        response["result"]["isError"], true,
+        "目录消失后不得报告成功：{}",
+        tool_text(&response)
+    );
+    assert!(
+        tool_text(&response).contains("attempt_dir_lost"),
+        "必须具名报告 attempt_dir_lost：{}",
+        tool_text(&response)
+    );
+}
+
+/// 全部记录被外部清理后重跑同一 task_id：必须能看出这是重跑，而不是既有结果回放
+#[test]
+fn standalone_rerun_after_records_removed_is_marked() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = temp_git_dir();
+    let arguments = json!({
+        "task_id": "sa-pruned-rerun",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": write_file_argv("rerun.txt", "hello"),
+        "acceptance": [{ "type": "file_exists", "path": "rerun.txt" }],
+        "max_attempts": 1
+    });
+    let first = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
+    assert_eq!(first["replay_basis"], "fresh", "首次执行必须是 fresh：{first}");
+
+    fs::remove_dir_all(runs.path().join("sa-pruned-rerun")).expect("删除全部记录");
+    let rerun = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
+    assert_eq!(
+        rerun["replay_basis"], "rerun_after_records_missing",
+        "记录消失后的新执行必须可被识别：{rerun}"
+    );
+    assert_eq!(rerun["prior_attempts"], 1, "{rerun}");
+    assert_eq!(rerun["attempt"], 1, "重跑从 attempt-1 开始：{rerun}");
+
+    let replay = tool_payload(&call_tool(&server, "task.execute", arguments));
+    assert_eq!(replay["replayed"], true, "{replay}");
+    assert_eq!(
+        replay["replay_basis"], "rerun_after_records_missing",
+        "既有结果回放必须保留重跑标注：{replay}"
     );
 }

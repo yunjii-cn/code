@@ -2665,6 +2665,131 @@ B 回执关键字段：`"replayed":false`、`"status":"ok"`、`"finishedAt":"202
 - 未在 POSIX 上重跑本组并发场景；Windows Job Object 语义是本轮唯一实测平台。
 - 本轮未改 `tools/list` 描述，`tools_sha256` 仍为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`。
 
+## 29. v1.30：`runs.prune` 与 AW 执行的并发防护实证
+
+### 29.1 结论（按文件/字段判定）
+
+| 问题 | 实测结论 | 判据 |
+|---|---|---|
+| AW 写 attempt 时持路径还是句柄 | stdout/stderr 是**句柄**（交给子进程持续写）；JSON 证据全部是**按路径短写** | 运行中 rename 活跃 attempt 目录 → `PermissionError: [WinError 5] 拒绝访问`，目录原地未动、`.prune-trash` 未产生；AW 回执 `ok` |
+| rename 后继续写会怎样 | **Windows 上 rename 先被 OS 拒绝**，不存在"写进 trash"；若目录被删除（允许），句柄仍有效但按路径读证据失败 | 运行中 `shutil.rmtree(attempt-1)` 成功，AW 回执 `isError=true`、`attempt_dir_lost`，`attempt-1` 不存在 |
+| 完成文件里有没有"活跃"字段 | **没有**；`handback` / `verdict` / `standalone-result` 都只在结束时写，`dispatch.json` 存在但不含完成态 | 新增 `runs/.inflight/<task_id>.json`：运行时 `seen=true`，`pid=90384`、`startedAt=2026-11-06T20:28:26Z`、`deadlineAt=20:29:56Z`；结束后 `exists_after=false` |
+| prune 与执行并发 | `runs.prune` 看到标记即跳过整个 task，**不进候选、不删除** | 6-2 场景（attempt-1 failed、attempt-2 运行中）dry 的 `skipped[0].reason="task_inflight"`、`inflight.stale=false`、`candidates_total=0`；delete 的 `deleted[]` 只有无关的 `r-a/r-b/r-c`，`attempt-1` 保留 |
+| 被清理后的重跑 | `replay_basis=rerun_after_records_missing`，可区分于既有结果回放 | 首次 `fresh`；删除 task 目录后再调 → `rerun_after_records_missing` + `prior_attempts=1`；第三次 → `replayed=true` 且保留该标注 |
+
+### 29.2 先红：HEAD `ad98d19` 上的原始失败（断言未放宽）
+
+做法：`git worktree add --detach D:\Temp\aw-v130-red HEAD`，只把本轮 `tests/mcp_contract.rs` 放入工作树，`CARGO_TARGET_DIR` 复用现有 target；跑完 `worktree remove --force`。
+
+```text
+thread 'standalone_inflight_marker_is_visible_then_removed' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5685:5:
+执行期间必须有 runs/.inflight/sa-inflight.json
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 105 filtered out; finished in 4.37s
+```
+
+```text
+thread 'prune_skips_task_with_live_inflight_marker' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5749:5:
+必须具名记录 task_inflight 跳过：{"batch_candidates_total":1,"candidates":[{"age_days":30,"attempt":1,...,"task_id":"sa-prune-inflight"}],"candidates_total":1,"dry_run":true,...,"skipped":[{"attempt":2,"reason":"latest_attempt_retained","task_id":"sa-prune-inflight"}],...}
+```
+
+```text
+thread 'standalone_active_attempt_deleted_is_reported_not_silent_ok' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5815:5:
+必须具名报告 attempt_dir_lost：{"error":"读取证据失败：系统找不到指定的路径。 (os error 3)"}
+```
+
+```text
+thread 'standalone_rerun_after_records_removed_is_marked' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5836:5:
+assertion `left == right` failed: 首次执行必须是 fresh：{...,"attempt":1,...,"replayed":false,...}
+  left: Null
+ right: "fresh"
+```
+
+红点：旧代码无活跃标记、无台账字段；目录消失时虽然 `isError=true`，但错误文案是通用的"读取证据失败"，外部无法据此判断是并发清理；prune 会把 `sa-prune-inflight/attempt-1` 当成正常候选（`batch_candidates_total=1`）。
+
+### 29.3 转绿与回归
+
+`cargo test -p aw-mcp-bridge`：`10 passed; 0 failed`（lib）+ `107 passed; 0 failed`（integration，含本轮新增 4 条）。新增用例：
+
+- `standalone_inflight_marker_is_visible_then_removed`
+- `prune_skips_task_with_live_inflight_marker`
+- `standalone_active_attempt_deleted_is_reported_not_silent_ok`
+- `standalone_rerun_after_records_removed_is_marked`
+
+### 29.4 真实 stdio 多进程回执
+
+夹具：`target\debug\aw-mcp-bridge.exe`（v1.30 重建），共享 `target\debug\runs`，工作目录 `D:\Temp\aw-v130-live\work`；每个场景独立进程、各自 `initialize`，prune 由第二个进程发起。
+
+**a) 活跃标记（`v130marker`，运行时读取原文）**
+
+```text
+{"deadlineAt":"2026-11-06T20:29:56.679097800+00:00","mode":"standalone","pid":90384,"startedAt":"2026-11-06T20:28:26Z","state":"active","task_id":"v130marker","version":"inflight-marker/1"}
+```
+
+任务结束后：`exists_after=false`，`runs/v130marker/` 只有 `attempt-1` 与 `standalone-result.json`。
+
+**b) attempt-2 运行中，prune 跳过（`v130pruneactive`）**
+
+dry-run 原文（截取该 task）：
+
+```text
+{"attempt":2,"inflight":{"deadlineAt":"2026-11-06T20:30:29.358120300+00:00","mode":"standalone","pid":146380,"stale":false,"startedAt":"2026-11-06T20:28:29Z","state":"active","task_id":"v130pruneactive","version":"inflight-marker/1"},"reason":"task_inflight","task_id":"v130pruneactive"}
+```
+
+delete 模式：`deleted[] = [("r-a",1,"deleted"),("r-b",1,"deleted"),("r-c",1,"deleted")]`（无关的旧夹具），`candidates_total=3`，**不含 `v130pruneactive`**；`v130pruneactive/attempt-1` 保留，`attempt-2` 回执：
+
+```text
+{"attempt":2,"attempts_total":2,"exit_code":0,"finishedAt":"2026-11-06T20:28:33Z","replay_basis":"fresh","replayed":false,"status":"ok","task_id":"v130pruneactive"}
+```
+
+**c) 对照：完成后无标记，同一 attempt 立即成为候选并被删**
+
+把 `attempt-1/handback.json` 的 `finishedAt` 改为 `2026-09-27T18:07:31Z`（40 天前），再跑 prune：
+
+```text
+dry candidates: [('v130pruneactive', 1, 40)]
+dry skipped(v130): [{'attempt': 2, 'reason': 'latest_attempt_retained'}]
+deleted(v130): [('v130pruneactive', 1, 'deleted')]
+attempt dirs after: ['attempt-2', 'standalone-result.json']
+```
+
+这证明 b) 的拦截来自活跃标记，而不是"该 attempt 本来就不合格"。
+
+**d) 运行中删除活跃 attempt（`v130vanish`）**
+
+```text
+{"error":"attempt_dir_lost: attempt 目录在写入过程中消失或被改名（可能被 runs.prune 或外部清理移动）：E:\\软件开发\\云集编程工作站\\4.AgentWork\\target\\debug\\runs\\v130vanish\\attempt-1；本次执行结果不可信，未报告 ok"}
+```
+
+`isError=true`，`attempt` 目录不存在，结束后标记也不存在。**不会静默成功**。
+
+**e) 运行中 rename 活跃 attempt（`v130rename`）**
+
+```text
+rename_error = PermissionError: [WinError 5] 拒绝访问。: '...\runs\v130rename\attempt-1' -> '...\runs\.prune-trash\manual-v130rename'
+attempt_exists = True, trash_exists = False, AW isError = false
+```
+
+目录原地未动，AW 正常完成（`ok`）；不存在"rename 成功、句柄继续写入 trash"。
+
+**f) 记录全部被清理后的重跑（`v130rerun`）**
+
+```text
+first : replay_basis=fresh,                        prior_attempts=0, replayed=False, attempt=1
+second: replay_basis=rerun_after_records_missing,  prior_attempts=1, replayed=False, attempt=1
+third : replay_basis=rerun_after_records_missing,  prior_attempts=1, replayed=True,  attempt=1
+```
+
+删除 task 目录后再调不会假装是既有结果；台账 `runs/.task-history/v130rerun.json` 保留上次 `attempts=1` / `lastFinishedAt`。
+
+### 29.5 未覆盖与限制（如实标注）
+
+- **POSIX 未实测**：Windows 的"rename 被 OS 拒绝"是平台语义；POSIX 下目录 rename 可能成功，句柄写入会跟到新路径，因此必须依赖标记 + 删除方读标记。
+- **TOCTOU 仍存在**：标记检查与 rename/delete 非原子。使用 AW 的 `runs.prune` 已被覆盖；自研删除方若不读 `runs/.inflight/<task_id>.json`，竞争窗口仍在。AW 的写完复核只能保证"不静默 ok"，不能阻止返回后的外部删除。
+- **残留标记**：pid 已消失且超过 `startedAt + 5s` 判残留；prune 仍保守跳过并标 `task_inflight_stale`，直到下一次 AW 调用清理。未做"prune 自动清残留"（避免与同时启动的新调用抢占删除）。
+- **台账盲区**：删除方若连 `runs/.task-history` 一起清理，或 task 从未被 AW 执行过（在 AW 外伪造 `runs/`），无法判定为重跑。
+- 同 id 并发与 prune 的组合只做了 b) 这一种时序（attempt-2 运行窗口约 2s）；未做高频压力循环。
+- 本轮未改 `tools/list` 描述，`tools_sha256` 仍为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`。
+
 
 
 

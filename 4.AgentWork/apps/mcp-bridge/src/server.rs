@@ -12,6 +12,13 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "aw-mcp-bridge";
 /// 会话审计目录名：以 _ 开头，与合法 task_id（必须字母或数字开头）不可能撞名
 const SESSION_DIR: &str = "_session";
+/// 活跃标记目录：以 . 开头，`is_task_dir_name` 会排除它，runs.list / runs.prune 不会把它当任务
+const INFLIGHT_DIR: &str = ".inflight";
+/// 任务历史台账目录：即使 task 目录被整体清理，这里仍保留"曾经存在过"的事实
+const TASK_HISTORY_DIR: &str = ".task-history";
+const INFLIGHT_VERSION: &str = "inflight-marker/1";
+/// 标记过期宽限：超过 deadlineAt 且 pid 已不可见才判定为残留
+const INFLIGHT_STALE_GRACE_SECS: i64 = 120;
 
 // 由 build.rs 注入，缺失时为 "unknown"（不使用当前时间兜底，保证可复现构建）
 pub const BUILD_TIME: &str = env!("AW_BUILD_TIME");
@@ -700,7 +707,22 @@ impl Server {
         for task_id in task_ids {
             let root = self.runs_dir.join(&task_id);
             let numbers = attempt_numbers(&root);
-            let Some(latest) = numbers.last().copied() else {
+            let latest = numbers.last().copied();
+            // 活跃标记优先于一切候选条件：即使有超龄非最新 attempt，也不在本次 prune 中删除
+            if let Some(snapshot) = self.inflight_snapshot(&task_id) {
+                let stale = snapshot
+                    .get("stale")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                skipped.push(json!({
+                    "task_id": task_id.clone(),
+                    "attempt": latest,
+                    "reason": if stale { "task_inflight_stale" } else { "task_inflight" },
+                    "inflight": snapshot
+                }));
+                continue;
+            }
+            let Some(latest) = latest else {
                 continue;
             };
             // 最新 attempt 永不进入候选：这是"每个 task 至少保留一次 attempt"的落地方式
@@ -943,6 +965,113 @@ impl Server {
         })
     }
 
+    /// 跨进程活跃标记：`create_new` 原子占位；已存在且未过期说明另一个进程在跑，本次只读不删。
+    /// 只有创建者在本进程退出/返回/报错时删除（Drop），异常退出留下的标记由 pid + 时间判定残留。
+    fn acquire_inflight_marker(
+        &self,
+        task_id: &str,
+        mode: &str,
+        args: &Value,
+    ) -> Result<Option<InflightGuard>, String> {
+        let dir = self.runs_dir.join(INFLIGHT_DIR);
+        fs::create_dir_all(&dir).map_err(|error| {
+            format!("inflight_marker_failed: 创建活跃标记目录失败：{error}")
+        })?;
+        let path = dir.join(format!("{task_id}.json"));
+        let deadline = inflight_deadline(args, mode);
+        for _ in 0..3 {
+            let record = json!({
+                "version": INFLIGHT_VERSION,
+                "task_id": task_id,
+                "pid": std::process::id(),
+                "mode": mode,
+                "state": "active",
+                "startedAt": now_stamp(),
+                "deadlineAt": deadline
+            });
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    if let Err(error) = file
+                        .write_all(serde_json::to_string(&record).unwrap_or_default().as_bytes())
+                        .and_then(|_| file.sync_all())
+                    {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("inflight_marker_failed: 写入活跃标记失败：{error}"));
+                    }
+                    return Ok(Some(InflightGuard { path }));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    match read_json(&path) {
+                        Ok(existing) if marker_is_stale(&existing, chrono::Utc::now()) => {
+                            // 残留：清理后重试占位；并发清理时由 create_new 决出唯一持有者
+                            let _ = fs::remove_file(&path);
+                            continue;
+                        }
+                        _ => return Ok(None),
+                    }
+                }
+                Err(error) => {
+                    return Err(format!("inflight_marker_failed: 创建活跃标记失败：{error}"))
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// 只读快照：给 prune 与外部调用方判断"该 task 是否有活跃执行"，不改动标记
+    fn inflight_snapshot(&self, task_id: &str) -> Option<Value> {
+        let path = self.runs_dir.join(INFLIGHT_DIR).join(format!("{task_id}.json"));
+        let mut record = read_json(&path).ok()?;
+        let stale = marker_is_stale(&record, chrono::Utc::now());
+        if let Some(object) = record.as_object_mut() {
+            object.insert("stale".to_string(), json!(stale));
+        }
+        Some(record)
+    }
+
+    /// 历史台账：task 目录被整体清理后，仍能凭它判定"这是重跑而不是既有结果"
+    fn read_task_history(&self, task_id: &str) -> Option<Value> {
+        read_json(
+            &self
+                .runs_dir
+                .join(TASK_HISTORY_DIR)
+                .join(format!("{task_id}.json")),
+        )
+        .ok()
+    }
+
+    /// 更新历史台账：失败不影响执行结果（台账是防误判元数据，不是执行证据）
+    fn record_task_history(&self, task_id: &str, attempts: u64, status: &str, finished_at: &str) {
+        let dir = self.runs_dir.join(TASK_HISTORY_DIR);
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let first_seen = self
+            .read_task_history(task_id)
+            .and_then(|record| {
+                record
+                    .get("firstSeenAt")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(now_stamp);
+        let record = json!({
+            "version": "task-history/1",
+            "task_id": task_id,
+            "firstSeenAt": first_seen,
+            "updatedAt": now_stamp(),
+            "attempts": attempts,
+            "lastStatus": status,
+            "lastFinishedAt": finished_at
+        });
+        let _ = write_json_file(&dir.join(format!("{task_id}.json")), &record);
+    }
+
     /// 接单执行：命令与判据由派单方给出，AW 只运行并产出可审计回执
     ///
     /// 幂等口径：task_id 即派单标识。同参重投复用既有 attempt（零执行、零新目录）；
@@ -954,7 +1083,11 @@ impl Server {
                 "task_id 非法（需以字母或数字开头，仅含字母数字 . _ -，长度 ≤64）：{task_id}"
             ));
         }
-        match standalone_mode(args)? {
+        let standalone = standalone_mode(args)?;
+        let mode = if standalone { "standalone" } else { "dispatched" };
+        // 活跃标记覆盖整个调用生命周期：正常返回、提前报错、被阻断都会在 Drop 时删除
+        let _inflight = self.acquire_inflight_marker(task_id, mode, args)?;
+        match standalone {
             false => self.execute_dispatched(args, task_id),
             true => self.execute_standalone(args, task_id),
         }
@@ -1254,6 +1387,12 @@ impl Server {
         };
         let task_root = self.runs_dir.join(task_id);
         let signature = spec.signature(task_id);
+        // 目录已不存在时先读台账：有历史说明此前的全部记录被外部清理，本次是重跑而非回放
+        let prior_history = if task_root.exists() {
+            None
+        } else {
+            self.read_task_history(task_id)
+        };
 
         if task_root.exists() {
             return self.replay_standalone(
@@ -1265,6 +1404,11 @@ impl Server {
             );
         }
         fs::create_dir_all(&task_root).map_err(|e| format!("创建运行目录失败：{e}"))?;
+        let replay_basis = if prior_history.is_some() {
+            "rerun_after_records_missing"
+        } else {
+            "fresh"
+        };
 
         for attempt in 1..=spec.max_attempts {
             let run_dir = task_root.join(format!("attempt-{attempt}"));
@@ -1301,6 +1445,17 @@ impl Server {
                 "mode": "standalone",
                 "task_id": task_id,
                 "attempt": attempt,
+                "replay_basis": replay_basis,
+                "prior_attempts": prior_history
+                    .as_ref()
+                    .and_then(|record| record.get("attempts"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                "prior_last_finished_at": prior_history
+                    .as_ref()
+                    .and_then(|record| record.get("lastFinishedAt"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
                 "decided_at": now_stamp(),
                 "verdict": conclusion,
                 "acceptance": spec.acceptance,
@@ -1343,12 +1498,24 @@ impl Server {
             } else {
                 None
             };
+            let finished_at = now_stamp();
             let mut handback = json!({
                 "task_id": task_id,
                 "attempt": attempt,
                 "mode": "standalone",
                 "replayed": false,
-                "finishedAt": now_stamp(),
+                "replay_basis": replay_basis,
+                "prior_attempts": prior_history
+                    .as_ref()
+                    .and_then(|record| record.get("attempts"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                "prior_last_finished_at": prior_history
+                    .as_ref()
+                    .and_then(|record| record.get("lastFinishedAt"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "finishedAt": finished_at,
                 "status": status,
                 "changed_files": changed_files,
                 "changed_files_truncated": changed_files_truncated,
@@ -1393,9 +1560,17 @@ impl Server {
                 write_handback(&run_dir, &handback)?;
                 // 最终结果标记：重投据此回放，避免把中间失败尝试误当成最终结论
                 write_json_file(&task_root.join(STANDALONE_RESULT), &handback)?;
+                // 外部若在本 attempt 写入期间把它移走/删掉，这里必须报错而不是把内存里的 ok 返回
+                ensure_standalone_attempt_records(&run_dir)?;
+                if !task_root.join(STANDALONE_RESULT).is_file() {
+                    return Err(attempt_dir_lost_message(&run_dir));
+                }
+                self.record_task_history(task_id, attempt, status, &finished_at);
                 return Ok(handback);
             }
             write_handback(&run_dir, &handback)?;
+            ensure_standalone_attempt_records(&run_dir)?;
+            self.record_task_history(task_id, attempt, status, &finished_at);
         }
         Err(format!(
             "standalone_retry_exhausted_without_result: task_id `{task_id}` 的尝试循环没有产出终止判定"
@@ -3365,6 +3540,115 @@ fn component_key(component: Component<'_>) -> String {
     }
 }
 
+/// 活跃标记的 RAII 守卫：任何正常返回、提前报错、阻断都会在 Drop 时删除标记
+struct InflightGuard {
+    path: PathBuf,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// 标记的有效期上限：覆盖胜者可能跑满的 timeout * max_attempts，再留 60s 收尾余量
+fn inflight_deadline(args: &Value, mode: &str) -> String {
+    let timeout = args
+        .get("timeout_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(120);
+    let attempts = if mode == "standalone" {
+        args.get("max_attempts")
+            .and_then(Value::as_u64)
+            .unwrap_or(3)
+            .clamp(1, 10)
+    } else {
+        1
+    };
+    let total = timeout
+        .saturating_mul(attempts)
+        .saturating_add(60)
+        .clamp(60, 86_400);
+    (chrono::Utc::now() + chrono::Duration::seconds(total as i64)).to_rfc3339()
+}
+
+/// 残留判定：pid 仍存活 → 绝不判残留；pid 已消失 → 5s 后判残留；无 pid 时退回 deadline + 宽限
+fn marker_is_stale(record: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
+    let started = record
+        .get("startedAt")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc));
+    if let Some(pid) = record.get("pid").and_then(Value::as_u64) {
+        if process_is_alive(pid as u32) {
+            return false;
+        }
+        return match started {
+            Some(started) => now > started + chrono::Duration::seconds(5),
+            None => true,
+        };
+    }
+    let deadline = record
+        .get("deadlineAt")
+        .and_then(Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc));
+    deadline
+        .map(|deadline| now > deadline + chrono::Duration::seconds(INFLIGHT_STALE_GRACE_SECS))
+        .unwrap_or(true)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        let _ = CloseHandle(handle);
+        ok != 0 && code as i32 == STILL_ACTIVE
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
+/// 写完后复核 attempt 的关键文件仍在：目录被外部移走/删除时必须报错，不能把内存中的 ok 返回
+fn ensure_standalone_attempt_records(run_dir: &Path) -> Result<(), String> {
+    for name in [
+        "dispatch.json",
+        "verdict.json",
+        "handback.json",
+        "stdout.txt",
+        "stderr.txt",
+    ] {
+        if !run_dir.join(name).is_file() {
+            return Err(attempt_dir_lost_message(run_dir));
+        }
+    }
+    Ok(())
+}
+
+fn attempt_dir_lost_message(run_dir: &Path) -> String {
+    format!(
+        "attempt_dir_lost: attempt 目录在写入过程中消失或被改名（可能被 runs.prune 或外部清理移动）：{}；本次执行结果不可信，未报告 ok",
+        run_dir.display()
+    )
+}
+
 /// 回放既有结果时标注来源：existing=调用时已完成，waited=等待并发胜者落盘
 fn standalone_replay_receipt(mut receipt: Value, kind: &str) -> Value {
     if let Some(object) = receipt.as_object_mut() {
@@ -3454,8 +3738,24 @@ fn run_standalone_command(
         }
     };
     let duration_ms = started.elapsed().as_millis() as u64;
-    let stdout_digest = digest_file(&stdout_path)?;
-    let stderr_digest = digest_file(&stderr_path)?;
+    // 目录在子进程运行期间被移走/删除时，按路径读证据会失败；必须具名报 attempt_dir_lost
+    if !run_dir.is_dir() {
+        return Err(attempt_dir_lost_message(run_dir));
+    }
+    let stdout_digest = digest_file(&stdout_path).map_err(|error| {
+        if !run_dir.is_dir() {
+            attempt_dir_lost_message(run_dir)
+        } else {
+            error
+        }
+    })?;
+    let stderr_digest = digest_file(&stderr_path).map_err(|error| {
+        if !run_dir.is_dir() {
+            attempt_dir_lost_message(run_dir)
+        } else {
+            error
+        }
+    })?;
     let (stdout_preview, stdout_bytes, stdout_truncated) = file_preview(&stdout_path);
     let (stderr_preview, stderr_bytes, stderr_truncated) = file_preview(&stderr_path);
     let blocked_reason = spawn_error
