@@ -1,8 +1,8 @@
-# PM → AW 派单与回执契约 v1.21
+# PM → AW 派单与回执契约 v1.22
 
-状态：v1.21。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
+状态：v1.22。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现**
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**
 
 ## 0. 结论
 
@@ -328,7 +328,14 @@
 - 落点：`runs/prune.jsonl`，append-only JSONL；`runs.list` 只列目录，因此该文件不会出现在任务列表里。
 - **真删（`dry_run=false` + `confirm=true`）且候选非空时**，每批追加两行，共享 `batch_id`：
   1. `phase="plan"`：**删除之前**写入并 `fsync`。字段：`at`（UTC）、`batch_id`、`older_than_days`、`candidate_count`、`candidates[]`（`task_id` / `attempt` / `path` / `dispatchedAt` / `finishedAt` / `age_days`）。
-  2. `phase="result"`：删除结束后写入。字段：`at`、`batch_id`、`deleted[]`、`failed[]`（含错误原因）、`deleted_total`、`failed_total`。
+  2. `phase="result"`：删除结束后写入。字段：`at`、`batch_id`、`older_than_days`、`status_filter`、`limit`、`deleted[]`、`failed[]`、`trashed[]`、`deleted_total`、`failed_total`、`trashed_total`。
+- **删除回执（v1.22，纯加法；旧字段全部保留、不改名、不删除）**：
+  - `deleted[]`：**唯一**表示"已从 `runs/` 移除"的集合。每条除保留 `task_id`/`attempt`/`path`/`status`/`dispatchedAt`/`finishedAt`/`age_days` 外，新增 `state="deleted"`、`source_path`、`trash_path`、`deleted_at`、`rule`、`fingerprint`。
+  - `failed[]`：**仍在原路径**的失败项，`state="retained_at_source"`、`trash_path=null`，同样带 `source_path`/`error`/`rule`/`fingerprint`。
+  - `trashed[]`：**已整链移入 `.prune-trash` 但未删掉**的失败项，`state="trashed_not_deleted"`、`trash_path` 指向暂存路径，同样带 `rule`/`fingerprint`。
+  - `rule` 逐条自包含：`older_than_days` / `status_filter` / `limit` / `batch_id` 与批次一致，跨批次核对不回连顶层。
+  - `fingerprint`：`status` / `finishedAt` / `dispatchedAt` / `handback_sha256` / `dispatch_sha256` / `bytes{handback,dispatch,total}`；sha256 与字节数均在**删除前**读出计算；文件缺失写 `null`（不编造）。
+  - 语义由代码保证：`failed[]`/`trashed[]` 的 `state` 只能来自 `RetainedState`（`retained_at_source` / `trashed_not_deleted`），构造不出 `deleted`；`.prune-trash` 里的一切都不算删除；三集合互斥，`deleted_total + failed_total + trashed_total = 本批候选数`。
 - **先记账后删除**：`plan` 行写不进去（目录不可写、磁盘满）→ **放弃本轮删除**，返回工具错误，一个目录都不删。禁止"删完再记"。
 - 崩溃可对账：只有 `plan` 没有 `result` = "已记录、未完成"，人工按清单核对；两行都在 = 可回答"删了什么、凭什么时候删的"。
 - `dry_run=true` 或候选为空时**不写审计**（没有发生删除，也就不该产生删除记录）。
@@ -340,9 +347,9 @@
 
 | 项 | 规则 |
 |---|---|
-| 部分失败 | 某个 attempt 的暂存重命名或删除失败 → 继续处理其余候选，返回 `status="partial"`、`deleted_total`、`failed_total` 与逐项错误；工具响应 `isError=true`。失败项要么**原样未动**（重命名失败），要么**整链留在 `.prune-trash/`**（删除失败，数据未丢）。**不许把"删了一半"报成成功** |
+| 部分失败 | 某个 attempt 的暂存重命名或删除失败 → 继续处理其余候选，返回 `status="partial"`、`deleted_total`、`failed_total`、`trashed_total` 与逐项错误；工具响应 `isError=true`。失败项要么**原样未动**（`state="retained_at_source"`），要么**整链留在 `.prune-trash/`**（`state="trashed_not_deleted"`，数据未丢）。**不许把"删了一半"报成成功**，也不许把两种未删除状态报成 `deleted` |
 | 不重试 | **不自动重试**任何删除；失败项只能由调用方下一次显式调用重新评估 |
-| 记账失败 | `plan` 行写失败 → 不删；`result` 行写失败 → 删除已发生，返回工具错误并明写"已删除 N 个、失败 M 个，结果行写入失败"，不得声称成功 |
+| 记账失败 | `plan` 行写失败 → 不删；`result` 行写失败 → 删除已发生，返回工具错误并明写"已删除 N 个、失败 M 个、暂存 K 个，结果行写入失败"，不得声称成功 |
 | 非删除类错误 | 参数非法（`invalid_retention` / `confirm_required`）在**任何写入之前**拒绝 |
 
 ### 8.7 与权威性的关系（对 §7 的补充）
@@ -463,3 +470,4 @@
 | v1.19 | 2026-11-06 | **按 PM 口径校正 `runs.prune` 默认包络（不改任何删除条件）**：推荐阈值校正为 **365 天**（不再使用上一版的临时值），`limit` 缺省 **20→100**；明确"先 `dry_run=true` 预览，再 `dry_run=false` + `confirm=true` 真删"；**不分档**；`ok=30` / `failed=180` / `blocked=365` 保留为"未实现、需另立契约"的历史参考，**不作为推荐**；`older_than_days` 仍必填、缺省仍 `invalid_retention`；其余默认决策（§10）不变；**`#3` 仍 `NOT_PROVEN`，W2c 不重开** |
 | v1.20 | 2026-11-06 | **在 W2d 基础上继续收窄 Windows `spawn → Assign` 窗口（落地 W2a，不改判据、不重开 W2c）**：子进程以 `CREATE_SUSPENDED` 创建，先 `AssignProcessToJobObject` 再恢复主线程，恢复前不执行任何代码，因此“窗口内派生作业外后代”对后代不再成立；恢复失败时终止进程并记 `process_resume_failed`，不把“从未执行”当成命令结果；Windows 回执与 `tools/list` 描述同步改为“挂起态创建、先入作业再恢复执行”，残余逃逸为 `BREAKAWAY` / 加入作业失败 / 嵌套作业；判据（`ActiveProcesses == 0`、`kill(-pgid,0)==ESRCH`）与“逃逸未验证”口径**不放宽**；**`#3` 仍 `NOT_PROVEN`**。证据：Windows 新增 `suspended_start_defers_execution_until_job_assign` 实跑（先红后绿，`marker_before_assign=false`、`ActiveProcesses_before_terminate=Some(2)`、`terminate=Cleaned`、`after=Some(0)`），POSIX 3 unit + 64 integration 复跑通过 |
 | v1.21 | 2026-11-06 | **实现 `runs.prune.status` 状态多值白名单（按 `RUNS-PRUNE-STATUS-TIER-PROPOSAL.md`，§8.10）**：`status` 为可选字符串数组，元素只能是 `ok` / `failed` / `blocked`，**显式传入才生效**，缺省 = 不过滤、候选集合与 v1.20 完全一致；与 `older_than_days` 为 **AND**，`limit` 在状态过滤**之后**生效；空数组 / `null` / 非数组 / 未知值一律 `invalid_retention`（占号前拒绝，**零删除、零审计落盘**）；**无默认状态、无服务端档位**（不存在 `tier` 参数，`tier` 与其他未知键仍按 `additionalProperties:false` 声明性忽略）；最新 attempt 永不删、两段式确认（`dry_run` 缺省 / `confirm`）与"先写 `runs/prune.jsonl` 再删除"不变；传入 `status` 时，回执缺 `status` 或值不认识 → `skipped: status_unknown`（不删），不在白名单 → `skipped: status_mismatch`（不删）；`tools/list` 的 `runs.prune` 新增 `status` schema（`array` / `minItems=1` / `uniqueItems` / `items.enum`），**PM 必须先确认 schema 含 `status` 才可携带并真删**（旧服务端会静默忽略 `status` 从而多删）；plan / result / audit 行均记录 `status_filter` / `older_than_days` / `limit` / `batch_id`；证据：提案附 23 条用例先红后绿实跑（Windows 6 组全绿，POSIX 同套减去 Windows-only 的 case 20）；**分档（`ok=30` / `failed=180` / `blocked=365`）仍未实现**，`#3` 仍 `NOT_PROVEN` |
+| v1.22 | 2026-11-06 | **删除回执自包含可核对（按 §19 建议形状，纯加法：旧字段全部保留、不改名、不删除）**：`deleted[]` 每条新增 `state="deleted"`、`source_path`、`trash_path`、`deleted_at`、`rule`（`older_than_days`/`status_filter`/`limit`/`batch_id`，逐条自包含）、`fingerprint`（`status`/`finishedAt`/`dispatchedAt`/`handback_sha256`/`dispatch_sha256`/`bytes{handback,dispatch,total}`，sha256 与字节数在**删除前**算出，缺文件写 `null`）；`failed[]` 新增 `source_path`/`state="retained_at_source"`/`trash_path=null`/`rule`/`fingerprint`；新增 `trashed[]`（`state="trashed_not_deleted"`，整链已移入 `.prune-trash` 但未删掉）与 `trashed_total`；三集合互斥，`deleted+failed+trashed = 候选数`；**语义由代码保证**：`failed[]`/`trashed[]` 的 `state` 只能来自 `RetainedState` 枚举（构造不出 `deleted`），`.prune-trash` 里的一切都不算删除；删除后重跑无幽灵候选的行为不变。证据：`prune_receipt_deleted_entries_carry_fingerprint_and_rule` 先红后绿（删前 sha256/字节数与回执逐字比对）、Windows partial 用例扩断言（`retained_at_source` + `trash_path=null` + 无 `deleted` 字样）、单元用例锁定 `RetainedState` 与缺文件 `null`；Windows 6 unit + 74 integration、POSIX 5 unit + 72 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN` |

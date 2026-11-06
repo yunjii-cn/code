@@ -1,6 +1,7 @@
 // aw-mcp-bridge 契约测试：以 MCP 客户端的视角驱动最小服务器
 use aw_mcp_bridge::Server;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
@@ -3063,6 +3064,52 @@ fn prune_status_partial_failure_is_reported_as_partial() {
     assert_eq!(payload["failed_total"], 1, "case 20");
     assert_eq!(payload["failed"][0]["attempt"], 1, "case 20");
     assert_eq!(payload["status_filter"], json!(["failed"]), "case 20");
+    let failed = &payload["failed"][0];
+    assert_eq!(
+        failed["state"], "retained_at_source",
+        "case 20：失败项必须显式标注仍在原处"
+    );
+    assert_eq!(failed["source_path"], "runs/t-partial/attempt-1", "case 20");
+    assert_eq!(
+        failed["trash_path"],
+        Value::Null,
+        "case 20：未移动过的失败项 trash_path 必须为 null"
+    );
+    assert_eq!(failed["rule"]["older_than_days"], 30, "case 20");
+    assert_eq!(failed["rule"]["status_filter"], json!(["failed"]), "case 20");
+    assert_eq!(failed["rule"]["batch_id"], payload["batch_id"], "case 20");
+    assert!(
+        failed["fingerprint"]["handback_sha256"].as_str().is_some(),
+        "case 20：失败项也要带删除前指纹"
+    );
+    assert!(attempt_one.is_dir(), "case 20：失败项不得离开原路径");
+    assert_eq!(payload["trashed_total"], 0, "case 20");
+    assert!(
+        payload["trashed"].as_array().expect("trashed").is_empty(),
+        "case 20"
+    );
+    assert_eq!(
+        payload["deleted"][0]["state"], "deleted",
+        "case 20：唯一表示已移除的集合"
+    );
+    assert!(
+        payload["deleted"][0]["fingerprint"]["handback_sha256"]
+            .as_str()
+            .is_some(),
+        "case 20：deleted 必须带指纹"
+    );
+    for item in payload["failed"]
+        .as_array()
+        .expect("failed")
+        .iter()
+        .chain(payload["trashed"].as_array().expect("trashed").iter())
+    {
+        assert_ne!(item["state"], "deleted", "case 20：failed/trashed 不得自称已删除");
+        assert!(
+            !item.to_string().to_lowercase().contains("\"deleted\""),
+            "case 20：failed/trashed 条目不得出现 deleted 字样：{item}"
+        );
+    }
     println!("[case 20] status 过滤下 partial 仍 partial + isError=true，其余照删 PASS");
 }
 
@@ -3464,6 +3511,102 @@ fn prune_rerun_after_delete_has_no_phantom_candidates_or_skips() {
             .any(|item| item["attempt"] == 1 || item["attempt"] == 2),
         "已删 attempt 不得出现在 skipped：{again}"
     );
+}
+
+/// 删除回执自包含：每条 deleted 都带指纹（删除前算好）、trash_path、deleted_at 与整批 rule。
+#[test]
+fn prune_receipt_deleted_entries_carry_fingerprint_and_rule() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(400);
+    prune_attempt_status(runs.path(), "t-fp", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-fp", 2, Some("ok"), Some(&old), true);
+
+    let handback = runs.path().join("t-fp").join("attempt-1").join("handback.json");
+    let dispatch = runs.path().join("t-fp").join("attempt-1").join("dispatch.json");
+    let handback_bytes = fs::read(&handback).expect("读 handback");
+    let dispatch_bytes = fs::read(&dispatch).expect("读 dispatch");
+    let handback_sha = hex::encode(Sha256::digest(&handback_bytes));
+    let dispatch_sha = hex::encode(Sha256::digest(&dispatch_bytes));
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "older_than_days": 365,
+            "status": ["failed"],
+            "limit": 100,
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    let payload = tool_payload(&response);
+    let batch = payload["batch_id"].as_str().expect("batch_id").to_string();
+    assert_eq!(payload["deleted_total"], 1, "{}", tool_text(&response));
+    let item = &payload["deleted"][0];
+
+    // 旧字段全部保留
+    assert_eq!(item["task_id"], "t-fp");
+    assert_eq!(item["attempt"], 1);
+    assert_eq!(item["path"], "runs/t-fp/attempt-1");
+    assert_eq!(item["status"], "failed");
+    assert_eq!(item["finishedAt"], old);
+    assert!(item["dispatchedAt"].as_str().is_some());
+    assert!(item["age_days"].as_u64().is_some());
+
+    // 新增字段：状态、去向、时间、整批 rule
+    assert_eq!(item["state"], "deleted");
+    assert_eq!(item["source_path"], "runs/t-fp/attempt-1");
+    assert_eq!(
+        item["trash_path"].as_str(),
+        Some(format!("runs/.prune-trash/{batch}/t-fp-attempt-1").as_str())
+    );
+    assert!(item["deleted_at"].as_str().is_some(), "deleted_at 必须逐条给出");
+    assert_eq!(item["rule"]["older_than_days"], 365);
+    assert_eq!(item["rule"]["status_filter"], json!(["failed"]));
+    assert_eq!(item["rule"]["limit"], 100);
+    assert_eq!(item["rule"]["batch_id"], batch);
+
+    // 指纹：删除前算出的真实 sha256 与字节数
+    let fingerprint = &item["fingerprint"];
+    assert_eq!(
+        fingerprint["handback_sha256"].as_str(),
+        Some(handback_sha.as_str()),
+        "handback sha256 必须与删除前文件一致：{item}"
+    );
+    assert_eq!(
+        fingerprint["dispatch_sha256"].as_str(),
+        Some(dispatch_sha.as_str()),
+        "dispatch sha256 必须与删除前文件一致：{item}"
+    );
+    assert_eq!(
+        fingerprint["bytes"]["handback"].as_u64(),
+        Some(handback_bytes.len() as u64)
+    );
+    assert_eq!(
+        fingerprint["bytes"]["dispatch"].as_u64(),
+        Some(dispatch_bytes.len() as u64)
+    );
+    assert_eq!(
+        fingerprint["bytes"]["total"].as_u64(),
+        Some((handback_bytes.len() + dispatch_bytes.len()) as u64)
+    );
+    assert_eq!(fingerprint["status"], "failed");
+    assert_eq!(fingerprint["finishedAt"], old);
+    assert!(fingerprint["dispatchedAt"].as_str().is_some());
+
+    // 本批无失败、无暂存：两个集合必须存在且为零
+    assert_eq!(payload["failed_total"], 0);
+    assert_eq!(payload["trashed_total"], 0);
+    assert!(payload["trashed"].as_array().expect("trashed").is_empty());
+
+    // 删除后重跑仍无幽灵候选
+    let again = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 365, "limit": 100 }),
+    ));
+    assert_eq!(again["candidates_total"], 0, "{}", tool_text(&again));
+    assert_eq!(again["skipped_total"], 1);
 }
 
 #[test]

@@ -411,8 +411,10 @@ impl Server {
                 "truncated": truncated,
                 "deleted_total": 0,
                 "failed_total": 0,
+                "trashed_total": 0,
                 "deleted": [],
-                "failed": []
+                "failed": [],
+                "trashed": []
             }));
         }
 
@@ -437,22 +439,86 @@ impl Server {
 
         let mut deleted: Vec<Value> = Vec::new();
         let mut failed: Vec<Value> = Vec::new();
+        let mut trashed: Vec<Value> = Vec::new();
+        // 每条条目自包含整批 rule，跨批次核对不必回连顶层
+        let rule = json!({
+            "older_than_days": older_than_days,
+            "status_filter": status_filter_json.clone(),
+            "limit": limit,
+            "batch_id": batch_id.clone()
+        });
         for candidate in &batch {
             let task_id = candidate["task_id"].as_str().unwrap_or_default().to_string();
             let attempt = candidate["attempt"].as_u64().unwrap_or_default();
+            let source_path = candidate["path"].as_str().unwrap_or_default().to_string();
+            let attempt_dir = self
+                .runs_dir
+                .join(&task_id)
+                .join(format!("attempt-{attempt}"));
+            // 指纹在删除前算出；文件不存在时写 null，不编造
+            let (handback_sha, handback_bytes) =
+                file_sha256_and_len(&attempt_dir.join("handback.json"));
+            let (dispatch_sha, dispatch_bytes) =
+                file_sha256_and_len(&attempt_dir.join("dispatch.json"));
+            let total_bytes = match (handback_bytes, dispatch_bytes) {
+                (Some(handback), Some(dispatch)) => json!(handback + dispatch),
+                _ => Value::Null,
+            };
+            let fingerprint = json!({
+                "status": candidate["status"],
+                "finishedAt": candidate["finishedAt"],
+                "dispatchedAt": candidate["dispatchedAt"],
+                "handback_sha256": handback_sha,
+                "dispatch_sha256": dispatch_sha,
+                "bytes": {
+                    "handback": handback_bytes,
+                    "dispatch": dispatch_bytes,
+                    "total": total_bytes
+                }
+            });
             match self.delete_attempt_dir(&task_id, attempt, &batch_id) {
-                Ok(()) => deleted.push(candidate.clone()),
-                Err(error) => failed.push(json!({
-                    "task_id": task_id,
-                    "attempt": attempt,
-                    "path": candidate["path"],
-                    "error": error
-                })),
+                DeleteOutcome::Deleted { trash_path } => {
+                    let mut item = candidate.clone();
+                    if let Some(object) = item.as_object_mut() {
+                        object.insert("state".into(), json!("deleted"));
+                        object.insert("source_path".into(), json!(source_path));
+                        object.insert("trash_path".into(), json!(trash_path));
+                        object.insert("deleted_at".into(), json!(now_stamp()));
+                        object.insert("rule".into(), rule.clone());
+                        object.insert("fingerprint".into(), fingerprint);
+                    }
+                    deleted.push(item);
+                }
+                DeleteOutcome::RetainedAtSource { error } => failed.push(retained_entry(
+                    RetainedState::AtSource,
+                    &task_id,
+                    attempt,
+                    &source_path,
+                    None,
+                    &error,
+                    &rule,
+                    &fingerprint,
+                )),
+                DeleteOutcome::RetainedInTrash { trash_path, error } => trashed.push(retained_entry(
+                    RetainedState::InTrash,
+                    &task_id,
+                    attempt,
+                    &source_path,
+                    Some(&trash_path),
+                    &error,
+                    &rule,
+                    &fingerprint,
+                )),
             }
         }
         let deleted_total = deleted.len() as u64;
         let failed_total = failed.len() as u64;
-        let status = if failed_total == 0 { "ok" } else { "partial" };
+        let trashed_total = trashed.len() as u64;
+        let status = if failed_total + trashed_total == 0 {
+            "ok"
+        } else {
+            "partial"
+        };
         let result = json!({
             "at": now_stamp(),
             "phase": "result",
@@ -462,12 +528,14 @@ impl Server {
             "limit": limit,
             "deleted": deleted.clone(),
             "failed": failed.clone(),
+            "trashed": trashed.clone(),
             "deleted_total": deleted_total,
-            "failed_total": failed_total
+            "failed_total": failed_total,
+            "trashed_total": trashed_total
         });
         if let Err(error) = self.append_prune_record(&result) {
             return Err(format!(
-                "prune_audit_failed: 已删除 {deleted_total} 个、失败 {failed_total} 个；结果行写入 prune.jsonl 失败：{error}"
+                "prune_audit_failed: 已删除 {deleted_total} 个、失败 {failed_total} 个、暂存 {trashed_total} 个；结果行写入 prune.jsonl 失败：{error}"
             ));
         }
 
@@ -483,8 +551,10 @@ impl Server {
             "truncated": truncated,
             "deleted_total": deleted_total,
             "failed_total": failed_total,
+            "trashed_total": trashed_total,
             "deleted": deleted,
-            "failed": failed
+            "failed": failed,
+            "trashed": trashed
         }))
     }
 
@@ -645,26 +715,33 @@ impl Server {
     }
 
     /// 整目录搬进 .prune-trash 后再删：重命名失败则原样不动，避免"只删了一半文件"
-    fn delete_attempt_dir(
-        &self,
-        task_id: &str,
-        attempt: u64,
-        batch_id: &str,
-    ) -> Result<(), String> {
+    fn delete_attempt_dir(&self, task_id: &str, attempt: u64, batch_id: &str) -> DeleteOutcome {
         let source = self.runs_dir.join(task_id).join(format!("attempt-{attempt}"));
         let stage_root = self.runs_dir.join(".prune-trash").join(batch_id);
-        fs::create_dir_all(&stage_root)
-            .map_err(|error| format!("创建暂存目录失败：{error}"))?;
+        if let Err(error) = fs::create_dir_all(&stage_root) {
+            return DeleteOutcome::RetainedAtSource {
+                error: format!("创建暂存目录失败（attempt 原样未动）：{error}"),
+            };
+        }
         let staged = stage_root.join(format!("{task_id}-attempt-{attempt}"));
-        fs::rename(&source, &staged).map_err(|error| {
-            format!("整体移动失败（attempt 原样未动）：{error}")
-        })?;
-        fs::remove_dir_all(&staged).map_err(|error| {
-            format!("已整链移至 runs/.prune-trash/{batch_id}，但删除暂存失败（数据未丢）：{error}")
-        })?;
+        let staged_rel = format!("runs/.prune-trash/{batch_id}/{task_id}-attempt-{attempt}");
+        if let Err(error) = fs::rename(&source, &staged) {
+            return DeleteOutcome::RetainedAtSource {
+                error: format!("整体移动失败（attempt 原样未动）：{error}"),
+            };
+        }
+        if let Err(error) = fs::remove_dir_all(&staged) {
+            let error_text = format!("已整链移至 {staged_rel}，但删除暂存失败（数据未丢）：{error}");
+            return DeleteOutcome::RetainedInTrash {
+                trash_path: staged_rel,
+                error: error_text,
+            };
+        }
         // 本批暂存目录空了就顺手移除；失败不影响结果
         let _ = fs::remove_dir(&stage_root);
-        Ok(())
+        DeleteOutcome::Deleted {
+            trash_path: staged_rel,
+        }
     }
 
     /// 审计落盘：append-only JSONL，写一行并 fsync；失败必须让调用方看到
@@ -1143,6 +1220,72 @@ fn is_valid_task_id(value: &str) -> bool {
 /// 以 `_`（`_session` 等预留目录）或 `.`（`.prune-trash` 等内部目录）开头的名字一律不是任务。
 fn is_task_dir_name(name: &str) -> bool {
     !name.starts_with('_') && !name.starts_with('.') && is_valid_task_id(name)
+}
+
+/// 单次删除的终态：只有 `Deleted` 表示"已从 `runs/` 移除"；其余两种都还在盘上。
+enum DeleteOutcome {
+    Deleted {
+        trash_path: String,
+    },
+    RetainedAtSource {
+        error: String,
+    },
+    RetainedInTrash {
+        trash_path: String,
+        error: String,
+    },
+}
+
+/// 未删除条目的状态：类型层面只可能取这两个值，构造不出 `deleted`
+#[derive(Clone, Copy)]
+enum RetainedState {
+    AtSource,
+    InTrash,
+}
+
+impl RetainedState {
+    fn as_str(self) -> &'static str {
+        match self {
+            RetainedState::AtSource => "retained_at_source",
+            RetainedState::InTrash => "trashed_not_deleted",
+        }
+    }
+}
+
+/// 未删除条目的统一构造入口：`state` 只能来自 `RetainedState`
+fn retained_entry(
+    state: RetainedState,
+    task_id: &str,
+    attempt: u64,
+    source_path: &str,
+    trash_path: Option<&str>,
+    error: &str,
+    rule: &Value,
+    fingerprint: &Value,
+) -> Value {
+    json!({
+        "task_id": task_id,
+        "attempt": attempt,
+        "path": source_path,
+        "source_path": source_path,
+        "state": state.as_str(),
+        "trash_path": trash_path,
+        "error": error,
+        "rule": rule,
+        "fingerprint": fingerprint
+    })
+}
+
+/// 删除前指纹：缺文件时如实写 null，不编造值
+fn file_sha256_and_len(path: &std::path::Path) -> (Value, Option<u64>) {
+    use sha2::{Digest, Sha256};
+    match fs::read(path) {
+        Ok(bytes) => (
+            json!(hex::encode(Sha256::digest(&bytes))),
+            Some(bytes.len() as u64),
+        ),
+        Err(_) => (Value::Null, None),
+    }
 }
 
 fn shell_command(cmd: &str) -> Command {
@@ -2119,5 +2262,64 @@ fn summarize_settings(path: &Path) -> Value {
             "repoPathConfigured": false,
             "aiConfigPresent": false
         }),
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    // 代码保证：未删除条目的 state 只能来自 RetainedState，构造不出 "deleted"
+    #[test]
+    fn retained_entries_never_use_deleted_state() {
+        let rule = json!({
+            "older_than_days": 365,
+            "status_filter": null,
+            "limit": 100,
+            "batch_id": "b-test"
+        });
+        let fingerprint = json!({ "status": "ok", "handback_sha256": "abc" });
+        let at_source = retained_entry(
+            RetainedState::AtSource,
+            "t",
+            1,
+            "runs/t/attempt-1",
+            None,
+            "move failed",
+            &rule,
+            &fingerprint,
+        );
+        let in_trash = retained_entry(
+            RetainedState::InTrash,
+            "t",
+            1,
+            "runs/t/attempt-1",
+            Some("runs/.prune-trash/b-test/t-attempt-1"),
+            "cleanup failed",
+            &rule,
+            &fingerprint,
+        );
+        assert_eq!(at_source["state"], "retained_at_source");
+        assert_eq!(in_trash["state"], "trashed_not_deleted");
+        for entry in [&at_source, &in_trash] {
+            assert_ne!(entry["state"], "deleted", "未删除条目不得自称已删除");
+            assert!(
+                !entry.to_string().to_lowercase().contains("\"deleted\""),
+                "未删除条目不得出现 deleted 字样：{entry}"
+            );
+            assert_eq!(entry["rule"]["batch_id"], "b-test", "rule 必须自包含");
+            assert_eq!(entry["fingerprint"]["status"], "ok");
+        }
+        assert_eq!(at_source["trash_path"], Value::Null);
+        assert!(in_trash["trash_path"].as_str().is_some());
+    }
+
+    // 缺文件时指纹必须写 null，不能编造值
+    #[test]
+    fn missing_files_yield_null_fingerprint_parts() {
+        let missing = std::env::temp_dir().join("aw-fingerprint-no-such-file-0123456789");
+        let (sha, len) = file_sha256_and_len(&missing);
+        assert_eq!(sha, Value::Null);
+        assert_eq!(len, None);
     }
 }

@@ -33,3 +33,5 @@ libc = "0.2.186"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

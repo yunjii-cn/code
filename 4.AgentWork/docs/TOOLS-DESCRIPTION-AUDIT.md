@@ -1027,5 +1027,191 @@ POSIX（verify.sh run）：3 unit + 71 integration，0 failed，四类证据行�
 
 本次改动：`tests/mcp_contract.rs`（+1 条用例）、本文档 §19。**实现未改、契约版本不变、未放宽判据；字段缺口只给建议形状，未改代码；分档仍未实现；`#3` 仍 `NOT_PROVEN`。**
 
+## 20. v1.22 删除回执落地：纯加法字段 + 代码保证（2026-11-06）
+
+### 20.1 版本与改动范围
+
+契约由 v1.21 升到 **v1.22**，纯加法：
+
+- **旧字段全部保留、不改名、不删除**：`task_id` / `attempt` / `path` / `status` / `dispatchedAt` / `finishedAt` / `age_days`、顶层 `deleted_total` / `failed_total`、`failed[].error`、plan 行全部字段。
+- **新增条目级字段**：`state` / `source_path` / `trash_path` / `deleted_at` / `rule` / `fingerprint`。
+- **新增集合与计数**：`trashed[]`、`trashed_total`。
+- `runs.prune` 的入参 schema 未变（无新参数），`tools/list` 描述不改，描述审计基线不因本次变动而变。
+- `.prune-trash` 相关内容仍不进入 `deleted[]`，也不进入任何任务/候选计数。
+
+### 20.2 字段最终形状
+
+`deleted[]` 条目（唯一表示"已从 `runs/` 移除"的集合）：
+
+```json
+{
+  "task_id": "t-fp",
+  "attempt": 1,
+  "path": "runs/t-fp/attempt-1",
+  "status": "failed",
+  "dispatchedAt": "2026-01-01T00:00:00Z",
+  "finishedAt": "2025-10-02T13:12:07Z",
+  "age_days": 400,
+  "state": "deleted",
+  "source_path": "runs/t-fp/attempt-1",
+  "trash_path": "runs/.prune-trash/<batch_id>/t-fp-attempt-1",
+  "deleted_at": "2026-11-06T13:12:07Z",
+  "rule": {
+    "older_than_days": 365,
+    "status_filter": ["failed"],
+    "limit": 100,
+    "batch_id": "<batch_id>"
+  },
+  "fingerprint": {
+    "status": "failed",
+    "finishedAt": "2025-10-02T13:12:07Z",
+    "dispatchedAt": "2026-01-01T00:00:00Z",
+    "handback_sha256": "…",
+    "dispatch_sha256": "…",
+    "bytes": { "handback": 1028, "dispatch": 202, "total": 1230 }
+  }
+}
+```
+
+`failed[]` 条目（`state` 只能是 `retained_at_source`，`trash_path` 恒为 `null`）：
+
+```json
+{
+  "task_id": "…", "attempt": 1,
+  "path": "runs/<task>/attempt-1",
+  "source_path": "runs/<task>/attempt-1",
+  "state": "retained_at_source",
+  "trash_path": null,
+  "error": "…",
+  "rule": { "older_than_days": …, "status_filter": …, "limit": …, "batch_id": … },
+  "fingerprint": { "…与 deleted 同一形状…" }
+}
+```
+
+`trashed[]` 条目（`state` 只能是 `trashed_not_deleted`，`trash_path` 非空）：
+
+```json
+{
+  "task_id": "…", "attempt": 1,
+  "path": "runs/<task>/attempt-1",
+  "source_path": "runs/<task>/attempt-1",
+  "state": "trashed_not_deleted",
+  "trash_path": "runs/.prune-trash/<batch_id>/<task>-attempt-1",
+  "error": "…",
+  "rule": { "…" },
+  "fingerprint": { "…" }
+}
+```
+
+顶层：`deleted_total` / `failed_total` / `trashed_total` 三集合计数，且 `deleted_total + failed_total + trashed_total = 本次实际处理的候选数`；`status` 仅在 `failed_total + trashed_total == 0` 时为 `ok`，否则为 `partial`。
+
+`rule` 在**每一条条目里自包含**（`older_than_days`、`status_filter`、`limit`、`batch_id` 四件套），跨批次核对不需要回连顶层或 `prune.jsonl` 的 plan/result 行。
+
+### 20.3 语义约束由代码保证（可指认位置）
+
+| 约束 | 代码位置 | 机制 |
+|---|---|---|
+| `deleted[]` 是唯一"已移除"集合 | `server.rs` 删除分支 | 只有 `DeleteOutcome::Deleted` 才 push 进 `deleted` 并写入 `state:"deleted"`；`RetainedAtSource` → `failed`，`RetainedInTrash` → `trashed` |
+| 未删除条目不可能自称 `deleted` | `RetainedState` / `retained_entry` | 枚举只有 `AtSource` / `InTrash` 两个取值，`as_str()` 分别返回 `retained_at_source` / `trashed_not_deleted`；未删除条目只能经 `retained_entry(...)` 构造，类型层面构造不出 `"deleted"` |
+| `.prune-trash` 里的一切不算删除 | `is_task_dir_name` | 目录名以 `.` 开头直接排除，`.prune-trash` 不成为任务、不进候选、不进任何计数 |
+| 三集合互斥且穷尽 | 真删循环 | 每个候选恰走一个 `DeleteOutcome` 分支；三个计数各自 `len()`，合计等于本批 `batch.len()` |
+| 部分失败必须报 `partial` | 结果行 | `status = ok` 当且仅当 `failed_total + trashed_total == 0`；`isError=true` |
+| 记账失败文案不误导 | `prune_audit_failed` | 文案为"已删除 N 个、失败 M 个、暂存 K 个" |
+
+对应用例：
+
+- `receipt_tests::retained_entries_never_use_deleted_state`（单元）：`AtSource` / `InTrash` 两种变体逐项断言 `state` 正确、`state != "deleted"`、序列化后不含 `"deleted"` 字样、`rule` 自包含、`trash_path` 只在 `InTrash` 时非空。
+- `receipt_tests::missing_files_yield_null_fingerprint_parts`（单元）：缺文件必须 `(Null, None)`。
+- `prune_rerun_after_delete_has_no_phantom_candidates_or_skips`（集成）：删除后重跑无幽灵候选、无新增 `skipped` 噪声。
+- `prune_receipt_deleted_entries_carry_fingerprint_and_rule`（集成）：旧字段保留 + 六个新字段 + 指纹真实值 + 删除后重跑。
+- `prune_status_partial_failure_is_reported_as_partial`（集成，Windows）：`failed[0]` 的 `state` / `trash_path` / `source_path` / `rule` / `fingerprint` 逐项断言，并断言 `failed[]` 与 `trashed[]` 不含 `state:"deleted"` 或 `"deleted"` 字样。
+
+### 20.4 指纹实现与事后核对
+
+- 在**删除前**对 `attempt-<n>/handback.json` 与 `dispatch.json` 各做一次 `fs::read`，计算 `sha2::Sha256` 与字节数，写进回执的 `fingerprint`；`bytes.total` 仅在两文件都存在时求和。
+- 文件缺失时写 `null`（`handback_sha256` / `dispatch_sha256` / `bytes.handback` / `bytes.dispatch` / `bytes.total`），**不编造值**，也不让删除因此失败。
+- 事后核对口径：拿备份/镜像里的同名文件重算 sha256 与字节数，与回执 `fingerprint` 逐项比对；与 `status` / `finishedAt` / `dispatchedAt` 三项元数据同条给出，避免只对内容不对批次。
+
+### 20.5 真实 MCP 响应原文
+
+沙箱：`runs/` 为生产数据副本 + 探针任务 `probe-receipt`（`attempt-1..3`，`finishedAt=2024-01-01`，状态 `failed/ok/ok`）；真实 `aw-mcp-bridge.exe` 走 stdio JSON-RPC，`older_than_days=365`、`limit=100`、`dry_run=false`、`confirm=true`。
+
+`deleted[0]` 原文（单行，字段顺序为 serde_json Map 顺序，不代表契约顺序）：
+
+```text
+{"age_days":1040,"attempt":1,"deleted_at":"2026-11-06T13:09:51Z","dispatchedAt":"2026-11-05T18:58:51Z","fingerprint":{"bytes":{"dispatch":202,"handback":1028,"total":1230},"dispatch_sha256":"fb034531b3d23cb6c4ce4d68dfe1c781bebb2ad5a46869d0ff2bb4abac3f3f0d","dispatchedAt":"2026-11-05T18:58:51Z","finishedAt":"2024-01-01T00:00:00Z","handback_sha256":"a7e2e98ae0f3d0596d32a32bb01de348220dd441d8321ebdfa282d57a2102fb6","status":"failed"},"finishedAt":"2024-01-01T00:00:00Z","path":"runs/probe-receipt/attempt-1","rule":{"batch_id":"prune-1793970591456-172644","limit":100,"older_than_days":365,"status_filter":null},"source_path":"runs/probe-receipt/attempt-1","state":"deleted","status":"failed","task_id":"probe-receipt","trash_path":"runs/.prune-trash/prune-1793970591456-172644/probe-receipt-attempt-1"}
+```
+
+汇总行：
+
+```text
+deleted_total=2 failed_total=0 trashed_total=0
+```
+
+要点：`state` 与 `path` / `source_path` / `trash_path` 同条给出；`deleted_at` 逐条时间戳；`rule` 自包含本批四件套（本批未带 `status`，故 `status_filter=null`）；指纹三项（`handback` / `dispatch` / `total`）均为真实字节数，sha256 与删除前文件一致。
+
+### 20.6 先红后绿（红原文原样）
+
+红 A：临时去掉 `deleted[]` 条目里的 `fingerprint` 写入（断言未改）：
+
+```text
+running 1 test
+test prune_receipt_deleted_entries_carry_fingerprint_and_rule ... FAILED
+
+failures:
+
+---- prune_receipt_deleted_entries_carry_fingerprint_and_rule stdout ----
+
+
+thread 'prune_receipt_deleted_entries_carry_fingerprint_and_rule' panicked at apps\mcp-bridge\tests\mcp_contract.rs:3571:5:
+assertion `left == right` failed: handback sha256 必须与删除前文件一致：{"age_days":400,"attempt":1,"deleted_at":"2026-11-06T13:12:07Z","dispatchedAt":"2026-01-01T00:00:00Z","finishedAt":"2025-10-02T13:12:07Z","path":"runs/t-fp/attempt-1","rule":{"batch_id":"prune-1793970727624-146604","limit":100,"older_than_days":365,"status_filter":["failed"]},"source_path":"runs/t-fp/attempt-1","state":"deleted","status":"failed","task_id":"t-fp","trash_path":"runs/.prune-trash/prune-1793970727624-146604/t-fp-attempt-1"}
+  left: None
+ right: Some("874f5223ed39df10c850b2f8dc966f29920acc2dc1d5dae940dd4f25eaaf9a29")
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 73 filtered out; finished in 0.02s
+```
+
+红 B：临时把 `RetainedState::AtSource` 的 `as_str()` 改成返回 `"deleted"`（断言未改）：
+
+```text
+running 1 test
+test server::receipt_tests::retained_entries_never_use_deleted_state ... FAILED
+
+---- server::receipt_tests::retained_entries_never_use_deleted_state stdout ----
+
+
+thread 'server::receipt_tests::retained_entries_never_use_deleted_state' panicked at apps\mcp-bridge\src\server.rs:2302:9:
+assertion `left == right` failed
+  left: String("deleted")
+ right: "retained_at_source"
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+```
+
+绿：两处扰动原样恢复（`server.rs` SHA256 恢复为 `B1155E5E…D908FB5`，与扰动前一致），Windows 全量：
+
+```text
+running 6 tests
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+running 74 tests
+test result: ok. 74 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+### 20.7 两平台数字
+
+```text
+Windows（cargo test -p aw-mcp-bridge）：6 unit + 74 integration，0 failed
+POSIX（WSL HostGoTest，verify.sh run，离线）：5 unit + 72 integration，0 failed，四类证据行齐全
+```
+
+差额说明：Windows 多 1 条单元与 2 条集成，均为 `cfg(windows)` 用例（作业对象挂起/恢复证据、独占共享模式制造"删一半"失败），POSIX 不适用。
+
+### 20.8 未变项
+
+- `tools/list` 的 `runs.prune` 入参 schema 与描述未变（本次纯回执侧加法）。
+- `dry_run` 缺省零写入、两段式确认、先记账后删除、最新 attempt 永不删、"宁可不删"均未削弱。
+- 分档（30/180/365）仍未实现、需另立契约。
+- `#3`（逃逸进程是否仍在运行）仍 `NOT_PROVEN`。
+
 
 
