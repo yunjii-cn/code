@@ -1916,6 +1916,76 @@ fn runs_list_counts_attempt_dirs_regardless_of_handback_and_gaps() {
     );
 }
 
+// ---- 预留目录不是任务：runs.list 与 runs.prune 共用同一判据（v1.21 真实数据核验）----
+
+/// 机器判据：`runs/` 下只有「不以 `_`/`.` 开头且是合法 task_id」的目录才算任务。
+/// `_session`（initialize 审计）与 `.prune-trash`（删除暂存）即使内含完整 attempt 链，
+/// 也不得出现在 `runs.list` 的计数/列表里，不得进入 `runs.prune` 的候选或 skipped。
+#[test]
+fn reserved_directories_are_never_tasks_in_list_or_prune() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(400);
+
+    // 合法任务：两个 attempt，旧的那个在 365 天下应成为候选
+    prune_attempt_status(runs.path(), "t-live", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-live", 2, Some("ok"), Some(&old), true);
+
+    // 伪装成任务的内部目录：都放了两个 attempt，且都足够旧、状态都可删
+    prune_attempt_status(runs.path(), "_session", 1, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), "_session", 2, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), ".prune-trash", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), ".prune-trash", 2, Some("failed"), Some(&old), true);
+
+    let list = runs_list_payload(&server, json!({}));
+    assert_eq!(list["total_tasks"], 1, "只有 t-live 是任务：{list}");
+    assert_eq!(list["total"], 2, "total 只计任务目录下的 attempt：{list}");
+    let names: Vec<&str> = list["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .map(|task| task["task_id"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["t-live"],
+        "预留目录不得出现在任务列表：{list}"
+    );
+
+    let dry = prune_dry(&server, json!({ "older_than_days": 365, "limit": 100 }));
+    assert_eq!(dry["state"], "ready");
+    assert_eq!(
+        dry["candidates_total"], 1,
+        "只有 t-live/attempt-1 是候选：{dry}"
+    );
+    let candidates = dry["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0]["task_id"], "t-live");
+    assert_eq!(candidates[0]["attempt"], 1);
+    assert_eq!(candidates[0]["status"], "failed");
+    let skipped = dry["skipped"].as_array().expect("skipped");
+    assert_eq!(
+        dry["skipped_total"], 1,
+        "只应保留 t-live 的最新 attempt：{dry}"
+    );
+    assert_eq!(skipped[0]["task_id"], "t-live");
+    assert_eq!(skipped[0]["reason"], "latest_attempt_retained");
+    assert!(
+        !skipped
+            .iter()
+            .any(|item| item["task_id"] == "_session" || item["task_id"] == ".prune-trash"),
+        "预留目录不得产生任何 skipped 记录：{dry}"
+    );
+
+    // dry-run 零写入、零删除
+    assert!(!runs.path().join("prune.jsonl").exists());
+    assert!(runs.path().join("_session").join("attempt-1").is_dir());
+    assert!(runs
+        .path()
+        .join(".prune-trash")
+        .join("attempt-1")
+        .is_dir());
+}
+
 // ---- path_prepend：显式前插继承 PATH（v1.9）----
 
 #[test]

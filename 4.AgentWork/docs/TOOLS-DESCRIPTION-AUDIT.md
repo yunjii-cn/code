@@ -834,3 +834,82 @@ running 69 tests -> test result: ok. 69 passed; 0 failed（原 64 + 本次 6 组
 
 本次改动：`server.rs`（`status` 校验/去重、`prune_candidates` 状态判定、`skipped` 原因码、dry-run/plan/result 的 `status_filter`、`tools/list` schema 与描述）、`tests/mcp_contract.rs`（6 组 23 条用例）、契约升 **v1.21**（新增 §8.10）、本文档 §17。**未新增依赖、未改删除条件、未放宽任何断言；分档（`ok=30` / `failed=180` / `blocked=365`）仍未实现；`#3` 仍 `NOT_PROVEN`。**
 
+---
+
+## 18. v1.21 真实数据核验与 `_session` 排除（2026-11-06）
+
+> 本节只记录实跑结果与机器判据，**契约版本不变（仍 v1.21）**：无参数、无返回字段、无描述变更。
+
+### 18.1 真实 `runs/` 与规模
+
+- bridge 默认 runs 目录 = 可执行文件同级 `runs/`：本机为 `target\debug\runs`（唯一生产 runs）。`target\debug\deps\runs` 是测试二进制产物，只有 `_session`、无任务目录，不计入。
+- 现状：**13 个任务目录**（12 个有 attempt，1 个空目录 `smoke-1`）、**13 个 attempt 目录**；`_session` 文件 **11 个**（本节两次 `initialize` 各 +1，9→10→11）。
+- 父会话提到的「57 个 `_session` 文件」在本机未复现：对 `E:\软件开发`、`D:\`、`AppData` 按目录名 `_session` 检索，文件数 >25 的目录为 0（最大是 `target\debug\deps\runs\_session`=22，测试产物）。以下只报告本机实测数字。
+
+### 18.2 三次 dry-run 实测（`older_than_days=365`、`limit=100`）
+
+| `status_filter` | `candidates_total` | `skipped_total` | `status_unknown` | 跳过原因分布 |
+|---|---|---|---|---|
+| `["ok"]` | 0 | 13 | 0 | `latest_attempt_retained`=12，`missing_dispatch`=1 |
+| `["failed"]` | 0 | 13 | 0 | 同上 |
+| `["blocked"]` | 0 | 13 | 0 | 同上 |
+| 不传（基线） | 0 | 13 | — | 同上 |
+
+三档与基线完全一致：`state=ready`、`candidates_total=0`。
+
+### 18.3 为什么三档都是 0（真实构成）
+
+- 13 个 attempt 的状态构成：`ok`=7、`failed`=2、`blocked`=2、无 handback=2。
+- 其中 12 个是各自任务的**最新 attempt** → 永不删，在状态判定之前就被 `latest_attempt_retained` 跳过。
+- 唯一非最新 attempt（`smoke-2/attempt-1`，`status=failed`）缺 `dispatch.json` → 在年龄/状态判定之前就 `missing_dispatch` 跳过。
+- 有回执的 attempt 的 `finishedAt` 均为 2026-11-05（约 1 天），远未到 365 天；`smoke-2` 两条为遗留空串。
+
+**`status_unknown` = 0 的原因**：不是"没有缺失状态"，而是所有 older attempt 都在更早的检查点被跳过；`status_unknown` 只在"过了年龄线且回执缺 `status`/值不认识"时才出现。据此，真数据在今天、在 365 天阈值下，**任何状态档位都删不到东西**；分档上线也不会删。
+
+### 18.4 `_session` 的机器判据
+
+- 判据收敛到单一函数（`server.rs`）：`is_task_dir_name(name)` 要求名字不以 `_` 或 `.` 开头，且 `is_valid_task_id(name)` 为真；`runs.list` 与 `runs.prune` **共用**该判据。
+- 效果：`_session`、`.prune-trash` 等目录即使内含完整 attempt 链（够旧、状态可删），也**不会**进入 `total_tasks` / `total`，不会成为候选，不会产生 `skipped` 记录，也不会被 dry-run/真删处理。
+- 与"上层过滤"的区别：判据在枚举入口，任何客户端（PM 或第三方）都绕不过去，不依赖调用方先过滤。
+- `_session` **不会**被当成孤儿：代码中没有"孤儿"概念，attempt 计数只从任务目录下的 `attempt-N` 取，`_session` 的 initialize 记录既不进列表也不进计数。
+
+锁定用例 `reserved_directories_are_never_tasks_in_list_or_prune`：`_session` 与 `.prune-trash` 各放两个 400 天前、状态可删的 attempt，另放合法任务 `t-live`（两个 attempt）。断言 `total_tasks=1` / `total=2` / 候选仅 `t-live/attempt-1` / `skipped` 仅 `latest_attempt_retained`，且 dry-run 零写入零删除。
+
+### 18.5 先红后绿（原文）
+
+红：把 `is_task_dir_name` 临时放宽为恒真（对照），同一用例原文：
+
+```text
+running 1 test
+
+thread 'reserved_directories_are_never_tasks_in_list_or_prune' panicked at apps\mcp-bridge\tests\mcp_contract.rs:1940:5:
+assertion `left == right` failed: 只有 t-live 是任务：{"limit":20,"offset":0,"state":"ready","tasks":[{"attempts":2,"blocked_reason":null,"duration_ms":null,"env_keys":["SECRET_TOKEN"],"exit_code":0,"handback":true,"latest_attempt":2,"status":"failed","task_id":".prune-trash"},{"attempts":2,"blocked_reason":null,"duration_ms":null,"env_keys":["SECRET_TOKEN"],"exit_code":0,"handback":true,"latest_attempt":2,"status":"ok","task_id":"_session"},{"attempts":2,"blocked_reason":null,"duration_ms":null,"env_keys":["SECRET_TOKEN"],"exit_code":0,"handback":true,"latest_attempt":2,"status":"ok","task_id":"t-live"}],"total":6,"total_tasks":3}
+  left: Number(3)
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test reserved_directories_are_never_tasks_in_list_or_prune ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.04s
+```
+
+绿：恢复判据后（文件 SHA256 `9C91EA05…3694` 前后一致）：
+
+```text
+running 1 test
+test reserved_directories_are_never_tasks_in_list_or_prune ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.03s
+```
+
+说明：`_`/`.` 开头目录的排除在既有实现里已存在，本次**没有行为缺陷可修**（只把两处判据收敛成一个函数）；红是对照红，用来证明新用例确实绑在判据上（放宽判据即失败），不是空断言。
+
+### 18.6 两平台与结论
+
+```text
+Windows：4 unit + 72 integration，0 failed
+POSIX（verify.sh run）：3 unit + 70 integration，0 failed，四类证据行齐全
+```
+
+本次改动：`server.rs`（判据收敛为 `is_task_dir_name`，行为不变）、`tests/mcp_contract.rs`（+1 条用例）、本文档 §18。**契约版本不变、未放宽判据、未新增依赖；分档仍未实现；`#3` 仍 `NOT_PROVEN`。**
+
+

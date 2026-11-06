@@ -254,7 +254,7 @@ impl Server {
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
                 // 预留目录（_session 等以 _ 开头）与非法 task_id 一律不当作任务
-                if name.starts_with('_') || !is_valid_task_id(&name) {
+                if !is_task_dir_name(&name) {
                     continue;
                 }
                 task_ids.push(name);
@@ -511,7 +511,7 @@ impl Server {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('_') || name.starts_with('.') || !is_valid_task_id(&name) {
+                if !is_task_dir_name(&name) {
                     continue;
                 }
                 task_ids.push(name);
@@ -1137,6 +1137,12 @@ fn is_valid_task_id(value: &str) -> bool {
     value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// `runs/` 下某目录名是否可当作任务目录（`runs.list` 与 `runs.prune` 共用同一判据）：
+/// 以 `_`（`_session` 等预留目录）或 `.`（`.prune-trash` 等内部目录）开头的名字一律不是任务。
+fn is_task_dir_name(name: &str) -> bool {
+    !name.starts_with('_') && !name.starts_with('.') && is_valid_task_id(name)
 }
 
 fn shell_command(cmd: &str) -> Command {
