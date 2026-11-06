@@ -1,7 +1,7 @@
-# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 见 §14；v1.19 校正见 §15）
+# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17）。
 - 本批性质：**只修描述与契约措辞，不改任何行为、不改回执字段**。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
@@ -682,3 +682,155 @@ running 64 tests -> test result: ok. 64 passed; 0 failed
 ```
 
 本次改动：`server.rs`（`CREATE_SUSPENDED` + Toolhelp 恢复 + `attach_error` + 回执文案）、`Cargo.toml`（仅启用 `windows-sys` 已有的 `Win32_System_Diagnostics_ToolHelp` feature，未新增包/版本）、新增 Windows 单元用例 `suspended_start_defers_execution_until_job_assign`、两处文案断言改为新口径、契约升 **v1.20**、设计文档 §4.2/§4.5/§6.5/§6.8 与本文档 §16。**`#3` 仍 `NOT_PROVEN`；W2c 未重开；回执仍只写已观测状态，逃逸保持“未验证”。**
+
+---
+
+## 17. v1.21 状态过滤：`runs.prune.status` 多值白名单（2026-11-06）
+
+> 本节依据 [RUNS-PRUNE-STATUS-TIER-PROPOSAL.md](./RUNS-PRUNE-STATUS-TIER-PROPOSAL.md)；`runs.prune` 的其余删除条件（最新 attempt 永不删、只认 `finishedAt`、缺字段不删、两段式确认、先记账后删除）**全部不变**；分档仍未实现。
+
+### 17.1 描述与 schema 变更
+
+| 位置 | 改前（v1.20） | 改后（v1.21） |
+|---|---|---|
+| `runs.prune` 工具级 `description` | 无状态过滤表述 | 新增：`status` 是**可选多值白名单**，**显式传入才生效**，缺省不过滤（与旧行为一致）；不接受分档/档位常量 |
+| `runs.prune` schema `status` | **不存在** | `{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","enum":["ok","failed","blocked"]}}`；字段描述写明"显式才生效、与 `older_than_days` 为 AND、空数组/null/未知值 `invalid_retention`、无默认状态、无服务端分档" |
+| `limit` 字段描述 | "本批最多处理的候选数，默认 100" | 追加"**在 `status` 过滤之后生效**"（`candidates_total` 为过滤后总数） |
+| dry-run 输出 | 无 `status_filter` | 新增 `status_filter`（缺省为 `null`）、候选 JSON 新增 `status` |
+| `skipped[]` 原因码 | `latest_attempt_retained` / `age_unknown` / `missing_dispatch` / `unfinished_or_missing_handback` | 新增 **`status_unknown`**（回执缺 `status` 或值不认识）与 **`status_mismatch`**（有状态但不在白名单）；仅传 `status` 时产生 |
+| 审计行 `runs/prune.jsonl` | plan/result 无过滤上下文 | `status_filter` / `older_than_days` / `limit` / `batch_id` 四件套在 **plan 与 result 两行**都记录 |
+
+**能力门禁（写死在描述里）**：旧服务端会按 `additionalProperties:false` 的声明性约束**静默忽略** `status`，从而把本不该删的候选一起删掉。因此 PM **必须先读 `tools/list` 确认 `runs.prune.inputSchema.properties.status` 存在，才允许携带 `status` 并真删**；schema 不含 `status` 时只能 dry-run、不得真删。服务端不提供 `tier`，未知键仍按 v1.18 的默认策略忽略（不报错、不生效）。
+
+### 17.2 对 87 条基线
+
+- **#60 / #69（显式、无自动清理）**：不变；仍只有 `tools/call` 一条入口。
+- **#61 / #62 / #76（dry-run 缺省、两段式确认）**：不变；`status` 不改变确认门。
+- **#63 / #64（只删非最新 attempt、最新永不进入候选）**：不变；`status` 白名单**不能**把最新 attempt 拉进候选（case 11 锁定）。
+- **#65 / #66（只认 `finishedAt`、缺字段不删）**：不变；缺 `status` 时新增 `status_unknown` 跳过（只会更保守）。
+- **#67（先记账后删除）**：不变；plan 行先落盘、失败即一个都不删。
+- **#68（partial + isError）**：不变；状态过滤下仍如实报 `partial`（case 20）。
+- **#70 / #71 / #72（`older_than_days` 必填与范围）**：不变；仍必填、仍 `1..=3650`、仍无隐式默认，365 只是推荐值。
+- **#77（`limit` 缺省 100、`1..=100`）**：缺省与范围不变，措辞补充"在状态过滤之后生效"，判定仍"与实现一致"。
+- **#84（`additionalProperties` 声明性忽略）**：不变；`status` 是**入 schema 的已知键**，因此"忽略未知键"不适用于它——传了就按白名单生效，非法就 fail-closed。
+- **87 条基线不增不减**，无"描述与实现不符"的新条目。
+
+### 17.3 新增断言（#88–#90，不计入 87 基线的历史编号）
+
+| # | 断言 | 实现依据 | 判定 |
+|---|---|---|---|
+| 88 | schema 声明 `status`：`array` / `minItems=1` / `uniqueItems` / `items.enum=[ok,failed,blocked]` | `tools()` 中 `runs.prune` 的 `properties.status`，与 `parse status_filter` 的校验同源 | 与实现一致（case 1） |
+| 89 | 描述写明"显式才生效、缺省不过滤、与年龄 AND、`limit` 后置、无默认状态/无分档、非法即 `invalid_retention`" | 工具级 `description` 与 `status` 字段描述；行为见 `prune_candidates` 与 `limit.take()` | 与实现一致（case 23） |
+| 90 | `skipped[]` 新增 `status_unknown` / `status_mismatch`，且只在不删一侧出现 | `prune_candidates`：缺/未知状态 → `status_unknown`；不在白名单 → `status_mismatch`；两者都不进入候选 | 与实现一致（case 12 / 13 / 3） |
+
+### 17.4 提案 23 条用例 → 实现映射
+
+| 组（测试函数） | 用例 | 断言点 |
+|---|---|---|
+| `prune_status_schema_and_legacy_compatibility` | 1, 2, 21, 23 | schema 形状；缺省 `status` 与 v1.20 候选集合逐项一致；不传 `status` 时旧字段/旧行为不变；描述语义与实现一致 |
+| `prune_status_whitelist_selection` | 3, 4, 10, 11, 12, 13, 14, 15 | 单值只删匹配项；多值取并集；与 `older_than_days` 为 AND；最新 attempt 不受白名单影响；缺 `status` → `status_unknown`；未知值 → `status_unknown`；`limit` 在过滤后生效（`candidates_total` 为过滤后总数）；`limit` 1/100 通过、0/101 → `invalid_retention` |
+| `prune_status_validation_is_fail_closed` | 5, 6, 7, 8, 9, 16, 17 | 空数组 / 未知值 / 非数组 / `null` → `invalid_retention`，**零删除零审计**；重复值去重后正常执行并回显去重结果；过滤下 dry-run 仍零写入；缺 `confirm` → `confirm_required` 且零删除零审计 |
+| `prune_status_audit_and_mixed_batch` | 18, 19 | plan 与 result 两行都记录 `status_filter` / `older_than_days` / `limit` / `batch_id`；混合批按白名单删、`blocked` 保留、计数正确 |
+| `prune_status_partial_failure_is_reported_as_partial`（Windows-only） | 20 | 状态过滤下部分失败仍 `partial` + `isError=true`，其余照删；POSIX 无法用文件锁稳定制造部分失败，故该组只在 Windows 跑 |
+| `prune_status_capability_gate_and_no_server_side_tier` | 22 | schema 含 `status` 是 PM 侧能力门禁的唯一依据；`tier` 被忽略、无服务端分档；schema 不含 `status` 时 PM 必须禁止携带并真删 |
+
+### 17.5 先红后绿（原文）
+
+红：以**本批改动前**的 `server.rs`（v1.20，`git restore --source=b98bc81` 对照复跑）执行 6 组新用例，原文如下（仅省略重复的 `note: run with RUST_BACKTRACE=1...` 与交错输出的 `test ... FAILED` 行；断言文本与左右值逐字保留）：
+
+```text
+running 6 tests
+
+thread 'prune_status_schema_and_legacy_compatibility' panicked at apps\mcp-bridge\tests\mcp_contract.rs:2620:5:
+assertion `left == right` failed: case 1
+  left: Null
+ right: "array"
+
+thread 'prune_status_validation_is_fail_closed' panicked at apps\mcp-bridge\tests\mcp_contract.rs:2594:5:
+assertion `left == right` failed: 该形态必须拒绝：{"candidates":[{"age_days":40,"attempt":1,"dispatchedAt":"2026-01-01T00:00:00Z","finishedAt":"2026-09-27T11:56:43Z","path":"runs/t-guard/attempt-1","task_id":"t-guard"}],"candidates_total":1,"dry_run":true,"evaluated_at":"2026-11-06T11:56:43Z","limit":100,"older_than_days":30,"skipped":[{"attempt":2,"reason":"latest_attempt_retained","task_id":"t-guard"}],"skipped_total":1,"state":"ready","truncated":false}
+  left: Bool(false)
+ right: true
+test prune_status_validation_is_fail_closed ... FAILED
+
+thread 'prune_status_capability_gate_and_no_server_side_tier' panicked at apps\mcp-bridge\tests\mcp_contract.rs:3009:5:
+case 22：schema 必须声明 status，这是 PM 侧能力门禁的唯一依据
+
+thread 'prune_status_partial_failure_is_reported_as_partial' panicked at apps\mcp-bridge\tests\mcp_contract.rs:2995:5:
+assertion `left == right` failed: case 20
+  left: Null
+ right: Array [String("failed")]
+
+thread 'prune_status_audit_and_mixed_batch' panicked at apps\mcp-bridge\tests\mcp_contract.rs:2928:5:
+assertion `left == right` failed: case 19
+  left: Null
+ right: Array [String("ok"), String("failed")]
+
+thread 'prune_status_whitelist_selection' panicked at apps\mcp-bridge\tests\mcp_contract.rs:2704:5:
+assertion `left == right` failed: case 3
+  left: Null
+ right: Array [String("failed")]
+
+failures:
+    prune_status_audit_and_mixed_batch
+    prune_status_capability_gate_and_no_server_side_tier
+    prune_status_partial_failure_is_reported_as_partial
+    prune_status_schema_and_legacy_compatibility
+    prune_status_validation_is_fail_closed
+    prune_status_whitelist_selection
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.06s
+error: test failed, to rerun pass `-p aw-mcp-bridge --test mcp_contract`
+```
+
+红阶段同时暴露了"旧服务端静默忽略 `status`"的实际后果：case 5/6/7/8 的非法 `status` 没有被拒绝，反而照常列出候选并进入删除路径——这正是能力门禁必须存在的原因，不是测试写法问题，断言未放宽。
+
+绿：恢复本批实现后（文件 SHA256 与红/绿对照前后一致，`8389EFDD…18D5`），同一命令原文：
+
+```text
+running 6 tests
+[case 1] schema status=array(minItems=1,uniqueItems,enum=[ok,failed,blocked]) PASS
+[case 23] runs.prune 描述与 status 语义一致 PASS
+[case 5] 空数组 → invalid_retention，零删除零审计 PASS
+[case 6] 未知值/大小写不符 → invalid_retention PASS
+[case 7] 非数组 → invalid_retention PASS
+[case 8] null → invalid_retention，不当作不过滤 PASS
+[case 9] 重复值去重后正常执行，status_filter 回显去重结果 PASS
+[case 16] status 过滤的 dry-run 仍零写入 PASS
+[case 17] status 合法但缺 confirm → confirm_required，零删除零审计 PASS
+[case 2] 缺省 status 与 v1.20 候选集合一致 PASS
+[case 21] 不传 status 时旧字段/旧行为不变 PASS
+[case 20] status 过滤下 partial 仍 partial + isError=true，其余照删 PASS
+[case 19] 混合白名单按状态删除，blocked 保留、计数正确 PASS
+[case 22] schema 含 status=能力位；不含时 PM 必须禁止携带并真删 PASS
+[case 22] 无服务端 tier；未知参数被忽略，故 PM 必须靠 schema 门禁 PASS
+[case 18] plan/result 均记录 status_filter、older_than_days、limit、batch_id PASS
+[case 3] status=[failed] 只删 failed，非白名单进 status_mismatch PASS
+[case 4] 多值白名单取并集，failed 不进入候选 PASS
+[case 10] status + older_than_days 为 AND，未满阈值不删 PASS
+[case 11] 最新 attempt 永不删，status 白名单不能选中 PASS
+[case 12] 回执缺 status → status_unknown，不删 PASS
+[case 13] 未知状态值 → status_unknown，不删 PASS
+[case 14] limit 在 status 过滤之后生效，candidates_total 为过滤后总数 PASS
+[case 15] limit 1/100 通过，0/101 → invalid_retention PASS
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.10s
+```
+
+### 17.6 两平台全量证据
+
+```text
+Windows（cargo test -p aw-mcp-bridge -- --nocapture）：
+running 4 tests  -> test result: ok. 4 passed; 0 failed（process_scope 单元）
+running 71 tests -> test result: ok. 71 passed; 0 failed（原 65 + 本次 6 组；含 Windows-only case 20）
+
+POSIX（WSL HostGoTest，verify.sh run，离线，AW_VENDOR=/root/vendor）：
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+[evidence] exited pgid=921 group_empty=true
+[evidence] setsid escaped_pid=925 escaped_alive=true original_group_empty=true
+[evidence] stopped pgid=923 kill(-pgid,0)_exists=true
+[evidence] stopped after_SIGKILL group_empty=true
+running 69 tests -> test result: ok. 69 passed; 0 failed（原 64 + 本次 6 组 - Windows-only 1 组）
+[INFO] 四类 POSIX 用例全部通过，证据行齐全
+```
+
+本次改动：`server.rs`（`status` 校验/去重、`prune_candidates` 状态判定、`skipped` 原因码、dry-run/plan/result 的 `status_filter`、`tools/list` schema 与描述）、`tests/mcp_contract.rs`（6 组 23 条用例）、契约升 **v1.21**（新增 §8.10）、本文档 §17。**未新增依赖、未改删除条件、未放宽任何断言；分档（`ok=30` / `failed=180` / `blocked=365`）仍未实现；`#3` 仍 `NOT_PROVEN`。**
+

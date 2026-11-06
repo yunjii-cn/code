@@ -1,8 +1,8 @@
-# PM → AW 派单与回执契约 v1.20
+# PM → AW 派单与回执契约 v1.21
 
-状态：v1.20。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
+状态：v1.21。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；残余逃逸（`BREAKAWAY` / 加入作业失败 / 嵌套作业）仍不可观测，`#3` 仍 `NOT_PROVEN`**
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现**
 
 ## 0. 结论
 
@@ -195,8 +195,9 @@
 | 14 | `path_prepend`（§3.5） | **一致** | 目录数组前插、继承 PATH 在后、分隔符按平台；参与幂等签名；占号前校验；回执只给目录名 |
 | 15 | `timeout` 文案诚实性（第 4 / 6 节） | **一致** | v1.17：文案只描述**受控集合**（POSIX 进程组 / Windows Job）的清理结果，三态分流（已清理 / 仍存活 / 不可用），明写"逃逸进程是否仍在运行未验证"；v1.20 Windows 改写为"挂起态创建、先入作业再恢复执行"，残余逃逸为 `BREAKAWAY` / 加入作业失败；任何分支都不出现"已终止进程树 / 无残留"；整树 `#3` 仍 `NOT_PROVEN`；证据见设计文档 §6.5（POSIX 四类实跑 + Windows 四类） |
 | 16 | 默认策略与 schema 声明（§10） | **一致** | `additionalProperties` 仍为声明性忽略（新增用例锁定）；`runs.prune` 推荐 365 天、`limit` 缺省 100，但 `older_than_days` 缺省仍 `invalid_retention`；`clientInfo` 仅审计、不参与准入；`path_prepend` 的 16 项 / 4096 字符已写入 schema 且实现同源 |
+| 17 | `runs.prune.status` 状态过滤（§8.10） | **一致** | v1.21：schema 声明 `array`/`minItems=1`/`uniqueItems`/`enum`；显式才生效、缺省不过滤；与年龄 AND、`limit` 后置；空数组/null/未知值 `invalid_retention` 零删除零审计；`status_unknown`/`status_mismatch` 不删；plan/result 记录 `status_filter`；23 条用例实跑通过（Windows 6 组、POSIX 同套减去 Windows-only 的 case 20） |
 
-统计：**已一致 15 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证不在 v1 范围，默认按 §10 第 1 行处理，准入所需字段见 §2.3）。
+统计：**已一致 16 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证不在 v1 范围，默认按 §10 第 1 行处理，准入所需字段见 §2.3）。
 
 ### 5.1 缺口补齐规划（后续批次）
 
@@ -301,9 +302,9 @@
 | `confirm` | 布尔，缺省 `false`。**只有 `dry_run=false` 且 `confirm=true` 才真删**；缺一即拒绝 |
 | 拒绝语义 | `dry_run=false` 而 `confirm` 不为 `true` → 工具错误 `confirm_required`，**零写入**；反之 `confirm=true` 但未显式 `dry_run=false` → 仍按 dry-run 处理（`confirm` 不隐含真删） |
 | 阈值必填 | `older_than_days` 必填（整数，1..=3650）；缺失或越界 → 工具错误 `invalid_retention`，**零写入**。**不提供隐式默认阈值**——"没写阈值"绝不能变成"按某个默认值删"；调用方按 §8.9 的 365 天推荐值显式传入 |
-| dry-run 输出（稳定可解析） | `dry_run=true`、`state`（`missing`/`empty`/`ready`）、`older_than_days`、`evaluated_at`（UTC）、`limit`、`candidates_total`、`truncated`、`candidates[]`、`skipped_total`、`skipped[]`；`candidates[]` 每项固定字段：`task_id` / `attempt` / `path`（相对路径 `runs/<task_id>/attempt-<N>`）/ `dispatchedAt` / `finishedAt` / `age_days` |
-| `skipped[]` 原因码 | `latest_attempt_retained`（最新 attempt，永不删）/ `unfinished_or_missing_handback`（无回执或不可解析）/ `missing_dispatch`（缺派单签名，年龄与一致性都无法证明）/ `age_unknown`（回执无 `finishedAt`）/ `invalid_finished_at`（时间戳不可解析）/ `future_timestamp`（晚于当前时刻，按时钟异常跳过）/ `not_old_enough`（未达阈值）/ `unsafe_attempt_path`（符号链接或非真实目录） |
-| 单批上限 | `limit` 缺省 100、范围 1..=100；按 `(task_id, attempt)` 升序取前 `limit` 个；`candidates_total > limit` 时 `truncated=true`。**真实删除只删被列出的这一批**，剩余的下一次调用再评估 |
+| dry-run 输出（稳定可解析） | `dry_run=true`、`state`（`missing`/`empty`/`ready`）、`older_than_days`、`status_filter`（缺省 `null`，显式时为去重后的数组）、`evaluated_at`（UTC）、`limit`、`candidates_total`（过滤后命中数）、`truncated`、`candidates[]`、`skipped_total`、`skipped[]`；`candidates[]` 每项固定字段：`task_id` / `attempt` / `path`（相对路径 `runs/<task_id>/attempt-<N>`）/ `status`（回执状态，缺省 `null`）/ `dispatchedAt` / `finishedAt` / `age_days` |
+| `skipped[]` 原因码 | `latest_attempt_retained`（最新 attempt，永不删）/ `unfinished_or_missing_handback`（无回执或不可解析）/ `missing_dispatch`（缺派单签名，年龄与一致性都无法证明）/ `age_unknown`（回执无 `finishedAt`）/ `invalid_finished_at`（时间戳不可解析）/ `future_timestamp`（晚于当前时刻，按时钟异常跳过）/ `not_old_enough`（未达阈值）/ `unsafe_attempt_path`（符号链接或非真实目录）/ `status_unknown`（传了 `status` 但回执缺状态或值不认识，宁可不删）/ `status_mismatch`（状态不在白名单） |
+| 单批上限 | `limit` 缺省 100、范围 1..=100；**在 `status` 过滤之后**按 `(task_id, attempt)` 升序取前 `limit` 个；`candidates_total` 是过滤后的命中总数，`candidates_total > limit` 时 `truncated=true`。**真实删除只删被列出的这一批**，剩余的下一次调用再评估 |
 | 两段一致性 | 相同参数、磁盘未变时，dry-run 的 `candidates[]` 与真实删除的 `deleted[]` **逐项一致**（同样的排序与同样的 `limit` 截断）；不一致即契约违规 |
 
 ### 8.3 年龄判据：只认 `finishedAt`
@@ -363,10 +364,10 @@
 | 方案 | 结论 |
 |---|---|
 | A 统一期限 | 长期可追溯性最差（成功/失败/超时证据同寿）；但 PM 口径已定为**统一 365 天**（§8.9），v1.19 按此执行 |
-| B 按结果分档 | `ok=30` / `failed=180` / `blocked=365` 仅作另立契约时的历史参考；PM 口径为**不分档**，当前接口无状态过滤参数，**未实现** |
+| B 按结果分档 | `ok=30` / `failed=180` / `blocked=365` 仍为**分档需求、未实现、需另立契约**；v1.21 只实现**状态多值白名单**（`status`），不含档位到阈值的映射，也不默认生效 |
 | C 按引用分档 | 自指（引用表本身成为新证据），且把只读接口变成影响清理结果的状态源，违背 §7 零写原则；不采用 |
 
-### 8.9 默认保留包络（v1.19：按 PM 口径校正，仍不自动删）
+### 8.9 默认保留包络（v1.19 校正；v1.21 增加可选状态白名单，仍不自动删）
 
 取值只在 PM 包络内（显式触发、默认不删、只删非最新 attempt、只认 `finishedAt`、缺字段不删；§8.1-§8.7），**不放宽任何删除条件**；下面的默认值只决定"什么时候可以开始删"，不改变"删什么/怎么删"。
 
@@ -376,10 +377,26 @@
 | 批量上限 | `limit = 100`（可覆盖，1..=100） | PM 已定口径：单批最多 100 个候选；取上限减少多次调用，同时保留分批能力 |
 | 操作顺序 | 先 `dry_run=true` 预览，再 `dry_run=false` + `confirm=true` 真删；默认 `dry_run=true` | PM 已定口径"必须先 dry-run"；服务端默认不删，真删需显式两段式确认 |
 | 是否隐式默认 | **否**：`older_than_days` 缺省仍 `invalid_retention` | "没写阈值"绝不能变成"按默认值删"（§8.3）；365 是推荐值，不是隐式默认 |
-| 状态分档 | **不做**（PM 口径：不分档） | `ok=30` / `failed=180` / `blocked=365` 仅为另立契约时的历史参考，**未实现、不作为推荐**；当前接口无状态过滤参数 |
+| 状态过滤 / 分档 | **`status` 可选多值白名单，显式传入才生效，缺省不过滤；分档仍不做**（PM 口径：不分档） | v1.21 §8.10：无默认状态、无服务端档位；`ok=30` / `failed=180` / `blocked=365` 仍为未实现的历史参考，PM 若要分档须自行展开为 `status` + 显式阈值 |
 | `task_id` 退役 | **任一 attempt 被清理过的 `task_id` 不得复用**；重投必须换新 id | §8.7：最新 attempt 可能已被删，复用会重新执行并混淆历史 |
 
-可配置：每次调用显式给 `older_than_days`（1..=3650）、`limit`（1..=100）、`dry_run`、`confirm`；本节的 365 天只是**推荐值**，不是 API 隐式默认。
+可配置：每次调用显式给 `older_than_days`（1..=3650）、`limit`（1..=100）、`dry_run`、`confirm`；可选 `status`（多值白名单，见 §8.10）。本节的 365 天只是**推荐值**，不是 API 隐式默认。
+
+### 8.10 状态过滤（v1.21 已实现；分档仍未实现）
+
+**参数**：`status` 可选 `string[]`，元素只能取 `ok` / `failed` / `blocked`（大小写敏感）。语义是**白名单**：只有 `handback.status` 精确等于数组内某值才进入候选。
+
+**必须显式**：`status` 缺省 = 不过滤，候选集合与 v1.20 完全一致；**不存在默认状态、不存在服务端档位**。`ok=30` / `failed=180` / `blocked=365` 仍是"未实现、需另立契约"的分档需求，AW 不提供 `tier` 参数；PM 若要分档，只能自己展开为 `status` + 显式 `older_than_days`。
+
+**组合语义**：`status` 与 `older_than_days` 为 **AND**；`limit` 在过滤之后生效（`candidates_total` 是过滤后的命中总数）；最新 attempt 永不进入候选；`status` 不能替代 `older_than_days`。
+
+**校验（fail-closed）**：非数组、空数组、`null`、含非字符串、含未知值 → 工具错误 `invalid_retention`，**零删除、零审计**；重复值先去重再执行，`status_filter` 回显去重结果。
+
+**缺失/未知状态**：传入 `status` 时，回执缺 `status` 或值不认识 → `skipped` 记 `status_unknown`，**永不进入候选**（宁可不删）；不在白名单 → `status_mismatch`。不传 `status` 时保持 v1.20 兼容行为（不做状态校验）。
+
+**审计**：`runs/prune.jsonl` 的 plan 与 result 两行都必须记录 `status_filter`、`older_than_days`、`limit`、`batch_id`；真删响应回显 `status_filter`，dry-run 响应回显 `status_filter`（缺省 `null`）。
+
+**能力门禁**：`tools/list` 的 `runs.prune.inputSchema.properties.status` 是唯一能力位。PM 只有在 schema 含 `status` 时才允许携带 `status` 并 `dry_run=false + confirm=true`；旧服务端会忽略未知参数，**不得**把"旧服务端忽略 `status`"当成可用降级路径。
 
 ## 9. 边界（写死）
 
@@ -401,7 +418,7 @@
 | 1 | 通道归属 | PM 直接以 stdio 子进程拉起 bridge；进程归属即事实准入边界 | §2：谁拉起谁是用调用方；bridge 无独立凭据 | 启动方式由 PM 决定；若改由 MH 拉起，MH 必须提供 peer 归属信息（新契约） | 直接把 bridge 挪到 MH 下而不提供归属信息，身份退回弱识别（现状），不会阻断执行 |
 | 2 | 重跑表达 | 换新 `task_id`（建议 `-r2`/`-r3`），零新增字段 | §3.1：同 id 是幂等键，不是重跑键 | PM 生成新 id | 若改为"同 id 重试"，需扩展输入契约并定义 attempt 语义 |
 | 3 | 失败码归属 | `upstream_rejected` 由 PM 记录；`concurrency_limit` 由 PM 侧排队，AW 不内置闸门 | §5 第 8 条、§6：AW 不做第二个协调者 | PM 侧策略；若 AW 内置限流需新契约 | 在 AW 加闸门会引入"未执行却被计为派单"的语义风险 |
-| 4 | 证据清理 | 统一 `older_than_days=365`、`limit=100` 为推荐调用值，**older 仍须显式传入**；先 dry-run 预览再真删；不分档；清理过的 `task_id` 退役 | §8.9、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm` | 若把 365 变成隐式默认，会让"漏传阈值"变成静默删除 |
+| 4 | 证据清理 | 统一 `older_than_days=365`、`limit=100` 为推荐调用值，**older 仍须显式传入**；先 dry-run 预览再真删；不分档；可选 `status` 多值白名单**显式才生效**；清理过的 `task_id` 退役 | §8.9、§8.10、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm`，可选 `status` | 若把 365 变成隐式默认，会让"漏传阈值"变成静默删除；若给 `status` 默认值，会让"漏传状态"变成按档位静默删 |
 | 5 | `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`） | 兼容现有调用方；MCP 客户端可能附加元数据/别名；schema 静态、行为需确定 | 契约版本级；不提供运行时开关 | 强制拒绝会打断携带额外字段的现有调用（§10.1） |
 | 6 | `clientInfo` 准入 | 默认**不参与准入**，仅审计 | §2.3：自报字段不可信 | 需新增票据/进程锚点/授权范围（§2.3） | 仅凭 `clientInfo.name` 放行会让冒充直接通过 |
 | 7 | `path_prepend` 限制 | 默认**写入 schema**：`maxItems=16`、`items.maxLength=4096` | 与实现校验上限一致；声明先于调用，减少无效派单 | 调用方传 0..16 项、每项 ≤4096；上限是契约常量，改动需升版 | 不写入 schema 会让客户端以为可传超量，直到占号前才被拒 |
@@ -445,3 +462,4 @@
 | v1.18 | 2026-11-06 | **把"待 PM 确认"转为默认决策（§10），不改执行/超时行为**：`additionalProperties` 保持声明性忽略（新增用例锁定；强制拒绝会打断携带 `_meta`/别名/额外字段的现有调用，见 §10.1）；`runs.prune` 给出统一推荐默认（该值已在 v1.19 按 PM 口径校正为 365 天，见下行；仍须显式传入，缺省仍 `invalid_retention`），分档参考值 `ok=30` / `failed=180` / `blocked=365` 仅入契约、**未实现且不作为推荐**（§8.9）；`clientInfo` 默认不参与准入，并列出参与所需字段（§2.3）；`path_prepend` 的 `maxItems=16` / `items.maxLength=4096` 写入 schema（与实现校验同源）；**`#3` 仍 `NOT_PROVEN`，W2c 不重开，回执仍只写已观测状态** |
 | v1.19 | 2026-11-06 | **按 PM 口径校正 `runs.prune` 默认包络（不改任何删除条件）**：推荐阈值校正为 **365 天**（不再使用上一版的临时值），`limit` 缺省 **20→100**；明确"先 `dry_run=true` 预览，再 `dry_run=false` + `confirm=true` 真删"；**不分档**；`ok=30` / `failed=180` / `blocked=365` 保留为"未实现、需另立契约"的历史参考，**不作为推荐**；`older_than_days` 仍必填、缺省仍 `invalid_retention`；其余默认决策（§10）不变；**`#3` 仍 `NOT_PROVEN`，W2c 不重开** |
 | v1.20 | 2026-11-06 | **在 W2d 基础上继续收窄 Windows `spawn → Assign` 窗口（落地 W2a，不改判据、不重开 W2c）**：子进程以 `CREATE_SUSPENDED` 创建，先 `AssignProcessToJobObject` 再恢复主线程，恢复前不执行任何代码，因此“窗口内派生作业外后代”对后代不再成立；恢复失败时终止进程并记 `process_resume_failed`，不把“从未执行”当成命令结果；Windows 回执与 `tools/list` 描述同步改为“挂起态创建、先入作业再恢复执行”，残余逃逸为 `BREAKAWAY` / 加入作业失败 / 嵌套作业；判据（`ActiveProcesses == 0`、`kill(-pgid,0)==ESRCH`）与“逃逸未验证”口径**不放宽**；**`#3` 仍 `NOT_PROVEN`**。证据：Windows 新增 `suspended_start_defers_execution_until_job_assign` 实跑（先红后绿，`marker_before_assign=false`、`ActiveProcesses_before_terminate=Some(2)`、`terminate=Cleaned`、`after=Some(0)`），POSIX 3 unit + 64 integration 复跑通过 |
+| v1.21 | 2026-11-06 | **实现 `runs.prune.status` 状态多值白名单（按 `RUNS-PRUNE-STATUS-TIER-PROPOSAL.md`，§8.10）**：`status` 为可选字符串数组，元素只能是 `ok` / `failed` / `blocked`，**显式传入才生效**，缺省 = 不过滤、候选集合与 v1.20 完全一致；与 `older_than_days` 为 **AND**，`limit` 在状态过滤**之后**生效；空数组 / `null` / 非数组 / 未知值一律 `invalid_retention`（占号前拒绝，**零删除、零审计落盘**）；**无默认状态、无服务端档位**（不存在 `tier` 参数，`tier` 与其他未知键仍按 `additionalProperties:false` 声明性忽略）；最新 attempt 永不删、两段式确认（`dry_run` 缺省 / `confirm`）与"先写 `runs/prune.jsonl` 再删除"不变；传入 `status` 时，回执缺 `status` 或值不认识 → `skipped: status_unknown`（不删），不在白名单 → `skipped: status_mismatch`（不删）；`tools/list` 的 `runs.prune` 新增 `status` schema（`array` / `minItems=1` / `uniqueItems` / `items.enum`），**PM 必须先确认 schema 含 `status` 才可携带并真删**（旧服务端会静默忽略 `status` 从而多删）；plan / result / audit 行均记录 `status_filter` / `older_than_days` / `limit` / `batch_id`；证据：提案附 23 条用例先红后绿实跑（Windows 6 组全绿，POSIX 同套减去 Windows-only 的 case 20）；**分档（`ok=30` / `failed=180` / `blocked=365`）仍未实现**，`#3` 仍 `NOT_PROVEN` |

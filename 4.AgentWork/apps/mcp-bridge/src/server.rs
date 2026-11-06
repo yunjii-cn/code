@@ -328,10 +328,49 @@ impl Server {
         if !(1..=100).contains(&limit) {
             return Err("invalid_retention: limit 必须在 1..=100 之间".to_string());
         }
+        let status_filter = match args.get("status") {
+            None => None,
+            Some(value) => {
+                let array = value.as_array().ok_or_else(|| {
+                    "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                        .to_string()
+                })?;
+                if array.is_empty() {
+                    return Err(
+                        "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                            .to_string(),
+                    );
+                }
+                let mut parsed: Vec<String> = Vec::new();
+                for item in array {
+                    let Some(text) = item.as_str() else {
+                        return Err(
+                            "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                                .to_string(),
+                        );
+                    };
+                    if !matches!(text, "ok" | "failed" | "blocked") {
+                        return Err(
+                            "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                                .to_string(),
+                        );
+                    }
+                    if !parsed.iter().any(|existing| existing == text) {
+                        parsed.push(text.to_string());
+                    }
+                }
+                Some(parsed)
+            }
+        };
+        let status_filter_json = match &status_filter {
+            Some(values) => json!(values),
+            None => Value::Null,
+        };
 
         let evaluated_at = now_stamp();
         let now = chrono::Utc::now();
-        let (candidates, skipped, task_count) = self.prune_candidates(older_than_days, now);
+        let (candidates, skipped, task_count) =
+            self.prune_candidates(older_than_days, now, status_filter.as_deref());
         let total_candidates = candidates.len() as u64;
         let truncated = total_candidates > limit;
         let batch: Vec<Value> = candidates.into_iter().take(limit as usize).collect();
@@ -348,6 +387,7 @@ impl Server {
                 "dry_run": true,
                 "state": state,
                 "older_than_days": older_than_days,
+                "status_filter": status_filter_json,
                 "evaluated_at": evaluated_at,
                 "limit": limit,
                 "candidates_total": total_candidates,
@@ -364,6 +404,7 @@ impl Server {
                 "dry_run": false,
                 "status": "ok",
                 "older_than_days": older_than_days,
+                "status_filter": status_filter_json,
                 "evaluated_at": evaluated_at,
                 "limit": limit,
                 "candidates_total": total_candidates,
@@ -385,6 +426,8 @@ impl Server {
             "phase": "plan",
             "batch_id": batch_id,
             "older_than_days": older_than_days,
+            "status_filter": status_filter_json,
+            "limit": limit,
             "candidate_count": batch.len() as u64,
             "candidates": batch.clone()
         });
@@ -414,6 +457,9 @@ impl Server {
             "at": now_stamp(),
             "phase": "result",
             "batch_id": batch_id,
+            "older_than_days": older_than_days,
+            "status_filter": status_filter_json,
+            "limit": limit,
             "deleted": deleted.clone(),
             "failed": failed.clone(),
             "deleted_total": deleted_total,
@@ -430,6 +476,7 @@ impl Server {
             "status": status,
             "batch_id": batch_id,
             "older_than_days": older_than_days,
+            "status_filter": status_filter_json,
             "evaluated_at": evaluated_at,
             "limit": limit,
             "candidates_total": total_candidates,
@@ -446,6 +493,7 @@ impl Server {
         &self,
         older_than_days: u64,
         now: chrono::DateTime<chrono::Utc>,
+        status_filter: Option<&[String]>,
     ) -> (Vec<Value>, Vec<Value>, usize) {
         let mut candidates: Vec<Value> = Vec::new();
         let mut skipped: Vec<Value> = Vec::new();
@@ -555,10 +603,38 @@ impl Server {
                     }));
                     continue;
                 }
+                let status = handback.get("status").and_then(Value::as_str);
+                if let Some(filter) = status_filter {
+                    let Some(value) = status else {
+                        skipped.push(json!({
+                            "task_id": task_id.clone(),
+                            "attempt": number,
+                            "reason": "status_unknown"
+                        }));
+                        continue;
+                    };
+                    if !matches!(value, "ok" | "failed" | "blocked") {
+                        skipped.push(json!({
+                            "task_id": task_id.clone(),
+                            "attempt": number,
+                            "reason": "status_unknown"
+                        }));
+                        continue;
+                    }
+                    if !filter.iter().any(|allowed| allowed == value) {
+                        skipped.push(json!({
+                            "task_id": task_id.clone(),
+                            "attempt": number,
+                            "reason": "status_mismatch"
+                        }));
+                        continue;
+                    }
+                }
                 candidates.push(json!({
                     "task_id": task_id.clone(),
                     "attempt": number,
                     "path": format!("runs/{task_id}/attempt-{number}"),
+                    "status": status,
                     "dispatchedAt": dispatch.get("dispatchedAt").cloned().unwrap_or(Value::Null),
                     "finishedAt": finished_at,
                     "age_days": age_days
@@ -1972,14 +2048,15 @@ fn tools() -> Value {
         },
         {
             "name": "runs.prune",
-            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。系统内没有定时/启动自动清理",
+            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。系统内没有定时/启动自动清理",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt。PM 口径统一推荐 365 天；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" },
+                    "status": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "enum": ["ok", "failed", "blocked"] }, "description": "可选：状态多值白名单，显式传入才生效；缺省不过滤（与旧行为一致）。仅 handback.status 精确匹配才进入候选，与 older_than_days 为 AND；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档" },
                     "dry_run": { "type": "boolean", "description": "默认 true：只列候选、不删不写；false 表示要求真删（还需 confirm=true）" },
                     "confirm": { "type": "boolean", "description": "默认 false：真删必须显式 true；单独 true 不隐含真删" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 100" }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 100；在 status 过滤之后生效" }
                 },
                 "required": ["older_than_days"],
                 "additionalProperties": false

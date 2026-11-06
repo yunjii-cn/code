@@ -2534,6 +2534,509 @@ fn prune_attempt(
     dir
 }
 
+/// 在 `prune_attempt` 基础上改写 `handback.status`：`None` 表示回执缺 status 字段
+fn prune_attempt_status(
+    runs: &Path,
+    task_id: &str,
+    attempt: u64,
+    status: Option<&str>,
+    finished_at: Option<&str>,
+    with_dispatch: bool,
+) -> PathBuf {
+    let dir = prune_attempt(runs, task_id, attempt, true, finished_at, with_dispatch);
+    let mut record = json!({
+        "task_id": task_id,
+        "attempt": attempt,
+        "exit_code": 0
+    });
+    if let Some(value) = status {
+        record["status"] = json!(value);
+    }
+    if let Some(stamp) = finished_at {
+        record["finishedAt"] = json!(stamp);
+    }
+    fs::write(dir.join("handback.json"), record.to_string()).expect("写入 handback.json");
+    dir
+}
+
+fn prune_schema(server: &Server) -> Value {
+    let response = call(
+        server,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}),
+    );
+    response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组")
+        .iter()
+        .find(|tool| tool["name"] == "runs.prune")
+        .expect("缺少 runs.prune")["inputSchema"]
+        .clone()
+}
+
+fn prune_tool_description(server: &Server) -> String {
+    let response = call(
+        server,
+        json!({"jsonrpc": "2.0", "id": 6, "method": "tools/list"}),
+    );
+    response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组")
+        .iter()
+        .find(|tool| tool["name"] == "runs.prune")
+        .expect("缺少 runs.prune")["description"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn prune_error(server: &Server, arguments: Value) -> String {
+    let response = call_tool(server, "runs.prune", arguments);
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "该形态必须拒绝：{}",
+        tool_text(&response)
+    );
+    tool_text(&response)
+}
+
+fn prune_dry(server: &Server, arguments: Value) -> Value {
+    let response = call_tool(server, "runs.prune", arguments);
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "dry-run 应成功：{}",
+        tool_text(&response)
+    );
+    tool_payload(&response)
+}
+
+// ---- runs.prune：status 多值白名单（v1.21，提案 23 条）----
+
+#[test]
+fn prune_status_schema_and_legacy_compatibility() {
+    let (server, _settings, runs) = server_with_runs();
+    let schema = prune_schema(&server);
+    assert_eq!(schema["properties"]["status"]["type"], "array", "case 1");
+    assert_eq!(schema["properties"]["status"]["minItems"], 1, "case 1");
+    assert_eq!(schema["properties"]["status"]["uniqueItems"], true, "case 1");
+    assert_eq!(
+        schema["properties"]["status"]["items"]["type"], "string",
+        "case 1"
+    );
+    assert_eq!(
+        schema["properties"]["status"]["items"]["enum"],
+        json!(["ok", "failed", "blocked"]),
+        "case 1"
+    );
+    assert_eq!(
+        schema["required"],
+        json!(["older_than_days"]),
+        "case 1：年龄阈值仍必填"
+    );
+    println!("[case 1] schema status=array(minItems=1,uniqueItems,enum=[ok,failed,blocked]) PASS");
+
+    let description = prune_tool_description(&server);
+    assert!(
+        description.contains("status") && description.contains("显式"),
+        "case 23：描述必须写明 status 显式传入才生效：{description}"
+    );
+    assert!(
+        description.contains("白名单") && description.contains("缺省不过滤"),
+        "case 23：描述必须写明白名单与缺省不过滤：{description}"
+    );
+    println!("[case 23] runs.prune 描述与 status 语义一致 PASS");
+
+    let old = days_ago_stamp(40);
+    for (task, status) in [("t-ok", "ok"), ("t-failed", "failed"), ("t-blocked", "blocked")] {
+        prune_attempt_status(runs.path(), task, 1, Some(status), Some(&old), true);
+        prune_attempt_status(runs.path(), task, 2, Some(status), Some(&old), true);
+    }
+
+    let legacy = prune_dry(&server, json!({ "older_than_days": 30 }));
+    assert_eq!(legacy["status_filter"], Value::Null, "case 2：缺省不过滤");
+    assert_eq!(legacy["candidates_total"], 3, "case 2：三种状态都进入候选");
+    let candidates = legacy["candidates"].as_array().expect("candidates");
+    let statuses: Vec<&str> = candidates
+        .iter()
+        .map(|item| item["status"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        statuses,
+        vec!["blocked", "failed", "ok"],
+        "case 21：旧调用方字段不变，候选新增 status 回显"
+    );
+    assert_eq!(legacy["older_than_days"], 30, "case 21：旧字段不变");
+    assert_eq!(legacy["limit"], 100, "case 21：旧字段不变");
+    assert_eq!(legacy["dry_run"], true, "case 21：旧字段不变");
+    assert_eq!(
+        legacy["skipped_total"], 3,
+        "case 21：最新 attempt 仍按旧口径跳过"
+    );
+    println!("[case 2] 缺省 status 与 v1.20 候选集合一致 PASS");
+    println!("[case 21] 不传 status 时旧字段/旧行为不变 PASS");
+}
+
+#[test]
+fn prune_status_whitelist_selection() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    let young = days_ago_stamp(5);
+
+    // t-mix：attempt-1=ok、attempt-2=blocked、attempt-3=ok（最新）
+    prune_attempt_status(runs.path(), "t-mix", 1, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-mix", 2, Some("blocked"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-mix", 3, Some("ok"), Some(&old), true);
+    // t-failed：attempt-1=failed、attempt-2=failed（最新）
+    prune_attempt_status(runs.path(), "t-failed", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-failed", 2, Some("failed"), Some(&old), true);
+    // t-young：attempt-1=failed 但只有 5 天，attempt-2=failed 最新
+    prune_attempt_status(runs.path(), "t-young", 1, Some("failed"), Some(&young), true);
+    prune_attempt_status(runs.path(), "t-young", 2, Some("failed"), Some(&old), true);
+    // t-nostatus：attempt-1 缺 status，attempt-2=ok 最新
+    prune_attempt_status(runs.path(), "t-nostatus", 1, None, Some(&old), true);
+    prune_attempt_status(runs.path(), "t-nostatus", 2, Some("ok"), Some(&old), true);
+    // t-weird：attempt-1 状态值不认识，attempt-2=ok 最新
+    prune_attempt_status(runs.path(), "t-weird", 1, Some("weird"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-weird", 2, Some("ok"), Some(&old), true);
+
+    let failed = prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"] }));
+    assert_eq!(failed["status_filter"], json!(["failed"]), "case 3");
+    let candidates = failed["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 1, "case 3：只保留 failed 的非最新候选");
+    assert!(
+        candidates
+            .iter()
+            .all(|item| item["status"] == "failed" && item["task_id"] == "t-failed"),
+        "case 3：ok/blocked 不得进入候选：{failed}"
+    );
+    let skipped = failed["skipped"].as_array().expect("skipped");
+    assert!(
+        skipped.iter().any(|item| item["task_id"] == "t-mix"
+            && item["attempt"] == 2
+            && item["reason"] == "status_mismatch"),
+        "case 3：blocked 必须标 status_mismatch：{failed}"
+    );
+    println!("[case 3] status=[failed] 只删 failed，非白名单进 status_mismatch PASS");
+
+    let multi = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["ok", "blocked"] }),
+    );
+    assert_eq!(multi["status_filter"], json!(["ok", "blocked"]), "case 4");
+    let multi_candidates = multi["candidates"].as_array().expect("candidates");
+    assert!(
+        multi_candidates
+            .iter()
+            .all(|item| item["status"] == "ok" || item["status"] == "blocked"),
+        "case 4：failed 不得进入候选：{multi}"
+    );
+    assert!(
+        multi_candidates.iter().any(|item| item["task_id"] == "t-mix"
+            && item["attempt"] == 2
+            && item["status"] == "blocked"),
+        "case 4：blocked 必须在白名单内被选中"
+    );
+    println!("[case 4] 多值白名单取并集，failed 不进入候选 PASS");
+
+    let young_check = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"] }),
+    );
+    let young_skipped = young_check["skipped"].as_array().expect("skipped");
+    assert!(
+        young_skipped.iter().any(|item| item["task_id"] == "t-young"
+            && item["attempt"] == 1
+            && item["reason"] == "not_old_enough"),
+        "case 10：status 与 older_than_days 必须是 AND：{young_check}"
+    );
+    assert!(
+        !young_check["candidates"]
+            .as_array()
+            .expect("candidates")
+            .iter()
+            .any(|item| item["task_id"] == "t-young"),
+        "case 10：未满阈值的 failed 不得删"
+    );
+    println!("[case 10] status + older_than_days 为 AND，未满阈值不删 PASS");
+
+    let latest_check = prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"] }));
+    assert!(
+        latest_check["skipped"]
+            .as_array()
+            .expect("skipped")
+            .iter()
+            .any(|item| item["task_id"] == "t-failed"
+                && item["attempt"] == 2
+                && item["reason"] == "latest_attempt_retained"),
+        "case 11：最新 attempt 即使状态命中也不删：{latest_check}"
+    );
+    println!("[case 11] 最新 attempt 永不删，status 白名单不能选中 PASS");
+
+    for (task, expected_reason) in [("t-nostatus", "status_unknown"), ("t-weird", "status_unknown")] {
+        let check = prune_dry(&server, json!({ "older_than_days": 30, "status": ["ok"] }));
+        assert!(
+            !check["candidates"]
+                .as_array()
+                .expect("candidates")
+                .iter()
+                .any(|item| item["task_id"] == task),
+            "case 12/13：{task} 不得进入候选：{check}"
+        );
+        assert!(
+            check["skipped"]
+                .as_array()
+                .expect("skipped")
+                .iter()
+                .any(|item| item["task_id"] == task
+                    && item["attempt"] == 1
+                    && item["reason"] == expected_reason),
+            "case 12/13：{task} 必须标 {expected_reason}：{check}"
+        );
+    }
+    println!("[case 12] 回执缺 status → status_unknown，不删 PASS");
+    println!("[case 13] 未知状态值 → status_unknown，不删 PASS");
+
+    for task in ["t-l1", "t-l2", "t-l3"] {
+        prune_attempt_status(runs.path(), task, 1, Some("failed"), Some(&old), true);
+        prune_attempt_status(runs.path(), task, 2, Some("failed"), Some(&old), true);
+    }
+    let limited = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"], "limit": 1 }),
+    );
+    assert!(
+        limited["candidates_total"].as_u64().unwrap_or(0) >= 3,
+        "case 14：limit 必须在过滤之后生效（总数是过滤后命中数）：{limited}"
+    );
+    assert_eq!(limited["truncated"], true, "case 14");
+    assert_eq!(
+        limited["candidates"].as_array().expect("candidates").len(),
+        1,
+        "case 14：批次只取 limit 个"
+    );
+    println!("[case 14] limit 在 status 过滤之后生效，candidates_total 为过滤后总数 PASS");
+
+    prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"], "limit": 1 }));
+    prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"], "limit": 100 }));
+    for bad in [0, 101] {
+        let text = prune_error(
+            &server,
+            json!({ "older_than_days": 30, "status": ["failed"], "limit": bad }),
+        );
+        assert!(text.contains("invalid_retention"), "case 15：{bad}：{text}");
+    }
+    println!("[case 15] limit 1/100 通过，0/101 → invalid_retention PASS");
+}
+
+#[test]
+fn prune_status_validation_is_fail_closed() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt_status(runs.path(), "t-guard", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-guard", 2, Some("failed"), Some(&old), true);
+
+    let invalid_forms = [
+        (json!([]), "case 5"),
+        (json!(["unknown"]), "case 6"),
+        (json!(["Failed"]), "case 6"),
+        (json!("failed"), "case 7"),
+        (Value::Null, "case 8"),
+    ];
+    for (status, label) in invalid_forms {
+        let text = prune_error(
+            &server,
+            json!({ "older_than_days": 30, "status": status }),
+        );
+        assert!(text.contains("invalid_retention"), "{label}：{text}");
+    }
+    println!("[case 5] 空数组 → invalid_retention，零删除零审计 PASS");
+    println!("[case 6] 未知值/大小写不符 → invalid_retention PASS");
+    println!("[case 7] 非数组 → invalid_retention PASS");
+    println!("[case 8] null → invalid_retention，不当作不过滤 PASS");
+
+    let dedup = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed", "failed"] }),
+    );
+    assert_eq!(
+        dedup["status_filter"],
+        json!(["failed"]),
+        "case 9：重复值去重后回显"
+    );
+    println!("[case 9] 重复值去重后正常执行，status_filter 回显去重结果 PASS");
+
+    let entries_before = fs::read_dir(runs.path()).expect("读 runs").count();
+    let dry = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"] }),
+    );
+    assert_eq!(dry["dry_run"], true, "case 16");
+    assert!(
+        !runs.path().join("prune.jsonl").exists(),
+        "case 16：dry-run 不得写审计"
+    );
+    assert!(
+        !runs.path().join(".prune-trash").exists(),
+        "case 16：dry-run 不得创建 trash"
+    );
+    assert_eq!(
+        fs::read_dir(runs.path()).expect("读 runs").count(),
+        entries_before,
+        "case 16：dry-run 零写入"
+    );
+    println!("[case 16] status 过滤的 dry-run 仍零写入 PASS");
+
+    let text = prune_error(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"], "dry_run": false }),
+    );
+    assert!(text.contains("confirm_required"), "case 17：{text}");
+    assert!(
+        !runs.path().join("prune.jsonl").exists(),
+        "case 17：缺 confirm 不得写审计"
+    );
+    assert!(
+        runs.path().join("t-guard").join("attempt-1").is_dir(),
+        "case 17：缺 confirm 不得删除"
+    );
+    println!("[case 17] status 合法但缺 confirm → confirm_required，零删除零审计 PASS");
+}
+
+#[test]
+fn prune_status_audit_and_mixed_batch() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt_status(runs.path(), "t-mix", 1, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-mix", 2, Some("blocked"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-mix", 3, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-failed", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-failed", 2, Some("failed"), Some(&old), true);
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "older_than_days": 30,
+            "status": ["ok", "failed"],
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status_filter"], json!(["ok", "failed"]), "case 19");
+    assert_eq!(payload["deleted_total"], 2, "case 19：ok+failed 两类都删");
+    assert_eq!(payload["failed_total"], 0, "case 19");
+    assert!(
+        runs.path()
+            .join("t-mix")
+            .join("attempt-2")
+            .join("handback.json")
+            .is_file(),
+        "case 19：blocked 不在白名单，必须保留"
+    );
+    assert!(
+        !runs.path().join("t-mix").join("attempt-1").exists(),
+        "case 19：ok 应被删除"
+    );
+    assert!(
+        !runs.path().join("t-failed").join("attempt-1").exists(),
+        "case 19：failed 应被删除"
+    );
+    println!("[case 19] 混合白名单按状态删除，blocked 保留、计数正确 PASS");
+
+    let audit = fs::read_to_string(runs.path().join("prune.jsonl")).expect("必须写审计");
+    let lines: Vec<&str> = audit.lines().filter(|line| !line.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 2, "case 18：plan + result 两行");
+    for line in &lines {
+        let record: Value = serde_json::from_str(line).expect("审计行必须是 JSON");
+        assert_eq!(record["status_filter"], json!(["ok", "failed"]), "case 18");
+        assert_eq!(record["older_than_days"], 30, "case 18");
+        assert_eq!(record["limit"], 100, "case 18");
+        assert!(record["batch_id"].as_str().is_some(), "case 18");
+    }
+    println!("[case 18] plan/result 均记录 status_filter、older_than_days、limit、batch_id PASS");
+}
+
+#[cfg(windows)]
+#[test]
+fn prune_status_partial_failure_is_reported_as_partial() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt_status(runs.path(), "t-partial", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-partial", 2, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-partial", 3, Some("failed"), Some(&old), true);
+    let attempt_one = runs.path().join("t-partial").join("attempt-1");
+    let _locked = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(attempt_one.join("stdout.txt"))
+        .expect("以独占共享模式打开文件");
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "older_than_days": 30,
+            "status": ["failed"],
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    assert_eq!(response["result"]["isError"], true, "case 20：{}", tool_text(&response));
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "partial", "case 20");
+    assert_eq!(payload["deleted_total"], 1, "case 20：其余白名单候选仍删");
+    assert_eq!(payload["failed_total"], 1, "case 20");
+    assert_eq!(payload["failed"][0]["attempt"], 1, "case 20");
+    assert_eq!(payload["status_filter"], json!(["failed"]), "case 20");
+    println!("[case 20] status 过滤下 partial 仍 partial + isError=true，其余照删 PASS");
+}
+
+#[test]
+fn prune_status_capability_gate_and_no_server_side_tier() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt_status(runs.path(), "t-gate", 1, Some("failed"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-gate", 2, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-gate2", 1, Some("ok"), Some(&old), true);
+    prune_attempt_status(runs.path(), "t-gate2", 2, Some("ok"), Some(&old), true);
+
+    let schema = prune_schema(&server);
+    assert!(
+        schema["properties"].get("status").is_some(),
+        "case 22：schema 必须声明 status，这是 PM 侧能力门禁的唯一依据"
+    );
+    println!("[case 22] schema 含 status=能力位；不含时 PM 必须禁止携带并真删 PASS");
+
+    let tier = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "tier": "failed" }),
+    );
+    assert_eq!(tier["status_filter"], Value::Null, "case 22");
+    assert_eq!(
+        tier["candidates_total"], 2,
+        "case 22：tier 被忽略、不产生服务端分档：{tier}"
+    );
+    assert!(
+        tier["candidates"]
+            .as_array()
+            .expect("candidates")
+            .iter()
+            .any(|item| item["status"] == "failed")
+            && tier["candidates"]
+                .as_array()
+                .expect("candidates")
+                .iter()
+                .any(|item| item["status"] == "ok"),
+        "case 22：tier 不得被当作状态白名单"
+    );
+    println!("[case 22] 无服务端 tier；未知参数被忽略，故 PM 必须靠 schema 门禁 PASS");
+}
+
 #[test]
 fn prune_defaults_to_dry_run_and_lists_candidates_without_writing() {
     let (server, _settings, runs) = server_with_runs();
