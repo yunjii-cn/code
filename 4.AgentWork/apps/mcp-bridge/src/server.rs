@@ -1481,6 +1481,40 @@ mod process_scope {
                 assert!(emptied, "SIGKILL 后进程组应最终清空");
             }
 
+            // 实测锁定：忽略 SIGTERM 且持续 fork 的进程组，一次 SIGKILL 后必须清空。
+            // 终止前组长仍存活（因此宽限期结束后必然派发 SIGKILL），SIGKILL 派发时仍在 fork。
+            #[test]
+            fn single_sigkill_suffices_under_fork_pressure() {
+                let mut supervisor = Supervisor::new();
+                let mut command = Command::new("sh");
+                command
+                    .arg("-c")
+                    .arg("trap '' TERM; while :; do sleep 5 & done")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+                let mut child = command.spawn().expect("spawn fork pressure");
+                supervisor.attach(&mut child);
+                let pgid = child.id() as i32;
+                std::thread::sleep(Duration::from_millis(400));
+                let exists_before = group_exists(pgid);
+                let started = Instant::now();
+                let outcome = supervisor.terminate(&mut child);
+                println!(
+                    "[evidence] fork_pressure pgid={pgid} group_exists_before={exists_before} outcome={outcome:?} elapsed_ms={}",
+                    started.elapsed().as_millis()
+                );
+                assert!(
+                    exists_before,
+                    "组长忽略 SIGTERM 且持续 fork，终止前进程组必须存在（宽限期后必须派发 SIGKILL）"
+                );
+                assert_eq!(
+                    outcome,
+                    CleanupOutcome::Cleaned,
+                    "一次 SIGKILL 后受控集合必须清空"
+                );
+            }
+
             // 反向：进程已退出，组判据应为空
             #[test]
             fn exited_process_group_has_no_members() {
@@ -1883,6 +1917,46 @@ mod process_scope {
                 assert_eq!(after, Some(0));
             }
 
+            // 实测锁定：成员持续拉起后代时，一次 TerminateJobObject 后作业必须清空。
+            #[test]
+            fn single_terminate_suffices_under_spawn_pressure() {
+                for trial in 0..6u64 {
+                    let mut supervisor = Supervisor::new();
+                    assert!(supervisor.job.is_some());
+                    let mut command = Command::new("cmd");
+                    command
+                        .args([
+                            "/C",
+                            "for /L %i in (1,1,20000) do @start /b ping -n 30 127.0.0.1 > NUL",
+                        ])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    supervisor.configure(&mut command);
+                    let mut child = command.spawn().expect("spawn spawner");
+                    supervisor.attach(&mut child);
+                    assert!(supervisor.attached);
+                    std::thread::sleep(Duration::from_millis(30 + trial * 20));
+                    let before = supervisor.active_processes();
+                    let started = Instant::now();
+                    let outcome = supervisor.terminate(&mut child);
+                    let after = supervisor.active_processes();
+                    println!(
+                        "[evidence] spawn_pressure trial={trial} ActiveProcesses_before={before:?} outcome={outcome:?} ActiveProcesses_after={after:?} elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    );
+                    assert!(
+                        before.unwrap_or(0) > 0,
+                        "终止前作业内必须有活跃进程（否则用例空转）"
+                    );
+                    assert_eq!(
+                        outcome,
+                        CleanupOutcome::Cleaned,
+                        "一次 TerminateJobObject 后作业必须清空"
+                    );
+                    assert_eq!(after, Some(0));
+                }
+            }
+
             // 反向：进程已退出，作业内活动进程数应为 0
             #[test]
             fn exited_process_leaves_job_empty() {
@@ -2173,14 +2247,14 @@ fn tools() -> Value {
         },
         {
             "name": "task.execute",
-            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号，仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树",
+            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号；终止只尝试一次（不重试），仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string", "description": "派单标识（字母或数字开头，仅含字母数字 . _ -，≤64）" },
                     "cmd": { "type": "string", "description": "派单方指定的执行/验证命令" },
                     "cwd": { "type": "string", "description": "工作目录，默认进程当前目录；回执中的 locator 始终为相对路径" },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因。原因按受控集合清理结果三态给出：已清理受控集合 / 受控集合内仍有存活进程 / 受控集合未能建立或无法查询（此时仅向直接子进程发送终止信号）；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树" },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因。原因按受控集合清理结果三态给出：已清理受控集合 / 受控集合内仍有存活进程 / 受控集合未能建立或无法查询（此时仅向直接子进程发送终止信号）；终止只尝试一次（不重试），只有观测到集合内无存活进程才写「已清理受控集合」；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树" },
                     "env": {
                         "type": "object",
                         "description": "可选：追加/覆盖子进程环境变量（字符串 map，仅非 PATH 变量）。未列出的变量继承 bridge 进程环境；显式同名变量覆盖继承值。PATH 任意大小写变体一律拒绝（invalid_env）：继承的 PATH 永远保留、不会整体覆盖、也不会被静默忽略；需要追加目录请用 path_prepend。值为空串表示置空，不是 unset；不做任何自动推断",

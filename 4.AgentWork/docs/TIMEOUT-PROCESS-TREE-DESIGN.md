@@ -444,6 +444,47 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 
 v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不提供逃逸观测点**，因此不改变上表任何一格，也不改变 `#3 = NOT_PROVEN`。四条中任何一条不满足，"逃逸未验证"就必须保留。
 
+### 6.9 单次终止尝试是否足够（v1.24 实测；结论：一次即足够，不加重试）
+
+要回答的问题：一次 `TerminateJobObject`（Windows）/ 一次 `kill(-pgid, SIGKILL)`（POSIX）之后，受控集合内还会不会有存活成员？"刚 spawn 未入集合 / 进程在内核态 / 被杀进程再拉起子进程"这三种条件哪几种真实存在？
+
+#### 实测（真实进程，不是推理）
+
+| 平台 / 夹具 | 轮数 | 做法 | 结果 |
+|---|---|---|---|
+| Windows Job Object：`cmd /C "for /L %i in (1,1,20000) do @start /b ping -n 30 127.0.0.1 > NUL"` 持续拉起后代 | 20 | 走生产路径 `CREATE_SUSPENDED → Assign → Resume`，30..220ms 后**一次** `TerminateJobObject(job, 1)`，再每 10ms 轮询 `ActiveProcesses` 3 秒 | `ActiveProcesses_before` = 2..21；**20/20 首次轮询即为 0**（`saw_nonzero_after_terminate=false`），`at_3s=Some(0)` |
+| POSIX：`sh -c 'while :; do sleep 20 & done'` 高速 fork | 40 | `setsid` 建组，12..83ms 后一次 `kill(-pgid, SIGKILL)`，每 20ms 查 `kill(-pgid, 0)` 3 秒 | **40/40 组内 0 存活**（`alive_after_first_3s=False`，`members=0`） |
+| POSIX：2GB 进程持续 `os.fork()`（单次 fork ≈16ms，SIGKILL 必落在 fork 窗口内） | 20 | 分配并触碰 2GB 后就绪，再 2..29ms 一次 `kill(-pgid, SIGKILL)` | **20/20 组内 0 存活** |
+| POSIX：400 个已存在子进程（早期探针 `setsid sh -c 'i=0; while [ $i -lt 400 ]; do sleep 5 & ...'`） | 8 | 30ms 后一次 `kill(-pgid, SIGKILL)` | **8/8 组内 0 存活** |
+
+合计 POSIX 68 轮、Windows 20 轮，**0 次出现"一次终止后仍有存活"**。
+
+#### 为什么 fork 竞态没有留下幸存者
+
+第 3 行把"fork 与 SIGKILL 同时发生"的窗口放大到约 16ms（2GB 页表复制），仍然 0 幸存。原因不是运气：Linux `copy_process` 在返回前检查 `signal_pending(current)`，致命信号已到达时**中止本次 fork**，不会产生"信号派发之后才出生"的组成员。Windows 侧作业成员关系在 `CreateProcess` 时原子继承（本实现不允许 `BREAKAWAY`），`CREATE_SUSPENDED` 又关掉了"恢复执行前派生后代"的窗口；20 轮持续派生场景下 `TerminateJobObject` 返回后 `ActiveProcesses` 首次查询即为 0。三种条件逐条落点：
+
+- 刚 spawn 未入集合：Windows 由 `CREATE_SUSPENDED → Assign → Resume` 关闭（§6.5 `suspended_start_defers_execution_until_job_assign` 实跑）；POSIX 由 `process_group(0)` 在 exec 前建组，不存在"先运行后入组"。
+- 进程在内核态：Windows `TerminateJobObject` 由内核终止当前全部成员；POSIX SIGKILL 对内核态进程同样生效（除 D 状态，见下）。
+- 被杀进程再拉起子进程：POSIX 的 fork 在致命信号 pending 时被内核中止；Windows 的子进程在创建时原子继承作业，`TerminateJobObject` 覆盖当前全部成员。
+
+#### 哪些情况仍会观测到 `StillAlive`，以及为什么重试不能把它变成 `Cleaned`
+
+- **僵尸成员**：`kill(-pgid, 0)` 对僵尸仍返回成功，"组里只有僵尸"会被判为存在。生产代码在 SIGKILL 后立刻 `child.wait()` 收掉直接子进程；其余孤儿的父进程已死，由 init/收养者回收。对僵尸再发 SIGKILL 是 no-op，重试不会缩短这段时间。
+- **冻结 / 不可中断**：cgroup v2 冻结构造（`cgroup.freeze=1` 后 `kill(-pgid,SIGKILL)`）显示进程**立即变 Z**（不是"杀不死"），二次 SIGKILL 无变化，解冻后消失（`alive_after_unfreeze=False`）。真正的 D 状态（I/O 不可中断）在本环境无法构造；但 SIGKILL 一旦 pending 就不会丢失，重发是同一个 pending 信号，不能加速唤醒。
+- **判据本身**：`ESRCH` 与 `ActiveProcesses==0` 是"观测"而非"命令成功"；任何未观测到空的路径只能记 `StillAlive` / `Unavailable`，本批不放宽。
+
+因此 v1.24 **不新增第二次终止尝试**：没有实测场景能证明"第二次尝试把 `StillAlive` 变成 `Cleaned`"；能构造出的 `StillAlive` 场景（僵尸、冻结）重试也无效。加轮询内重试只会把"如实报告仍有存活"变成"多杀几次再如实报告"，不改变判据，反而增加实现与门禁复杂度。
+
+#### 锁定用例（两平台，均为真实进程）
+
+- POSIX：`single_sigkill_suffices_under_fork_pressure` —— 组长 `trap '' TERM` 且持续 fork，宽限期结束后**必然**派发 SIGKILL；断言 `Cleaned`。绿：`[evidence] fork_pressure pgid=1472 group_exists_before=true outcome=Cleaned elapsed_ms=673`。
+- Windows：`single_terminate_suffices_under_spawn_pressure` —— 成员持续 `start /b` 拉起 ping 子进程，6 轮；断言每轮 `Cleaned` 且 `after=Some(0)`。绿：`ActiveProcesses_before=Some(2..13) outcome=Cleaned ActiveProcesses_after=Some(0)`。
+
+变异红灯（证明断言非空转；变异已逐字还原）：
+
+- POSIX 把 `kill(-pgid, SIGKILL)` 改成只杀组长 `kill(pgid, SIGKILL)`：`outcome=StillAlive elapsed_ms=3524`，断言失败原文 `left: StillAlive / right: Cleaned`。
+- Windows 把 `TerminateJobObject` 改成只 `child.kill()`：trial 1 `outcome=StillAlive ActiveProcesses_after=Some(4) elapsed_ms=3019`，同一断言失败。
+
 ---
 
 ## 7. 依赖与构建影响汇总（已核实）
@@ -488,14 +529,15 @@ v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不�
 - Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，v1.20 起 `CREATE_SUSPENDED` 创建、先 `Assign` 再 `ResumeThread`（W2a）；
 - 判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`，作用域写死"受控集合"；
 - 超时文案为 v1.20 三态措辞（只有 `Cleaned` 分支写"已清理受控集合；逃逸进程是否仍在运行未验证"，Windows 另写挂起创建/入作业/恢复执行与残余逃逸）；旧回执原样返回、不改写；
-- 契约 v1.16 + v1.16.1（文案退回）+ v1.17（文案启用）+ v1.20（Windows 窗口收窄）+ 五类用例（正向 / 反假通过 / 反向 / 作用域负例 / 恢复前零执行）。
+- 契约 v1.16 + v1.16.1（文案退回）+ v1.17（文案启用）+ v1.20（Windows 窗口收窄）+ v1.24（单次终止实测确认）+ 六类用例（正向 / 反假通过 / 反向 / 作用域负例 / 恢复前零执行 / 单次终止压力）；
 
 **明确没做**：
 
 - 不实现 W2b/W2c：W2c 已在 §4.5 专项评估并固定结论（不做，非待办）；W2a 已覆盖其唯一想收窄的后代窗口；
 - 不引入 cgroup v2 委派、不实现整棵树枚举，也不提供"逃逸存在性"观测点（门槛见 §6.8）；
 - 不把 `#3` 改成已证明，不改 `NOT_PROVEN` 状态；
-- 不写"已终止进程树 / 无残留"，也不在任何分支把 `StillAlive` / `Unavailable` 升级为"已清理"。
+- 不写"已终止进程树 / 无残留"，也不在任何分支把 `StillAlive` / `Unavailable` 升级为"已清理"；
+- **不新增第二次终止尝试**（v1.24）：POSIX 68 轮 + Windows 20 轮实测均未出现"一次终止后仍有存活"，能构造出的 `StillAlive` 场景（僵尸、冻结）重试也无效（§6.9）；描述已明写"终止只尝试一次（不重试）"。
 
 ---
 

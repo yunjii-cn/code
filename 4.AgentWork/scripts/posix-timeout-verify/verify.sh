@@ -290,6 +290,8 @@ run_tests() {
     "escaped_alive=true" \
     "original_group_empty=true" \
     "[evidence] timeout_reason=" \
+    "[evidence] fork_pressure" \
+    "single_sigkill_suffices_under_fork_pressure ... ok" \
     "已清理受控集合" \
     "exited_process_group_has_no_members ... ok" \
     "stopped_process_still_counts_as_alive ... ok" \

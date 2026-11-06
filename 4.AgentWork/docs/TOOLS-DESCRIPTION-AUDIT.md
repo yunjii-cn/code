@@ -1229,8 +1229,8 @@ cargo test -p aw-mcp-bridge description_gate
 
 | ID | 工具 | 路径 | 必须包含 | 不得包含 | 实现侧断言 |
 |---|---|---|---|---|---|
-| G1 | `task.execute` | `description` | 受控集合（POSIX 进程组 / Windows Job Object）；仅当观测到集合内无存活进程才写「已清理受控集合」；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树；挂起态创建、先加入作业再恢复执行 | 已终止进程树；无残留；会终止整棵进程树 | `description_gate_timeout_three_states_match_description` |
-| G2 | `task.execute` | `inputSchema.properties.timeout_secs.description` | 默认 120；三态；已清理受控集合；受控集合内仍有存活进程；受控集合未能建立或无法查询；仅向直接子进程发送终止信号；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树 | 已终止进程树；无残留；会终止整棵进程树 | `description_gate_timeout_three_states_match_description` |
+| G1 | `task.execute` | `description` | 受控集合（POSIX 进程组 / Windows Job Object）；终止只尝试一次（不重试）；仅当观测到集合内无存活进程才写「已清理受控集合」；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树；挂起态创建、先加入作业再恢复执行 | 已终止进程树；无残留；会终止整棵进程树；自动重试 | `description_gate_timeout_three_states_match_description` |
+| G2 | `task.execute` | `inputSchema.properties.timeout_secs.description` | 默认 120；三态；终止只尝试一次（不重试）；已清理受控集合；受控集合内仍有存活进程；受控集合未能建立或无法查询；仅向直接子进程发送终止信号；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树 | 已终止进程树；无残留；会终止整棵进程树；自动重试 | `description_gate_timeout_three_states_match_description` |
 | G3 | `runs.prune` | `description` | 显式传入才生效；缺省不过滤；无默认状态；无服务端分档；与 older_than_days 为 AND | 默认 90 天；默认分档；分档 30 | `description_gate_behavior_status_capability_and_filtering` |
 | G4 | `runs.prune` | `inputSchema.properties.status.description` | 显式传入才生效；缺省不过滤；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档 | 默认状态 ok | `description_gate_behavior_status_capability_and_filtering` |
 | G5 | `runs.prune` | `inputSchema.properties.limit.description` | 默认 100；在 status 过滤之后生效 | — | `description_gate_behavior_status_capability_and_filtering`、`description_gate_behavior_session_and_limit_defaults` |
@@ -1247,22 +1247,22 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "884952c7686d305356dc0f41b52af5579835edf54ea37f0e7b7378293b093092",
+  "tools_sha256": "10128b3ed88a4b4df5d419dbf61e02b151a8832f4cd5eb2e52791a67851d3895",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
       "id": "G1",
       "tool": "task.execute",
       "path": "description",
-      "contains": ["受控集合（POSIX 进程组 / Windows Job Object）", "仅当观测到集合内无存活进程才写「已清理受控集合」", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树", "挂起态创建、先加入作业再恢复执行"],
-      "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树"]
+      "contains": ["受控集合（POSIX 进程组 / Windows Job Object）", "终止只尝试一次（不重试）", "仅当观测到集合内无存活进程才写「已清理受控集合」", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树", "挂起态创建、先加入作业再恢复执行"],
+      "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树", "自动重试"]
     },
     {
       "id": "G2",
       "tool": "task.execute",
       "path": "inputSchema.properties.timeout_secs.description",
-      "contains": ["默认 120", "三态", "已清理受控集合", "受控集合内仍有存活进程", "受控集合未能建立或无法查询", "仅向直接子进程发送终止信号", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树"],
-      "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树"]
+      "contains": ["默认 120", "三态", "终止只尝试一次（不重试）", "已清理受控集合", "受控集合内仍有存活进程", "受控集合未能建立或无法查询", "仅向直接子进程发送终止信号", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树"],
+      "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树", "自动重试"]
     },
     {
       "id": "G3",
@@ -1349,6 +1349,7 @@ cargo test -p aw-mcp-bridge description_gate
 | `_session` 不作为任务 | `runs.list` 与 `runs.prune` 在有 `_session` 的 runs 目录下都不把它当任务/候选 |
 | `limit` 缺省值 | `runs.list` 缺省回显 `limit=20` 且只回 20 条；`runs.prune` 缺省回显 `limit=100`；`limit` 在 `status` 过滤之后生效（过滤后截断、`truncated=true`） |
 | 连接计数（v1.23） | 描述必须写明连接级 `connections`、无会话概念、`active/total/peak` 恒为 1、`initialize_total` 累加、只观测；真实 stdio 进程两次 `initialize` 后必须读到 `initialize_total=2` 且 `total/peak/active=1` |
+| 终止只尝试一次（v1.24） | `task.execute` 与 `timeout_secs` 描述必须写明「终止只尝试一次（不重试）」「只有观测到集合内无存活进程才写「已清理受控集合」」；不得出现「自动重试」；两平台压力用例必须证明一次终止后判据归零（POSIX `kill(-pgid,0)==ESRCH`、Windows `ActiveProcesses==0`） |
 
 ### 21.5 仍然只能靠人的部分（不做自动覆盖）
 
@@ -1358,6 +1359,7 @@ cargo test -p aw-mcp-bridge description_gate
 | "AW 不定义判据、不做验收" | 对全仓的否定性断言，有限用例无法证明"不存在验收逻辑"；依赖代码评审与审计复核 |
 | "仅审计弱识别，不构成身份" | 同上，属跨链路否定性断言；门禁无法枚举所有未来读取路径 |
 | PM 侧能力门禁（先读 schema 再决定是否携带 `status`） | 属调用方行为；服务端只能保证 schema 事实存在，无法验证 PM 是否遵守 |
+| "一次终止即足够"的跨环境普适性（v1.24） | 门禁与两平台用例只能证明本机（Windows 作业对象 / WSL Ubuntu 24.04 内核）在这些夹具下成立；内核调度、D 状态、NFS 等等待无法在本环境穷举。可自动验证的是"未观测到空只能报 StillAlive"与"一次终止后判据归零"两个方向 |
 | `additionalProperties:false` 对严格客户端的效果 | 严格客户端可能在发送前就拒绝未知参数，服务端观测不到；门禁只验证服务端"自己不拒绝" |
 | 三态文案在真实超时下的分支归属 | 需要真实进程/竞态；门禁只保证文案函数与描述一致，真实分支由 POSIX/Windows 证据用例覆盖 |
 | 回执内容（stdout/stderr 正文、耗时、产物哈希）的运行时正确性 | 依赖真实执行环境与文件系统状态；门禁只对齐描述措辞，正确性由执行层用例承担 |
@@ -1494,6 +1496,81 @@ POSIX （WSL HostGoTest，verify.sh run 离线）：8 unit + 76 integration，0 
 - 计数是**进程级**：不同 bridge 进程各自独立，没有跨进程共享或汇总。
 - 只观测：不参与准入、不做上限、不做限流；`clientInfo` 仍不参与准入。
 - 真实 stdio 用例会把 `initialize` 审计文件写到可执行文件同级的 `runs/_session`（测试目录，非生产 runs）；不影响计数断言。
+
+## 23. 超时终止「单次尝试」实测与门禁（v1.24）
+
+### 23.1 结论
+
+**一次终止即足够，本批不新增第二次尝试。** 实测：POSIX 68 轮（高速 fork / 2GB 进程 16ms fork 窗口 / 400 个已存在子进程）+ Windows 20 轮（成员持续 `start /b` 拉起后代）均未出现"一次 SIGKILL / 一次 `TerminateJobObject` 后集合内仍有存活"。能构造出的 `StillAlive` 场景（僵尸成员、cgroup 冻结）重试也无效：僵尸对再次 SIGKILL 是 no-op，冻结进程在首次 SIGKILL 后已是 Z，解冻后才消失。完整夹具、原始输出与"fork 为何不会留下幸存者"见 [TIMEOUT-PROCESS-TREE-DESIGN.md](./TIMEOUT-PROCESS-TREE-DESIGN.md) §6.9。
+
+回执语义未变松：只有观测到 POSIX `kill(-pgid,0)==ESRCH` / Windows `ActiveProcesses==0` 才写 `Cleaned`；任何分支仍不出现"已终止进程树"；逃逸进程仍写"未验证"；`#3` 仍 `NOT_PROVEN`，W2c 未重开。
+
+### 23.2 描述与门禁对应
+
+| 门禁行 | 覆盖内容 | 本批变化 |
+|---|---|---|
+| G1 | `task.execute` 的 `description` | 新增必需措辞「终止只尝试一次（不重试）」；`not_contains` 新增「自动重试」 |
+| G2 | `task.execute.inputSchema.properties.timeout_secs.description` | 新增必需措辞「终止只尝试一次（不重试）」「只有观测到集合内无存活进程才写「已清理受控集合」」；`not_contains` 新增「自动重试」 |
+
+`tools_sha256` 由 `884952c7686d305356dc0f41b52af5579835edf54ea37f0e7b7378293b093092` 更新为 `10128b3ed88a4b4df5d419dbf61e02b151a8832f4cd5eb2e52791a67851d3895`。新增/改动的两行同时受行断言、每个工具描述覆盖检查与快照哈希三重约束。
+
+### 23.3 门禁扰动（红）原文
+
+把 `task.execute` 描述里的「终止只尝试一次（不重试）」改成「终止会自动重试直到清理」，行断言与快照同时失败：
+
+```text
+thread 'server::description_gate::description_gate_rows_hold_on_tools' panicked at apps\mcp-bridge\src\server.rs:2513:17:
+G1：task.execute 的 description 缺少必需措辞「终止只尝试一次（不重试）」：接单执行：…超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号；终止会自动重试直到清理，仅当观测到集合内无存活进程才写「已清理受控集合」…
+
+thread 'server::description_gate::description_gate_snapshot_matches_audit' panicked at apps\mcp-bridge\src\server.rs:2485:9:
+assertion `left == right` failed: tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。实际=3600f8fb17c828dc892fff3da43f73926159fbe514206528ad93d8ebd2839c8c
+  left: "3600f8fb17c828dc892fff3da43f73926159fbe514206528ad93d8ebd2839c8c"
+ right: "10128b3ed88a4b4df5d419dbf61e02b151a8832f4cd5eb2e52791a67851d3895"
+```
+
+扰动已逐字恢复，门禁回到 3 + 4 全绿。
+
+### 23.4 用例变异（红）原文
+
+新增的两个压力用例不是空转：把实现临时削弱后各自失败（变异已逐字还原）。
+
+POSIX：把 `kill(-pgid, SIGKILL)` 改成只杀组长 `kill(pgid, SIGKILL)`，子进程留在组内：
+
+```text
+[evidence] fork_pressure pgid=12971 group_exists_before=true outcome=StillAlive elapsed_ms=3533
+
+thread 'server::process_scope::imp::tests::single_sigkill_suffices_under_fork_pressure' panicked at apps/mcp-bridge/src/server.rs:1511:17:
+assertion `left == right` failed: 一次 SIGKILL 后受控集合必须清空
+  left: StillAlive
+ right: Cleaned
+```
+
+Windows：把 `TerminateJobObject` 改成只 `child.kill()`，后代留在作业内：
+
+```text
+[evidence] spawn_pressure trial=0 ActiveProcesses_before=Some(2) outcome=Cleaned ActiveProcesses_after=Some(0) elapsed_ms=23
+[evidence] spawn_pressure trial=1 ActiveProcesses_before=Some(5) outcome=StillAlive ActiveProcesses_after=Some(3) elapsed_ms=3012
+
+thread 'server::process_scope::imp::tests::single_terminate_suffices_under_spawn_pressure' panicked at apps\mcp-bridge\src\server.rs:1950:21:
+assertion `left == right` failed: 一次 TerminateJobObject 后作业必须清空
+  left: StillAlive
+ right: Cleaned
+```
+
+### 23.5 两平台数字与边界
+
+```text
+Windows：10 unit + 78 integration，0 failed
+POSIX （WSL HostGoTest，verify.sh run 离线）：9 unit + 76 integration，0 failed，四类证据行齐全
+```
+
+边界（如实标注）：
+
+- 门禁只能自动验证"描述与 tools/list 一致""未观测到空只能报 StillAlive""本机夹具下一次终止后判据归零"；跨内核/调度状态的普适性列入 §21.5。
+- POSIX 的 2GB fork 夹具把 fork 窗口放大到约 16ms 仍 0 幸存；结论依赖内核"致命信号 pending 时中止 fork"，不是概率性断言。
+- Windows 的作业成员关系在 `CreateProcess` 时原子继承且本实现不允许 `BREAKAWAY`；`CREATE_SUSPENDED` 关闭"恢复前派生"窗口。
+- 真实 D 状态（I/O 不可中断）无法在本环境构造；SIGKILL 一旦 pending 不会丢失，重发同一信号不能加速。
+
 
 
 
