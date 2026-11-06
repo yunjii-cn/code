@@ -2323,3 +2323,186 @@ mod receipt_tests {
         assert_eq!(len, None);
     }
 }
+
+/// 描述审计自动门禁：审计文档 §21 的机器可读块是唯一来源。
+/// 描述/schema 改动必须同步该块（含 `tools_sha256`），否则本模块用例失败。
+#[cfg(test)]
+mod description_gate {
+    use super::*;
+
+    const AUDIT_DOC: &str = include_str!("../../../docs/TOOLS-DESCRIPTION-AUDIT.md");
+    const BEGIN: &str = "<!-- description-gate:begin -->";
+    const END: &str = "<!-- description-gate:end -->";
+
+    fn gate_block() -> Value {
+        let start = AUDIT_DOC
+            .find(BEGIN)
+            .unwrap_or_else(|| panic!("审计文档缺少 {BEGIN} 标记"));
+        let rest = &AUDIT_DOC[start + BEGIN.len()..];
+        let stop = rest
+            .find(END)
+            .unwrap_or_else(|| panic!("审计文档缺少 {END} 标记"));
+        let raw = rest[..stop].trim();
+        let raw = raw.strip_prefix("```json").unwrap_or(raw);
+        let raw = raw.strip_suffix("```").unwrap_or(raw);
+        serde_json::from_str(raw.trim()).expect("description-gate 块必须是合法 JSON")
+    }
+
+    fn canonical_tools_sha256() -> String {
+        use sha2::{Digest, Sha256};
+        hex::encode(Sha256::digest(tools().to_string().as_bytes()))
+    }
+
+    fn tool_by_name<'a>(list: &'a Value, name: &str) -> &'a Value {
+        list.as_array()
+            .expect("tools 必须是数组")
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("tools/list 缺少工具：{name}"))
+    }
+
+    fn text_at<'a>(tool: &'a Value, path: &str) -> &'a str {
+        let mut current = tool;
+        for segment in path.split('.') {
+            current = current
+                .get(segment)
+                .unwrap_or_else(|| panic!("{} 缺少路径 {path}", tool["name"]));
+        }
+        current
+            .as_str()
+            .unwrap_or_else(|| panic!("{} 的 {path} 不是字符串：{current}", tool["name"]))
+    }
+
+    #[test]
+    fn description_gate_snapshot_matches_audit() {
+        let gate = gate_block();
+        assert_eq!(gate["version"], "description-gate/1", "门禁块版本不匹配");
+        let expected = gate["tools_sha256"]
+            .as_str()
+            .expect("tools_sha256 必须是字符串");
+        let actual = canonical_tools_sha256();
+        assert_eq!(
+            actual, expected,
+            "tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。实际={actual}"
+        );
+    }
+
+    #[test]
+    fn description_gate_rows_hold_on_tools() {
+        let gate = gate_block();
+        let list = tools();
+        let rows = gate["rows"].as_array().expect("rows 必须是数组");
+        let mut covered: Vec<String> = Vec::new();
+        for row in rows {
+            let id = row["id"].as_str().expect("门禁行缺少 id");
+            let name = row["tool"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id} 缺少 tool"));
+            let path = row["path"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{id} 缺少 path"));
+            let tool = tool_by_name(&list, name);
+            let text = text_at(tool, path);
+            for phrase in row["contains"].as_array().unwrap_or_else(|| {
+                panic!("{id} 缺少 contains 数组")
+            }) {
+                let phrase = phrase
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id} 的 contains 必须是字符串"));
+                assert!(
+                    text.contains(phrase),
+                    "{id}：{name} 的 {path} 缺少必需措辞「{phrase}」：{text}"
+                );
+            }
+            for phrase in row["not_contains"].as_array().unwrap_or_else(|| {
+                panic!("{id} 缺少 not_contains 数组")
+            }) {
+                let phrase = phrase
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{id} 的 not_contains 必须是字符串"));
+                assert!(
+                    !text.contains(phrase),
+                    "{id}：{name} 的 {path} 不得包含「{phrase}」：{text}"
+                );
+            }
+            if path == "description" {
+                covered.push(name.to_string());
+            }
+        }
+        for tool in list.as_array().expect("tools 必须是数组") {
+            let name = tool["name"].as_str().expect("工具缺少 name");
+            assert!(
+                covered.iter().any(|item| item == name),
+                "工具 {name} 的 description 没有任何门禁行覆盖"
+            );
+        }
+    }
+
+    #[test]
+    fn description_gate_timeout_three_states_match_description() {
+        use process_scope::CleanupOutcome;
+        let list = tools();
+        let description = text_at(
+            tool_by_name(&list, "task.execute"),
+            "inputSchema.properties.timeout_secs.description",
+        );
+        let cleaned = timeout_reason(30, Some(CleanupOutcome::Cleaned));
+        let still_alive = timeout_reason(30, Some(CleanupOutcome::StillAlive));
+        let unavailable = timeout_reason(30, Some(CleanupOutcome::Unavailable));
+
+        for phrase in [
+            "已清理受控集合",
+            "受控集合内仍有存活进程",
+            "受控集合未能建立或无法查询",
+            "仅向直接子进程发送终止信号",
+            "逃逸进程是否仍在运行未验证",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "timeout_secs 描述缺少三态措辞「{phrase}」：{description}"
+            );
+        }
+        assert!(cleaned.contains("已清理受控集合"), "{cleaned}");
+        assert!(
+            cleaned.contains("逃逸进程是否仍在运行未验证"),
+            "{cleaned}"
+        );
+        assert!(
+            !cleaned.contains("受控集合内仍有存活进程"),
+            "已清理分支不得同时声明仍有存活进程：{cleaned}"
+        );
+        assert!(
+            still_alive.contains("受控集合内仍有存活进程"),
+            "{still_alive}"
+        );
+        assert!(
+            !still_alive.contains("已清理受控集合"),
+            "仍有存活进程时不得自称已清理：{still_alive}"
+        );
+        assert!(
+            unavailable.contains("受控集合未能建立或无法查询"),
+            "{unavailable}"
+        );
+        assert!(
+            unavailable.contains("仅向直接子进程发送终止信号"),
+            "{unavailable}"
+        );
+        assert!(
+            !unavailable.contains("已清理受控集合"),
+            "无法查询时不得自称已清理：{unavailable}"
+        );
+        for reason in [&cleaned, &still_alive, &unavailable] {
+            for forbidden in [
+                "已终止进程树",
+                "无残留",
+                "会终止整棵进程树",
+                "保证清理全部",
+            ] {
+                assert!(
+                    !reason.contains(forbidden),
+                    "超时文案不得含「{forbidden}」：{reason}"
+                );
+            }
+        }
+    }
+}

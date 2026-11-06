@@ -3714,3 +3714,161 @@ fn prune_partial_failure_is_reported_as_partial_without_retry() {
 
     drop(locked);
 }
+
+// ---- 描述审计自动门禁：依赖运行时行为的断言（文档 §21）----
+
+#[test]
+fn description_gate_behavior_additional_properties_declared_only() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组");
+    for tool in tools {
+        let name = tool["name"].as_str().expect("工具缺少 name");
+        assert_eq!(
+            tool["inputSchema"]["additionalProperties"], false,
+            "{name} 必须声明 additionalProperties:false"
+        );
+    }
+
+    // 只声明不强制：服务端不拒绝未知参数
+    let unknown = call_tool(&server, "runs.list", json!({ "bogus": 1 }));
+    assert_eq!(
+        unknown["result"]["isError"],
+        false,
+        "未知参数不得被拒绝：{}",
+        tool_text(&unknown)
+    );
+    // 未知参数也不得生效：`tier` 不产生服务端分档
+    let dry = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 365, "tier": "30" }),
+    );
+    assert_eq!(dry["result"]["isError"], false, "{}", tool_text(&dry));
+    let payload = tool_payload(&dry);
+    assert_eq!(payload["dry_run"], true);
+    assert!(
+        payload.get("tier").is_none(),
+        "未知参数 tier 不得生效：{payload}"
+    );
+    assert_eq!(
+        payload["status_filter"],
+        Value::Null,
+        "未传 status 时不得有默认状态：{payload}"
+    );
+}
+
+#[test]
+fn description_gate_behavior_status_capability_and_filtering() {
+    let (server, _settings, runs) = server_with_runs();
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+    );
+    let prune = response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组")
+        .iter()
+        .find(|tool| tool["name"] == "runs.prune")
+        .expect("缺少 runs.prune");
+    let status = &prune["inputSchema"]["properties"]["status"];
+    assert_eq!(status["type"], "array", "status 能力位必须是数组");
+    assert_eq!(status["minItems"], 1);
+    assert_eq!(status["uniqueItems"], true);
+    let allowed: Vec<&str> = status["items"]["enum"]
+        .as_array()
+        .expect("status 必须有 enum")
+        .iter()
+        .map(|value| value.as_str().expect("enum 必须是字符串"))
+        .collect();
+    assert_eq!(allowed, vec!["ok", "failed", "blocked"]);
+
+    // 行为：attempt 1..3 旧 failed、attempt 4 为最新 → 3 个候选
+    let old = days_ago_stamp(400);
+    for attempt in 1..=3 {
+        prune_attempt_status(
+            runs.path(),
+            "t-gate",
+            attempt,
+            Some("failed"),
+            Some(&old),
+            true,
+        );
+    }
+    prune_attempt_status(runs.path(), "t-gate", 4, Some("ok"), Some(&old), true);
+
+    let filtered = prune_dry(
+        &server,
+        json!({ "older_than_days": 365, "status": ["failed"] }),
+    );
+    assert_eq!(filtered["candidates_total"], 3, "{}", filtered);
+    assert_eq!(filtered["candidates"].as_array().unwrap().len(), 3);
+
+    let truncated = prune_dry(
+        &server,
+        json!({ "older_than_days": 365, "status": ["failed"], "limit": 1 }),
+    );
+    assert_eq!(
+        truncated["candidates_total"], 3,
+        "limit 必须在 status 过滤之后生效：{}",
+        truncated
+    );
+    assert_eq!(truncated["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(truncated["truncated"], true);
+
+    let ok_only = prune_dry(
+        &server,
+        json!({ "older_than_days": 365, "status": ["ok"] }),
+    );
+    assert_eq!(ok_only["candidates_total"], 0, "{}", ok_only);
+    assert!(
+        ok_only["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["reason"] == "status_mismatch"),
+        "非白名单必须进 status_mismatch：{}",
+        ok_only
+    );
+}
+
+#[test]
+fn description_gate_behavior_session_and_limit_defaults() {
+    let (server, _settings, runs) = server_with_runs();
+    fs::create_dir_all(runs.path().join("_session")).expect("创建 _session");
+    fs::write(runs.path().join("_session").join("initialize.json"), b"{}")
+        .expect("写入 _session 文件");
+    for index in 0..25 {
+        fs::create_dir_all(runs.path().join(format!("task-{index:03}"))).expect("创建任务目录");
+    }
+
+    let listed = tool_payload(&call_tool(&server, "runs.list", json!({})));
+    assert_eq!(listed["total_tasks"], 25, "{}", listed);
+    assert_eq!(listed["limit"], 20, "runs.list limit 缺省必须是 20");
+    let tasks = listed["tasks"].as_array().expect("tasks 必须是数组");
+    assert_eq!(tasks.len(), 20, "缺省只回一页 20 条");
+    assert!(
+        !tasks.iter().any(|task| task["task_id"] == "_session"),
+        "_session 不得作为任务：{listed}"
+    );
+
+    let dry = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 365 }),
+    ));
+    assert_eq!(dry["limit"], 100, "runs.prune limit 缺省必须是 100");
+    assert!(
+        dry["candidates"]
+            .as_array()
+            .expect("candidates 必须是数组")
+            .iter()
+            .all(|item| item["task_id"] != "_session"),
+        "_session 不得成为候选：{dry}"
+    );
+}

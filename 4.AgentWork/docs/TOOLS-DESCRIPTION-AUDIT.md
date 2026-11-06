@@ -1213,5 +1213,197 @@ POSIX（WSL HostGoTest，verify.sh run，离线）：5 unit + 72 integration，0
 - 分档（30/180/365）仍未实现、需另立契约。
 - `#3`（逃逸进程是否仍在运行）仍 `NOT_PROVEN`。
 
+## 21. 描述审计自动门禁（2026-11-06）
+
+### 21.1 一条命令
+
+```text
+cargo test -p aw-mcp-bridge description_gate
+```
+
+同一次 `cargo test` 会同时跑单元与集成两类门禁用例：单元侧校验「快照漂移 + 行断言 + 三态文案」，集成侧校验依赖运行时行为的断言（`additionalProperties` 只声明不强制、`status` 能力位与过滤、`_session`、`limit` 缺省值）。
+
+### 21.2 机器可校验表（本文档即唯一来源）
+
+下表中 `contains` / `not_contains` 由用例直接对 `tools/list` 的**实际返回**逐项断言；`tools_sha256` 是对整个 `tools/list` JSON 的规范化序列化做 SHA-256 的**漂移指纹**。任何一处描述或 schema 改动而本文档没有同步更新，`description_gate_snapshot_matches_audit` 立即失败。
+
+| ID | 工具 | 路径 | 必须包含 | 不得包含 | 实现侧断言 |
+|---|---|---|---|---|---|
+| G1 | `task.execute` | `description` | 受控集合（POSIX 进程组 / Windows Job Object）；仅当观测到集合内无存活进程才写「已清理受控集合」；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树；挂起态创建、先加入作业再恢复执行 | 已终止进程树；无残留；会终止整棵进程树 | `description_gate_timeout_three_states_match_description` |
+| G2 | `task.execute` | `inputSchema.properties.timeout_secs.description` | 默认 120；三态；已清理受控集合；受控集合内仍有存活进程；受控集合未能建立或无法查询；仅向直接子进程发送终止信号；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树 | 已终止进程树；无残留；会终止整棵进程树 | `description_gate_timeout_three_states_match_description` |
+| G3 | `runs.prune` | `description` | 显式传入才生效；缺省不过滤；无默认状态；无服务端分档；与 older_than_days 为 AND | 默认 90 天；默认分档；分档 30 | `description_gate_behavior_status_capability_and_filtering` |
+| G4 | `runs.prune` | `inputSchema.properties.status.description` | 显式传入才生效；缺省不过滤；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档 | 默认状态 ok | `description_gate_behavior_status_capability_and_filtering` |
+| G5 | `runs.prune` | `inputSchema.properties.limit.description` | 默认 100；在 status 过滤之后生效 | — | `description_gate_behavior_status_capability_and_filtering`、`description_gate_behavior_session_and_limit_defaults` |
+| G6 | `runs.list` | `description` | 排除 _session 等预留目录 | — | `description_gate_behavior_session_and_limit_defaults` |
+| G7 | `runs.list` | `inputSchema.properties.limit.description` | 默认 20 | — | `description_gate_behavior_session_and_limit_defaults` |
+| G8 | `health` | `description` | 只读 | — | `description_gate_behavior_additional_properties_declared_only` |
+| G9 | `status` | `description` | 只读；不回显任何配置值 | — | `description_gate_behavior_additional_properties_declared_only` |
+| G10 | `receipt.get` | `description` | 默认返回最新一次 | — | `description_gate_snapshot_matches_audit` |
+
+机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
+
+<!-- description-gate:begin -->
+```json
+{
+  "version": "description-gate/1",
+  "tools_sha256": "96441bc418decc077810cb13ae1cf76a1c4efc766cef8958a5ddf8cf7b35a736",
+  "command": "cargo test -p aw-mcp-bridge description_gate",
+  "rows": [
+    {
+      "id": "G1",
+      "tool": "task.execute",
+      "path": "description",
+      "contains": ["受控集合（POSIX 进程组 / Windows Job Object）", "仅当观测到集合内无存活进程才写「已清理受控集合」", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树", "挂起态创建、先加入作业再恢复执行"],
+      "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树"]
+    },
+    {
+      "id": "G2",
+      "tool": "task.execute",
+      "path": "inputSchema.properties.timeout_secs.description",
+      "contains": ["默认 120", "三态", "已清理受控集合", "受控集合内仍有存活进程", "受控集合未能建立或无法查询", "仅向直接子进程发送终止信号", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树"],
+      "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树"]
+    },
+    {
+      "id": "G3",
+      "tool": "runs.prune",
+      "path": "description",
+      "contains": ["显式传入才生效", "缺省不过滤", "无默认状态", "无服务端分档", "与 older_than_days 为 AND"],
+      "not_contains": ["默认 90 天", "默认分档", "分档 30"]
+    },
+    {
+      "id": "G4",
+      "tool": "runs.prune",
+      "path": "inputSchema.properties.status.description",
+      "contains": ["显式传入才生效", "缺省不过滤", "空数组/null/未知值按 invalid_retention 拒绝", "无默认状态、无服务端分档"],
+      "not_contains": ["默认状态 ok"]
+    },
+    {
+      "id": "G5",
+      "tool": "runs.prune",
+      "path": "inputSchema.properties.limit.description",
+      "contains": ["默认 100", "在 status 过滤之后生效"],
+      "not_contains": []
+    },
+    {
+      "id": "G6",
+      "tool": "runs.list",
+      "path": "description",
+      "contains": ["排除 _session 等预留目录"],
+      "not_contains": []
+    },
+    {
+      "id": "G7",
+      "tool": "runs.list",
+      "path": "inputSchema.properties.limit.description",
+      "contains": ["默认 20"],
+      "not_contains": []
+    },
+    {
+      "id": "G8",
+      "tool": "health",
+      "path": "description",
+      "contains": ["只读"],
+      "not_contains": []
+    },
+    {
+      "id": "G9",
+      "tool": "status",
+      "path": "description",
+      "contains": ["只读", "不回显任何配置值"],
+      "not_contains": []
+    },
+    {
+      "id": "G10",
+      "tool": "receipt.get",
+      "path": "description",
+      "contains": ["默认返回最新一次"],
+      "not_contains": []
+    }
+  ]
+}
+```
+<!-- description-gate:end -->
+
+### 21.3 覆盖与"任何一处改动即失败"
+
+- 每个工具的 `description` 至少被一条行断言覆盖；行中的工具名必须真实存在、路径必须解析为字符串，否则用例失败（防止表格与实现脱节）。
+- `tools_sha256` 覆盖**全部**工具描述与全部 `inputSchema`（含 `additionalProperties`、`status` 的 `enum/minItems/uniqueItems`、`limit` 的 `default` 语义措辞等）：即使改动没有破坏任何 `contains`，指纹也会失败，迫使本次改动同步本文档并重新判定。
+- 重算指纹方法：跑一次门禁，失败信息里的 `实际=<sha256>` 即为新值；把它写回本块，同时按变更补行/改行。
+
+### 21.4 覆盖的断言清单（对应本次重点）
+
+| 重点 | 自动断言 |
+|---|---|
+| 三态回执文案 | `timeout_reason` 的三个 `CleanupOutcome` 分支各自必须出现对应措辞；描述必须列出三态；任何分支都不得出现"已终止进程树/无残留" |
+| 超时作用域 | 描述必须写明受控集合（POSIX 进程组 / Windows Job Object）、"不承诺终止整棵进程树"、"逃逸进程……未验证"；不得包含"会终止整棵进程树" |
+| `status` 能力位 | schema 必须声明 `status`（`array`、`minItems=1`、`uniqueItems=true`、`enum=[ok,failed,blocked]`）；行为上显式白名单确实过滤，未知 `tier` 被忽略（无服务端分档） |
+| `additionalProperties` 只声明不强制 | 六个工具的 schema 全部声明 `additionalProperties:false`；同时带未知参数调用不被拒绝、未知参数不生效 |
+| `_session` 不作为任务 | `runs.list` 与 `runs.prune` 在有 `_session` 的 runs 目录下都不把它当任务/候选 |
+| `limit` 缺省值 | `runs.list` 缺省回显 `limit=20` 且只回 20 条；`runs.prune` 缺省回显 `limit=100`；`limit` 在 `status` 过滤之后生效（过滤后截断、`truncated=true`） |
+
+### 21.5 仍然只能靠人的部分（不做自动覆盖）
+
+| 项 | 为什么不能自动验证 |
+|---|---|
+| Windows 挂起态创建 → 入作业 → 恢复执行、BREAKAWAY 作业外进程不可观测 | 需要 Windows 主机与真实 Job Object 行为；POSIX 主机上无法观测，门禁只能校验描述措辞，环境证据由 `cfg(windows)` 用例单独承担 |
+| "AW 不定义判据、不做验收" | 对全仓的否定性断言，有限用例无法证明"不存在验收逻辑"；依赖代码评审与审计复核 |
+| "仅审计弱识别，不构成身份" | 同上，属跨链路否定性断言；门禁无法枚举所有未来读取路径 |
+| PM 侧能力门禁（先读 schema 再决定是否携带 `status`） | 属调用方行为；服务端只能保证 schema 事实存在，无法验证 PM 是否遵守 |
+| `additionalProperties:false` 对严格客户端的效果 | 严格客户端可能在发送前就拒绝未知参数，服务端观测不到；门禁只验证服务端"自己不拒绝" |
+| 三态文案在真实超时下的分支归属 | 需要真实进程/竞态；门禁只保证文案函数与描述一致，真实分支由 POSIX/Windows 证据用例覆盖 |
+| 回执内容（stdout/stderr 正文、耗时、产物哈希）的运行时正确性 | 依赖真实执行环境与文件系统状态；门禁只对齐描述措辞，正确性由执行层用例承担 |
+
+### 21.6 扰动证明（红原文原样）
+
+环境：Windows，命令 `cargo test -p aw-mcp-bridge description_gate`，断言未放宽。
+
+红 A：把 `timeout_secs.description` 的"不承诺终止整棵进程树"改成"会终止整棵进程树"（行断言与漂移指纹同时失败）：
+
+```text
+test server::description_gate::description_gate_rows_hold_on_tools ... FAILED
+test server::description_gate::description_gate_snapshot_matches_audit ... FAILED
+
+thread 'server::description_gate::description_gate_rows_hold_on_tools' panicked at apps\mcp-bridge\src\server.rs:2412:17:
+G2：task.execute 的 inputSchema.properties.timeout_secs.description 缺少必需措辞「不承诺终止整棵进程树」：超时秒数，默认 120；超时记 blocked 并给出原因。原因按受控集合清理结果三态给出：已清理受控集合 / 受控集合内仍有存活进程 / 受控集合未能建立或无法查询（此时仅向直接子进程发送终止信号）；逃逸进程是否仍在运行未验证；会终止整棵进程树
+
+thread 'server::description_gate::description_gate_snapshot_matches_audit' panicked at apps\mcp-bridge\src\server.rs:2384:9:
+assertion `left == right` failed: tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。实际=ac049762557fa423c763f3a55d4a644c133ec59e7a7d1243b599d0764c7bdbce
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+```
+
+红 B：只把 `health` 描述的"（只读）"改成"（只读查询）"——不破坏任何 `contains`，但漂移指纹必须失败：
+
+```text
+test server::description_gate::description_gate_timeout_three_states_match_description ... ok
+test server::description_gate::description_gate_rows_hold_on_tools ... ok
+test server::description_gate::description_gate_snapshot_matches_audit ... FAILED
+
+thread 'server::description_gate::description_gate_snapshot_matches_audit' panicked at apps\mcp-bridge\src\server.rs:2384:9:
+assertion `left == right` failed: tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。实际=3f9ccb0395b8216a33e6760cb52c95575dfb91479f2efa9b517fab6a2a9b694f
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+```
+
+恢复两处扰动后（描述逐字还原，`tools_sha256` 回到 `96441bc4…35a736`）：
+
+```text
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out
+running 3 tests
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out
+```
+
+### 21.7 两平台数字
+
+```text
+Windows（cargo test -p aw-mcp-bridge）：9 unit + 77 integration，0 failed（门禁 3 + 3）
+POSIX（WSL HostGoTest，verify.sh run 离线）：8 unit + 75 integration，0 failed，四类证据行齐全（门禁 3 + 3）
+```
+
+差额仍为 `cfg(windows)` 用例。POSIX 侧 `verify.sh` 已同步把本文档复制进裁剪 workspace，否则 `include_str!` 会让门禁用例在 POSIX 上无法编译。
+
+结论：门禁把"描述与实现对齐"从"靠人记得更新"变成**可执行、可失败**；上表列出的环境依赖项与否定性断言仍只能靠人，已如实标注，不假装覆盖。
+
 
 

@@ -142,7 +142,7 @@ require_linker() {
 require_repo() {
   local f
   for f in Cargo.toml Cargo.lock apps/mcp-bridge/Cargo.toml apps/mcp-bridge/src/server.rs \
-           apps/mcp-bridge/tests/mcp_contract.rs; do
+           apps/mcp-bridge/tests/mcp_contract.rs docs/TOOLS-DESCRIPTION-AUDIT.md; do
     [ -e "$REPO_ROOT/$f" ] || fail repo_incomplete "仓库缺少 $f（REPO_ROOT=$REPO_ROOT）"
   done
 }
@@ -205,6 +205,10 @@ write_trimmed_workspace() {
   rm -rf "$SRC_DIR/apps/mcp-bridge"
   cp -a "$REPO_ROOT/apps/mcp-bridge" "$SRC_DIR/apps/" \
     || fail workspace_prepare_failed "复制 apps/mcp-bridge 失败"
+  # 描述审计门禁用 include_str! 读取本文档，裁剪 workspace 必须一并带入
+  mkdir -p "$SRC_DIR/docs"
+  cp "$REPO_ROOT/docs/TOOLS-DESCRIPTION-AUDIT.md" "$SRC_DIR/docs/" \
+    || fail workspace_prepare_failed "复制描述审计文档失败（门禁用例依赖它）"
 }
 
 write_vendor_config() {
