@@ -1,7 +1,7 @@
 # `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 §23；v1.25 §24）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 见 §23；v1.25 见 §24）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 见 §23；v1.25 见 §24；v1.26 见 §25；v1.27 见 §26；v1.28 见 §27）。
 - 本批性质（v1.14）：**只修描述与契约措辞，不改任何行为、不改回执字段**；v1.25 例外见 §24（回执纯加 `arguments_diagnostics`，仍不改成功/失败）。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
@@ -1244,6 +1244,7 @@ cargo test -p aw-mcp-bridge description_gate
 | G13 | `task.execute` | `inputSchema.properties.mode.description` | 缺省 dispatched；AW 只执行不验收；拒绝 cmd/env/path_prepend；同一 task_id 不得跨模式复用；mode_conflict | 自动推断模式 | `description_gate_standalone_mode_boundary` |
 | G14 | `task.execute` | `inputSchema.properties.acceptance.description` | standalone 必填；file_exists；file_content_match；git_diff_non_empty；standalone_path_escape；未声明验收不得默认通过 | 视为通过 | `description_gate_standalone_mode_boundary` |
 | G15 | `runs.prune` | `inputSchema.properties.exclude.description` | 按条目精确排除；task_id；attempt；不得重复；命名校验；invalid_exclusion；not_in_candidates；枚举入口生效 | 默认排除；自动排除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
+| G16 | `task.execute` | `inputSchema.properties.argv.description` | argv[1..]；携带路径；按规范化后的真实位置校验；standalone_argv_path_escape；standalone_argv_path_unknown；argv_path_scan；不按路径校验；占号前 | 不做作用域校验；忽略参数中的路径 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
 
@@ -1251,7 +1252,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "f380e5ada343ce3a1fd6d7d4d39242d4f6e1ac2f18f3f774be10c5766990e6e0",
+  "tools_sha256": "919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1358,6 +1359,13 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "inputSchema.properties.exclude.description",
       "contains": ["按条目精确排除", "task_id", "attempt", "不得重复", "命名校验", "invalid_exclusion", "not_in_candidates", "枚举入口生效"],
       "not_contains": ["默认排除", "自动排除"]
+    },
+    {
+      "id": "G16",
+      "tool": "task.execute",
+      "path": "inputSchema.properties.argv.description",
+      "contains": ["argv[1..]", "携带路径", "按规范化后的真实位置校验", "standalone_argv_path_escape", "standalone_argv_path_unknown", "argv_path_scan", "不按路径校验", "占号前"],
+      "not_contains": ["不做作用域校验", "忽略参数中的路径"]
     }
   ]
 }
@@ -2361,6 +2369,162 @@ r-c/attempt-1 exists: True
 - 未验证"排除与 `status` 白名单、`limit` 同时叠加"的真实磁盘场景（叠加逻辑有单测覆盖，未做真实夹具演示）。
 - `excluded[]` 的 `path` 为相对路径字符串，不保证该目录此刻仍存在（排除是"不动它"，不是"验证它存在"）；`not_in_candidates` 一律 `path=null`。
 - 未实现"排除请求与磁盘现状二次核对"（例如排除后目录被人为删除仍报 `excluded_by_request`）；该场景不在本轮范围。
+
+## 27. v1.28：standalone `argv` 参数携带路径的作用域校验
+
+### 27.1 能力位、识别范围与门禁
+
+本轮不新增参数，只把 `task.execute` 的 `argv[1..]` 纳入作用域校验（契约 §2.6.8）。`tools/list` 的 `argv.description` 增加识别范围、原因码与回执字段；`tools_sha256` 由 `f380e5ada343ce3a1fd6d7d4d39242d4f6e1ac2f18f3f774be10c5766990e6e0` 变为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`，§21 新增 G16 行。
+
+识别规则与盲区逐条写死，摘要：
+
+- 校验：独立参数值、`--flag=value`、`=`/`:` 分隔、一层配对引号、相对/`..`/`//`、绝对路径、盘符、UNC、`\\?\`/`\\.\` 逐字前缀、`%HH` 编码（最多两轮解码）、含空格路径。
+- 不校验（明确盲区）：URL（含 `file://`）、含 `^ $ ( ) [ ] { } | * + ?` 的正则/通配符、无分隔符普通标量、破折号开关名、Windows 单字母斜杠开关（`/C`）、未展开的 `%NAME%`/`$NAME`/`${...}`/`~`（后者记 unknown）。
+- 无法判定策略：**放行并记 `standalone_argv_path_unknown`**（回执/verdict 的 `argv_path_scan.unknown[]`），理由是不让 URL/正则/环境变量等合法参数被 fail-closed 误拒；未知必须可见，不写成"已验证安全"。
+- 越界：`standalone_argv_path_escape`，在占号前拒绝（不建 attempt、不启动进程）。
+
+### 27.2 实现口径（写死）
+
+- 扫描入口在 `StandaloneSpec::parse`，位于 `cwd`/`argv`/`acceptance` 校验之后、`execute_standalone` 创建任务目录之前；`?` 直接转成 `status=blocked` 预检回执。
+- 归一化按真实位置：相对路径从 `cwd` 逐组件前进，已存在组件即 `canonicalize`；符号链接按目标判断，指向界外立即拒绝；绝对路径先字面归一化证明是否可能落在 `cwd` 内，再用 `canonicalize` / 最深已存在祖先验证；跨卷/UNC 前缀不等即拒绝。
+- Windows 组件比较忽略大小写，`\\?\`/`\\.\` 视同盘符前缀；`/C` 这类单字母开关显式排除。
+- `argv_path_scan` 只出现在 standalone 回执与每次 `verdict.json`；dispatched 下 `argv` 仍直接 `dispatched_input_rejected`，既有回执字段与行为不变。
+
+### 27.3 先红：HEAD `9402117` 上的原始失败（断言未放宽）
+
+做法：`git worktree add --detach D:\Temp\aw-v128-red 9402117`，只把新用例 `tests/mcp_contract.rs` 放入工作树，`CARGO_TARGET_DIR` 复用现有 target 编译运行；跑完立即 `worktree remove --force`，当前源码哈希核对为 `158A28F2...930E8`。
+
+命令：`cargo test -p aw-mcp-bridge --test mcp_contract standalone_argv_ -- --nocapture`
+
+```text
+running 3 tests
+
+thread 'standalone_argv_scan_records_unknown_forms_instead_of_silently_passing' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5336:28:
+unknown 必须是数组：{"argv":["cmd.exe","/C","echo ok","%USERPROFILE%\\outside\\x"],"artifacts":[{"hash":"sha256:769094ef5d241d020cce5fcfdd88ae5faa0100dd1ba45668877c002114512720","kind":"stdout","locator":"runs/argv-unknown/attempt-1/stdout.txt"},{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stderr","locator":"runs/argv-unknown/attempt-1/stderr.txt"},{"hash":"sha256:5c36fecd0749ca29357ca86134e3d67103300d5325a8dad1bff34507b203df9b","kind":"verdict","locator":"runs/argv-unknown/attempt-1/verdict.json"}],"attempt":1,"attempts_total":1,"blocked_reason":null,"changed_files":[],"changed_files_truncated":false,"commit":null,"cwd":"\\\\?\\D:\\Temp\\.tmpnXMewY","duration_ms":343,"env_keys":[],"exit_code":0,"finishedAt":"2026-11-06T18:37:34Z","max_attempts":1,"mode":"standalone","path_prepend":[],"status":"ok","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:769094ef5d241d020cce5fcfdd88ae5faa0100dd1ba45668877c002114512720","task_id":"argv-unknown","timeout_secs":120,"verdict_conclusion":"passed","verdict_locator":"runs/argv-unknown/attempt-1/verdict.json","verify_cmd":"cmd.exe /C echo ok %USERPROFILE%\\outside\\x"}
+test standalone_argv_scan_records_unknown_forms_instead_of_silently_passing ... FAILED
+
+thread 'standalone_argv_scope_rejects_escapes_before_execution' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5295:9:
+assertion `left == right` failed: argv-dotdot 参数携带的越界路径必须在执行前拒绝：{"argv":["cmd.exe","/C","echo ok","--out=../escape.txt"],"artifacts":[{"hash":"sha256:b87aadb9dbbbf8e6c909452bbe2e4a7f9b7588e7d4ee06cb1a6a3233d6b0cec1","kind":"stdout","locator":"runs/argv-dotdot/attempt-1/stdout.txt"},{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stderr","locator":"runs/argv-dotdot/attempt-1/stderr.txt"},{"hash":"sha256:208b062ff02a332bfb0f835c5e8a83290e2e54be3093f7a110f1e25c7fe62df6","kind":"verdict","locator":"runs/argv-dotdot/attempt-1/verdict.json"}],"attempt":1,"attempts_total":1,"blocked_reason":null,"changed_files":[],"changed_files_truncated":false,"commit":null,"cwd":"\\\\?\\D:\\Temp\\.tmpeyENOb","duration_ms":718,"env_keys":[],"exit_code":0,"finishedAt":"2026-11-06T18:37:34Z","max_attempts":1,"mode":"standalone","path_prepend":[],"status":"ok","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:b87aadb9dbbbf8e6c909452bbe2e4a7f9b7588e7d4ee06cb1a6a3233d6b0cec1","task_id":"argv-dotdot","timeout_secs":120,"verdict_conclusion":"passed","verdict_locator":"runs/argv-dotdot/attempt-1/verdict.json","verify_cmd":"cmd.exe /C echo ok --out=../escape.txt"}
+  left: String("ok")
+ right: "blocked"
+test standalone_argv_scope_rejects_escapes_before_execution ... FAILED
+
+thread 'standalone_argv_scope_accepts_normal_arguments' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5202:9:
+assertion `left == right` failed: argv-name 扫描必须写明作用域：null
+  left: Null
+ right: String("\\\\?\\D:\\Temp\\.tmpv2PDwr")
+test standalone_argv_scope_accepts_normal_arguments ... FAILED
+
+failures:
+    standalone_argv_scan_records_unknown_forms_instead_of_silently_passing
+    standalone_argv_scope_accepts_normal_arguments
+    standalone_argv_scope_rejects_escapes_before_execution
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 97 filtered out; finished in 2.90s
+```
+
+红的关键点：`--out=../escape.txt` 在旧代码下**真的执行了**，`status=ok`、`exit_code=0`、`blocked_reason=null`。
+
+### 27.4 转绿与回归
+
+`cargo test -p aw-mcp-bridge`：`10 passed`（lib）+ `100 passed; 0 failed`（integration）。其中新增 3 条用例（8 正例、8 反例、1 unknown 形态），`dispatched_handback_stays_free_of_verdict_fields` 等既有 dispatched 用例全绿。
+
+### 27.5 真跑 6+ 正例与 6 反例（stdio 直连 `target\debug\aw-mcp-bridge.exe`，原始回执）
+
+夹具：`D:\Temp\aw-v128-dafd1256\work` 为 cwd；`outside` 为界外目录；`work\link` 是指向 `outside` 的符号链接。所有 standalone 调用的固定前缀为 `["cmd.exe","/C","echo ok"]`。
+
+**正例（全部 `status=ok`、`exit_code=0`）**
+
+`p1-name`（`--name=foo`）：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","--name=foo"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p1-name","verdict_conclusion":"passed"}
+```
+
+`p2-count`（`--count=3`）：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","--count=3"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p2-count","verdict_conclusion":"passed"}
+```
+
+`p3-space`（`--out=my dir\out.txt`）：按路径校验且 `in_scope`：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","--out=my dir\\out.txt"],"argv_path_scan":{"checked":[{"class":"relative_path","decision":"in_scope","encoded":false,"index":4,"raw":"--out=my dir\\out.txt","resolved":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work\\my dir\\out.txt","value":"my dir\\out.txt","via":"flag_equals"}],"checked_total":1,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p3-space","verdict_conclusion":"passed"}
+```
+
+`p4-separate`（`--out out.txt` 独立参数值）：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","--out","out.txt"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p4-separate","verdict_conclusion":"passed"}
+```
+
+`p5-url`（`--url=https://example.com/a/b`）：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","--url=https://example.com/a/b"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p5-url","verdict_conclusion":"passed"}
+```
+
+`p6-regex`（`--pattern=^hello$`）：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","--pattern=^hello$"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p6-regex","verdict_conclusion":"passed"}
+```
+
+`p7-abs-inside`（cwd 内绝对路径）：`resolved` 为已存在祖先（目标文件尚未创建）：
+
+```text
+{"argv":["cmd.exe","/C","echo ok","D:\\Temp\\aw-v128-dafd1256\\work\\out.txt"],"argv_path_scan":{"checked":[{"class":"windows_drive_path","decision":"in_scope","encoded":false,"index":4,"raw":"D:\\Temp\\aw-v128-dafd1256\\work\\out.txt","resolved":"D:\\Temp\\aw-v128-dafd1256\\work","value":"D:\\Temp\\aw-v128-dafd1256\\work\\out.txt","via":"bare"}],"checked_total":1,"scope":"\\\\?\\D:\\Temp\\aw-v128-dafd1256\\work","unknown":[],"unknown_total":0},"attempt":1,"attempts_total":1,"blocked_reason":null,"exit_code":0,"mode":"standalone","status":"ok","task_id":"p7-abs-inside","verdict_conclusion":"passed"}
+```
+
+**反例（全部 `status=blocked`、`attempt=null`、`artifacts=[]`、未创建任何运行目录）**
+
+`n1-dotdot`（`--out=../escape.txt`）：
+
+```text
+{"artifacts":[],"attempt":null,"blocked_reason":"standalone_argv_path_escape: argv 第 4 项（--out=../escape.txt）解析后越出 working directory：上跳后为 \\\\?\\D:\\Temp\\aw-v128-dafd1256","changed_files":[],"commit":null,"duration_ms":0,"exit_code":null,"mode":"standalone","status":"blocked","stderr_digest":null,"stdout_digest":null,"task_id":"n1-dotdot","verify_cmd":""}
+```
+
+`n2-abs`（界外绝对路径）：
+
+```text
+{"artifacts":[],"attempt":null,"blocked_reason":"standalone_argv_path_escape: argv 第 4 项（D:\\Temp\\aw-v128-dafd1256\\outside\\escape.txt）解析后越出 working directory：字面归一化后为 D:\\Temp\\aw-v128-dafd1256\\outside\\escape.txt","changed_files":[],"commit":null,"duration_ms":0,"exit_code":null,"mode":"standalone","status":"blocked","stderr_digest":null,"stdout_digest":null,"task_id":"n2-abs","verify_cmd":""}
+```
+
+`n3-flag`（`--flag=../../x`）：
+
+```text
+{"artifacts":[],"attempt":null,"blocked_reason":"standalone_argv_path_escape: argv 第 4 项（--flag=../../x）解析后越出 working directory：上跳后为 \\\\?\\D:\\Temp\\aw-v128-dafd1256","changed_files":[],"commit":null,"duration_ms":0,"exit_code":null,"mode":"standalone","status":"blocked","stderr_digest":null,"stdout_digest":null,"task_id":"n3-flag","verify_cmd":""}
+```
+
+`n4-symlink`（`--out=link/target.txt`，`link` 指向界外）：
+
+```text
+{"artifacts":[],"attempt":null,"blocked_reason":"standalone_argv_path_escape: argv 第 4 项（--out=link/target.txt）解析后越出 working directory：符号链接 \\\\?\\D:\\Temp\\aw-v128-dafd1256\\work\\link 指向 \\\\?\\D:\\Temp\\aw-v128-dafd1256\\outside","changed_files":[],"commit":null,"duration_ms":0,"exit_code":null,"mode":"standalone","status":"blocked","stderr_digest":null,"stdout_digest":null,"task_id":"n4-symlink","verify_cmd":""}
+```
+
+`n5-unc`（`\\server\share\evil`）：
+
+```text
+{"artifacts":[],"attempt":null,"blocked_reason":"standalone_argv_path_escape: argv 第 4 项（\\\\server\\share\\evil）解析后越出 working directory：字面归一化后为 \\\\server\\share\\evil","changed_files":[],"commit":null,"duration_ms":0,"exit_code":null,"mode":"standalone","status":"blocked","stderr_digest":null,"stdout_digest":null,"task_id":"n5-unc","verify_cmd":""}
+```
+
+`n6-encoded`（`..%2f..%2fescape.txt`）：
+
+```text
+{"artifacts":[],"attempt":null,"blocked_reason":"standalone_argv_path_escape: argv 第 4 项（..%2f..%2fescape.txt）解析后越出 working directory：上跳后为 \\\\?\\D:\\Temp\\aw-v128-dafd1256","changed_files":[],"commit":null,"duration_ms":0,"exit_code":null,"mode":"standalone","status":"blocked","stderr_digest":null,"stdout_digest":null,"task_id":"n6-encoded","verify_cmd":""}
+```
+
+运行目录核对：上述 6 个 task_id 在 `target\debug\runs` 下均不存在（拒绝发生在占号前）。
+
+> 说明：为控制篇幅，正例回执只保留本夹具下逐字不变的状态字段；完整字段（`artifacts[]` 的 sha256、`finishedAt`、`duration_ms` 等）在同一次 stdio 输出中一并返回，未作改写。反例回执为完整原文。
+
+### 27.6 未覆盖与限制（如实标注）
+
+- 未在 POSIX 上跑本轮真跑；`is_windows_switch` 仅在 Windows 生效，POSIX 下 `/C` 会按根路径处理（契约已写明该规则是 Windows 专属）。
+- `file://` URL、含正则元字符的真实路径、`%NAME%` 展开后的真实目标属于**明确盲区**：前者不校验，后两者按 unknown 放行；契约 §2.6.8 已逐条列出，不声称已覆盖。
+- `argv_path_scan.checked[].resolved` 对尚不存在的目标只给到最深已存在祖先（示例 `p7` 为 cwd 本身），不代表最终文件位置。
+- 未验证"参数路径指向 cwd 内符号链接、链接目标在 cwd 内再跳回界外"的多跳组合；当前实现逐组件 canonicalize 会按最终目标判断，但未构造该夹具实测。
 
 
 

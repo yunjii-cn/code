@@ -5121,3 +5121,232 @@ fn prune_without_exclude_keeps_legacy_behavior_and_invariant() {
         "无排除时 删除+失败+暂存+排除 == 候选总数：{payload}"
     );
 }
+
+// ---- v1.28：standalone 下 argv 参数携带路径的作用域校验 ----
+
+/// standalone 直接启动程序；测试把待测参数追加在固定前缀之后
+#[cfg(windows)]
+fn argv_with_extra(extra: &[String]) -> Vec<Value> {
+    let mut argv = vec![json!("cmd.exe"), json!("/C"), json!("echo ok")];
+    argv.extend(extra.iter().map(|item| json!(item)));
+    argv
+}
+
+#[cfg(not(windows))]
+fn argv_with_extra(extra: &[String]) -> Vec<Value> {
+    let mut argv = vec![json!("sh"), json!("-c"), json!("echo ok")];
+    argv.extend(extra.iter().map(|item| json!(item)));
+    argv
+}
+
+fn canonical_cwd(dir: &Path) -> String {
+    fs::canonicalize(dir)
+        .expect("cwd 必须可规范化")
+        .to_string_lossy()
+        .to_string()
+}
+
+#[test]
+fn standalone_argv_scope_accepts_normal_arguments() {
+    let (server, _settings, _runs) = server_with_runs();
+    let cwd = TempDir::new().expect("创建临时目录");
+    let inside_absolute = fs::canonicalize(cwd.path())
+        .expect("规范化 cwd")
+        .join("out.txt")
+        .to_string_lossy()
+        .to_string();
+
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        ("argv-name", vec!["--name=foo".to_string()]),
+        ("argv-count", vec!["--count=3".to_string()]),
+        ("argv-spaced", vec!["--out=my dir\\out.txt".to_string()]),
+        (
+            "argv-separate",
+            vec!["--out".to_string(), "out.txt".to_string()],
+        ),
+        (
+            "argv-url",
+            vec!["--url=https://example.com/a/b".to_string()],
+        ),
+        ("argv-regex", vec!["--pattern=^hello$".to_string()]),
+        ("argv-abs-inside", vec![inside_absolute]),
+        ("argv-colon", vec!["out:out.txt".to_string()]),
+    ];
+
+    for (task_id, extra) in cases {
+        let response = call_tool(
+            &server,
+            "task.execute",
+            json!({
+                "task_id": task_id,
+                "mode": "standalone",
+                "cwd": cwd.path(),
+                "argv": argv_with_extra(&extra),
+                "acceptance": [{ "type": "exit_code", "expected": 0 }],
+                "max_attempts": 1
+            }),
+        );
+        assert_eq!(
+            response["result"]["isError"],
+            false,
+            "{task_id} 正常参数不应引起工具错误：{}",
+            tool_text(&response)
+        );
+        let payload = tool_payload(&response);
+        assert_eq!(
+            payload["status"], "ok",
+            "{task_id} 正常参数不得被误拒：{payload}"
+        );
+        assert_eq!(payload["attempts_total"], 1, "{task_id}: {payload}");
+        let scan = &payload["argv_path_scan"];
+        assert_eq!(
+            scan["scope"],
+            json!(canonical_cwd(cwd.path())),
+            "{task_id} 扫描必须写明作用域：{scan}"
+        );
+        let checked = scan["checked"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{task_id} checked 必须是数组：{scan}"));
+        let unknown = scan["unknown"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{task_id} unknown 必须是数组：{scan}"));
+        match task_id {
+            "argv-spaced" => {
+                let entry = checked
+                    .iter()
+                    .find(|item| item["raw"] == json!("--out=my dir\\out.txt"))
+                    .unwrap_or_else(|| panic!("带空格的界内路径必须按路径校验：{scan}"));
+                assert_eq!(entry["class"], "relative_path", "{entry}");
+                assert_eq!(entry["via"], "flag_equals", "{entry}");
+                assert_eq!(entry["decision"], "in_scope", "{entry}");
+            }
+            "argv-name" | "argv-count" | "argv-colon" => assert!(
+                checked.is_empty(),
+                "{task_id} 普通参数不得被当成路径：{scan}"
+            ),
+            "argv-url" | "argv-regex" => {
+                assert!(checked.is_empty(), "{task_id} 不是路径：{scan}");
+                assert!(unknown.is_empty(), "{task_id} 不应记为未知：{scan}");
+            }
+            "argv-abs-inside" => {
+                let entry = checked
+                    .iter()
+                    .find(|item| item["class"] == "absolute_path")
+                    .unwrap_or_else(|| panic!("界内绝对路径必须按路径校验：{scan}"));
+                assert_eq!(entry["decision"], "in_scope", "{entry}");
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn standalone_argv_scope_rejects_escapes_before_execution() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = TempDir::new().expect("创建临时目录");
+    let outside = TempDir::new().expect("创建界外目录");
+    let outside_absolute = fs::canonicalize(outside.path())
+        .expect("规范化界外目录")
+        .join("escape.txt")
+        .to_string_lossy()
+        .to_string();
+
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(outside.path(), cwd.path().join("link"))
+        .expect("创建指向界外的符号链接（需符号链接权限）");
+    #[cfg(not(windows))]
+    std::os::unix::fs::symlink(outside.path(), cwd.path().join("link"))
+        .expect("创建指向界外的符号链接");
+
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        ("argv-dotdot", vec!["--out=../escape.txt".to_string()]),
+        ("argv-abs-out", vec![outside_absolute]),
+        ("argv-flag-escape", vec!["--flag=../../x".to_string()]),
+        ("argv-symlink", vec!["--out=link/target.txt".to_string()]),
+        ("argv-unc", vec!["\\\\server\\share\\evil".to_string()]),
+        ("argv-encoded", vec!["..%2f..%2fescape.txt".to_string()]),
+        ("argv-quoted", vec!["\"../escape.txt\"".to_string()]),
+        (
+            "argv-backslash",
+            vec!["--out=..\\..\\escape.txt".to_string()],
+        ),
+    ];
+
+    for (task_id, extra) in cases {
+        let response = call_tool(
+            &server,
+            "task.execute",
+            json!({
+                "task_id": task_id,
+                "mode": "standalone",
+                "cwd": cwd.path(),
+                "argv": argv_with_extra(&extra),
+                "acceptance": [{ "type": "exit_code", "expected": 0 }],
+                "max_attempts": 1
+            }),
+        );
+        assert_eq!(
+            response["result"]["isError"],
+            false,
+            "{task_id} 越界拒绝是预检结论不是工具错误：{}",
+            tool_text(&response)
+        );
+        let payload = tool_payload(&response);
+        assert_eq!(
+            payload["status"], "blocked",
+            "{task_id} 参数携带的越界路径必须在执行前拒绝：{payload}"
+        );
+        let reason = blocked_reason(&payload);
+        assert!(
+            reason.starts_with("standalone_argv_path_escape"),
+            "{task_id} 必须给出明确原因码：{reason}"
+        );
+        assert!(
+            reason.contains(extra.last().expect("至少一个参数")),
+            "{task_id} 原因必须写明具体参数：{reason}"
+        );
+        assert!(
+            !runs.path().join(task_id).exists(),
+            "{task_id} 拒绝必须发生在占号前，不得留下运行目录"
+        );
+    }
+}
+
+#[test]
+fn standalone_argv_scan_records_unknown_forms_instead_of_silently_passing() {
+    let (server, _settings, _runs) = server_with_runs();
+    let cwd = TempDir::new().expect("创建临时目录");
+    let extra = vec!["%USERPROFILE%\\outside\\x".to_string()];
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "argv-unknown",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": argv_with_extra(&extra),
+            "acceptance": [{ "type": "exit_code", "expected": 0 }],
+            "max_attempts": 1
+        }),
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "ok", "{payload}");
+    let unknown = payload["argv_path_scan"]["unknown"]
+        .as_array()
+        .unwrap_or_else(|| panic!("unknown 必须是数组：{payload}"));
+    assert_eq!(unknown.len(), 1, "无法判定的形态必须逐条记录：{payload}");
+    assert_eq!(unknown[0]["decision"], "allowed");
+    assert_eq!(
+        unknown[0]["reason_code"], "standalone_argv_path_unknown",
+        "未知形态必须有原因码：{}",
+        unknown[0]
+    );
+    assert!(
+        unknown[0]["raw"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("%USERPROFILE%"),
+        "必须记录原样参数：{}",
+        unknown[0]
+    );
+}

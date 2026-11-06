@@ -1292,6 +1292,7 @@ impl Server {
                 "decided_at": now_stamp(),
                 "verdict": conclusion,
                 "acceptance": spec.acceptance,
+                "argv_path_scan": spec.argv_scan,
                 "criteria": criteria,
                 "observations": {
                     "exit_code": run.exit_code,
@@ -1343,6 +1344,7 @@ impl Server {
                 "env_keys": [],
                 "path_prepend": [],
                 "argv": spec.argv,
+                "argv_path_scan": spec.argv_scan,
                 "max_attempts": spec.max_attempts,
                 "verify_cmd": spec.display_cmd(),
                 "exit_code": run.exit_code,
@@ -2652,6 +2654,7 @@ fn standalone_mode(args: &Value) -> Result<bool, String> {
 struct StandaloneSpec {
     cwd: PathBuf,
     argv: Vec<String>,
+    argv_scan: Value,
     acceptance: Vec<Value>,
     max_attempts: u64,
     timeout_secs: u64,
@@ -2717,6 +2720,8 @@ impl StandaloneSpec {
             }
         };
         ensure_program_in_scope(&argv[0], &cwd)?;
+        // 参数里携带的路径同样必须落在 cwd 内；越界在任何执行之前拒绝
+        let argv_scan = scan_argv_paths(&argv, &cwd)?;
 
         let timeout_secs = match args.get("timeout_secs") {
             None | Some(Value::Null) => 120,
@@ -2755,6 +2760,7 @@ impl StandaloneSpec {
         Ok(Self {
             cwd,
             argv,
+            argv_scan,
             acceptance,
             max_attempts,
             timeout_secs,
@@ -2866,6 +2872,479 @@ fn ensure_program_in_scope(program: &str, cwd: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// argv 中携带路径的参数的识别与作用域校验（v1.28）。
+///
+/// 识别范围：`key=value` / `key:value` / `--flag=value` 的 value 部分、引号包裹后的
+/// 内容、独立参数值本身；`..`、相对/绝对路径、盘符、UNC、含空格路径都按路径处理。
+/// 明确不当作路径：URL（`scheme://...`）、正则/通配符形态、普通标量（无分隔符且非
+/// 已存在的符号链接）。无法判定真实位置时放行并在回执 `unknown[]` 记
+/// `standalone_argv_path_unknown`，不做 fail-closed 误拒。
+fn scan_argv_paths(argv: &[String], cwd: &Path) -> Result<Value, String> {
+    let mut checked: Vec<Value> = Vec::new();
+    let mut unknown: Vec<Value> = Vec::new();
+    for (offset, raw) in argv.iter().enumerate().skip(1) {
+        let index = offset + 1;
+        let Some(token) = classify_argv_token(raw, cwd) else {
+            continue;
+        };
+        let entry_base = json!({
+            "index": index,
+            "raw": raw,
+            "value": token.value,
+            "via": token.via,
+            "class": token.class,
+            "encoded": token.encoded
+        });
+        if let Some(reason) = token.unknown_reason {
+            let mut entry = entry_base;
+            if let Some(object) = entry.as_object_mut() {
+                object.insert("decision".to_string(), json!("allowed"));
+                object.insert("reason_code".to_string(), json!(ARGV_PATH_UNKNOWN));
+                object.insert("reason".to_string(), json!(reason));
+            }
+            unknown.push(entry);
+            continue;
+        }
+        match resolve_argv_path(&token.value, cwd) {
+            ArgvPathVerdict::InScope { resolved } => {
+                let mut entry = entry_base;
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("decision".to_string(), json!("in_scope"));
+                    object.insert(
+                        "resolved".to_string(),
+                        json!(resolved.to_string_lossy().to_string()),
+                    );
+                }
+                checked.push(entry);
+            }
+            ArgvPathVerdict::Escapes { detail } => {
+                return Err(format!(
+                    "standalone_argv_path_escape: argv 第 {index} 项（{raw}）解析后越出 working directory：{detail}"
+                ));
+            }
+            ArgvPathVerdict::Unresolved { detail } => {
+                let mut entry = entry_base;
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("decision".to_string(), json!("allowed"));
+                    object.insert("reason_code".to_string(), json!(ARGV_PATH_UNKNOWN));
+                    object.insert("reason".to_string(), json!(detail));
+                }
+                unknown.push(entry);
+            }
+        }
+    }
+    let checked_total = checked.len();
+    let unknown_total = unknown.len();
+    Ok(json!({
+        "scope": cwd.to_string_lossy(),
+        "checked": checked,
+        "unknown": unknown,
+        "checked_total": checked_total,
+        "unknown_total": unknown_total
+    }))
+}
+
+const ARGV_PATH_UNKNOWN: &str = "standalone_argv_path_unknown";
+
+struct ArgvTokenScan {
+    value: String,
+    via: &'static str,
+    class: &'static str,
+    encoded: bool,
+    unknown_reason: Option<String>,
+}
+
+enum ArgvPathVerdict {
+    InScope { resolved: PathBuf },
+    Escapes { detail: String },
+    Unresolved { detail: String },
+}
+
+fn classify_argv_token(raw: &str, cwd: &Path) -> Option<ArgvTokenScan> {
+    let mut value = raw.to_string();
+    let mut via = "bare";
+    if let Some(inner) = strip_matching_quotes(&value) {
+        value = inner.to_string();
+    }
+    let (split_value, split_via) = split_argument_value(&value);
+    if split_via != "bare" {
+        via = split_via;
+        value = split_value;
+        if let Some(inner) = strip_matching_quotes(&value) {
+            value = inner.to_string();
+        }
+    }
+    if value.is_empty() {
+        return None;
+    }
+    // Windows 单字母斜杠开关（cmd.exe 的 /C、/S 等）不是路径
+    #[cfg(windows)]
+    if is_windows_switch(&value) {
+        return None;
+    }
+    // 盘符优先：`C://x` 是 Windows 路径而不是 URL
+    let drive = has_drive_prefix(&value);
+    if !drive && is_url_like(&value) {
+        return None;
+    }
+    if let Some(reason) = env_expansion_reason(&value) {
+        return Some(ArgvTokenScan {
+            class: "unknown_env_expansion",
+            unknown_reason: Some(reason),
+            value,
+            via,
+            encoded: false,
+        });
+    }
+    // `\\?\` / `\\.\` 是 Windows 逐字前缀，其中的 ? 不是通配符
+    let verbatim = value.starts_with("\\\\?\\") || value.starts_with("\\\\.\\");
+    // 正则/通配符形态不按路径校验（宁可漏报；盲区见契约 §2.6.8）
+    if !verbatim
+        && value.chars().any(|c| {
+            matches!(c, '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '*' | '+' | '?')
+        })
+    {
+        return None;
+    }
+    let mut decoded = value.clone();
+    let mut encoded = false;
+    for _ in 0..2 {
+        match percent_decode(&decoded) {
+            Some(next) if next != decoded => {
+                decoded = next;
+                encoded = true;
+            }
+            _ => break,
+        }
+    }
+    if decoded.is_empty() {
+        return None;
+    }
+    let class = if verbatim {
+        "absolute_path"
+    } else if decoded.starts_with("\\\\") || decoded.starts_with("//") {
+        "unc_path"
+    } else if has_drive_prefix(&decoded) {
+        "windows_drive_path"
+    } else if decoded.starts_with('/') || decoded.starts_with('\\') {
+        "absolute_path"
+    } else if decoded.contains('/') || decoded.contains('\\') || decoded.starts_with('.') {
+        "relative_path"
+    } else {
+        // 普通标量不是路径；只有它本身是 cwd 下的符号链接时才按路径校验
+        match fs::symlink_metadata(cwd.join(&decoded)) {
+            Ok(meta) if meta.file_type().is_symlink() => "relative_path",
+            _ => return None,
+        }
+    };
+    Some(ArgvTokenScan {
+        value: decoded,
+        via,
+        class,
+        encoded,
+        unknown_reason: None,
+    })
+}
+
+/// 取一层配对引号（`"..."` / `'...'`），引号内视为参数值本身
+fn strip_matching_quotes(text: &str) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        if (first == b'"' || first == b'\'') && bytes[bytes.len() - 1] == first {
+            return Some(&text[1..text.len() - 1]);
+        }
+    }
+    None
+}
+
+fn split_argument_value(token: &str) -> (String, &'static str) {
+    if token.starts_with('-') {
+        if let Some((_, value)) = token.split_once('=') {
+            if !value.is_empty() {
+                return (value.to_string(), "flag_equals");
+            }
+        }
+        return (token.to_string(), "bare");
+    }
+    if has_drive_prefix(token) {
+        return (token.to_string(), "bare");
+    }
+    if let Some((key, value)) = token.split_once('=') {
+        if is_plain_key(key) && !value.is_empty() {
+            return (value.to_string(), "key_equals");
+        }
+    }
+    if let Some((key, value)) = token.split_once(':') {
+        if is_plain_key(key) && !value.is_empty() {
+            return (value.to_string(), "key_colon");
+        }
+    }
+    (token.to_string(), "bare")
+}
+
+fn is_plain_key(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    text.len() <= 64 && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+fn has_drive_prefix(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic()) && chars.next() == Some(':')
+}
+
+/// Windows 下 `/C` 这类单字母斜杠开关是命令参数而非路径（`/etc/passwd` 仍是路径）
+#[cfg(windows)]
+fn is_windows_switch(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() == 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic()
+}
+
+fn is_url_like(text: &str) -> bool {
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return false;
+    };
+    !rest.is_empty()
+        && scheme
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// 未展开的环境变量/波浪号：不推测真实位置，放行并记 unknown
+fn env_expansion_reason(value: &str) -> Option<String> {
+    if value.starts_with('~') {
+        return Some("波浪号（~）路径未展开，无法判定真实位置".to_string());
+    }
+    if value.contains("${") {
+        return Some("环境变量 ${...} 未展开，无法判定真实位置".to_string());
+    }
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            if let Some(end) = value[index + 1..].find('%') {
+                let name = &value[index + 1..index + 1 + end];
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '(' | ')'))
+                {
+                    return Some(format!(
+                        "环境变量 %{name}% 未展开，无法判定真实位置"
+                    ));
+                }
+            }
+        }
+        if byte == b'$' && index + 1 < bytes.len() && bytes[index + 1].is_ascii_alphabetic() {
+            return Some("环境变量 $NAME 未展开，无法判定真实位置".to_string());
+        }
+        index += 1;
+    }
+    None
+}
+
+/// 只解码 `%HH`；无变化返回 None（避免把普通参数误判成路径）
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut changed = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
+                out.push(high * 16 + low);
+                index += 3;
+                changed = true;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    changed.then(|| String::from_utf8_lossy(&out).to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn resolve_argv_path(value: &str, cwd: &Path) -> ArgvPathVerdict {
+    let path = Path::new(value);
+    let rooted = path.is_absolute()
+        || value.starts_with('/')
+        || value.starts_with('\\')
+        || has_drive_prefix(value);
+    if rooted {
+        return resolve_rooted_argv_path(path, value, cwd);
+    }
+    let mut current = cwd.to_path_buf();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let Some(parent) = current.parent() else {
+                    return ArgvPathVerdict::Escapes {
+                        detail: "已到根目录仍继续上跳".to_string(),
+                    };
+                };
+                current = parent.to_path_buf();
+                if !path_within(&current, cwd) {
+                    return ArgvPathVerdict::Escapes {
+                        detail: format!("上跳后为 {}", current.display()),
+                    };
+                }
+            }
+            Component::Normal(name) => {
+                let next = current.join(name);
+                match fs::symlink_metadata(&next) {
+                    Ok(meta) if meta.file_type().is_symlink() => match fs::canonicalize(&next) {
+                        Ok(real) => {
+                            if !path_within(&real, cwd) {
+                                return ArgvPathVerdict::Escapes {
+                                    detail: format!(
+                                        "符号链接 {} 指向 {}",
+                                        next.display(),
+                                        real.display()
+                                    ),
+                                };
+                            }
+                            current = real;
+                        }
+                        Err(error) => {
+                            return ArgvPathVerdict::Unresolved {
+                                detail: format!("符号链接 {} 无法解析：{error}", next.display()),
+                            };
+                        }
+                    },
+                    _ => current = next,
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return ArgvPathVerdict::Unresolved {
+                    detail: "相对路径中出现根/前缀组件".to_string(),
+                };
+            }
+        }
+    }
+    if path_within(&current, cwd) {
+        ArgvPathVerdict::InScope { resolved: current }
+    } else {
+        ArgvPathVerdict::Escapes {
+            detail: format!("解析到 {}", current.display()),
+        }
+    }
+}
+
+fn resolve_rooted_argv_path(path: &Path, raw: &str, cwd: &Path) -> ArgvPathVerdict {
+    let normalized = normalize_lexically(path);
+    if !path_within(&normalized, cwd) {
+        return ArgvPathVerdict::Escapes {
+            detail: format!("字面归一化后为 {}", normalized.display()),
+        };
+    }
+    if let Ok(real) = fs::canonicalize(path) {
+        return if path_within(&real, cwd) {
+            ArgvPathVerdict::InScope { resolved: real }
+        } else {
+            ArgvPathVerdict::Escapes {
+                detail: format!("解析为 {}", real.display()),
+            }
+        };
+    }
+    let mut ancestor = path.to_path_buf();
+    loop {
+        if let Ok(real) = fs::canonicalize(&ancestor) {
+            return if path_within(&real, cwd) {
+                ArgvPathVerdict::InScope { resolved: ancestor }
+            } else {
+                ArgvPathVerdict::Escapes {
+                    detail: format!(
+                        "已存在的祖先 {} 解析为 {}",
+                        ancestor.display(),
+                        real.display()
+                    ),
+                }
+            };
+        }
+        match ancestor.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => ancestor = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    ArgvPathVerdict::Unresolved {
+        detail: format!("无法解析路径：{raw}"),
+    }
+}
+
+fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(name) => normalized.push(name),
+        }
+    }
+    normalized
+}
+
+/// 组件级比较：Windows 下忽略大小写，并把 `\\?\` / `\\.\` 前缀视同普通盘符前缀
+fn path_within(path: &Path, base: &Path) -> bool {
+    let mut path_components = path.components();
+    for base_component in base.components() {
+        match path_components.next() {
+            Some(component) if component_key(component) == component_key(base_component) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+fn component_key(component: Component<'_>) -> String {
+    let key = match component {
+        Component::Prefix(prefix) => {
+            let text = prefix.as_os_str().to_string_lossy().to_string();
+            let text = text
+                .replace('/', "\\")
+                .trim_start_matches("\\\\?\\")
+                .trim_start_matches("\\\\.\\")
+                .to_string();
+            format!("prefix:{text}")
+        }
+        Component::RootDir => "root".to_string(),
+        Component::CurDir => "cur".to_string(),
+        Component::ParentDir => "parent".to_string(),
+        Component::Normal(name) => format!("normal:{}", name.to_string_lossy()),
+    };
+    #[cfg(windows)]
+    {
+        key.to_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        key
+    }
 }
 
 fn standalone_blocked_receipt(task_id: &str, reason: String) -> Value {
@@ -3372,7 +3851,7 @@ fn tools() -> Value {
                         "minItems": 1,
                         "maxItems": 1024,
                         "items": { "type": "string", "minLength": 1, "maxLength": 4096 },
-                        "description": "standalone 必填：程序与参数数组，argv[0] 是程序（显式路径必须落在 working directory 内），其余逐项作为参数传给程序，不经 shell 解释。dispatched 下传入即拒绝（dispatched_input_rejected）"
+                        "description": "standalone 必填：程序与参数数组，argv[0] 是程序（显式路径必须落在 working directory 内），其余逐项作为参数传给程序，不经 shell 解释。argv[1..] 中携带路径的参数（独立值、--flag=value、=/: 分隔、引号包裹、相对/绝对/UNC/盘符、含空格路径）按规范化后的真实位置校验：越界在占号前以 standalone_argv_path_escape 拒绝；URL、正则/通配符形态与普通标量不按路径校验；无法判定的形态放行并在回执 argv_path_scan.unknown 记 standalone_argv_path_unknown。dispatched 下传入即拒绝（dispatched_input_rejected）"
                     },
                     "acceptance": {
                         "type": "array",
