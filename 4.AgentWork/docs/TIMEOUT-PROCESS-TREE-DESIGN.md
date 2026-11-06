@@ -68,7 +68,7 @@
 - 任何分支都**不得**出现"已终止进程树 / 无残留"；
 - 调用方需自行确认受控集合之外的残留进程。
 
-状态约束：**`#3` 仍为 `NOT_PROVEN`**；实现窄定义不改变该状态，状态变更只能由用例结果另行决定。
+状态约束：**`#3` 仍为 `NOT_PROVEN`**；实现窄定义不改变该状态，状态变更只能由用例结果另行决定。2026-11-07 复核：本机可补跑的 Windows/POSIX 窄判据证据已补齐，仍缺 §6.8 的完整枚举观测点，状态不变；证据链见 [`TOOLS-DESCRIPTION-AUDIT.md`](./TOOLS-DESCRIPTION-AUDIT.md) §30。
 
 ---
 
@@ -425,6 +425,7 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 - **失败原因码**：所有失败统一 `[FAIL] reason=<码> hint=<处置>`、退出码 2，不静默失败、不跳过用例：`wrong_platform` / `wrong_target` / `missing_setsid` / `rust_missing` / `rust_broken` / `rust_too_old` / `rust_install_failed` / `missing_linker` / `repo_incomplete` / `vendor_missing` / `vendor_incomplete` / `vendor_failed` / `test_failed` / `missing_evidence` / `bad_usage`。
 - **本次脚本自检（2026-11-06，现有 WSL Ubuntu 24.04）**：`check` 通过（`rustc 1.88.0`、`host=x86_64-unknown-linux-gnu`、vendor 完整）；`run` 在现有 work 目录上离线跑通 `3 passed` + `64 passed`，四类证据齐全、退出码 0；负例三条均给出明确原因：无 Rust → `rust_missing`、vendor 缺失 → `vendor_missing`、伪造 `host: x86_64-pc-windows-msvc` → `wrong_target`。
 - **本机网络限制（如实说明）**：该 WSL 对外网络受限（apt 源指向不可用代理、`static.rust-lang.org` 极慢），本次验证使用**预置** Rust 与 vendor（`AW_VENDOR=/root/vendor`），未在本机重跑 `prepare` 的下载分支；缺 vendor 且 `AW_OFFLINE=1` 时脚本按 `vendor_missing` 明确失败，不会联网猜测或静默跳过。
+- **2026-11-07 复核（v1.31 收尾）**：同一 WSL 环境重跑 `run`：`#3` 四类证据行齐全，`timeout_cleans_controlled_set_including_grandchild` / `timeout_reason_states_action_not_tree_death` 通过；POSIX 总计 `104 passed; 1 failed`，失败项与本项无关——`standalone_argv_scope_rejects_escapes_before_execution` 的 `argv-backslash` 用例（`..\..\escape.txt` 在 POSIX 是合法文件名而非路径分隔，扫描判 `in_scope` 后执行成功）。该用例属 v1.28，本轮未改断言，记为独立待办；详见 [`TOOLS-DESCRIPTION-AUDIT.md`](./TOOLS-DESCRIPTION-AUDIT.md) §30.4。
 
 ### 6.8 "逃逸未验证"何时可被机器判定（门槛，不是待办）
 

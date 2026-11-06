@@ -120,6 +120,17 @@ impl Server {
         // 参数诊断只观测、不拦截：先算好，调用结果完全不受它影响
         let diagnostics = argument_diagnostics(name, &arguments);
 
+        // v1.31：仅当调用方显式要求（_meta.strict_arguments=true）才按 schema 拒绝；
+        // 默认仍是 v1.18/v1.25 的“只诊断、不拒绝”，不打断携带 _meta/别名/自定义元数据的既有调用。
+        if let Some(diagnostics) = diagnostics.as_ref() {
+            if strict_arguments_requested(&arguments) {
+                if let Some(error) = strict_arguments_error(diagnostics) {
+                    let payload = attach_argument_diagnostics(error, diagnostics.clone());
+                    return tool_result(&payload, true);
+                }
+            }
+        }
+
         let (payload, is_error) = match name {
             "health" => (self.health_payload(), false),
             "status" => (self.status_payload(), false),
@@ -4139,6 +4150,64 @@ fn attach_argument_diagnostics(mut payload: Value, diagnostics: Value) -> Value 
         object.insert("arguments_diagnostics".to_string(), diagnostics);
     }
     payload
+}
+
+/// v1.31 严格模式开关：只由单次调用显式选择，避免同一请求在不同进程里行为不同。
+fn strict_arguments_requested(arguments: &Value) -> bool {
+    arguments
+        .get("_meta")
+        .and_then(|meta| meta.get("strict_arguments"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// 严格模式下把 `kind=unknown|alias` 变成具名工具错误。
+/// `_meta`（client_metadata）与显式 null 的可选字段不算违规；值只回显名字，不回显值。
+fn strict_arguments_error(diagnostics: &Value) -> Option<Value> {
+    let entries = diagnostics.get("unknown_arguments")?.as_array()?;
+    let violations: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.get("kind").and_then(Value::as_str),
+                Some("unknown") | Some("alias")
+            )
+        })
+        .collect();
+    if violations.is_empty() {
+        return None;
+    }
+
+    let names: Vec<&str> = violations
+        .iter()
+        .filter_map(|entry| entry.get("name").and_then(Value::as_str))
+        .collect();
+    let declared: Vec<&str> = diagnostics
+        .get("declared_arguments")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let suggestions: Vec<String> = violations
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(Value::as_str)?;
+            let target = entry.get("alias_of").and_then(Value::as_str)?;
+            Some(format!("{name} -> {target}"))
+        })
+        .collect();
+
+    Some(json!({
+        "error": format!(
+            "invalid_arguments: 未声明参数 {}；已声明参数：{}；strict_arguments=true 时按 inputSchema.additionalProperties=false 拒绝",
+            names.join(", "),
+            declared.join(", ")
+        ),
+        "code": "invalid_arguments",
+        "unknown_arguments": names,
+        "declared_arguments": declared,
+        "alias_suggestions": suggestions,
+        "hint": "去掉 _meta.strict_arguments 即回到默认宽松策略（只诊断不拒绝）；别名只给出建议、不会自动改名，请改用已声明参数名"
+    }))
 }
 
 /// 日志侧：单行 JSON 到 stderr，与回执里的 `arguments_diagnostics` 是同一份信息

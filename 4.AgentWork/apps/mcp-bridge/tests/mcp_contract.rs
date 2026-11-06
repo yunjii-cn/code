@@ -5851,3 +5851,102 @@ fn standalone_rerun_after_records_removed_is_marked() {
         "既有结果回放必须保留重跑标注：{replay}"
     );
 }
+
+/// v1.31：默认宽松不变；只有显式 `_meta.strict_arguments=true` 才按 schema 拒绝未声明参数
+#[test]
+fn strict_arguments_meta_rejects_unknown_with_readable_code() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "runs.list",
+        json!({
+            "offset": 0,
+            "offest": 5,
+            "_meta": { "strict_arguments": true, "source": "strict-test" }
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "严格模式必须拒绝未声明参数：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    let error = payload["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("必须回传具名错误：{payload}"));
+    assert!(
+        error.starts_with("invalid_arguments"),
+        "错误码必须可判定：{error}"
+    );
+    assert!(error.contains("offest"), "错误必须点名参数：{error}");
+    assert!(
+        error.contains("offset"),
+        "错误必须给出已声明参数，调用方无需读源码：{error}"
+    );
+    assert_eq!(payload["code"], "invalid_arguments", "{payload}");
+    assert!(
+        payload["unknown_arguments"]
+            .as_array()
+            .expect("unknown_arguments 必须是数组")
+            .contains(&json!("offest")),
+        "必须回显违规参数名：{payload}"
+    );
+}
+
+#[test]
+fn strict_arguments_meta_rejects_alias_with_suggestion() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "dryRun": true,
+            "older_than_days": 365,
+            "_meta": { "strict_arguments": true }
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "严格模式下别名也必须拒绝（别名不会自动改名）：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["code"], "invalid_arguments", "{payload}");
+    assert!(
+        payload["alias_suggestions"]
+            .as_array()
+            .expect("alias_suggestions 必须是数组")
+            .contains(&json!("dryRun -> dry_run")),
+        "必须给出可执行的更正建议：{payload}"
+    );
+}
+
+#[test]
+fn strict_arguments_meta_allows_declared_and_omitted_optionals() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "runs.list",
+        json!({ "_meta": { "strict_arguments": true } }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "合法的可选参数缺省不得被误拒：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert!(payload.get("error").is_none(), "{payload}");
+    assert!(payload["total_tasks"].is_number(), "{payload}");
+    assert!(
+        payload["arguments_diagnostics"]["unknown_arguments"]
+            .as_array()
+            .expect("unknown_arguments 必须是数组")
+            .iter()
+            .all(|entry| entry["kind"] == "client_metadata"),
+        "严格模式只放行 _meta 这类客户端元数据：{payload}"
+    );
+}
+

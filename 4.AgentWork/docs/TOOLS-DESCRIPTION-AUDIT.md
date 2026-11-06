@@ -2790,6 +2790,129 @@ third : replay_basis=rerun_after_records_missing,  prior_attempts=1, replayed=Tr
 - 同 id 并发与 prune 的组合只做了 b) 这一种时序（attempt-2 运行窗口约 2s）；未做高频压力循环。
 - 本轮未改 `tools/list` 描述，`tools_sha256` 仍为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`。
 
+## 30. `#3` 为什么是 `NOT_PROVEN`：证据链与关闭条件（v1.31，2026-11-07 复核）
+
+### 30.1 `#3` 指哪个能力项
+
+`#3` 不是某一条用例编号，而是契约 §5 第 15 行 / 门禁 G9 的能力项：**超时后终止"整棵进程树"**（对应 `task.execute` 的超时分支）。设计评估与窄定义实现见 [`TIMEOUT-PROCESS-TREE-DESIGN.md`](./TIMEOUT-PROCESS-TREE-DESIGN.md)。当前只宣称"已清理**受控集合**（POSIX 进程组 / Windows Job Object）；逃逸进程是否仍在运行未验证"。
+
+### 30.2 证据链（代码 → 用例 → 缺什么）
+
+| 层 | 位置 | 已证明什么 | 不能证明什么 |
+|---|---|---|---|
+| 实现 | [`server.rs`](../apps/mcp-bridge/src/server.rs) `process_scope`（约 L1956-L2035 Unix、L2246-L2336 Windows） | POSIX 在 exec 前建组、SIGTERM→SIGKILL→轮询 `kill(-pgid,0)`；Windows `CREATE_SUSPENDED → Assign → Resume`，`TerminateJobObject` 后轮询 `ActiveProcesses`；查询失败按 `Unavailable` | 作用域外的后代（`setsid`/`setpgid`、`BREAKAWAY`、加入作业失败、嵌套作业）不在任何判据里 |
+| 实现 | `execute_task` 超时分支（约 L1263）、`timeout_reason`（约 L2641） | 三态分流；只有 `Cleaned` 才写"已清理受控集合"；任何分支不写"已终止进程树 / 无残留" | 文案保守不等于能力已具备 |
+| 用例（Windows 单元，实跑） | `job_counts_grandchild_and_empties_after_terminate` / `alive_but_idle_process_is_counted_in_job` / `exited_process_leaves_job_empty` / `suspended_start_defers_execution_until_job_assign` / `single_terminate_suffices_under_spawn_pressure` | 作业内孙进程可清空；活着但不写盘的进程被判"存在"；自然退出判"不存在"；恢复执行前不派生子进程；一次终止后作业计数归零 | 作业外后代枚举；`BREAKAWAY` / 加入失败 |
+| 用例（POSIX 单元，WSL 实跑） | `setsid_escape_is_outside_the_observed_group` 等 | `setsid sleep` 逃出原进程组后，组判据返回 `ESRCH` 而 `kill(已知PID,0)` 为 0——**证明 C1 是窄判据** | 整棵树；逃逸进程的持续追踪 |
+| 用例（集成，两平台） | `timeout_cleans_controlled_set_including_grandchild` / `timeout_reason_states_action_not_tree_death` / `legacy_timeout_reason_is_returned_verbatim_and_not_rewritten` / `timeout_description_matches_controlled_set_semantics` | 真实超时任务走 `Cleaned` 分支；文案禁语门禁 | 文案之外的能力 |
+
+### 30.3 缺的是"真跑"还是"实现"
+
+缺的是**能枚举全部后代的观测点**，不是窄判据的实现：
+
+1. Windows 只有作业成员计数/列表（`ActiveProcesses` / `JobObjectBasicProcessIdList`），没有"作业外候选"枚举；`BREAKAWAY`、加入作业失败、嵌套作业策略都可能留下作业外后代。
+2. POSIX 没有可移植的后代枚举；`/proc` 扫描是 TOCTOU，`setsid` 后无句柄可追；cgroup v2 是唯一接近整棵树的机制，但要求委派权限且进程可自行移出，本环境未验证。
+3. "某一时刻看不到"不等于"以后不会出现"：逃逸父进程仍可在观测后继续派生。
+
+判定门槛（四条缺一即保留"未验证"）固定在 [`TIMEOUT-PROCESS-TREE-DESIGN.md`](./TIMEOUT-PROCESS-TREE-DESIGN.md) §6.8：完整枚举、全时段覆盖、三态可分、平台闭合。
+
+### 30.4 本轮本机补跑（2026-11-07）
+
+- Windows：`cargo test -p aw-mcp-bridge --lib -- --nocapture` → `10 passed`，证据原文：
+
+```text
+[evidence] grandchild attached=true ActiveProcesses_before=Some(1)
+[evidence] grandchild terminate=Cleaned ActiveProcesses_after=Some(0)
+[evidence] alive_but_idle attached=true ActiveProcesses_before=Some(1)
+[evidence] alive_but_idle terminate=Cleaned ActiveProcesses_after=Some(0)
+[evidence] suspended_start marker_before_assign=false marker_after_resume=true attached=true ActiveProcesses_before_terminate=Some(2)
+[evidence] suspended_start terminate=Cleaned ActiveProcesses_after=Some(0)
+[evidence] exited_process ActiveProcesses_final=Some(0)
+```
+
+- Windows 集成（超时组）：`7 passed`，证据原文：
+
+```text
+[evidence] timeout_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建并先加入作业再恢复执行（恢复前不会派生子进程）；BREAKAWAY 或加入作业失败的作业外进程仍不可观测
+[evidence] grandchild_reason=timeout：超过 8s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建并先加入作业再恢复执行（恢复前不会派生子进程）；BREAKAWAY 或加入作业失败的作业外进程仍不可观测
+[evidence] grandchild pid=126076 process_exists_after=false
+```
+
+- POSIX（WSL `HostGoTest`，Rust 1.88.0，`verify.sh run` 离线）：四类 `#3` 证据行齐全（`timeout_cleans_controlled_set_including_grandchild` / `timeout_reason_states_action_not_tree_death` 均通过）。同次运行出现 **1 条与本项无关的失败**：`standalone_argv_scope_rejects_escapes_before_execution` 的 `argv-backslash` 用例（`..\..\escape.txt` 在 POSIX 是合法文件名、不是分隔符，扫描判 `in_scope` 后执行成功）。该用例属 v1.28，本轮未改动断言，如实记录为**独立待办**，不计入 `#3` 证据。
+
+### 30.5 结论（不改状态）
+
+**`#3` 继续保持 `NOT_PROVEN`**：本机可补跑的窄判据证据已补齐（Windows 单元 + 集成、POSIX WSL 复核），但仍缺整棵树观测点，属**环境/平台能力阻塞 + 既有窄定义实现**，不是"再写一段代码就能关"。关闭条件与 §6.8 完全一致；四条中任何一条满足前，回执不得出现"已终止进程树 / 无残留"。
+
+## 31. `additionalProperties: false` 仍只声明不强制；新增单次调用严格模式（v1.31）
+
+### 31.1 结论
+
+- **v1.25 之后仍然成立**：六个工具的 `inputSchema` 都声明 `additionalProperties: false`，服务端默认**只读已知键、忽略未知键**，v1.25 只是把"忽略"变成可观测（回执追加 `arguments_diagnostics`）。
+- **默认不改为全局强制**（理由与契约 §10.1 一致）：会打断携带 `_meta`、camelCase 别名、自定义元数据的既有调用；且契约已明确不提供"同一请求因进程/环境不同而行为不同"的开关。这不是实现代价问题，而是兼容与可复现性决策。
+- **新增单次调用可选的严格模式**：`arguments._meta.strict_arguments = true` 时，服务端按 schema 拒绝 `kind=unknown` / `kind=alias`，返回具名错误 `invalid_arguments`；`_meta` 自身（`client_metadata`）与显式 `null` 可选字段不算违规。默认行为、schema 与 `tools_sha256` 均不变。
+
+### 31.2 先红（HEAD `c5af9cf` 上同一批用例原样失败）
+
+```text
+thread 'strict_arguments_meta_rejects_unknown_with_readable_code' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5868:5:
+  left: Bool(false)
+ right: true
+thread 'strict_arguments_meta_rejects_alias_with_suggestion' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5909:5:
+  left: Bool(false)
+ right: true
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 107 filtered out
+```
+
+红点：旧实现即使看到 `_meta.strict_arguments=true` 也照常执行（`isError=false`），声明与强制完全脱节。
+
+### 31.3 转绿 + 真实 stdio 多进程回执
+
+`cargo test -p aw-mcp-bridge --test mcp_contract strict_arguments_meta` → `3 passed; 0 failed`。真实 stdio（独立 bridge 进程，`initialize` 后逐条 `tools/call`）原文：
+
+默认（无 `strict_arguments`，未知键仍被执行并附带诊断）：
+
+```text
+default_unknown: isError=False {"arguments_diagnostics":{...,"unknown_arguments":[{"kind":"unknown","name":"offest"...},{"kind":"unknown","name":"unexpected"...}]},...,"total_tasks":30}
+```
+
+严格（未声明参数被明确拒绝，错误码与已声明参数可读）：
+
+```text
+strict_unknown: isError=True {"alias_suggestions":[],"code":"invalid_arguments","declared_arguments":["limit","offset"],"error":"invalid_arguments: 未声明参数 offest；已声明参数：limit, offset；strict_arguments=true 时按 inputSchema.additionalProperties=false 拒绝",...}
+```
+
+严格 + 别名（拒绝并给出更正建议，不自动改名）：
+
+```text
+strict_alias: isError=True {"alias_suggestions":["dryRun -> dry_run"],"code":"invalid_arguments","declared_arguments":["confirm","dry_run","exclude","limit","older_than_days","status"],"error":"invalid_arguments: 未声明参数 dryRun；已声明参数：confirm, dry_run, exclude, limit, older_than_days, status；..."}
+```
+
+严格 + 合法可选参数缺省（不误拒）：
+
+```text
+strict_legal: isError=False {"arguments_diagnostics":{"unknown_arguments":[{"kind":"client_metadata","name":"_meta"...}]},...,"total_tasks":30}
+```
+
+`tools/list` 原文：`runs.list additionalProperties=false properties=['limit', 'offset']`；六个工具均 `additionalProperties=false`。
+
+### 31.4 若改为全局强制：哪些客户端会失败（评估）
+
+| 调用方行为 | 默认（现状） | 全局强制后 | 本次选择 |
+|---|---|---|---|
+| 携带 `_meta` 元数据 | 正常执行（诊断为 `client_metadata`） | 被拒绝 | 严格模式放行 `_meta`，只拒绝真正未声明键 |
+| 使用 camelCase 别名（`dryRun`） | 被忽略且**不生效**（诊断为 `alias`） | 被拒绝 | 严格模式拒绝并给 `dryRun -> dry_run` 建议，避免"静默不生效" |
+| SDK 序列化出显式 `null` 的可选字段 | 正常执行（诊断为 `null_optional`） | 仍正常（字段已声明） | 与全局强制一致 |
+| 自定义元数据 / 拼错的参数名 | 被忽略（诊断为 `unknown`） | 被拒绝 | 默认保持忽略；需要时由调用方按单次请求开启严格 |
+
+仓库内目前**没有 PM 侧真实调用样本**，上表是按 MCP 客户端通用行为推导的类别；默认宽松仍是对既有调用方最安全的选择。
+
+### 31.5 边界
+
+- 严格模式只覆盖 `kind=unknown|alias`；`null_optional` 与 `_meta` 不拒绝。
+- 不新增环境变量/进程级开关（避免契约 §10.1 第 2 条"同一请求不同进程行为不同"）；严格与否由**单次请求**决定，回执可审计。
+- `tools/list` 的 `description` / `inputSchema` 未改，`tools_sha256` 仍为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`。
+
 
 
 
