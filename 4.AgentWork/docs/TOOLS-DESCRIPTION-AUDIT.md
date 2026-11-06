@@ -206,8 +206,8 @@
 | # | 断言 | 实现依据 | 判定 |
 |---|---|---|---|
 | 78 | 六个工具的 `inputSchema.type` 均为 `object` | 六个 schema 均声明 `type=object`；`call_tool` 在缺失 `arguments` 时按 `{}` 处理，非对象值也透传（不额外校验） | 与实现一致（v1.18 更正：原"`call_tool` 要求为对象"表述过强，见 §13.6 注 5） |
-| 79 | `task.execute.required = ["task_id","cmd"]`：`task_id` 缺失即错误 | `required_str("task_id")` → 工具错误 | 与实现一致 |
-| 80 | `task.execute.required = ["task_id","cmd"]`：`cmd` 缺失按 schema 属必填 | 缺 `cmd` **不报工具错误**，而返回 `blocked` 回执（`command_not_found:`），见契约 §6 | 与实现一致（口径按契约 §6 的 blocked 回执，schema `required` 只约束调用方；服务端容错是既有行为，本批不改） |
+| 79 | `task.execute.required = ["task_id"]`（v1.26 起；`cmd`/`argv` 由 `anyOf` 二选一）：`task_id` 缺失即错误 | `required_str("task_id")` → 工具错误 | 与实现一致 |
+| 80 | `task.execute.anyOf = [{required:["cmd"]}, {required:["mode","argv"]}]`：dispatched 需 `cmd`；standalone 需 `mode`+`argv` | 缺 `cmd` 的 dispatched 调用**不报工具错误**，而返回 `blocked` 回执（`command_not_found:`）；`mode` 非法 → `invalid_mode`；standalone 缺 `argv`/`cwd`/`acceptance` → 具名 `standalone_*` blocked 回执（§2.6.1） | 与实现一致（口径按契约 §2.6 / §6；schema 只声明结构，服务端容错是既有行为） |
 | 81 | `receipt.get.required = ["task_id"]` | 缺失 → 工具错误 | 与实现一致 |
 | 82 | `runs.prune.required = ["older_than_days"]` | 缺失 → `invalid_retention` | 与实现一致 |
 | 83 | `health` / `status` / `runs.list` 的 `properties` 为空或仅可选字段 | `health`/`status` 不读参数；`runs.list` 两字段均可缺省 | 与实现一致 |
@@ -324,7 +324,7 @@ test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 | 8 | `task.execute` 描述 | "生效 timeout_secs" | `handback.timeout_secs`（含默认 120） | 与实现一致 |
 | 9 | `task.execute` 描述 | "env_keys" | `handback.env_keys` | 与实现一致 |
 | 10 | `task.execute` 描述 | "changed_files 是否截断" | `handback.changed_files_truncated` | 与实现一致 |
-| 11 | `task.execute` 描述 | "AW 不定义判据、不做验收" | 无验收逻辑；`status` 仅进程结果 | 与实现一致 |
+| 11 | `task.execute` 描述 | "AW 不定义判据、不做验收"（该句限定 dispatched） | dispatched：无验收逻辑，`status` 仅进程结果；standalone：按任务声明的 `acceptance` 判定，三态结论落盘 `verdict.json`（v1.26）；dispatched 回执仍无 verdict 字段 | 与实现一致（v1.26 分模式表述） |
 | 16 | `timeout_secs` 描述 | "超时秒数，默认 120" | `unwrap_or(120)`；范围 `1..=600` | 与实现一致 |
 | 17 | `timeout_secs` 描述 | "超时记 blocked 并给出原因" | 实现按三态给原因（`Cleaned` / `StillAlive` / `Unavailable`），Windows 另写 `spawn→Assign` 窗口；描述未写口径与边界 | **不一致（已修）** |
 | 43 | `receipt.get` 描述 | "按 task_id 读回执行回执" | `receipt_payload` + `is_valid_task_id` | 与实现一致 |
@@ -1240,6 +1240,9 @@ cargo test -p aw-mcp-bridge description_gate
 | G9 | `status` | `description` | 只读；不回显任何配置值 | — | `description_gate_behavior_additional_properties_declared_only` |
 | G10 | `receipt.get` | `description` | 默认返回最新一次 | — | `description_gate_snapshot_matches_audit` |
 | G11 | `status` | `description` | 连接级计数 connections；unit=connection；进程内无会话概念；active/total/peak 恒为 1；initialize_total 随 initialize 次数累加；多份 initialize 不等于多会话；仅观测，不做准入或上限 | 活跃会话数；会话上限；准入拦截 | `description_gate_behavior_connection_counters_real_stdio` |
+| G12 | `task.execute` | `description` | mode=standalone；verdict.json；undetermined；无法判定绝不默认通过；attempt < max_attempts；AW 不定义判据、不做验收 | 自动重试；会终止整棵进程树；已终止进程树；无残留 | `description_gate_standalone_mode_boundary` |
+| G13 | `task.execute` | `inputSchema.properties.mode.description` | 缺省 dispatched；AW 只执行不验收；拒绝 cmd/env/path_prepend；同一 task_id 不得跨模式复用；mode_conflict | 自动推断模式 | `description_gate_standalone_mode_boundary` |
+| G14 | `task.execute` | `inputSchema.properties.acceptance.description` | standalone 必填；file_exists；file_content_match；git_diff_non_empty；standalone_path_escape；未声明验收不得默认通过 | 视为通过 | `description_gate_standalone_mode_boundary` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
 
@@ -1247,7 +1250,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "10128b3ed88a4b4df5d419dbf61e02b151a8832f4cd5eb2e52791a67851d3895",
+  "tools_sha256": "26481e124bbf5326df50b354b55121d7b3bd459fee89a251cf0fbb43cf758595",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1326,6 +1329,27 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "description",
       "contains": ["连接级计数 connections", "unit=connection", "进程内无会话概念", "active/total/peak 恒为 1", "initialize_total 随 initialize 次数累加", "多份 initialize 不等于多会话", "仅观测，不做准入或上限"],
       "not_contains": ["活跃会话数", "会话上限", "准入拦截"]
+    },
+    {
+      "id": "G12",
+      "tool": "task.execute",
+      "path": "description",
+      "contains": ["mode=standalone", "verdict.json", "undetermined", "无法判定绝不默认通过", "attempt < max_attempts", "AW 不定义判据、不做验收"],
+      "not_contains": ["自动重试", "会终止整棵进程树", "已终止进程树", "无残留"]
+    },
+    {
+      "id": "G13",
+      "tool": "task.execute",
+      "path": "inputSchema.properties.mode.description",
+      "contains": ["缺省 dispatched", "AW 只执行不验收", "拒绝 cmd/env/path_prepend", "同一 task_id 不得跨模式复用", "mode_conflict"],
+      "not_contains": ["自动推断模式"]
+    },
+    {
+      "id": "G14",
+      "tool": "task.execute",
+      "path": "inputSchema.properties.acceptance.description",
+      "contains": ["standalone 必填", "file_exists", "file_content_match", "git_diff_non_empty", "standalone_path_escape", "未声明验收不得默认通过"],
+      "not_contains": ["视为通过"]
     }
   ]
 }
@@ -1679,6 +1703,518 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; fin
 - 只对 `arguments` 为 JSON 对象的调用做诊断；非对象 `arguments` 不新增诊断，也不改变原有行为。
 - 诊断只写 stderr 与回执，不落 `runs/` 审计文件；当前没有"跨调用汇总诊断"的持久化。
 - 本次只在 Windows 实跑；POSIX 未复跑（本改动不涉及平台分支），未验证项不写成已验证。
+
+## 25. v1.26：运行模式显式化与独立判定（`dispatched` / `standalone`）
+
+### 25.1 契约与实现要点
+
+- `task.execute` 新增可选 `mode`：缺省 `dispatched`（PM 派单，**行为零变化**）；`standalone` 必须显式。
+- standalone 必填 `cwd` + `argv` + 非空 `acceptance`，拒绝 `cmd`/`env`/`path_prepend`；执行不经 shell、限定 cwd。
+- 判定逐 attempt 落盘 `runs/<task_id>/attempt-N/verdict.json`：`criteria[].spec/observed/passed`、`observations{exit_code,stdout_digest,stderr_digest,stdout_preview,changed_files,...}`、`missing[]`、`decision{action,reason,last_failure}`；结论三态 `passed|failed|undetermined`，`undetermined` 绝不默认通过且不重试。
+- `max_attempts` 1..5（默认 3）：仅 `failed` 且未耗尽时重试；每次 attempt 独立目录、不覆盖；耗尽 `retry_exhausted`。
+- 同 `task_id` 跨模式 → `mode_conflict`，零写入。dispatched 回执不新增 `mode/verdict_*/attempts_total`，`dispatch.json` 不写 `mode`。
+- `tools/list` 的 `task.execute` 描述与 schema（`mode`/`argv`/`acceptance`/`max_attempts`、`required=["task_id"]` + `anyOf`）同步更新；门禁新增 G12–G14，`tools_sha256=26481e12…`。
+
+### 25.2 先红：实现前的原始失败输出
+
+在当前代码（HEAD = v1.25）上，先只提交测试文件、把 `src/server.rs` 暂存回 HEAD 后运行；以下为原始输出（未修改断言、未放宽）。
+
+7 条 standalone 用例：
+
+```text
+running 7 tests
+test standalone_and_dispatched_cannot_share_one_task_id ... FAILED
+test standalone_failure_retries_without_overwriting_records ... FAILED
+test standalone_passes_and_persists_verdict_with_observations ... FAILED
+test standalone_rejects_shell_fields_and_out_of_scope_paths ... FAILED
+test standalone_replay_returns_final_result_without_new_attempts ... FAILED
+test standalone_requires_cwd_argv_and_acceptance_before_claiming ... FAILED
+test standalone_undetermined_is_never_reported_as_pass ... FAILED
+
+---- standalone_and_dispatched_cannot_share_one_task_id stdout ----
+thread 'standalone_and_dispatched_cannot_share_one_task_id' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4634:5:
+assertion `left == right` failed: 同一目录不得既被 PM 当权威又被 AW 自判：{"...","blocked_reason":"command_not_found: 缺少 cmd（必填字符串）","status":"blocked",...}
+  left: Bool(false)
+ right: true
+
+---- standalone_failure_retries_without_overwriting_records stdout ----
+thread 'standalone_failure_retries_without_overwriting_records' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4298:5:
+assertion `left == right` failed: {"...","blocked_reason":"command_not_found: 缺少 cmd（必填字符串）","status":"blocked",...}
+  left: String("blocked")
+ right: "failed"
+
+---- standalone_passes_and_persists_verdict_with_observations stdout ----
+thread 'standalone_passes_and_persists_verdict_with_observations' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4214:5:
+assertion `left == right` failed: {"...","blocked_reason":"command_not_found: 缺少 cmd（必填字符串）","status":"blocked",...}
+  left: String("blocked")
+ right: "ok"
+
+---- standalone_rejects_shell_fields_and_out_of_scope_paths stdout ----
+thread 'standalone_rejects_shell_fields_and_out_of_scope_paths' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4492:5:
+assertion `left == right` failed
+  left: String("ok")
+ right: "blocked"
+
+---- standalone_replay_returns_final_result_without_new_attempts stdout ----
+thread 'standalone_replay_returns_final_result_without_new_attempts' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4571:5:
+assertion `left == right` failed
+  left: Null
+ right: 1
+
+---- standalone_requires_cwd_argv_and_acceptance_before_claiming stdout ----
+thread 'standalone_requires_cwd_argv_and_acceptance_before_claiming' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4409:5:
+assertion `left == right` failed
+  left: Null
+ right: "standalone"
+
+---- standalone_undetermined_is_never_reported_as_pass stdout ----
+thread 'standalone_undetermined_is_never_reported_as_pass' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4363:5:
+assertion `left == right` failed
+  left: Null
+ right: "undetermined"
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.73s
+```
+
+结构用例（schema 门禁同样先红）：
+
+```text
+thread 'schema_structure_declares_required_fields_and_bounds' panicked at apps\mcp-bridge\tests\mcp_contract.rs:222:5:
+assertion `left == right` failed
+  left: Array [String("task_id"), String("cmd")]
+ right: Array [String("task_id")]
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 90 filtered out; finished in 0.00s
+```
+
+说明：`{...}` 是为可读性省略的同一回执其余字段；断言文字与 `left/right` 逐字保留。每个 standalone 调用前的 `arguments_diagnostics` stderr（`mode/argv/acceptance` 被当成未知参数）未重复粘贴。
+
+### 25.3 转绿与全量回归
+
+```text
+running 7 tests
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 1.67s
+
+cargo test -p aw-mcp-bridge --lib            → 10 passed; 0 failed; 0 ignored
+cargo test -p aw-mcp-bridge --test mcp_contract → 91 passed; 0 failed; 0 ignored
+```
+
+`dispatched_handback_stays_free_of_verdict_fields` 是回归锁：断言 dispatched 回执无 `mode/verdict_conclusion/verdict_locator/attempts_total/max_attempts`、attempt 目录无 `verdict.json`、`dispatch.json` 无 `mode`。
+
+### 25.4 真实 stdio 双单（原样证据）
+
+直接向 `target/debug/aw-mcp-bridge.exe` 的 stdio 写 JSON-RPC；工作目录为两个临时 git 仓库（`D:\Temp\aw-sa-ok-20261107` / `D:\Temp\aw-sa-fail-20261107`），非测试桩。
+
+成功单 `standalone-ok-20261107`，`max_attempts=1`：`attempt-1/verdict.json`
+
+```json
+{
+  "acceptance": [
+    { "path": "out.txt", "type": "file_exists" },
+    { "contains": "hello", "path": "out.txt", "type": "file_content_match" }
+  ],
+  "attempt": 1,
+  "criteria": [
+    { "index": 1, "observed": { "bytes": 7, "exists": true, "path": "out.txt" }, "passed": true, "spec": { "path": "out.txt", "type": "file_exists" } },
+    { "index": 2, "observed": { "bytes": 7, "contains": "hello", "exists": true, "matched": true, "path": "out.txt" }, "passed": true, "spec": { "contains": "hello", "path": "out.txt", "type": "file_content_match" } }
+  ],
+  "decided_at": "2026-11-06T17:32:08Z",
+  "decision": { "action": "terminate", "last_failure": null, "reason": "acceptance_met" },
+  "missing": [],
+  "mode": "standalone",
+  "observations": {
+    "changed_files": ["out.txt"],
+    "changed_files_truncated": false,
+    "duration_ms": 520,
+    "exit_code": 0,
+    "spawn_failed": null,
+    "stderr_bytes": 0,
+    "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_preview": "",
+    "stderr_truncated": false,
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_preview": "",
+    "stdout_truncated": false,
+    "timed_out": false
+  },
+  "task_id": "standalone-ok-20261107",
+  "verdict": "passed",
+  "version": "standalone-verdict/1"
+}
+```
+
+成功单回执 `attempt-1/handback.json`：
+
+```json
+{
+  "argv": ["cmd.exe", "/C", "echo hello>out.txt"],
+  "artifacts": [
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stdout", "locator": "runs/standalone-ok-20261107/attempt-1/stdout.txt" },
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stderr", "locator": "runs/standalone-ok-20261107/attempt-1/stderr.txt" },
+    { "hash": "sha256:33dc97af8fc129a578aca1dbbc618810008a254b3f1e6eb2b6713eea6bde3f04", "kind": "verdict", "locator": "runs/standalone-ok-20261107/attempt-1/verdict.json" }
+  ],
+  "attempt": 1,
+  "attempts_total": 1,
+  "blocked_reason": null,
+  "changed_files": ["out.txt"],
+  "changed_files_truncated": false,
+  "commit": null,
+  "cwd": "\\\\?\\D:\\Temp\\aw-sa-ok-20261107",
+  "duration_ms": 520,
+  "env_keys": [],
+  "exit_code": 0,
+  "finishedAt": "2026-11-06T17:32:08Z",
+  "max_attempts": 1,
+  "mode": "standalone",
+  "path_prepend": [],
+  "status": "ok",
+  "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "task_id": "standalone-ok-20261107",
+  "timeout_secs": 120,
+  "verdict_conclusion": "passed",
+  "verdict_locator": "runs/standalone-ok-20261107/attempt-1/verdict.json",
+  "verify_cmd": "cmd.exe /C echo hello>out.txt"
+}
+```
+
+失败单 `standalone-fail-20261107`，`max_attempts=2`，验收要求文件含 `EXPECTED`、程序写入 `WRONG`。
+
+`attempt-1/verdict.json`（失败 → 重试）：
+
+```json
+{
+  "acceptance": [{ "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" }],
+  "attempt": 1,
+  "criteria": [
+    { "index": 1, "observed": { "bytes": 7, "contains": "EXPECTED", "exists": true, "matched": false, "path": "out.txt" }, "passed": false, "spec": { "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" } }
+  ],
+  "decided_at": "2026-11-06T17:32:08Z",
+  "decision": { "action": "retry", "last_failure": "acceptance_not_met", "reason": "acceptance_not_met" },
+  "missing": [],
+  "mode": "standalone",
+  "observations": {
+    "changed_files": ["out.txt"],
+    "changed_files_truncated": false,
+    "duration_ms": 397,
+    "exit_code": 0,
+    "spawn_failed": null,
+    "stderr_bytes": 0,
+    "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_preview": "",
+    "stderr_truncated": false,
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_preview": "",
+    "stdout_truncated": false,
+    "timed_out": false
+  },
+  "task_id": "standalone-fail-20261107",
+  "verdict": "failed",
+  "version": "standalone-verdict/1"
+}
+```
+
+`attempt-2/verdict.json`（耗尽 → 终止）：
+
+```json
+{
+  "acceptance": [{ "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" }],
+  "attempt": 2,
+  "criteria": [
+    { "index": 1, "observed": { "bytes": 7, "contains": "EXPECTED", "exists": true, "matched": false, "path": "out.txt" }, "passed": false, "spec": { "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" } }
+  ],
+  "decided_at": "2026-11-06T17:32:09Z",
+  "decision": { "action": "terminate", "last_failure": "acceptance_not_met", "reason": "retry_exhausted" },
+  "missing": [],
+  "mode": "standalone",
+  "observations": {
+    "changed_files": [],
+    "changed_files_truncated": false,
+    "duration_ms": 386,
+    "exit_code": 0,
+    "spawn_failed": null,
+    "stderr_bytes": 0,
+    "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_preview": "",
+    "stderr_truncated": false,
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_preview": "",
+    "stdout_truncated": false,
+    "timed_out": false
+  },
+  "task_id": "standalone-fail-20261107",
+  "verdict": "failed",
+  "version": "standalone-verdict/1"
+}
+```
+
+失败单最终回执 `attempt-2/handback.json`：
+
+```json
+{
+  "argv": ["cmd.exe", "/C", "echo WRONG>out.txt"],
+  "artifacts": [
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stdout", "locator": "runs/standalone-fail-20261107/attempt-2/stdout.txt" },
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stderr", "locator": "runs/standalone-fail-20261107/attempt-2/stderr.txt" },
+    { "hash": "sha256:7df3f21883a119f43e878e4dd043a22cadbf20c37ef1405e2ab11a4594132214", "kind": "verdict", "locator": "runs/standalone-fail-20261107/attempt-2/verdict.json" }
+  ],
+  "attempt": 2,
+  "attempts_total": 2,
+  "blocked_reason": null,
+  "changed_files": [],
+  "changed_files_truncated": false,
+  "commit": null,
+  "cwd": "\\\\?\\D:\\Temp\\aw-sa-fail-20261107",
+  "duration_ms": 386,
+  "env_keys": [],
+  "exit_code": 0,
+  "finishedAt": "2026-11-06T17:32:09Z",
+  "max_attempts": 2,
+  "mode": "standalone",
+  "path_prepend": [],
+  "status": "failed",
+  "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "task_id": "standalone-fail-20261107",
+  "timeout_secs": 120,
+  "verdict_conclusion": "failed",
+  "verdict_locator": "runs/standalone-fail-20261107/attempt-2/verdict.json",
+  "verify_cmd": "cmd.exe /C echo WRONG>out.txt"
+}
+```
+
+`attempt-1/handback.json` 同样存在（`status=failed`、`verdict_locator=runs/standalone-fail-20261107/attempt-1/verdict.json`、无 `attempts_total`），证明重试没有覆盖上一次记录。
+
+### 25.5 干净重建后的重跑（本次最终验证）
+
+去除 fmt 噪声、按 HEAD 重新应用语义编辑并 `cargo build -p aw-mcp-bridge` 之后，再次真跑两个独立任务（全新 task_id 与目录，非测试桩、非回放）：
+
+- 成功单 `standalone-ok-b`：cwd `D:\Temp\aw-sa-ok-b`（临时 git 仓库），`max_attempts=1`。
+- 失败单 `standalone-fail-b`：cwd `D:\Temp\aw-sa-fail-b`（临时 git 仓库），`max_attempts=2`，验收要求文件含 `EXPECTED`、程序写 `WRONG`。
+
+成功单 `attempt-1/verdict.json`：
+
+```json
+{
+  "acceptance": [
+    { "path": "out.txt", "type": "file_exists" },
+    { "contains": "hello", "path": "out.txt", "type": "file_content_match" }
+  ],
+  "attempt": 1,
+  "criteria": [
+    { "index": 1, "observed": { "bytes": 7, "exists": true, "path": "out.txt" }, "passed": true, "spec": { "path": "out.txt", "type": "file_exists" } },
+    { "index": 2, "observed": { "bytes": 7, "contains": "hello", "exists": true, "matched": true, "path": "out.txt" }, "passed": true, "spec": { "contains": "hello", "path": "out.txt", "type": "file_content_match" } }
+  ],
+  "decided_at": "2026-11-06T17:51:45Z",
+  "decision": { "action": "terminate", "last_failure": null, "reason": "acceptance_met" },
+  "missing": [],
+  "mode": "standalone",
+  "observations": {
+    "changed_files": ["out.txt"],
+    "changed_files_truncated": false,
+    "duration_ms": 226,
+    "exit_code": 0,
+    "spawn_failed": null,
+    "stderr_bytes": 0,
+    "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_preview": "",
+    "stderr_truncated": false,
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_preview": "",
+    "stdout_truncated": false,
+    "timed_out": false
+  },
+  "task_id": "standalone-ok-b",
+  "verdict": "passed",
+  "version": "standalone-verdict/1"
+}
+```
+
+成功单 `attempt-1/handback.json`：
+
+```json
+{
+  "argv": ["cmd.exe", "/C", "echo hello>out.txt"],
+  "artifacts": [
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stdout", "locator": "runs/standalone-ok-b/attempt-1/stdout.txt" },
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stderr", "locator": "runs/standalone-ok-b/attempt-1/stderr.txt" },
+    { "hash": "sha256:a4b1ba0c80fb9e8a2423c173562359e1f68fffc1a0c82f0bd095714ad93982b6", "kind": "verdict", "locator": "runs/standalone-ok-b/attempt-1/verdict.json" }
+  ],
+  "attempt": 1,
+  "attempts_total": 1,
+  "blocked_reason": null,
+  "changed_files": ["out.txt"],
+  "changed_files_truncated": false,
+  "commit": null,
+  "cwd": "\\\\?\\D:\\Temp\\aw-sa-ok-b",
+  "duration_ms": 226,
+  "env_keys": [],
+  "exit_code": 0,
+  "finishedAt": "2026-11-06T17:51:45Z",
+  "max_attempts": 1,
+  "mode": "standalone",
+  "path_prepend": [],
+  "status": "ok",
+  "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "task_id": "standalone-ok-b",
+  "timeout_secs": 120,
+  "verdict_conclusion": "passed",
+  "verdict_locator": "runs/standalone-ok-b/attempt-1/verdict.json",
+  "verify_cmd": "cmd.exe /C echo hello>out.txt"
+}
+```
+
+失败单 `attempt-1/verdict.json`（不通过 → 重试）：
+
+```json
+{
+  "acceptance": [{ "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" }],
+  "attempt": 1,
+  "criteria": [
+    { "index": 1, "observed": { "bytes": 7, "contains": "EXPECTED", "exists": true, "matched": false, "path": "out.txt" }, "passed": false, "spec": { "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" } }
+  ],
+  "decided_at": "2026-11-06T17:51:50Z",
+  "decision": { "action": "retry", "last_failure": "acceptance_not_met", "reason": "acceptance_not_met" },
+  "missing": [],
+  "mode": "standalone",
+  "observations": {
+    "changed_files": ["out.txt"],
+    "changed_files_truncated": false,
+    "duration_ms": 183,
+    "exit_code": 0,
+    "spawn_failed": null,
+    "stderr_bytes": 0,
+    "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_preview": "",
+    "stderr_truncated": false,
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_preview": "",
+    "stdout_truncated": false,
+    "timed_out": false
+  },
+  "task_id": "standalone-fail-b",
+  "verdict": "failed",
+  "version": "standalone-verdict/1"
+}
+```
+
+`attempt-1/handback.json`（`status=failed`、无 `attempts_total`，证明中间尝试未被覆盖）：
+
+```json
+{
+  "argv": ["cmd.exe", "/C", "echo WRONG>out.txt"],
+  "artifacts": [
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stdout", "locator": "runs/standalone-fail-b/attempt-1/stdout.txt" },
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stderr", "locator": "runs/standalone-fail-b/attempt-1/stderr.txt" },
+    { "hash": "sha256:ca9bc840456fe43f110431329cff46f85c69a46f1724a114baf8b1cc1a7b97c8", "kind": "verdict", "locator": "runs/standalone-fail-b/attempt-1/verdict.json" }
+  ],
+  "attempt": 1,
+  "blocked_reason": null,
+  "changed_files": ["out.txt"],
+  "changed_files_truncated": false,
+  "commit": null,
+  "cwd": "\\\\?\\D:\\Temp\\aw-sa-fail-b",
+  "duration_ms": 183,
+  "env_keys": [],
+  "exit_code": 0,
+  "finishedAt": "2026-11-06T17:51:50Z",
+  "max_attempts": 2,
+  "mode": "standalone",
+  "path_prepend": [],
+  "status": "failed",
+  "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "task_id": "standalone-fail-b",
+  "timeout_secs": 120,
+  "verdict_conclusion": "failed",
+  "verdict_locator": "runs/standalone-fail-b/attempt-1/verdict.json",
+  "verify_cmd": "cmd.exe /C echo WRONG>out.txt"
+}
+```
+
+失败单 `attempt-2/verdict.json`（耗尽 → 终止）：
+
+```json
+{
+  "acceptance": [{ "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" }],
+  "attempt": 2,
+  "criteria": [
+    { "index": 1, "observed": { "bytes": 7, "contains": "EXPECTED", "exists": true, "matched": false, "path": "out.txt" }, "passed": false, "spec": { "contains": "EXPECTED", "path": "out.txt", "type": "file_content_match" } }
+  ],
+  "decided_at": "2026-11-06T17:51:51Z",
+  "decision": { "action": "terminate", "last_failure": "acceptance_not_met", "reason": "retry_exhausted" },
+  "missing": [],
+  "mode": "standalone",
+  "observations": {
+    "changed_files": [],
+    "changed_files_truncated": false,
+    "duration_ms": 187,
+    "exit_code": 0,
+    "spawn_failed": null,
+    "stderr_bytes": 0,
+    "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stderr_preview": "",
+    "stderr_truncated": false,
+    "stdout_bytes": 0,
+    "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "stdout_preview": "",
+    "stdout_truncated": false,
+    "timed_out": false
+  },
+  "task_id": "standalone-fail-b",
+  "verdict": "failed",
+  "version": "standalone-verdict/1"
+}
+```
+
+失败单最终回执 `attempt-2/handback.json`：
+
+```json
+{
+  "argv": ["cmd.exe", "/C", "echo WRONG>out.txt"],
+  "artifacts": [
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stdout", "locator": "runs/standalone-fail-b/attempt-2/stdout.txt" },
+    { "hash": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "kind": "stderr", "locator": "runs/standalone-fail-b/attempt-2/stderr.txt" },
+    { "hash": "sha256:eb21d94faab0784f1eb9ed77e1e77a9c0345049957d6923239251dbb666ab34b", "kind": "verdict", "locator": "runs/standalone-fail-b/attempt-2/verdict.json" }
+  ],
+  "attempt": 2,
+  "attempts_total": 2,
+  "blocked_reason": null,
+  "changed_files": [],
+  "changed_files_truncated": false,
+  "commit": null,
+  "cwd": "\\\\?\\D:\\Temp\\aw-sa-fail-b",
+  "duration_ms": 187,
+  "env_keys": [],
+  "exit_code": 0,
+  "finishedAt": "2026-11-06T17:51:51Z",
+  "max_attempts": 2,
+  "mode": "standalone",
+  "path_prepend": [],
+  "status": "failed",
+  "stderr_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stdout_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "task_id": "standalone-fail-b",
+  "timeout_secs": 120,
+  "verdict_conclusion": "failed",
+  "verdict_locator": "runs/standalone-fail-b/attempt-2/verdict.json",
+  "verify_cmd": "cmd.exe /C echo WRONG>out.txt"
+}
+```
+
+### 25.6 未覆盖与限制（如实标注）
+
+- 本次只在 Windows 10 实跑与回归；POSIX 分支未复跑（standalone 执行路径无平台特定代码，但未验证不写成已验证）。
+- 演示仓库为空仓（无 HEAD），`commit=null`；`changed_files` 仍按 `git status --porcelain` 差值正确抓到 `out.txt`。
+- `git_diff_non_empty` 以 `git status --porcelain` 判定（含未跟踪文件）；非 git 仓库 → `undetermined`，已有用例覆盖，但**未在真实双单中演示**。
+- 失败单 `attempt-2` 的 `changed_files` 为空：第 1 次已创建 `out.txt`，第 2 次是改写同一文件，按"新增文件差值"口径不重复计入；这是既有 `changed_files` 语义，不是本次新增缺陷。
+- 未实现：跨调用的判定汇总、`acceptance` 的表达式/断言组合、对 `argv` 参数中的路径做逐项作用域校验（当前只校验 `argv[0]` 显式路径与验收路径）。
 
 
 

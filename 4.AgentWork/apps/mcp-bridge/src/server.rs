@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -849,6 +849,28 @@ impl Server {
                 "task_id 非法（需以字母或数字开头，仅含字母数字 . _ -，长度 ≤64）：{task_id}"
             ));
         }
+        match standalone_mode(args)? {
+            false => self.execute_dispatched(args, task_id),
+            true => self.execute_standalone(args, task_id),
+        }
+    }
+
+    /// dispatched（缺省）：外部（PM）派单。AW 只执行、交回执、不验收、不判停（既有契约逐字不变）
+    fn execute_dispatched(&self, args: &Value, task_id: &str) -> Result<Value, String> {
+        // standalone-only 字段在 dispatched 下必须显式拒绝：不许让调用方误以为 AW 会按这些字段验收
+        for field in ["argv", "acceptance", "max_attempts"] {
+            if args
+                .get(field)
+                .map(|value| !value.is_null())
+                .unwrap_or(false)
+            {
+                return Ok(blocked_receipt(
+                    task_id,
+                    "",
+                    format!("dispatched_input_rejected: 字段 {field} 仅限 mode=standalone；dispatched 由 PM 定义判据，AW 不验收"),
+                ));
+            }
+        }
 
         // 前置判定一律在占号之前完成：只返回 blocked 回执，不创建任何 attempt 目录
         let cmd = match required_str(args, "cmd") {
@@ -1078,12 +1100,30 @@ impl Server {
         if let Some(object) = stored.as_object_mut() {
             // dispatchedAt 是时间事实、不是派单参数：必须剔除，否则任何一次重投都会因时间不同误判冲突
             object.remove("dispatchedAt");
-            if !object.contains_key("env") {
-                object.insert("env".to_string(), json!({}));
-            }
-            // 升级前的签名没有 path_prepend：其语义等价于空数组，补齐后再比对
-            if !object.contains_key("path_prepend") {
-                object.insert("path_prepend".to_string(), json!([]));
+        }
+        // 模式是硬边界：同一 task_id 既有记录属于另一种模式时，必须具名拒绝，禁止「同一目录既被 PM 当权威、又被 AW 自判」
+        let stored_mode = stored
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("dispatched");
+        let requested_mode = signature
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("dispatched");
+        if stored_mode != requested_mode {
+            return Err(format!(
+                "mode_conflict: task_id `{task_id}` 已存在且属于 {stored_mode} 模式，不能以 {requested_mode} 模式复用；请换新 task_id"
+            ));
+        }
+        if requested_mode == "dispatched" {
+            if let Some(object) = stored.as_object_mut() {
+                if !object.contains_key("env") {
+                    object.insert("env".to_string(), json!({}));
+                }
+                // 升级前的签名没有 path_prepend：其语义等价于空数组，补齐后再比对
+                if !object.contains_key("path_prepend") {
+                    object.insert("path_prepend".to_string(), json!([]));
+                }
             }
         }
         if &stored != signature {
@@ -1098,6 +1138,191 @@ impl Server {
         }
         wait_for_json(&handback_path, Duration::from_secs(timeout_secs + 5)).ok_or_else(|| {
             format!("task_in_progress: task_id `{task_id}` 的既有尝试仍在执行中，请稍后重试")
+        })
+    }
+
+    /// standalone：没有外部派单方时由 AW 自己闭环——执行、按任务声明的 acceptance 判定、失败有界重试
+    fn execute_standalone(&self, args: &Value, task_id: &str) -> Result<Value, String> {
+        let spec = match StandaloneSpec::parse(args) {
+            Ok(spec) => spec,
+            Err(reason) => return Ok(standalone_blocked_receipt(task_id, reason)),
+        };
+        let task_root = self.runs_dir.join(task_id);
+        let signature = spec.signature(task_id);
+
+        if task_root.exists() {
+            return self.replay_standalone(task_id, &task_root, &signature, spec.timeout_secs);
+        }
+        fs::create_dir_all(&task_root).map_err(|e| format!("创建运行目录失败：{e}"))?;
+
+        for attempt in 1..=spec.max_attempts {
+            let run_dir = task_root.join(format!("attempt-{attempt}"));
+            match fs::create_dir(&run_dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // 并发重投：落败方等待胜者的最终结果，不重复执行
+                    return self.replay_standalone(task_id, &task_root, &signature, spec.timeout_secs);
+                }
+                Err(error) => return Err(format!("创建尝试目录失败：{error}")),
+            }
+            write_dispatch(&run_dir, &signature)?;
+
+            let commit = git_output(&spec.cwd, &["rev-parse", "--short", "HEAD"])
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let before = git_paths(&spec.cwd);
+            let run = run_standalone_command(&spec, &run_dir)?;
+            let after = git_paths(&spec.cwd);
+            let (changed_files, changed_files_truncated) = changed_between(&before, &after);
+
+            let (criteria, missing, all_passed) = evaluate_acceptance(&spec, &run);
+            let (conclusion, action, reason, last_failure) =
+                decide_standalone(&run, &missing, all_passed, &spec, attempt);
+
+            let verdict = json!({
+                "version": "standalone-verdict/1",
+                "mode": "standalone",
+                "task_id": task_id,
+                "attempt": attempt,
+                "decided_at": now_stamp(),
+                "verdict": conclusion,
+                "acceptance": spec.acceptance,
+                "criteria": criteria,
+                "observations": {
+                    "exit_code": run.exit_code,
+                    "stdout_digest": run.stdout_digest,
+                    "stderr_digest": run.stderr_digest,
+                    "stdout_preview": run.stdout_preview,
+                    "stderr_preview": run.stderr_preview,
+                    "stdout_bytes": run.stdout_bytes,
+                    "stderr_bytes": run.stderr_bytes,
+                    "stdout_truncated": run.stdout_truncated,
+                    "stderr_truncated": run.stderr_truncated,
+                    "changed_files": changed_files,
+                    "changed_files_truncated": changed_files_truncated,
+                    "duration_ms": run.duration_ms,
+                    "timed_out": run.timed_out,
+                    "spawn_failed": run.spawn_error
+                },
+                "missing": missing,
+                "decision": {
+                    "action": action,
+                    "reason": reason,
+                    "last_failure": last_failure
+                }
+            });
+            let verdict_path = run_dir.join("verdict.json");
+            write_json_file(&verdict_path, &verdict)?;
+            let verdict_digest = digest_file(&verdict_path)?;
+
+            let status = match conclusion.as_str() {
+                "passed" => "ok",
+                "failed" => "failed",
+                _ => "blocked",
+            };
+            let blocked_reason = if status == "blocked" {
+                Some(standalone_blocked_detail(&run, &missing))
+            } else {
+                None
+            };
+            let mut handback = json!({
+                "task_id": task_id,
+                "attempt": attempt,
+                "mode": "standalone",
+                "finishedAt": now_stamp(),
+                "status": status,
+                "changed_files": changed_files,
+                "changed_files_truncated": changed_files_truncated,
+                "cwd": spec.cwd.to_string_lossy(),
+                "timeout_secs": spec.timeout_secs,
+                "env_keys": [],
+                "path_prepend": [],
+                "argv": spec.argv,
+                "max_attempts": spec.max_attempts,
+                "verify_cmd": spec.display_cmd(),
+                "exit_code": run.exit_code,
+                "stdout_digest": run.stdout_digest,
+                "stderr_digest": run.stderr_digest,
+                "commit": commit,
+                "duration_ms": run.duration_ms,
+                "blocked_reason": blocked_reason,
+                "verdict_conclusion": conclusion,
+                "verdict_locator": format!("runs/{task_id}/attempt-{attempt}/verdict.json"),
+                "artifacts": [
+                    {
+                        "kind": "stdout",
+                        "locator": format!("runs/{task_id}/attempt-{attempt}/stdout.txt"),
+                        "hash": run.stdout_digest
+                    },
+                    {
+                        "kind": "stderr",
+                        "locator": format!("runs/{task_id}/attempt-{attempt}/stderr.txt"),
+                        "hash": run.stderr_digest
+                    },
+                    {
+                        "kind": "verdict",
+                        "locator": format!("runs/{task_id}/attempt-{attempt}/verdict.json"),
+                        "hash": verdict_digest
+                    }
+                ]
+            });
+            if action == "terminate" {
+                if let Some(object) = handback.as_object_mut() {
+                    object.insert("attempts_total".to_string(), json!(attempt));
+                }
+                write_handback(&run_dir, &handback)?;
+                // 最终结果标记：重投据此回放，避免把中间失败尝试误当成最终结论
+                write_json_file(&task_root.join(STANDALONE_RESULT), &handback)?;
+                return Ok(handback);
+            }
+            write_handback(&run_dir, &handback)?;
+        }
+        Err(format!(
+            "standalone_retry_exhausted_without_result: task_id `{task_id}` 的尝试循环没有产出终止判定"
+        ))
+    }
+
+    /// standalone 重投：签名/模式一致则回放最终结果；仍在执行则等待，不重复跑
+    fn replay_standalone(
+        &self,
+        task_id: &str,
+        task_root: &Path,
+        signature: &Value,
+        timeout_secs: u64,
+    ) -> Result<Value, String> {
+        let dispatch_path = task_root.join("attempt-1").join("dispatch.json");
+        let stored = match read_json(&dispatch_path) {
+            Ok(stored) => stored,
+            Err(_) => wait_for_json(&dispatch_path, Duration::from_secs(5)).ok_or_else(|| {
+                format!(
+                    "task_id_conflict: task_id `{task_id}` 已有运行目录但缺少派单签名（dispatch.json），无法证明参数一致；重跑请使用新 task_id"
+                )
+            })?,
+        };
+        let mut stored = stored;
+        if let Some(object) = stored.as_object_mut() {
+            object.remove("dispatchedAt");
+        }
+        let stored_mode = stored
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("dispatched");
+        if stored_mode != "standalone" {
+            return Err(format!(
+                "mode_conflict: task_id `{task_id}` 已存在且属于 {stored_mode} 模式，不能以 standalone 模式复用；请换新 task_id"
+            ));
+        }
+        if &stored != signature {
+            return Err(format!(
+                "task_id_conflict: task_id `{task_id}` 已存在且 standalone 参数不一致（cwd / argv / acceptance / max_attempts / timeout_secs 必须完全一致）；重跑请使用新 task_id"
+            ));
+        }
+        let result_path = task_root.join(STANDALONE_RESULT);
+        if let Ok(result) = read_json(&result_path) {
+            return Ok(result);
+        }
+        wait_for_json(&result_path, Duration::from_secs(timeout_secs + 5)).ok_or_else(|| {
+            format!("task_in_progress: task_id `{task_id}` 的 standalone 执行仍在进行中，请稍后重试")
         })
     }
 
@@ -2206,6 +2431,565 @@ fn write_handback(run_dir: &Path, handback: &Value) -> Result<(), String> {
     fs::write(&path, text).map_err(|e| format!("写入回执失败：{e}"))
 }
 
+fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
+    fs::write(path, text).map_err(|e| format!("写入 {} 失败：{e}", path.display()))
+}
+
+/// standalone 的最终结果标记：重投按它回放，不把中间失败尝试当成最终结论
+const STANDALONE_RESULT: &str = "standalone-result.json";
+
+/// 模式显式化：缺省 dispatched（PM 派单，行为零变化）；只有显式 standalone 才由 AW 自行闭环
+fn standalone_mode(args: &Value) -> Result<bool, String> {
+    match args.get("mode") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::String(mode)) if mode == "dispatched" => Ok(false),
+        Some(Value::String(mode)) if mode == "standalone" => Ok(true),
+        Some(other) => {
+            let raw = serde_json::to_string(other).unwrap_or_else(|_| "非字符串值".to_string());
+            let repr: String = raw.chars().take(80).collect();
+            Err(format!(
+                "invalid_mode: mode 只能是 dispatched 或 standalone，收到 {repr}"
+            ))
+        }
+    }
+}
+
+struct StandaloneSpec {
+    cwd: PathBuf,
+    argv: Vec<String>,
+    acceptance: Vec<Value>,
+    max_attempts: u64,
+    timeout_secs: u64,
+}
+
+impl StandaloneSpec {
+    /// 独立模式的输入契约：作用域限定在 cwd、不经 shell、必须有验收标准
+    fn parse(args: &Value) -> Result<Self, String> {
+        for field in ["cmd", "env", "path_prepend"] {
+            if args
+                .get(field)
+                .map(|value| !value.is_null())
+                .unwrap_or(false)
+            {
+                return Err(match field {
+                    "cmd" => "standalone_cmd_rejected: standalone 不接受 cmd（shell 命令）；请用 argv 数组逐项传参，AW 不经 shell 执行",
+                    "env" => "standalone_env_rejected: standalone 不接受 env；子进程只继承 bridge 环境",
+                    _ => "standalone_path_prepend_rejected: standalone 不接受 path_prepend；执行限定在任务 working directory 内",
+                }
+                .to_string());
+            }
+        }
+
+        let raw_cwd = args
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "standalone_cwd_required: standalone 必须显式给出 cwd（执行与验收的作用域根目录）".to_string()
+            })?;
+        let cwd = fs::canonicalize(raw_cwd)
+            .map_err(|e| format!("standalone_cwd_invalid: cwd 无法解析为目录：{raw_cwd}（{e}）"))?;
+        if !cwd.is_dir() {
+            return Err(format!(
+                "standalone_cwd_invalid: cwd 不是目录：{}",
+                cwd.display()
+            ));
+        }
+
+        let argv = match args.get("argv") {
+            Some(Value::Array(items)) if !items.is_empty() => {
+                let mut argv = Vec::with_capacity(items.len());
+                for (index, item) in items.iter().enumerate() {
+                    let Some(text) = item.as_str() else {
+                        return Err(format!(
+                            "standalone_argv_invalid: argv 第 {} 项不是字符串",
+                            index + 1
+                        ));
+                    };
+                    if text.is_empty() || text.contains('\0') {
+                        return Err(format!(
+                            "standalone_argv_invalid: argv 第 {} 项为空或含 NUL",
+                            index + 1
+                        ));
+                    }
+                    argv.push(text.to_string());
+                }
+                argv
+            }
+            _ => {
+                return Err("standalone_argv_required: standalone 必须给出非空 argv 数组（argv[0] 是程序，其余是参数）".to_string())
+            }
+        };
+        ensure_program_in_scope(&argv[0], &cwd)?;
+
+        let timeout_secs = match args.get("timeout_secs") {
+            None | Some(Value::Null) => 120,
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (1..=600).contains(value))
+                .ok_or_else(|| {
+                    "standalone_timeout_invalid: timeout_secs 必须在 1..=600 之间".to_string()
+                })?,
+        };
+        let max_attempts = match args.get("max_attempts") {
+            None | Some(Value::Null) => 3,
+            Some(value) => value
+                .as_u64()
+                .filter(|value| (1..=5).contains(value))
+                .ok_or_else(|| {
+                    "standalone_max_attempts_invalid: max_attempts 必须是 1..=5 的整数".to_string()
+                })?,
+        };
+
+        let Some(items) = args.get("acceptance").and_then(Value::as_array) else {
+            return Err("standalone_acceptance_required: standalone 必须在任务输入里声明 acceptance；不声明验收标准不得默认通过".to_string());
+        };
+        if items.is_empty() {
+            return Err(
+                "standalone_acceptance_required: acceptance 不能为空（没有验收标准无法判定）"
+                    .to_string(),
+            );
+        }
+        let mut acceptance = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            validate_acceptance(item, index)?;
+            acceptance.push(item.clone());
+        }
+
+        Ok(Self {
+            cwd,
+            argv,
+            acceptance,
+            max_attempts,
+            timeout_secs,
+        })
+    }
+
+    fn signature(&self, task_id: &str) -> Value {
+        json!({
+            "task_id": task_id,
+            "mode": "standalone",
+            "cwd": self.cwd.to_string_lossy(),
+            "argv": self.argv,
+            "acceptance": self.acceptance,
+            "max_attempts": self.max_attempts,
+            "timeout_secs": self.timeout_secs
+        })
+    }
+
+    fn display_cmd(&self) -> String {
+        self.argv.join(" ")
+    }
+}
+
+/// 验收标准：四种可核对类型；未知类型/缺字段/路径越界在占号前拒绝
+fn validate_acceptance(item: &Value, index: usize) -> Result<(), String> {
+    let Some(object) = item.as_object() else {
+        return Err(format!(
+            "standalone_acceptance_invalid: 第 {} 条验收标准不是对象",
+            index + 1
+        ));
+    };
+    let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
+    let prefix = format!("standalone_acceptance_invalid: 第 {} 条（{kind}）", index + 1);
+    match kind {
+        "exit_code" => {
+            if object.get("expected").and_then(Value::as_i64).is_none() {
+                return Err(format!("{prefix} 缺少整数 expected"));
+            }
+        }
+        "file_exists" => {
+            let path = object.get("path").and_then(Value::as_str).unwrap_or("");
+            ensure_relative_scope_path(path)?;
+        }
+        "file_content_match" => {
+            let path = object.get("path").and_then(Value::as_str).unwrap_or("");
+            ensure_relative_scope_path(path)?;
+            if object
+                .get("contains")
+                .and_then(Value::as_str)
+                .map(str::is_empty)
+                .unwrap_or(true)
+            {
+                return Err(format!("{prefix} 缺少非空 contains"));
+            }
+        }
+        "git_diff_non_empty" => {}
+        _ => {
+            return Err(format!(
+                "standalone_acceptance_invalid: 第 {} 条 type 未知（只支持 exit_code / file_exists / file_content_match / git_diff_non_empty）",
+                index + 1
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn ensure_relative_scope_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.contains('\0') {
+        return Err("standalone_acceptance_invalid: 验收路径为空或含 NUL".to_string());
+    }
+    for component in Path::new(path).components() {
+        if !matches!(component, Component::Normal(_) | Component::CurDir) {
+            return Err(format!(
+                "standalone_path_escape: 验收路径必须是 working directory 内的相对路径（不允许绝对路径或 ..）：{path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 显式程序路径必须落在 cwd 内；裸程序名（不含分隔符）按继承 PATH 解析，允许解释器/运行时
+fn ensure_program_in_scope(program: &str, cwd: &Path) -> Result<(), String> {
+    let has_separator = program.contains('/') || program.contains('\\');
+    let mut rooted = false;
+    for component in Path::new(program).components() {
+        if matches!(
+            component,
+            Component::RootDir | Component::ParentDir | Component::Prefix(_)
+        ) {
+            rooted = true;
+        }
+    }
+    if !has_separator && !rooted {
+        return Ok(());
+    }
+    let path = Path::new(program);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let resolved = fs::canonicalize(&candidate).map_err(|_| {
+        format!("standalone_program_unresolved: 无法证明程序位于 working directory 内：{program}")
+    })?;
+    if !resolved.starts_with(cwd) {
+        return Err(format!(
+            "standalone_program_outside_scope: 程序路径越出 working directory：{}",
+            resolved.display()
+        ));
+    }
+    Ok(())
+}
+
+fn standalone_blocked_receipt(task_id: &str, reason: String) -> Value {
+    let mut receipt = blocked_receipt(task_id, "", reason);
+    if let Some(object) = receipt.as_object_mut() {
+        object.insert("mode".to_string(), json!("standalone"));
+    }
+    receipt
+}
+
+struct StandaloneRun {
+    exit_code: Option<i32>,
+    stdout_digest: String,
+    stderr_digest: String,
+    stdout_preview: String,
+    stderr_preview: String,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    duration_ms: u64,
+    timed_out: bool,
+    spawn_error: Option<String>,
+    blocked_reason: Option<String>,
+}
+
+/// 不经 shell：直接启动 argv[0]，其余参数逐项传入；current_dir 固定为 cwd
+fn run_standalone_command(
+    spec: &StandaloneSpec,
+    run_dir: &Path,
+) -> Result<StandaloneRun, String> {
+    let stdout_path = run_dir.join("stdout.txt");
+    let stderr_path = run_dir.join("stderr.txt");
+    let stdout_file =
+        fs::File::create(&stdout_path).map_err(|e| format!("创建 stdout 失败：{e}"))?;
+    let stderr_file =
+        fs::File::create(&stderr_path).map_err(|e| format!("创建 stderr 失败：{e}"))?;
+
+    let mut command = Command::new(&spec.argv[0]);
+    command
+        .args(&spec.argv[1..])
+        .current_dir(&spec.cwd)
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
+
+    let started = Instant::now();
+    let deadline = Duration::from_secs(spec.timeout_secs);
+    let mut timed_out = false;
+    let mut cleanup_outcome = None;
+    let mut spawn_error: Option<String> = None;
+    let mut supervisor = process_scope::Supervisor::new();
+    supervisor.configure(&mut command);
+    let exit_status = match command.spawn() {
+        Ok(mut child) => {
+            supervisor.attach(&mut child);
+            if let Some(error) = supervisor.attach_error().map(str::to_string) {
+                let _ = child.wait();
+                spawn_error = Some(error);
+                None
+            } else {
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => break Some(status),
+                        Ok(None) => {
+                            if started.elapsed() >= deadline {
+                                timed_out = true;
+                                cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                break None;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(error) => return Err(format!("等待进程失败：{error}")),
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            spawn_error = Some(format!("standalone_spawn_failed: 启动程序失败：{error}"));
+            None
+        }
+    };
+    let duration_ms = started.elapsed().as_millis() as u64;
+    let stdout_digest = digest_file(&stdout_path)?;
+    let stderr_digest = digest_file(&stderr_path)?;
+    let (stdout_preview, stdout_bytes, stdout_truncated) = file_preview(&stdout_path);
+    let (stderr_preview, stderr_bytes, stderr_truncated) = file_preview(&stderr_path);
+    let blocked_reason = spawn_error
+        .clone()
+        .or_else(|| timed_out.then(|| timeout_reason(spec.timeout_secs, cleanup_outcome)));
+    Ok(StandaloneRun {
+        exit_code: exit_status.and_then(|status| status.code()),
+        stdout_digest,
+        stderr_digest,
+        stdout_preview,
+        stderr_preview,
+        stdout_bytes,
+        stderr_bytes,
+        stdout_truncated,
+        stderr_truncated,
+        duration_ms,
+        timed_out,
+        spawn_error,
+        blocked_reason,
+    })
+}
+
+/// 输出摘要：只给前 200 字符，明确标注是否截断；完整内容以 stdout.txt + 摘要哈希为准
+fn file_preview(path: &Path) -> (String, u64, bool) {
+    let bytes = fs::read(path).unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes);
+    let truncated = text.chars().count() > 200;
+    let preview: String = text.chars().take(200).collect();
+    (preview, bytes.len() as u64, truncated)
+}
+
+fn changed_between(
+    before: &HashSet<String>,
+    after: &HashSet<String>,
+) -> (Vec<String>, bool) {
+    let mut changed: Vec<String> = after.difference(before).cloned().collect();
+    changed.sort();
+    let truncated = changed.len() > 20;
+    changed.truncate(20);
+    (changed, truncated)
+}
+
+/// 逐条按任务声明的验收标准判定；观测不到的项进入 missing，绝不默认通过
+fn evaluate_acceptance(
+    spec: &StandaloneSpec,
+    run: &StandaloneRun,
+) -> (Vec<Value>, Vec<String>, bool) {
+    let mut entries = Vec::new();
+    let mut missing = Vec::new();
+    let mut all_passed = true;
+    for (index, criterion) in spec.acceptance.iter().enumerate() {
+        let kind = criterion["type"].as_str().unwrap_or("");
+        let (observed, passed, unavailable, miss) = match kind {
+            "exit_code" => {
+                let expected = criterion["expected"].as_i64().unwrap_or(i64::MIN);
+                let actual = run.exit_code.map(|code| code as i64);
+                (
+                    json!({ "exit_code": actual, "expected": expected }),
+                    actual == Some(expected),
+                    false,
+                    None,
+                )
+            }
+            "file_exists" => {
+                let path = criterion["path"].as_str().unwrap_or("");
+                let meta = fs::metadata(spec.cwd.join(path));
+                let exists = meta.is_ok();
+                (
+                    json!({
+                        "path": path,
+                        "exists": exists,
+                        "bytes": meta.ok().map(|meta| meta.len())
+                    }),
+                    exists,
+                    false,
+                    None,
+                )
+            }
+            "file_content_match" => {
+                let path = criterion["path"].as_str().unwrap_or("");
+                let contains = criterion["contains"].as_str().unwrap_or("");
+                match fs::read(spec.cwd.join(path)) {
+                    Ok(bytes) => {
+                        let matched = String::from_utf8_lossy(&bytes).contains(contains);
+                        (
+                            json!({
+                                "path": path,
+                                "exists": true,
+                                "contains": contains,
+                                "matched": matched,
+                                "bytes": bytes.len()
+                            }),
+                            matched,
+                            false,
+                            None,
+                        )
+                    }
+                    Err(_) => (
+                        json!({
+                            "path": path,
+                            "exists": false,
+                            "contains": contains,
+                            "matched": false
+                        }),
+                        false,
+                        false,
+                        None,
+                    ),
+                }
+            }
+            "git_diff_non_empty" => match git_output(&spec.cwd, &["status", "--porcelain"]) {
+                Some(raw) => {
+                    let empty = raw.trim().is_empty();
+                    (
+                        json!({
+                            "command": "git status --porcelain",
+                            "empty": empty,
+                            "bytes": raw.len()
+                        }),
+                        !empty,
+                        false,
+                        None,
+                    )
+                }
+                None => (
+                    json!({ "command": "git status --porcelain", "available": false }),
+                    false,
+                    true,
+                    Some(
+                        "git_diff_non_empty：无法取得 git status --porcelain（cwd 不是可用的 git 仓库或 git 不可执行）"
+                            .to_string(),
+                    ),
+                ),
+            },
+            _ => unreachable!("acceptance 已在 StandaloneSpec::parse 中校验"),
+        };
+        if unavailable {
+            all_passed = false;
+        } else if !passed {
+            all_passed = false;
+        }
+        if let Some(miss) = miss {
+            missing.push(miss);
+        }
+        entries.push(json!({
+            "index": index + 1,
+            "spec": criterion,
+            "observed": observed,
+            "passed": passed
+        }));
+    }
+    (entries, missing, all_passed)
+}
+
+/// 判定三态与重试/终止：无法判定绝不重试、绝不当通过；失败只在 attempt < max 时重试
+fn decide_standalone(
+    run: &StandaloneRun,
+    missing: &[String],
+    all_passed: bool,
+    spec: &StandaloneSpec,
+    attempt: u64,
+) -> (String, String, String, Option<String>) {
+    if run.spawn_error.is_some() {
+        return (
+            "undetermined".to_string(),
+            "terminate".to_string(),
+            "spawn_failed".to_string(),
+            Some("spawn_failed".to_string()),
+        );
+    }
+    if run.timed_out {
+        return (
+            "undetermined".to_string(),
+            "terminate".to_string(),
+            "timeout".to_string(),
+            Some("timeout".to_string()),
+        );
+    }
+    if !missing.is_empty() {
+        return (
+            "undetermined".to_string(),
+            "terminate".to_string(),
+            "observation_unavailable".to_string(),
+            Some("observation_unavailable".to_string()),
+        );
+    }
+    let declares_exit_code = spec
+        .acceptance
+        .iter()
+        .any(|criterion| criterion["type"] == "exit_code");
+    let command_ok = run.exit_code == Some(0) || declares_exit_code;
+    if all_passed && command_ok {
+        return (
+            "passed".to_string(),
+            "terminate".to_string(),
+            "acceptance_met".to_string(),
+            None,
+        );
+    }
+    let failure = if all_passed {
+        "command_failed".to_string()
+    } else {
+        "acceptance_not_met".to_string()
+    };
+    if attempt < spec.max_attempts {
+        (
+            "failed".to_string(),
+            "retry".to_string(),
+            failure.clone(),
+            Some(failure),
+        )
+    } else {
+        (
+            "failed".to_string(),
+            "terminate".to_string(),
+            "retry_exhausted".to_string(),
+            Some(failure),
+        )
+    }
+}
+
+fn standalone_blocked_detail(run: &StandaloneRun, missing: &[String]) -> String {
+    if let Some(error) = &run.spawn_error {
+        return format!("spawn_failed: {error}");
+    }
+    if run.timed_out {
+        return run
+            .blocked_reason
+            .clone()
+            .unwrap_or_else(|| "timeout".to_string());
+    }
+    format!("observation_unavailable: {}", missing.join("；"))
+}
+
 fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -2378,13 +3162,46 @@ fn tools() -> Value {
         },
         {
             "name": "task.execute",
-            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号；终止只尝试一次（不重试），仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树",
+            "description": "接单执行，两种运行模式必须显式区分。dispatched（缺省，外部派单）：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。standalone（mode=standalone，无外部派单方）：由 AW 自行闭环，必须显式给出 cwd/argv/acceptance，按每条验收标准逐 attempt 判定，把依据哪条标准、观测到什么、结论一起落盘 verdict.json，结论三态 passed/failed/undetermined；undetermined 即无法判定绝不默认通过并说明缺什么；只有 failed 且 attempt < max_attempts 才重试，每次尝试独立记录、不覆盖，耗尽写 retry_exhausted。两种模式互斥，同一 task_id 不得跨模式复用。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号；终止只尝试一次（不重试），仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string", "description": "派单标识（字母或数字开头，仅含字母数字 . _ -，≤64）" },
-                    "cmd": { "type": "string", "description": "派单方指定的执行/验证命令" },
-                    "cwd": { "type": "string", "description": "工作目录，默认进程当前目录；回执中的 locator 始终为相对路径" },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["dispatched", "standalone"],
+                        "description": "可选：缺省 dispatched（外部派单；AW 只执行不验收，判据由派单方定义），standalone 表示没有外部派单方时由 AW 自行闭环。standalone 拒绝 cmd/env/path_prepend，执行不经 shell 且限定 cwd。模式不靠推断，必须显式传入；同一 task_id 不得跨模式复用，跨模式重投按 mode_conflict 拒绝"
+                    },
+                    "cmd": { "type": "string", "description": "dispatched：派单方指定的执行/验证命令" },
+                    "argv": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1024,
+                        "items": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                        "description": "standalone 必填：程序与参数数组，argv[0] 是程序（显式路径必须落在 working directory 内），其余逐项作为参数传给程序，不经 shell 解释。dispatched 下传入即拒绝（dispatched_input_rejected）"
+                    },
+                    "acceptance": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "standalone 必填：任务声明的验收标准数组（至少 1 条）。类型：exit_code（expected 整数退出码）、file_exists（path 为 cwd 内相对路径）、file_content_match（path + 非空 contains）、git_diff_non_empty（cwd 是 git 仓库且工作区有变更）。绝对路径或 .. 按 standalone_path_escape 拒绝。未声明验收不得默认通过；观测不到所需事实时结论为 undetermined。dispatched 下传入即拒绝",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": { "type": "string", "enum": ["exit_code", "file_exists", "file_content_match", "git_diff_non_empty"] },
+                                "path": { "type": "string", "description": "cwd 内相对路径（file_exists / file_content_match）" },
+                                "contains": { "type": "string", "description": "文件内容必须包含的字面量（file_content_match）" },
+                                "expected": { "type": "integer", "description": "期望退出码（exit_code）" }
+                            },
+                            "required": ["type"]
+                        }
+                    },
+                    "max_attempts": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "description": "standalone 可选：最大尝试次数，默认 3。仅当本次判定 failed 且 attempt < max_attempts 才重试；每次尝试各自目录与 verdict.json，不覆盖上一次记录；耗尽写 retry_exhausted。dispatched 下传入即拒绝"
+                    },
+                    "cwd": { "type": "string", "description": "工作目录。dispatched 缺省为进程当前目录；standalone 必填且是执行与验收的作用域根目录。回执中的 locator 始终为相对路径" },
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600, "description": "超时秒数，默认 120；超时记 blocked 并给出原因。原因按受控集合清理结果三态给出：已清理受控集合 / 受控集合内仍有存活进程 / 受控集合未能建立或无法查询（此时仅向直接子进程发送终止信号）；终止只尝试一次（不重试），只有观测到集合内无存活进程才写「已清理受控集合」；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树" },
                     "env": {
                         "type": "object",
@@ -2398,7 +3215,11 @@ fn tools() -> Value {
                         "description": "可选：前插到子进程 PATH 的目录列表（字符串数组）。按数组字面顺序排在最前，其后才是继承的 PATH；平台分隔符自动使用（Windows 为分号，其他平台为冒号）。空数组与缺省完全等价（签名相同）。参与幂等签名：同 task_id 重投必须完全一致。上限 16 项、单项 ≤4096 字符；不做目录存在性校验。非法形态（非字符串数组/空元素/NUL/超量/超长）在占号前以 invalid_path_prepend 拒绝"
                     }
                 },
-                "required": ["task_id", "cmd"],
+                "required": ["task_id"],
+                "anyOf": [
+                    { "required": ["cmd"] },
+                    { "required": ["mode", "argv"] }
+                ],
                 "additionalProperties": false
             }
         },

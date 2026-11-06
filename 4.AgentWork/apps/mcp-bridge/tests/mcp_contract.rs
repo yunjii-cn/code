@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 
@@ -217,9 +218,41 @@ fn schema_structure_declares_required_fields_and_bounds() {
     }
 
     let execute = &find("task.execute")["inputSchema"];
-    assert_eq!(execute["required"], json!(["task_id", "cmd"]));
+    // v1.26：cmd 不再是唯一执行入口；dispatched 用 cmd，standalone 用 mode+argv
+    assert_eq!(execute["required"], json!(["task_id"]));
+    assert_eq!(
+        execute["anyOf"],
+        json!([
+            { "required": ["cmd"] },
+            { "required": ["mode", "argv"] }
+        ]),
+        "task.execute 必须声明 cmd | mode+argv 二选一"
+    );
     assert_eq!(execute["properties"]["task_id"]["type"], "string");
     assert_eq!(execute["properties"]["cmd"]["type"], "string");
+    assert_eq!(
+        execute["properties"]["mode"]["enum"],
+        json!(["dispatched", "standalone"]),
+        "模式必须显式且仅两值"
+    );
+    assert_eq!(execute["properties"]["argv"]["type"], "array");
+    assert_eq!(execute["properties"]["argv"]["minItems"], 1);
+    assert_eq!(execute["properties"]["argv"]["items"]["type"], "string");
+    assert_eq!(execute["properties"]["acceptance"]["type"], "array");
+    assert_eq!(execute["properties"]["acceptance"]["minItems"], 1);
+    assert_eq!(
+        execute["properties"]["acceptance"]["items"]["properties"]["type"]["enum"],
+        json!([
+            "exit_code",
+            "file_exists",
+            "file_content_match",
+            "git_diff_non_empty"
+        ]),
+        "验收标准只允许四类可核对类型"
+    );
+    assert_eq!(execute["properties"]["max_attempts"]["type"], "integer");
+    assert_eq!(execute["properties"]["max_attempts"]["minimum"], 1);
+    assert_eq!(execute["properties"]["max_attempts"]["maximum"], 5);
     assert_eq!(execute["properties"]["cwd"]["type"], "string");
     assert_eq!(execute["properties"]["timeout_secs"]["type"], "integer");
     assert_eq!(execute["properties"]["timeout_secs"]["minimum"], 1);
@@ -4102,4 +4135,603 @@ fn description_gate_behavior_connection_counters_real_stdio() {
 
     let _ = child.kill();
     let _ = child.wait();
+}
+
+// ---- v1.26：standalone（AW 自行闭环）与 dispatched（PM 派单）的边界 ----
+
+/// standalone 绕过 shell 直接启动程序，测试用的「写文件」程序按平台给 argv
+#[cfg(windows)]
+fn write_file_argv(path: &str, content: &str) -> Vec<Value> {
+    vec![
+        json!("cmd.exe"),
+        json!("/C"),
+        json!(format!("echo {content}>{path}")),
+    ]
+}
+
+#[cfg(not(windows))]
+fn write_file_argv(path: &str, content: &str) -> Vec<Value> {
+    vec![
+        json!("sh"),
+        json!("-c"),
+        json!(format!("printf '%s\\n' '{content}' > {path}")),
+    ]
+}
+
+fn temp_git_dir() -> TempDir {
+    let dir = TempDir::new().expect("创建临时 git 目录");
+    let status = Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir.path())
+        .status()
+        .expect("启动 git init");
+    assert!(status.success(), "git init 失败");
+    dir
+}
+
+fn read_json_at(path: &Path) -> Value {
+    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
+    serde_json::from_str(&text).expect("必须是 JSON")
+}
+
+fn attempt_dir(runs: &TempDir, task_id: &str, attempt: u64) -> PathBuf {
+    runs.path().join(task_id).join(format!("attempt-{attempt}"))
+}
+
+fn blocked_reason(payload: &Value) -> String {
+    payload["blocked_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("blocked 回执必须给原因：{payload}"))
+        .to_string()
+}
+
+#[test]
+fn standalone_passes_and_persists_verdict_with_observations() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = temp_git_dir();
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-ok",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [
+                { "type": "file_exists", "path": "out.txt" },
+                { "type": "file_content_match", "path": "out.txt", "contains": "hello" }
+            ],
+            "max_attempts": 1
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"], false,
+        "standalone 执行本身不应是工具错误：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "ok", "{payload}");
+    assert_eq!(payload["mode"], "standalone");
+    assert_eq!(payload["verdict_conclusion"], "passed");
+    assert_eq!(payload["attempts_total"], 1);
+    assert_eq!(payload["changed_files"], json!(["out.txt"]));
+    assert_eq!(
+        payload["verdict_locator"],
+        "runs/sa-ok/attempt-1/verdict.json",
+        "判定必须落在 AW 自己的 attempt 目录内：{payload}"
+    );
+
+    let verdict_path = attempt_dir(&runs, "sa-ok", 1).join("verdict.json");
+    let verdict = read_json_at(&verdict_path);
+    assert_eq!(verdict["version"], "standalone-verdict/1");
+    assert_eq!(verdict["mode"], "standalone");
+    assert_eq!(verdict["verdict"], "passed");
+    assert_eq!(verdict["attempt"], 1);
+
+    let criteria = verdict["criteria"].as_array().expect("criteria 必须是数组");
+    assert_eq!(criteria.len(), 2, "每条验收标准都要有判定记录：{verdict}");
+    assert_eq!(criteria[0]["index"], 1);
+    assert_eq!(criteria[0]["spec"]["type"], "file_exists");
+    assert_eq!(criteria[0]["passed"], true);
+    assert_eq!(criteria[0]["observed"]["exists"], true);
+    assert_eq!(criteria[1]["index"], 2);
+    assert_eq!(criteria[1]["spec"]["type"], "file_content_match");
+    assert_eq!(
+        criteria[1]["observed"]["matched"], true,
+        "观测值必须可核对，不能只给结论：{verdict}"
+    );
+    assert!(
+        verdict["missing"]
+            .as_array()
+            .expect("missing 必须是数组")
+            .is_empty(),
+        "全部可观测时 missing 必须为空：{verdict}"
+    );
+
+    let observations = &verdict["observations"];
+    assert_eq!(observations["exit_code"], 0);
+    assert_eq!(observations["changed_files"], json!(["out.txt"]));
+    let stdout_digest = observations["stdout_digest"]
+        .as_str()
+        .expect("必须记录输出摘要哈希");
+    assert!(stdout_digest.starts_with("sha256:"), "{stdout_digest}");
+    assert_eq!(verdict["decision"]["action"], "terminate");
+    assert_eq!(verdict["decision"]["reason"], "acceptance_met");
+
+    // 回执里的 verdict 工件哈希必须能对上落盘文件
+    let artifact = payload["artifacts"]
+        .as_array()
+        .expect("artifacts 必须是数组")
+        .iter()
+        .find(|item| item["kind"] == "verdict")
+        .expect("回执必须登记 verdict 工件")
+        .clone();
+    assert_eq!(artifact["locator"], "runs/sa-ok/attempt-1/verdict.json");
+    assert_eq!(artifact["hash"], json!(sha256_prefixed(&verdict_path)));
+}
+
+#[test]
+fn standalone_failure_retries_without_overwriting_records() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = temp_git_dir();
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-fail",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "WRONG"),
+            "acceptance": [
+                { "type": "file_content_match", "path": "out.txt", "contains": "EXPECTED" }
+            ],
+            "max_attempts": 2
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"], false,
+        "验收不通过是任务结论不是工具错误：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "failed", "{payload}");
+    assert_eq!(payload["verdict_conclusion"], "failed");
+    assert_eq!(payload["attempt"], 2);
+    assert_eq!(payload["attempts_total"], 2, "重试上限 2，耗尽即终止：{payload}");
+
+    let first = read_json_at(&attempt_dir(&runs, "sa-fail", 1).join("verdict.json"));
+    assert_eq!(first["attempt"], 1);
+    assert_eq!(first["verdict"], "failed");
+    assert_eq!(first["decision"]["action"], "retry");
+    assert_eq!(first["decision"]["reason"], "acceptance_not_met");
+    assert_eq!(first["criteria"][0]["passed"], false);
+    assert_eq!(
+        first["criteria"][0]["observed"]["matched"], false,
+        "不通过必须给出实际观测：{first}"
+    );
+
+    let second = read_json_at(&attempt_dir(&runs, "sa-fail", 2).join("verdict.json"));
+    assert_eq!(second["attempt"], 2);
+    assert_eq!(second["verdict"], "failed");
+    assert_eq!(second["decision"]["action"], "terminate");
+    assert_eq!(second["decision"]["reason"], "retry_exhausted");
+    assert_eq!(
+        second["decision"]["last_failure"], "acceptance_not_met",
+        "终止原因必须写清上一次失败类型：{second}"
+    );
+
+    // 重试不覆盖上一次：attempt-1 的目录与回执逐字保留
+    let first_handback = read_json_at(&attempt_dir(&runs, "sa-fail", 1).join("handback.json"));
+    assert_eq!(first_handback["attempt"], 1);
+    assert_eq!(first_handback["status"], "failed");
+    assert_eq!(
+        first_handback["verdict_locator"], "runs/sa-fail/attempt-1/verdict.json",
+        "中间尝试的判定必须留在自己的目录：{first_handback}"
+    );
+    assert!(
+        first_handback.get("attempts_total").is_none(),
+        "中间尝试不得冒充最终结论：{first_handback}"
+    );
+    let second_handback = read_json_at(&attempt_dir(&runs, "sa-fail", 2).join("handback.json"));
+    assert_eq!(second_handback["attempts_total"], 2);
+}
+
+#[test]
+fn standalone_undetermined_is_never_reported_as_pass() {
+    let (server, _settings, runs) = server_with_runs();
+    // 非 git 仓库：git_diff_non_empty 无法观测，必须落 undetermined 而不是「通过」
+    let cwd = TempDir::new().expect("创建非 git 目录");
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-undetermined",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [{ "type": "git_diff_non_empty" }],
+            "max_attempts": 1
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    let payload = tool_payload(&response);
+    assert_eq!(
+        payload["status"], "blocked",
+        "无法判定不能写成 ok：{payload}"
+    );
+    assert_eq!(payload["verdict_conclusion"], "undetermined");
+    assert!(
+        blocked_reason(&payload).contains("observation_unavailable"),
+        "必须说明缺什么：{}",
+        blocked_reason(&payload)
+    );
+
+    let verdict = read_json_at(&attempt_dir(&runs, "sa-undetermined", 1).join("verdict.json"));
+    assert_eq!(verdict["verdict"], "undetermined");
+    assert_eq!(
+        verdict["decision"]["action"], "terminate",
+        "无法判定不得重试、不得当通过：{verdict}"
+    );
+    assert_eq!(verdict["decision"]["reason"], "observation_unavailable");
+    assert!(
+        !verdict["missing"]
+            .as_array()
+            .expect("missing 必须是数组")
+            .is_empty(),
+        "undetermined 必须写明缺失的观测：{verdict}"
+    );
+    assert!(
+        !tool_text(&response).contains("\"passed\""),
+        "无法判定不得出现 passed：{}",
+        tool_text(&response)
+    );
+}
+
+#[test]
+fn standalone_requires_cwd_argv_and_acceptance_before_claiming() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = TempDir::new().expect("创建临时目录");
+
+    let no_cwd = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-no-cwd",
+            "mode": "standalone",
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [{ "type": "file_exists", "path": "out.txt" }]
+        }),
+    );
+    assert_eq!(no_cwd["result"]["isError"], false);
+    let payload = tool_payload(&no_cwd);
+    assert_eq!(payload["status"], "blocked");
+    assert_eq!(payload["mode"], "standalone");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_cwd_required"),
+        "缺 cwd 必须具名拒绝：{}",
+        blocked_reason(&payload)
+    );
+    assert!(
+        !runs.path().join("sa-no-cwd").exists(),
+        "占号前拒绝不得留下运行目录"
+    );
+
+    let no_argv = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-no-argv",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "acceptance": [{ "type": "file_exists", "path": "out.txt" }]
+        }),
+    );
+    let payload = tool_payload(&no_argv);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_argv_required"),
+        "缺 argv 必须具名拒绝：{}",
+        blocked_reason(&payload)
+    );
+
+    let no_acceptance = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-no-acceptance",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello")
+        }),
+    );
+    let payload = tool_payload(&no_acceptance);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_acceptance_required"),
+        "未声明验收不得默认通过：{}",
+        blocked_reason(&payload)
+    );
+
+    let empty_acceptance = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-empty-acceptance",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": []
+        }),
+    );
+    let payload = tool_payload(&empty_acceptance);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_acceptance_required"),
+        "空验收等价于没声明：{}",
+        blocked_reason(&payload)
+    );
+}
+
+#[test]
+fn standalone_rejects_shell_fields_and_out_of_scope_paths() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = TempDir::new().expect("创建临时目录");
+    let acceptance = json!([{ "type": "file_exists", "path": "out.txt" }]);
+
+    let with_cmd = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-cmd", "mode": "standalone", "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"), "cmd": "echo hi",
+            "acceptance": acceptance
+        }),
+    );
+    let payload = tool_payload(&with_cmd);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_cmd_rejected"),
+        "standalone 不得接受 shell 命令：{}",
+        blocked_reason(&payload)
+    );
+
+    let with_env = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-env", "mode": "standalone", "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"), "env": { "AW_TEST": "1" },
+            "acceptance": acceptance
+        }),
+    );
+    let payload = tool_payload(&with_env);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_env_rejected"),
+        "standalone 不得注入 env：{}",
+        blocked_reason(&payload)
+    );
+
+    let escape = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-escape", "mode": "standalone", "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [{ "type": "file_exists", "path": "../escape.txt" }]
+        }),
+    );
+    let payload = tool_payload(&escape);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_path_escape"),
+        "验收路径越界必须具名拒绝：{}",
+        blocked_reason(&payload)
+    );
+
+    let outside_program = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-program", "mode": "standalone", "cwd": cwd.path(),
+            "argv": [std::env::current_exe().expect("取测试可执行文件").to_string_lossy(), "x".to_string()],
+            "acceptance": acceptance
+        }),
+    );
+    let payload = tool_payload(&outside_program);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("standalone_program_outside_scope"),
+        "显式程序路径越界必须具名拒绝：{}",
+        blocked_reason(&payload)
+    );
+
+    for task_id in ["sa-cmd", "sa-env", "sa-escape", "sa-program"] {
+        assert!(
+            !runs.path().join(task_id).exists(),
+            "拒绝必须发生在占号前：{task_id} 不应留下运行目录"
+        );
+    }
+}
+
+#[test]
+fn standalone_replay_returns_final_result_without_new_attempts() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = temp_git_dir();
+    let arguments = json!({
+        "task_id": "sa-replay",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": write_file_argv("out.txt", "hello"),
+        "acceptance": [{ "type": "file_exists", "path": "out.txt" }],
+        "max_attempts": 1
+    });
+    let first = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
+    assert_eq!(first["attempts_total"], 1);
+    assert_eq!(first["verdict_conclusion"], "passed");
+
+    let replay = call_tool(&server, "task.execute", arguments);
+    assert_eq!(replay["result"]["isError"], false, "{}", tool_text(&replay));
+    let payload = tool_payload(&replay);
+    assert_eq!(
+        payload["attempts_total"], 1,
+        "重投只能回放最终结果，不得新增尝试：{payload}"
+    );
+    assert_eq!(payload["verdict_locator"], first["verdict_locator"]);
+    assert!(
+        !attempt_dir(&runs, "sa-replay", 2).exists(),
+        "重投不得写第二个 attempt 目录"
+    );
+
+    let conflicting = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-replay",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [{ "type": "exit_code", "expected": 0 }],
+            "max_attempts": 1
+        }),
+    );
+    assert_eq!(conflicting["result"]["isError"], true);
+    assert!(
+        tool_text(&conflicting).contains("task_id_conflict"),
+        "参数不一致不得默默回放旧结论：{}",
+        tool_text(&conflicting)
+    );
+}
+
+#[test]
+fn standalone_and_dispatched_cannot_share_one_task_id() {
+    let (server, _settings, runs) = server_with_runs();
+    let cwd = temp_git_dir();
+
+    // dispatched 先占号，再以 standalone 复用同一 task_id 必须具名拒绝
+    let dispatched = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "sa-mixed", "cmd": "echo hi" }),
+    );
+    assert_eq!(
+        dispatched["result"]["isError"], false,
+        "{}",
+        tool_text(&dispatched)
+    );
+    let standalone = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-mixed",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [{ "type": "file_exists", "path": "out.txt" }]
+        }),
+    );
+    assert_eq!(
+        standalone["result"]["isError"], true,
+        "同一目录不得既被 PM 当权威又被 AW 自判：{}",
+        tool_text(&standalone)
+    );
+    assert!(
+        tool_text(&standalone).contains("mode_conflict"),
+        "{}",
+        tool_text(&standalone)
+    );
+    assert!(
+        !attempt_dir(&runs, "sa-mixed", 2).exists(),
+        "跨模式复用不得写入第二个目录"
+    );
+
+    // 反向：standalone 先占号，dispatched 复用也必须拒绝
+    let standalone_first = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "sa-mixed-rev",
+            "mode": "standalone",
+            "cwd": cwd.path(),
+            "argv": write_file_argv("out.txt", "hello"),
+            "acceptance": [{ "type": "file_exists", "path": "out.txt" }],
+            "max_attempts": 1
+        }),
+    );
+    assert_eq!(tool_payload(&standalone_first)["status"], "ok");
+    let reverse = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "sa-mixed-rev", "cmd": "echo hi" }),
+    );
+    assert_eq!(reverse["result"]["isError"], true, "{}", tool_text(&reverse));
+    assert!(
+        tool_text(&reverse).contains("mode_conflict"),
+        "{}",
+        tool_text(&reverse)
+    );
+}
+
+#[test]
+fn dispatched_handback_stays_free_of_verdict_fields() {
+    let (server, _settings, runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "disp-regress", "cmd": "echo ok" }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    let payload = tool_payload(&response);
+    assert_eq!(payload["status"], "ok");
+
+    for field in [
+        "mode",
+        "verdict_conclusion",
+        "verdict_locator",
+        "attempts_total",
+        "max_attempts",
+        "acceptance",
+    ] {
+        assert!(
+            payload.get(field).is_none(),
+            "dispatched 回执不得新增判定字段 {field}：{payload}"
+        );
+    }
+    let dir = attempt_dir(&runs, "disp-regress", 1);
+    assert!(dir.join("handback.json").exists());
+    assert!(
+        !dir.join("verdict.json").exists(),
+        "dispatched 不得写 verdict.json"
+    );
+    assert!(!runs.path().join("disp-regress").join("standalone-result.json").exists());
+    let dispatch = read_json_at(&dir.join("dispatch.json"));
+    assert!(
+        dispatch.get("mode").is_none(),
+        "dispatched 派单签名不得写 mode：{dispatch}"
+    );
+    assert!(
+        !tool_text(&response).contains("verified"),
+        "dispatched 不得自称 verified：{}",
+        tool_text(&response)
+    );
+
+    // standalone-only 字段出现在 dispatched 调用里，必须显式拒绝而不是被静默忽略
+    let rejected = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "disp-argv",
+            "argv": ["echo"],
+            "acceptance": [{ "type": "file_exists", "path": "out.txt" }]
+        }),
+    );
+    let payload = tool_payload(&rejected);
+    assert_eq!(payload["status"], "blocked");
+    assert!(
+        blocked_reason(&payload).starts_with("dispatched_input_rejected"),
+        "dispatched 不得接受 standalone 判据：{}",
+        blocked_reason(&payload)
+    );
+    assert!(!runs.path().join("disp-argv").exists());
 }

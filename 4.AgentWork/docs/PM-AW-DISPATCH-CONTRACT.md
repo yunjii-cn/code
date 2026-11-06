@@ -1,15 +1,15 @@
-# PM → AW 派单与回执契约 v1.25
+# PM → AW 派单与回执契约 v1.26
 
-状态：v1.25。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
+状态：v1.26。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**；**v1.23 起 `status` 增加连接级计数 `connections`（纯加法、只观测）：实测确认进程内没有"会话"概念，只有一条 stdio 连接，故 `active`/`total`/`peak` 恒为 1、`initialize_total` 随 `initialize` 次数累加（多份 `initialize` 不等于多会话）；不做准入、不做上限**；**v1.24 起把超时的"单次终止尝试"做实：POSIX 68 轮 + Windows 20 轮实测确认一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内无存活，故不新增第二次尝试；描述明写"终止只尝试一次（不重试）"，判据与回执语义不变（只有观测到无存活才写 `Cleaned`，逃逸仍"未验证"，`#3` 仍 `NOT_PROVEN`）**；**v1.25 起把"未知/多余参数被静默忽略"变为可观测诊断（§2.5）：回执按需追加 `arguments_diagnostics`（未知参数名、camelCase/snake_case 别名指向、显式 `null` 的可选字段，值只给类型/长度），同一份 JSON 同步写 stderr；诊断不改变任何调用的成功/失败结果，`additionalProperties:false` 仍只声明不强制**
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**；**v1.23 起 `status` 增加连接级计数 `connections`（纯加法、只观测）：实测确认进程内没有"会话"概念，只有一条 stdio 连接，故 `active`/`total`/`peak` 恒为 1、`initialize_total` 随 `initialize` 次数累加（多份 `initialize` 不等于多会话）；不做准入、不做上限**；**v1.24 起把超时的"单次终止尝试"做实：POSIX 68 轮 + Windows 20 轮实测确认一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内无存活，故不新增第二次尝试；描述明写"终止只尝试一次（不重试）"，判据与回执语义不变（只有观测到无存活才写 `Cleaned`，逃逸仍"未验证"，`#3` 仍 `NOT_PROVEN`）**；**v1.25 起把"未知/多余参数被静默忽略"变为可观测诊断（§2.5）：回执按需追加 `arguments_diagnostics`（未知参数名、camelCase/snake_case 别名指向、显式 `null` 的可选字段，值只给类型/长度），同一份 JSON 同步写 stderr；诊断不改变任何调用的成功/失败结果，`additionalProperties:false` 仍只声明不强制**；**v1.26 起 `task.execute` 显式区分 `dispatched` / `standalone` 两种运行模式（§2.6）：dispatched 下 AW 仍只执行、不验收、不判停；standalone 下由 AW 按任务声明的 `acceptance` 自行判定，并把三态结论（`passed` / `failed` / `undetermined`）落盘到 `runs/<task_id>/attempt-N/verdict.json`，失败有界重试、无法判定绝不默认通过**
 
 ## 0. 结论
 
 - 复用 MCP 已有的 `initialize.params.clientInfo` 与 stdio 进程归属，**不新造 token/凭据格式**；`clientInfo` 只作**审计弱识别**，不构成身份、不构成准入。
 - `task_id` 是唯一幂等键。**重投 = 返回既有回执、复用既有 attempt 编号，零执行、零新目录**；有意重跑必须换新 `task_id`。
 - 回执完全映射到已实现字段，不新增第二套字段；失败原因只借用既有的 `blocked_reason` 字符串前缀做分类。
-- 一句话边界：**AW 只执行，不验收、不判停、不定义判据、不写 L0/事件；PM 是唯一写权威。**
+- 一句话边界（按模式）：**dispatched（PM 派单）下 AW 只执行，不验收、不判停、不定义判据、不写 L0/事件，PM 是唯一写权威；standalone（无外部派单方）下 AW 自行闭环——按任务声明的 `acceptance` 判定并把三态结论落盘到 attempt 目录（`verdict.json`），但仍不写 L0/事件、不成为项目状态的写权威。**
 
 ## 1. 术语
 
@@ -107,6 +107,154 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 4. **敏感值**：只报参数名、类型、长度；`_meta` 等对象只报键数，不报嵌套键与值。
 5. **未知工具名不做参数诊断**：调用本身返回未知工具错误，行为不变。
 
+### 2.6 运行模式与独立判定（v1.26）
+
+`task.execute` 的 `mode` **必须显式区分**，不靠推断：
+
+| 模式 | 谁负责闭环 | AW 做什么 | AW 不做什么 | 入口 |
+|---|---|---|---|---|
+| `dispatched`（缺省） | PM | 只执行、交可审计回执；现有契约与行为**逐字不变** | 不验收、不判停、不定义判据、不写 `verdict.json`、不宣称 `verified`；回执**不新增** `mode` / `verdict_*` / `attempts_total` 字段；`dispatch.json` **不写** `mode` | 沿用既有 `task_id` + `cmd` + `cwd` + `timeout_secs` + `env` + `path_prepend` |
+| `standalone` | AW 自己 | 按任务声明的 `acceptance` 逐条判定、落盘 `verdict.json`、失败有界重试 | 仍不写 L0/事件、不成为项目状态写权威；不替调用方发明验收标准 | 必须显式 `mode="standalone"` + `cwd` + `argv` + 非空 `acceptance` |
+
+**硬边界：同一 `task_id` 不得跨模式复用。** 已存在记录的模式与本次请求不一致 → 工具错误 `mode_conflict`，**零执行、零新 attempt、零覆盖**。判定依据是 `runs/<task_id>/attempt-1/dispatch.json` 的 `mode` 字段（旧记录缺该字段一律视为 `dispatched`）；同一目录不会既被 PM 当写权威、又被 AW 自行判了。
+
+#### 2.6.1 standalone 输入契约
+
+| 参数 | 要求 | 拒绝码（占号前，不创建 attempt 目录） |
+|---|---|---|
+| `mode` | 必须为字符串 `"standalone"` | 非法值 `invalid_mode` |
+| `cwd` | 必填、可解析为目录；作为**执行与验收的唯一作用域根目录**，以规范化绝对路径落盘 | `standalone_cwd_required` / `standalone_cwd_invalid` |
+| `argv` | 必填、非空字符串数组；`argv[0]` 是程序，其余逐项传参，**不经 shell** | `standalone_argv_required` / `standalone_argv_invalid` |
+| `acceptance` | 必填、非空数组；见 §2.6.2 | `standalone_acceptance_required` / `standalone_acceptance_invalid` / `standalone_path_escape` |
+| `max_attempts` | 可选，整数 `1..=5`，缺省 `3` | `standalone_max_attempts_invalid` |
+| `timeout_secs` | 可选，整数 `1..=600`，缺省 `120`；每次尝试独立计时 | `standalone_timeout_invalid` |
+| `cmd` | **禁止**（不接受 shell 命令字符串） | `standalone_cmd_rejected` |
+| `env` / `path_prepend` | **禁止**（作用域与可复现性考虑） | `standalone_env_rejected` / `standalone_path_prepend_rejected` |
+
+拒绝一律返回 `status=blocked` 的预检回执（带 `mode="standalone"`），**不占号、不落盘、不产生 `verdict.json`**。
+
+#### 2.6.2 验收标准从哪来：任务输入里的 `acceptance[]`
+
+验收标准**只来自任务输入**，AW 不自行发明。四种可核对类型：
+
+| `type` | 必填字段 | 判定 | 观测记录 |
+|---|---|---|---|
+| `exit_code` | `expected`（整数） | 进程退出码逐字相等 | `observations.exit_code` + `criteria[].observed.exit_code` |
+| `file_exists` | `path`（cwd 内相对路径） | 文件存在 | `observed.exists` / `bytes` |
+| `file_content_match` | `path` + `contains`（非空字符串） | 文件内容包含子串 | `observed.exists` / `matched` / `bytes` |
+| `git_diff_non_empty` | 无 | `git status --porcelain` 输出非空（**含未跟踪文件**） | `observed.empty` / `bytes` / 执行的命令 |
+
+规则：
+
+1. 路径必须是 cwd 内的**相对路径**；绝对路径、`..`、根/前缀组件一律 `standalone_path_escape`（占号前拒绝）。
+2. `git_diff_non_empty` 在非 git 仓库或 git 不可用时**不是通过、也不是失败，而是 `undetermined`**（见 §2.6.3）。
+3. **没有声明 `acceptance`（缺省或空数组）→ 明确拒绝** `standalone_acceptance_required`；不允许把"没写验收"当通过。
+
+示例（成功任务）：
+
+```json
+{
+  "task_id": "demo-standalone-ok",
+  "mode": "standalone",
+  "cwd": "D:\\Temp\\demo",
+  "argv": ["cmd.exe", "/C", "echo hello>out.txt"],
+  "acceptance": [
+    { "type": "file_exists", "path": "out.txt" },
+    { "type": "file_content_match", "path": "out.txt", "contains": "hello" }
+  ],
+  "max_attempts": 1
+}
+```
+
+#### 2.6.3 判定落盘：`runs/<task_id>/attempt-N/verdict.json`
+
+每次尝试都写一份**独立** `verdict.json`（重试不覆盖上一次）：
+
+```json
+{
+  "version": "standalone-verdict/1",
+  "mode": "standalone",
+  "task_id": "demo-standalone-ok",
+  "attempt": 1,
+  "decided_at": "2026-11-07T00:00:00Z",
+  "verdict": "passed",
+  "acceptance": [ /* 本次任务声明的验收标准原文 */ ],
+  "criteria": [
+    {
+      "index": 1,
+      "spec": { "type": "file_exists", "path": "out.txt" },
+      "observed": { "path": "out.txt", "exists": true, "bytes": 7 },
+      "passed": true
+    }
+  ],
+  "observations": {
+    "exit_code": 0,
+    "stdout_digest": "sha256:...",
+    "stderr_digest": "sha256:...",
+    "stdout_preview": "前 200 字符（超出则 stdout_truncated=true）",
+    "stderr_preview": "",
+    "stdout_bytes": 0,
+    "stderr_bytes": 0,
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "changed_files": ["out.txt"],
+    "changed_files_truncated": false,
+    "duration_ms": 123,
+    "timed_out": false,
+    "spawn_failed": null
+  },
+  "missing": [],
+  "decision": { "action": "terminate", "reason": "acceptance_met", "last_failure": null }
+}
+```
+
+结论**三态**，没有第四种：
+
+| `verdict` | 含义 | `decision.action` | 回执 `status` |
+|---|---|---|---|
+| `passed` | 所有标准都有观测且全部通过；且（退出码为 0，或任务显式声明了 `exit_code` 标准并已通过） | `terminate` | `ok` |
+| `failed` | 至少一条标准有观测但未通过；或标准全过但命令退出码非 0 且未声明 `exit_code`（`last_failure=command_failed`） | `retry`（未达上限）/ `terminate`（耗尽） | `failed` |
+| `undetermined` | 缺少可核对观测（如非 git 仓库的 `git_diff_non_empty`）、spawn 失败、超时 | 一律 `terminate` | `blocked` |
+
+**无法判定绝不默认通过**：`missing[]` 必须逐条写明缺什么（例如 `git_diff_non_empty：无法取得 git status --porcelain…`）；spawn 失败/超时写 `spawn_failed` / `timeout`，且**不重试**。
+
+standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_attempts`、`verdict_conclusion`、`verdict_locator`（如 `runs/<task_id>/attempt-1/verdict.json`）、`attempts_total`（仅终止尝试）；`artifacts[]` 增加 `kind="verdict"` 及其 sha256。dispatched 回执**不出现**这些字段（见 §2.6.5）。
+
+#### 2.6.4 有界重试
+
+- 上限：`max_attempts`（默认 3，范围 1..5）。第 N 次尝试目录为 `attempt-N`，每次都有独立的 `dispatch.json` / `stdout.txt` / `stderr.txt` / `verdict.json` / `handback.json`，**不覆盖、不合并**。
+- 仅 `verdict=failed` 且 `attempt < max_attempts` 时重试，`decision.reason="acceptance_not_met"`（或 `command_failed`）。
+- 达到上限写 `decision.action="terminate"`、`reason="retry_exhausted"`，`last_failure` 保留最后一次失败原因。
+- `undetermined`、spawn 失败、超时**不重试**，直接终止。
+- 全部尝试结束后在 `runs/<task_id>/standalone-result.json` 写最终回执；同参重投按它回放，**不追加 attempt**；执行未结束时的重投返回 `task_in_progress`。
+
+#### 2.6.5 dispatched 行为零变化（回归锁）
+
+- 缺省 `mode` 或缺省 `"dispatched"` 走原有分支：`cmd` + 既有参数、既有签名、既有回执字段。
+- `dispatch.json` 不写 `mode`；回执不写 `verdict_conclusion` / `verdict_locator` / `attempts_total` / `max_attempts` / `mode`。
+- dispatched 下传 `argv` / `acceptance` / `max_attempts` → `dispatched_input_rejected`（避免调用方误以为 AW 会按这些字段验收）；`cmd` 本身不受影响。
+- PM 侧无需任何改动；既有 dispatched 契约用例必须全绿。
+
+#### 2.6.6 执行作用域：允许什么、拒绝什么
+
+| 项 | 规则 | 原因码 |
+|---|---|---|
+| 进程启动 | `Command::new(argv[0]).args(argv[1..]).current_dir(cwd)`，**不经 shell**；`&&`、`>`、`|` 等按字面参数传入，不具 shell 语义 | — |
+| 工作目录 | 固定为规范化后的 `cwd`；产出与验收都相对它 | — |
+| 显式程序路径 | 含分隔符或绝对路径时，规范化后必须位于 `cwd` 内 | `standalone_program_outside_scope`（越界）/ `standalone_program_unresolved`（无法证明在界内，fail-closed） |
+| 裸程序名 | 不含分隔符的名字（如 `git` / `cmd.exe`）按继承 `PATH` 解析；这是解释器/运行时的必要能力 | — |
+| 验收路径 | 仅 cwd 内相对路径 | `standalone_path_escape` |
+| `cmd` / `env` / `path_prepend` | 一律拒绝 | `standalone_cmd_rejected` / `standalone_env_rejected` / `standalone_path_prepend_rejected` |
+
+**明确不做**：不提供任意 shell 入口、不允许环境变量注入、不允许把执行根目录挪到 `cwd` 之外。
+
+#### 2.6.7 真跑证据（v1.26）
+
+真实 stdio 进程（非测试桩）两单，原始 `verdict.json` / `handback.json` 见 [`TOOLS-DESCRIPTION-AUDIT.md`](./TOOLS-DESCRIPTION-AUDIT.md) §25：
+
+- 成功：`standalone-ok-20261107` → `verdict=passed`、`changed_files=["out.txt"]`、`status=ok`。
+- 失败：`standalone-fail-20261107`，`max_attempts=2` → attempt-1 `failed/retry/acceptance_not_met`；attempt-2 `failed/terminate/retry_exhausted`；两次记录独立保留。
+
 ## 3. 幂等
 
 ### 3.1 规则
@@ -184,7 +332,7 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 |---|---|---|---|
 | `task_id` | string | 派单标识 | 已实现 |
 | `attempt` | integer | 该 id 的第几次执行，从 1 起连续 | 已实现（原子取号） |
-| `status` | `ok` / `failed` / `blocked` | 仅描述进程结果，**不是验收结论** | 已实现 |
+| `status` | `ok` / `failed` / `blocked` | dispatched：仅描述进程结果，**不是验收结论**；standalone：映射判定结论（`passed→ok` / `failed→failed` / `undetermined→blocked`），结论细节以 `verdict.json` 为准 | 已实现（standalone 映射 v1.26） |
 | `verify_cmd` | string | 实际执行的命令（回显派单参数，供 PM 逐字比对判据） | 已实现 |
 | `exit_code` | integer / null | 进程退出码；`blocked` 时为 null | 已实现 |
 | `changed_files` | string[] | 执行前后 `git status --porcelain` 差集，相对路径，最多 20 条 | 已实现（有 20 条上限） |
@@ -200,11 +348,18 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 | `blocked_reason` | string / null | 仅 `blocked` 时非空，见第 6 节 | 已实现（自由文本，未分类） |
 | `finishedAt` | string | 该 attempt **结束并落盘回执**的时刻，RFC3339/UTC/秒级/`Z`；`ok` / `failed` / `blocked` 一律写实际结束时间。**落盘回执中必填、不为 null**；不落盘的预检 `blocked` 回执不含此字段（它没有 attempt） | 已实现（v1.6） |
 | `path_prepend` | string[] | 本次实际前插的目录列表（原样，不做规范化）；未提供时为空数组。只给目录名，不含任何 env 值 | 已实现（v1.9） |
+| `mode` | string | **仅 standalone 回执**出现，恒为 `"standalone"`；dispatched 回执不出现该字段 | 已实现（v1.26） |
+| `argv` | string[] | **仅 standalone**：本次实际启动的 argv（程序 + 参数） | 已实现（v1.26） |
+| `max_attempts` | integer | **仅 standalone**：本次任务声明的重试上限（默认 3） | 已实现（v1.26） |
+| `verdict_conclusion` | `passed` / `failed` / `undetermined` | **仅 standalone**：与 `verdict.json` 的 `verdict` 一致；dispatched 不出现 | 已实现（v1.26） |
+| `verdict_locator` | string | **仅 standalone**：相对路径 `runs/<task_id>/attempt-<N>/verdict.json` | 已实现（v1.26） |
+| `attempts_total` | integer | **仅 standalone**：终止尝试的编号（即总尝试次数）；中间重试回执不带该字段 | 已实现（v1.26） |
 
 回执使用规则：
 
-- PM **不采信 `status` 自述**，只按 `exit_code`、`verify_cmd` 与判据的逐字一致性、`stdout_digest` 与 `artifacts` 中原始日志的重算一致性判定。
-- `status=ok` 只表示进程退出码为 0，不表示验收通过。
+- **dispatched**：PM **不采信 `status` 自述**，只按 `exit_code`、`verify_cmd` 与判据的逐字一致性、`stdout_digest` 与 `artifacts` 中原始日志的重算一致性判定。
+- **standalone**：`verdict_conclusion` 是 AW 自己的判定，不是 PM 的验收；调用方仍应复核 `verdict.json` 的 `criteria[].spec/observed` 与哈希。`undetermined` 表示"缺观测、判不了"，**不得被当成通过**。
+- dispatched 的 `status=ok` 只表示进程退出码为 0，不表示验收通过；standalone 的 `status` 已映射判定结论，见上一行。
 - 历史读取：`receipt.get` 默认返回最新一次；`include_history=true` 返回 `attempts / latest / history[]`，用于回答“执行过几次、每次 exit_code 与耗时”。
 - `cwd` / `timeout_secs` / `changed_files_truncated`（v1.3）与 `env_keys`（v1.4）属**纯增量字段**：既有字段语义未变；旧 `handback.json` 不含这些字段，`receipt.get` 原样返回、**不回填、不改写**。
 - `dispatchedAt`（派单记录，§3.4）与 `finishedAt`（回执）同样**纯增量**：v1.6 起写入；旧记录缺失，`receipt.get` **原样返回、不回填**，消费方按“**缺失即未知**”处理。
@@ -240,8 +395,9 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 | 15 | `timeout` 文案诚实性（第 4 / 6 节） | **一致** | v1.17：文案只描述**受控集合**（POSIX 进程组 / Windows Job）的清理结果，三态分流（已清理 / 仍存活 / 不可用），明写"逃逸进程是否仍在运行未验证"；v1.20 Windows 改写为"挂起态创建、先入作业再恢复执行"，残余逃逸为 `BREAKAWAY` / 加入作业失败；v1.24 实测确认单次终止足够并明写"终止只尝试一次（不重试）"；任何分支都不出现"已终止进程树 / 无残留"；整树 `#3` 仍 `NOT_PROVEN`；证据见设计文档 §6.5 / §6.9 与审计文档 §23 |
 | 16 | 默认策略与 schema 声明（§10） | **一致** | `additionalProperties` 仍为声明性忽略（新增用例锁定）；`runs.prune` 推荐 365 天、`limit` 缺省 100，但 `older_than_days` 缺省仍 `invalid_retention`；`clientInfo` 仅审计、不参与准入；`path_prepend` 的 16 项 / 4096 字符已写入 schema 且实现同源 |
 | 17 | `runs.prune.status` 状态过滤（§8.10） | **一致** | v1.21：schema 声明 `array`/`minItems=1`/`uniqueItems`/`enum`；显式才生效、缺省不过滤；与年龄 AND、`limit` 后置；空数组/null/未知值 `invalid_retention` 零删除零审计；`status_unknown`/`status_mismatch` 不删；plan/result 记录 `status_filter`；23 条用例实跑通过（Windows 6 组、POSIX 同套减去 Windows-only 的 case 20） |
+| 18 | 运行模式与独立判定（§2.6） | **一致** | v1.26：`mode` 显式（缺省 dispatched）；standalone 要求 `cwd`/`argv`/`acceptance`、拒绝 `cmd`/`env`/`path_prepend`；四类验收标准；`verdict.json` 三态落盘（`passed`/`failed`/`undetermined`），`undetermined` 绝不默认通过；`max_attempts` 1..5 有界重试、逐 attempt 独立记录；跨模式复用 `mode_conflict`；dispatched 回执零新增字段。用例 8 条先红后绿（Windows 7 条 standalone + 1 条 dispatched 回归锁），integration 91 全绿；真实 stdio 双单证据见审计 §25 |
 
-统计：**已一致 16 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证不在 v1 范围，默认按 §10 第 1 行处理，准入所需字段见 §2.3）。
+统计：**已一致 17 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证不在 v1 范围，默认按 §10 第 1 行处理，准入所需字段见 §2.3）。
 
 ### 5.1 缺口补齐规划（后续批次）
 
@@ -449,16 +605,19 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 
 **能力门禁**：`tools/list` 的 `runs.prune.inputSchema.properties.status` 是唯一能力位。PM 只有在 schema 含 `status` 时才允许携带 `status` 并 `dry_run=false + confirm=true`；旧服务端会忽略未知参数，**不得**把"旧服务端忽略 `status`"当成可用降级路径。
 
-## 9. 边界（写死）
+## 9. 边界（写死，按模式）
 
-**AW 只执行：不验收、不判停、不定义判据、不写 L0/事件。PM 是唯一写权威。**
+**dispatched（PM 派单）：AW 只执行，不验收、不判停、不定义判据、不写 L0/事件；PM 是唯一写权威。**
+
+**standalone（无外部派单方）：AW 自己闭环——按任务声明的 `acceptance` 判定、落盘 `verdict.json`、失败有界重试；但 AW 仍不写 L0/事件、不成为项目状态的写权威，判定结论只存在于 AW 自己的 attempt 目录。**
 
 由此派生：
 
-- AW 不写项目状态、任务、审批，不改 TK 的 L0/L1/L2，不发 `[task]/[delivery]/[verification]/[blocker]` 标记。
-- AW 不判定 `ok` 是否代表“完成”，也不提供“验收通过/退回/升级”结论。
-- AW 不派单给其他 AI 工具，不做第二个协调者。
-- PM 验收后按 TK 既有事件 schema 记账；AW 仅提供回执证据。
+- 两种模式都：AW 不写项目状态、任务、审批，不改 TK 的 L0/L1/L2，不发 `[task]/[delivery]/[verification]/[blocker]` 标记。
+- dispatched：AW 不判定 `ok` 是否代表“完成”，也不提供“验收通过/退回/升级”结论。
+- standalone：AW 只对**任务输入里声明的**验收标准给出 `passed/failed/undetermined`；不发明标准、不把 `undetermined` 当通过、不宣称 `verified`。
+- 两种模式都：AW 不派单给其他 AI 工具，不做第二个协调者。
+- PM 验收后按 TK 既有事件 schema 记账；AW 仅提供回执与（standalone 时的）判定证据。
 
 ## 10. 默认决策（v1.18 起；v1.19 校正 prune 默认包络）
 
@@ -473,6 +632,7 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 | 5 | `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`）；v1.25 起在回执按需追加 `arguments_diagnostics`（§2.5），**可观测但不拒绝** | 兼容现有调用方；MCP 客户端可能附加元数据/别名；schema 静态、行为需确定 | 契约版本级；不提供运行时开关 | 强制拒绝会打断携带额外字段的现有调用（§10.1） |
 | 6 | `clientInfo` 准入 | 默认**不参与准入**，仅审计 | §2.3：自报字段不可信 | 需新增票据/进程锚点/授权范围（§2.3） | 仅凭 `clientInfo.name` 放行会让冒充直接通过 |
 | 7 | `path_prepend` 限制 | 默认**写入 schema**：`maxItems=16`、`items.maxLength=4096` | 与实现校验上限一致；声明先于调用，减少无效派单 | 调用方传 0..16 项、每项 ≤4096；上限是契约常量，改动需升版 | 不写入 schema 会让客户端以为可传超量，直到占号前才被拒 |
+| 8 | `task.execute.mode` | 缺省 `dispatched`（PM 派单，行为零变化）；`standalone` **必须显式传入** | §2.6：不靠推断；同一 `task_id` 不得跨模式复用 | 调用方显式传 `mode`；`dispatched` 可省略 | 若让 standalone 靠"有没有 argv"推断，会把 PM 派单与 AW 自判混在同一目录；若给 dispatched 加 verdict 字段，PM 侧契约与消费方会被迫改动 |
 
 ### 10.1 `additionalProperties=false` 为什么默认仍是"只声明、不强制"
 
@@ -520,3 +680,4 @@ v1.25 在不改变接受/拒绝的前提下把"忽略"变成**可观测**：多�
 | v1.23 | 2026-11-06 | **把"多份 `initialize` 不等于多会话"变成可观测口径（只观测、不拦截）**：实测真实 stdio 进程连续两次 `initialize` 均成功，`status.connections` 为 `active=1`/`total=1`/`peak=1`/`initialize_total=2`；结论为**进程内无会话概念，只有一条连接**，故字段明确按**连接级**命名（`unit="connection"`、`scope="process"`），不写"会话数"；新增 `connections` 为纯加法输出，准入/上限仍不做，`clientInfo` 仍不参与准入；描述门禁新增 G11 行 + 真实 stdio 行为用例，改描述或改计数都过闸。证据：新用例先红后绿（去掉 `initialize_total` 累加 → 实测量 0≠2），Windows 9 unit + 78 integration、POSIX 8 unit + 76 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN`，W2c 未重开 |
 | v1.24 | 2026-11-07 | **把超时的"单次终止尝试"做实（实测结论：一次即足够，不加重试）**：POSIX 68 轮（高速 fork 40 + 2GB 进程 16ms fork 窗口 20 + 400 个已存在子进程 8）与 Windows 20 轮（成员持续 `start /b` 拉起后代）均未出现"一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内仍有存活"；Linux `copy_process` 在致命信号 pending 时中止 fork，Windows 作业成员在 `CreateProcess` 时原子继承且 `CREATE_SUSPENDED` 关闭恢复前派生窗口；能构造出的 `StillAlive`（僵尸、cgroup 冻结）重试也无效，故**不新增第二次尝试**。判据与回执语义不变：只有观测到 `kill(-pgid,0)==ESRCH` / `ActiveProcesses==0` 才写 `Cleaned`，任何分支不出现"已终止进程树"，逃逸仍"未验证"。`task.execute` 与 `timeout_secs` 描述新增"终止只尝试一次（不重试）"，门禁 G1/G2 同步（`tools_sha256` 更新）；两平台新增压力用例并以变异红灯证明非空转。证据：Windows 10 unit + 78 integration、POSIX 9 unit + 76 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN`，W2c 未重开 |
 | v1.25 | 2026-11-07 | **把"未知/多余参数被静默忽略"变成可观测诊断（§2.5，不拒绝、不改结果）**：命中工具后按需在回执 JSON 追加 `arguments_diagnostics`——`unknown_arguments[]`（`kind` 区分 `unknown` 拼写错误 / `alias` 别名 / `client_metadata` 如 `_meta`，别名给 `alias_of`）、`null_optional_arguments[]`（显式 `null` 的可选字段，`kind=null_optional`，调用照旧成功）、`declared_arguments` 与固定 `note`；值只给 `{type,length}`（字符串字符数 / 数组项数 / 对象键数），**绝不回显值**；同一份 JSON 同步写 stderr 单行日志；无可报告项时不出现该字段；`additionalProperties:false` 仍只声明不强制，别名不生效。证据：5 条新用例先红后绿 + 1 条既有"未知参数被忽略"用例改为精确断言（`payload` 无 `error` 字段、诊断存在）；真实 stdio 双探针（正确 `limit` vs 拼错 `lmtt`）原样回执见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §24。`tools/list` 描述与 schema 未改（门禁 `tools_sha256` 不变）；Windows 10 unit + 83 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN` |
+| v1.26 | 2026-11-07 | **运行模式显式化：AW 独立运行能力与 PM 协作边界共存（§2.6）**：`task.execute` 新增可选 `mode`（缺省 `dispatched`，PM 派单行为**零变化**）；`standalone` 必须显式传 `mode` + `cwd` + `argv` + 非空 `acceptance`，拒绝 `cmd`/`env`/`path_prepend`，执行不经 shell、作用于 cwd（显式程序路径越界 `standalone_program_outside_scope`，验收路径越界 `standalone_path_escape`）；判定逐 attempt 落盘 `runs/<task_id>/attempt-N/verdict.json`（`version`/`mode`/`criteria[].spec+observed+passed`/`observations`（退出码、stdout/stderr 摘要与预览、changed_files）/`missing[]`/`decision{action,reason,last_failure}`），结论三态 `passed|failed|undetermined`，**`undetermined` 绝不默认通过且不重试**；`max_attempts` 1..5（默认 3）有界重试，仅 `failed` 且未耗尽时重试，每次 attempt 独立目录不覆盖，耗尽写 `retry_exhausted`；同 `task_id` 跨模式复用 → `mode_conflict` 零写入；dispatched 回执**不新增** `mode/verdict_*/attempts_total`，`dispatch.json` 不写 `mode`。证据：8 条新用例先红后绿（Windows 7 条 standalone + 1 条 dispatched 回归锁），Windows 10 unit + 91 integration 全绿；真实 stdio 双单（成功 `passed` + 失败 `retry_exhausted`）原样 `verdict.json` / `handback.json` 见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §25；`tools/list` 的 `task.execute` 描述与 schema 同步更新（`required` 改为 `["task_id"]` + `anyOf(cmd|mode+argv)`），门禁 `tools_sha256` 更新；**分档仍未实现**，`#3` 仍 `NOT_PROVEN` |
