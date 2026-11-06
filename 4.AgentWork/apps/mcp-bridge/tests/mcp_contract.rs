@@ -290,10 +290,174 @@ fn unknown_arguments_are_ignored_by_default() {
         payload["total_tasks"].is_number(),
         "正常返回计数：{payload}"
     );
+    // v1.25：未知参数变为可观测诊断，但仍不得变成拒绝——payload 里不允许出现 error 字段
     assert!(
-        !tool_text(&response).contains("unknown_argument"),
-        "默认策略是忽略未知参数，不得新增拒绝行为"
+        payload.get("error").is_none(),
+        "默认策略是忽略未知参数，不得新增拒绝行为：{payload}"
     );
+    let diagnostics = payload["arguments_diagnostics"]
+        .as_object()
+        .expect("未知参数必须可观测（v1.25）：{payload}");
+    assert!(
+        diagnostics["unknown_arguments"].is_array(),
+        "未知参数必须落在结构化字段里：{payload}"
+    );
+}
+
+fn diagnostic_entry<'a>(payload: &'a Value, list: &str, name: &str) -> &'a Value {
+    payload["arguments_diagnostics"][list]
+        .as_array()
+        .unwrap_or_else(|| panic!("{list} 必须是数组：{payload}"))
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .unwrap_or_else(|| panic!("{list} 缺少条目 {name}：{payload}"))
+}
+
+#[test]
+fn arguments_diagnostics_flags_unknown_names_without_rejecting() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "runs.list",
+        json!({ "offest": 0, "_meta": { "source": "unknown-args-test" } }),
+    );
+    // 诊断只增加可观测信息，不改变成功/失败
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+    assert!(payload["state"].is_string(), "调用必须照常成功：{payload}");
+    assert!(
+        payload.get("error").is_none(),
+        "不得因为诊断而报错：{payload}"
+    );
+
+    let diagnostics = &payload["arguments_diagnostics"];
+    assert_eq!(diagnostics["tool"], "runs.list");
+    let declared: Vec<&str> = diagnostics["declared_arguments"]
+        .as_array()
+        .expect("declared_arguments 必须是数组")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        declared.contains(&"offset") && declared.contains(&"limit"),
+        "必须回显已声明参数名，调用方无需读源码即可对照：{diagnostics}"
+    );
+
+    // 完全未知的参数名 → kind=unknown（拼写错误一类），并给出值类型/长度而非值
+    let typo = diagnostic_entry(&payload, "unknown_arguments", "offest");
+    assert_eq!(typo["kind"], "unknown");
+    assert!(
+        typo.get("alias_of").is_none(),
+        "不是别名就不得写 alias_of：{typo}"
+    );
+    assert_eq!(typo["value"]["type"], "number");
+    assert_eq!(typo["value"]["length"], Value::Null);
+
+    // 客户端多塞的元数据 → kind=client_metadata，与拼写错误区分
+    let meta = diagnostic_entry(&payload, "unknown_arguments", "_meta");
+    assert_eq!(meta["kind"], "client_metadata");
+    assert!(meta.get("alias_of").is_none());
+    assert_eq!(meta["value"]["type"], "object");
+    assert_eq!(meta["value"]["length"], 1);
+}
+
+#[test]
+fn arguments_diagnostics_marks_camel_case_alias_not_typo() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 365, "dryRun": false, "confirm": true }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+    // 别名仍不生效（服务端只读已知键）：dry_run 缺省 true，因此本轮仍是 dry-run
+    assert_eq!(payload["dry_run"], true, "别名不得被静默应用：{payload}");
+
+    let entry = diagnostic_entry(&payload, "unknown_arguments", "dryRun");
+    assert_eq!(
+        entry["kind"], "alias",
+        "camelCase 别名不得被当成拼写错误：{entry}"
+    );
+    assert_eq!(entry["alias_of"], "dry_run");
+    assert_eq!(entry["value"]["type"], "boolean");
+}
+
+#[test]
+fn arguments_diagnostics_records_null_optionals_and_stays_successful() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({
+            "task_id": "t-null-optional",
+            "cmd": "echo ok",
+            "cwd": null,
+            "timeout_secs": null
+        }),
+    );
+    // SDK 对可选字段传 null 必须仍然成功，且诊断不得把它误报成错误
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+    assert_eq!(
+        payload["status"], "ok",
+        "null 可选字段不得让调用失败：{payload}"
+    );
+    assert!(
+        payload.get("error").is_none(),
+        "null 可选字段不是错误：{payload}"
+    );
+
+    let nulls = payload["arguments_diagnostics"]["null_optional_arguments"]
+        .as_array()
+        .expect("null_optional_arguments 必须是数组");
+    assert_eq!(nulls.len(), 2, "两个可选字段都显式传了 null：{payload}");
+    for (name, declared_type) in [("cwd", "string"), ("timeout_secs", "integer")] {
+        let entry = diagnostic_entry(&payload, "null_optional_arguments", name);
+        assert_eq!(entry["kind"], "null_optional");
+        assert_eq!(entry["declared_type"], declared_type);
+        assert_eq!(entry["value"]["type"], "null");
+    }
+}
+
+#[test]
+fn arguments_diagnostics_is_absent_for_clean_calls() {
+    let (server, _settings, _runs) = server_with_runs();
+    for (name, arguments) in [("runs.list", json!({})), ("health", json!({}))] {
+        let response = call_tool(&server, name, arguments);
+        assert_eq!(response["result"]["isError"], false, "{name} 必须成功");
+        let payload = tool_payload(&response);
+        assert!(
+            payload.get("arguments_diagnostics").is_none(),
+            "{name} 无多余参数时不得产生诊断噪声：{payload}"
+        );
+    }
+}
+
+#[test]
+fn arguments_diagnostics_never_leaks_values() {
+    let secret = "super-secret-token-value-123456";
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(
+        &server,
+        "runs.list",
+        json!({ "apiToken": secret, "_meta": { "token": secret } }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let text = tool_text(&response);
+    assert!(!text.contains(secret), "诊断不得回显参数值：{text}");
+
+    let payload = tool_payload(&response);
+    let entry = diagnostic_entry(&payload, "unknown_arguments", "apiToken");
+    assert_eq!(entry["value"]["type"], "string");
+    assert_eq!(
+        entry["value"]["length"],
+        secret.chars().count() as u64,
+        "只允许值长度这类元信息：{entry}"
+    );
+    let meta = diagnostic_entry(&payload, "unknown_arguments", "_meta");
+    assert_eq!(meta["value"]["type"], "object");
+    assert_eq!(meta["value"]["length"], 1);
 }
 
 #[test]

@@ -1,8 +1,8 @@
-# PM → AW 派单与回执契约 v1.24
+# PM → AW 派单与回执契约 v1.25
 
-状态：v1.24。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
+状态：v1.25。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**；**v1.23 起 `status` 增加连接级计数 `connections`（纯加法、只观测）：实测确认进程内没有"会话"概念，只有一条 stdio 连接，故 `active`/`total`/`peak` 恒为 1、`initialize_total` 随 `initialize` 次数累加（多份 `initialize` 不等于多会话）；不做准入、不做上限**；**v1.24 起把超时的"单次终止尝试"做实：POSIX 68 轮 + Windows 20 轮实测确认一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内无存活，故不新增第二次尝试；描述明写"终止只尝试一次（不重试）"，判据与回执语义不变（只有观测到无存活才写 `Cleaned`，逃逸仍"未验证"，`#3` 仍 `NOT_PROVEN`）**
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**；**v1.23 起 `status` 增加连接级计数 `connections`（纯加法、只观测）：实测确认进程内没有"会话"概念，只有一条 stdio 连接，故 `active`/`total`/`peak` 恒为 1、`initialize_total` 随 `initialize` 次数累加（多份 `initialize` 不等于多会话）；不做准入、不做上限**；**v1.24 起把超时的"单次终止尝试"做实：POSIX 68 轮 + Windows 20 轮实测确认一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内无存活，故不新增第二次尝试；描述明写"终止只尝试一次（不重试）"，判据与回执语义不变（只有观测到无存活才写 `Cleaned`，逃逸仍"未验证"，`#3` 仍 `NOT_PROVEN`）**；**v1.25 起把"未知/多余参数被静默忽略"变为可观测诊断（§2.5）：回执按需追加 `arguments_diagnostics`（未知参数名、camelCase/snake_case 别名指向、显式 `null` 的可选字段，值只给类型/长度），同一份 JSON 同步写 stderr；诊断不改变任何调用的成功/失败结果，`additionalProperties:false` 仍只声明不强制**
 
 ## 0. 结论
 
@@ -79,6 +79,33 @@
 | `note` | 口径说明 | 固定文案，明写"无会话概念、只观测" |
 
 PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限流或判定"第几个会话"**；`initialize_total > 1` 只说明同一连接重复握手，不代表新的调用方。本版仍**不做准入、不做连接上限**。
+
+### 2.5 参数诊断 `arguments_diagnostics`（v1.25，只观测、不拦截）
+
+`tools/call` 命中某个工具后，若请求里存在**未知参数**或**显式传 `null` 的可选字段**，工具回执的 JSON 文本内容会追加 `arguments_diagnostics`；没有可报告项时**不出现该字段**（不产生噪声）。诊断与调用结果完全解耦：`isError`、`error`、正常 payload 字段一律不变。
+
+| 字段 | 含义 |
+|---|---|
+| `tool` | 本次调用的工具名 |
+| `declared_arguments` | 该工具 schema 已声明的参数名列表（调用方无需读源码即可对照） |
+| `unknown_arguments[]` | 请求里出现、但 schema 未声明的参数 |
+| `unknown_arguments[].name` | 参数名（只报名字） |
+| `unknown_arguments[].kind` | `unknown` = 对不上任何已声明参数（拼写错误一类）；`alias` = 能对上已声明参数的别名；`client_metadata` = MCP 客户端元数据（如 `_meta`） |
+| `unknown_arguments[].alias_of` | 仅 `kind=alias` 时出现，指向已声明参数（如 `dryRun` → `dry_run`） |
+| `unknown_arguments[].value` | `{type, length}`：仅类型与长度（字符串字符数 / 数组项数 / 对象键数），**绝不回显值** |
+| `null_optional_arguments[]` | schema 声明为可选、调用方显式传 `null` 的字段 |
+| `null_optional_arguments[].kind` | 恒为 `null_optional`（不是错误，调用结果照旧） |
+| `null_optional_arguments[].declared_type` | schema 声明的类型（如 `string` / `integer`） |
+| `null_optional_arguments[].value` | 恒为 `{type:"null", length:null}` |
+| `note` | 固定文案：只记录参数名与值类型/长度、不改变结果 |
+
+规则写死：
+
+1. **别名不生效**：`dryRun` 与 `dry_run` 仍只按 `dry_run` 读取；诊断指出 `alias_of`，服务端不替调用方改名。
+2. **不拒绝**：`additionalProperties:false` 仍是声明性约束（§10 第 5 行）；未知参数被忽略，但现在是**可观测的忽略**。
+3. **同源两侧**：同一份 JSON 同时写入回执字段与 stderr 单行日志（前缀 `[aw-mcp-bridge] arguments_diagnostics `），不是只写 stderr 的自由文本。
+4. **敏感值**：只报参数名、类型、长度；`_meta` 等对象只报键数，不报嵌套键与值。
+5. **未知工具名不做参数诊断**：调用本身返回未知工具错误，行为不变。
 
 ## 3. 幂等
 
@@ -443,7 +470,7 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 | 2 | 重跑表达 | 换新 `task_id`（建议 `-r2`/`-r3`），零新增字段 | §3.1：同 id 是幂等键，不是重跑键 | PM 生成新 id | 若改为"同 id 重试"，需扩展输入契约并定义 attempt 语义 |
 | 3 | 失败码归属 | `upstream_rejected` 由 PM 记录；`concurrency_limit` 由 PM 侧排队，AW 不内置闸门 | §5 第 8 条、§6：AW 不做第二个协调者 | PM 侧策略；若 AW 内置限流需新契约 | 在 AW 加闸门会引入"未执行却被计为派单"的语义风险 |
 | 4 | 证据清理 | 统一 `older_than_days=365`、`limit=100` 为推荐调用值，**older 仍须显式传入**；先 dry-run 预览再真删；不分档；可选 `status` 多值白名单**显式才生效**；清理过的 `task_id` 退役 | §8.9、§8.10、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm`，可选 `status` | 若把 365 变成隐式默认，会让"漏传阈值"变成静默删除；若给 `status` 默认值，会让"漏传状态"变成按档位静默删 |
-| 5 | `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`） | 兼容现有调用方；MCP 客户端可能附加元数据/别名；schema 静态、行为需确定 | 契约版本级；不提供运行时开关 | 强制拒绝会打断携带额外字段的现有调用（§10.1） |
+| 5 | `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`）；v1.25 起在回执按需追加 `arguments_diagnostics`（§2.5），**可观测但不拒绝** | 兼容现有调用方；MCP 客户端可能附加元数据/别名；schema 静态、行为需确定 | 契约版本级；不提供运行时开关 | 强制拒绝会打断携带额外字段的现有调用（§10.1） |
 | 6 | `clientInfo` 准入 | 默认**不参与准入**，仅审计 | §2.3：自报字段不可信 | 需新增票据/进程锚点/授权范围（§2.3） | 仅凭 `clientInfo.name` 放行会让冒充直接通过 |
 | 7 | `path_prepend` 限制 | 默认**写入 schema**：`maxItems=16`、`items.maxLength=4096` | 与实现校验上限一致；声明先于调用，减少无效派单 | 调用方传 0..16 项、每项 ≤4096；上限是契约常量，改动需升版 | 不写入 schema 会让客户端以为可传超量，直到占号前才被拒 |
 
@@ -457,7 +484,9 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 
 仓库内目前**没有 PM 侧实际调用样本**；上面列的是按 MCP 客户端通用行为推导的"会被打断的类别"，不是声称已观测到这些调用存在。一旦 PM 侧出现真实调用样本，按其 payload 复核后再议是否强制。
 
-若未来要强制：必须升契约版本，新增具名工具错误 `unknown_argument`（列出未知键），并提供兼容模式（默认宽松）与迁移说明。**默认不这么做。**
+v1.25 在不改变接受/拒绝的前提下把"忽略"变成**可观测**：多余参数、camelCase/snake_case 别名与显式 `null` 的可选字段都会出现在回执的 `arguments_diagnostics` 中（§2.5），调用结果不变；这回应的是"参数名拼错还是客户端多塞了东西"的排查需要，不是强制模式。
+
+若未来要强制：必须再升契约版本，新增具名工具错误 `unknown_argument`（列出未知键），并提供兼容模式（默认宽松）与迁移说明。**默认不这么做。**
 
 ## 11. 变更记录
 
@@ -490,3 +519,4 @@ PM 侧接法：只把它当运行时可观测口径，**不得用于准入、限
 | v1.22 | 2026-11-06 | **删除回执自包含可核对（按 §19 建议形状，纯加法：旧字段全部保留、不改名、不删除）**：`deleted[]` 每条新增 `state="deleted"`、`source_path`、`trash_path`、`deleted_at`、`rule`（`older_than_days`/`status_filter`/`limit`/`batch_id`，逐条自包含）、`fingerprint`（`status`/`finishedAt`/`dispatchedAt`/`handback_sha256`/`dispatch_sha256`/`bytes{handback,dispatch,total}`，sha256 与字节数在**删除前**算出，缺文件写 `null`）；`failed[]` 新增 `source_path`/`state="retained_at_source"`/`trash_path=null`/`rule`/`fingerprint`；新增 `trashed[]`（`state="trashed_not_deleted"`，整链已移入 `.prune-trash` 但未删掉）与 `trashed_total`；三集合互斥，`deleted+failed+trashed = 候选数`；**语义由代码保证**：`failed[]`/`trashed[]` 的 `state` 只能来自 `RetainedState` 枚举（构造不出 `deleted`），`.prune-trash` 里的一切都不算删除；删除后重跑无幽灵候选的行为不变。证据：`prune_receipt_deleted_entries_carry_fingerprint_and_rule` 先红后绿（删前 sha256/字节数与回执逐字比对）、Windows partial 用例扩断言（`retained_at_source` + `trash_path=null` + 无 `deleted` 字样）、单元用例锁定 `RetainedState` 与缺文件 `null`；Windows 6 unit + 74 integration、POSIX 5 unit + 72 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN` |
 | v1.23 | 2026-11-06 | **把"多份 `initialize` 不等于多会话"变成可观测口径（只观测、不拦截）**：实测真实 stdio 进程连续两次 `initialize` 均成功，`status.connections` 为 `active=1`/`total=1`/`peak=1`/`initialize_total=2`；结论为**进程内无会话概念，只有一条连接**，故字段明确按**连接级**命名（`unit="connection"`、`scope="process"`），不写"会话数"；新增 `connections` 为纯加法输出，准入/上限仍不做，`clientInfo` 仍不参与准入；描述门禁新增 G11 行 + 真实 stdio 行为用例，改描述或改计数都过闸。证据：新用例先红后绿（去掉 `initialize_total` 累加 → 实测量 0≠2），Windows 9 unit + 78 integration、POSIX 8 unit + 76 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN`，W2c 未重开 |
 | v1.24 | 2026-11-07 | **把超时的"单次终止尝试"做实（实测结论：一次即足够，不加重试）**：POSIX 68 轮（高速 fork 40 + 2GB 进程 16ms fork 窗口 20 + 400 个已存在子进程 8）与 Windows 20 轮（成员持续 `start /b` 拉起后代）均未出现"一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内仍有存活"；Linux `copy_process` 在致命信号 pending 时中止 fork，Windows 作业成员在 `CreateProcess` 时原子继承且 `CREATE_SUSPENDED` 关闭恢复前派生窗口；能构造出的 `StillAlive`（僵尸、cgroup 冻结）重试也无效，故**不新增第二次尝试**。判据与回执语义不变：只有观测到 `kill(-pgid,0)==ESRCH` / `ActiveProcesses==0` 才写 `Cleaned`，任何分支不出现"已终止进程树"，逃逸仍"未验证"。`task.execute` 与 `timeout_secs` 描述新增"终止只尝试一次（不重试）"，门禁 G1/G2 同步（`tools_sha256` 更新）；两平台新增压力用例并以变异红灯证明非空转。证据：Windows 10 unit + 78 integration、POSIX 9 unit + 76 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN`，W2c 未重开 |
+| v1.25 | 2026-11-07 | **把"未知/多余参数被静默忽略"变成可观测诊断（§2.5，不拒绝、不改结果）**：命中工具后按需在回执 JSON 追加 `arguments_diagnostics`——`unknown_arguments[]`（`kind` 区分 `unknown` 拼写错误 / `alias` 别名 / `client_metadata` 如 `_meta`，别名给 `alias_of`）、`null_optional_arguments[]`（显式 `null` 的可选字段，`kind=null_optional`，调用照旧成功）、`declared_arguments` 与固定 `note`；值只给 `{type,length}`（字符串字符数 / 数组项数 / 对象键数），**绝不回显值**；同一份 JSON 同步写 stderr 单行日志；无可报告项时不出现该字段；`additionalProperties:false` 仍只声明不强制，别名不生效。证据：5 条新用例先红后绿 + 1 条既有"未知参数被忽略"用例改为精确断言（`payload` 无 `error` 字段、诊断存在）；真实 stdio 双探针（正确 `limit` vs 拼错 `lmtt`）原样回执见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §24。`tools/list` 描述与 schema 未改（门禁 `tools_sha256` 不变）；Windows 10 unit + 83 integration 全绿；**分档仍未实现**，`#3` 仍 `NOT_PROVEN` |

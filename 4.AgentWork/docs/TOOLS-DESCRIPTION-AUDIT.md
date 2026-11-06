@@ -1,8 +1,8 @@
-# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17）
+# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 §23；v1.25 §24）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17）。
-- 本批性质：**只修描述与契约措辞，不改任何行为、不改回执字段**。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 见 §23；v1.25 见 §24）。
+- 本批性质（v1.14）：**只修描述与契约措辞，不改任何行为、不改回执字段**；v1.25 例外见 §24（回执纯加 `arguments_diagnostics`，仍不改成功/失败）。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
   - **不一致（已修）**：v1.14 之前描述与实现相反/缺失，**本批已改**。
@@ -1570,6 +1570,115 @@ POSIX （WSL HostGoTest，verify.sh run 离线）：9 unit + 76 integration，0 
 - POSIX 的 2GB fork 夹具把 fork 窗口放大到约 16ms 仍 0 幸存；结论依赖内核"致命信号 pending 时中止 fork"，不是概率性断言。
 - Windows 的作业成员关系在 `CreateProcess` 时原子继承且本实现不允许 `BREAKAWAY`；`CREATE_SUSPENDED` 关闭"恢复前派生"窗口。
 - 真实 D 状态（I/O 不可中断）无法在本环境构造；SIGKILL 一旦 pending 不会丢失，重发同一信号不能加速。
+
+## 24. 参数诊断 `arguments_diagnostics`（v1.25）
+
+### 24.1 结论与边界
+
+`additionalProperties: false` 仍**只声明、不强制**：未知参数照旧被忽略，调用照旧成功/失败。v1.25 只把"忽略"变成**可观测**——命中工具后，若有未知参数或显式 `null` 的可选字段，回执 JSON 追加 `arguments_diagnostics`；没有可报告项时该字段**不出现**（不产生噪声）。同一份 JSON 同步写 stderr 单行日志。
+
+判定口径（调用方无需读源码）：
+
+| `kind` | 含义 | 排查结论 |
+|---|---|---|
+| `unknown` | 规范化为小写、去掉 `_`/`-` 后对不上任何已声明参数 | 多半是参数名拼错；`declared_arguments` 给出正确名单 |
+| `alias` | 能对上某个已声明参数（如 `dryRun` → `dry_run`） | 客户端用了 camelCase/snake_case 别名；`alias_of` 指出目标 |
+| `client_metadata` | `_meta` | 客户端多塞的元数据，不是拼写错误 |
+| `null_optional` | schema 声明为可选、显式传 `null` | SDK 序列化行为，不是错误，调用照旧 |
+
+**别名不生效**：诊断只指出 `alias_of`，服务端不会替调用方改名（`dryRun` 仍不会驱动 `dry_run`）。**敏感值不落诊断**：值只给 `{type,length}`（字符串字符数 / 数组项数 / 对象键数），`_meta` 只报键数，不报嵌套键与值。未知工具名不做诊断（调用本身返回未知工具错误）。`tools/list` 的 `description`/`inputSchema` 未改，门禁 `tools_sha256` 不变。
+
+### 24.2 字段
+
+| 字段 | 说明 |
+|---|---|
+| `tool` | 本次调用的工具名 |
+| `declared_arguments` | 该工具已声明的参数名 |
+| `unknown_arguments[]` | `name` / `kind` / `alias_of`（仅 alias）/ `value{type,length}` |
+| `null_optional_arguments[]` | `name` / `kind="null_optional"` / `declared_type` / `value{type:"null",length:null}` |
+| `note` | 固定文案：只记录参数名与值类型/长度，不改变成功/失败 |
+
+### 24.3 用例先红后绿
+
+新增 5 条集成用例：完全未知参数名、camelCase 别名、显式 `null` 可选字段（必须成功）、无多余参数不产生诊断、值不泄漏；另把既有"未知参数被忽略"用例改为精确断言（payload 无 `error` 字段 + 诊断存在），替代原来对 `"unknown_argument"` 子串的弱检查。
+
+红：临时把 `apps/mcp-bridge/src/server.rs` 的实现改动 stash（回到 v1.24 行为），同一批新用例原样失败：
+
+```text
+running 5 tests
+
+thread 'arguments_diagnostics_flags_unknown_names_without_rejecting' panicked at apps\mcp-bridge\tests\mcp_contract.rs:331:5:
+assertion `left == right` failed
+  left: Null
+ right: "runs.list"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'arguments_diagnostics_never_leaks_values' panicked at apps\mcp-bridge\tests\mcp_contract.rs:310:28:
+unknown_arguments 必须是数组：{"limit":20,"offset":0,"state":"empty","tasks":[],"total":0,"total_tasks":0}
+
+thread 'arguments_diagnostics_marks_camel_case_alias_not_typo' panicked at apps\mcp-bridge\tests\mcp_contract.rs:310:28:
+unknown_arguments 必须是数组：{"candidates":[],"candidates_total":0,"dry_run":true,"evaluated_at":"2026-11-06T16:57:28Z","limit":100,"older_than_days":365,"skipped":[],"skipped_total":0,"state":"empty","status_filter":null,"truncated":false}
+test arguments_diagnostics_is_absent_for_clean_calls ... ok
+test arguments_diagnostics_flags_unknown_names_without_rejecting ... FAILED
+test arguments_diagnostics_marks_camel_case_alias_not_typo ... FAILED
+test arguments_diagnostics_never_leaks_values ... FAILED
+
+thread 'arguments_diagnostics_records_null_optionals_and_stays_successful' panicked at apps\mcp-bridge\tests\mcp_contract.rs:395:10:
+null_optional_arguments 必须是数组
+test arguments_diagnostics_records_null_optionals_and_stays_successful ... FAILED
+
+failures:
+
+failures:
+    arguments_diagnostics_flags_unknown_names_without_rejecting
+    arguments_diagnostics_marks_camel_case_alias_not_typo
+    arguments_diagnostics_never_leaks_values
+    arguments_diagnostics_records_null_optionals_and_stays_successful
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.62s
+
+error: test failed, to rerun pass `-p aw-mcp-bridge --test mcp_contract`
+```
+
+反向用例（无多余参数）在实现前就是绿的：它证明的是"实现后也不产生噪声"，不是新增能力的红。
+
+绿（同一批用例，恢复实现后）：
+
+```text
+running 5 tests
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 78 filtered out; finished in 0.63s
+```
+
+全量：`cargo test -p aw-mcp-bridge` → Windows 10 unit + 83 integration，0 failed。
+
+### 24.4 真实 stdio 双探针（原样回执）
+
+同一个工具 `runs.list`，一次正确参数 `{"limit":5}`，一次故意拼错 `{"lmtt":5}`；直接向 `target/debug/aw-mcp-bridge.exe` 的 stdio 各写一行 JSON-RPC，stdout/stderr 分开捕获。探针只调用只读 `runs.list`，未写任何 runs 数据。
+
+正确参数（stdout；stderr 为空）：
+
+```json
+{"id":1,"jsonrpc":"2.0","result":{"content":[{"text":"{\"limit\":5,\"offset\":0,\"state\":\"ready\",\"tasks\":[{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":null,\"env_keys\":[\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":null,\"handback\":false,\"latest_attempt\":1,\"status\":null,\"task_id\":\"pm-conc-a-20261105T195253Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":2300,\"env_keys\":[\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-a-20261105T195328Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":2317,\"env_keys\":[\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-a-20261105T195355Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":null,\"env_keys\":[\"PM_E2E_NOTE\",\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":null,\"handback\":false,\"latest_attempt\":1,\"status\":null,\"task_id\":\"pm-conc-b-20261105T195253Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":4311,\"env_keys\":[\"PM_E2E_NOTE\",\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-b-20261105T195328Z\"}],\"total\":13,\"total_tasks\":13}","type":"text"}],"isError":false}}
+```
+
+故意拼错 `lmtt`（stdout；`isError:false`，调用照常成功，`limit` 回落到默认 20；`tasks` 因默认 limit 不同比上一次多）：
+
+```json
+{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"arguments_diagnostics\":{\"declared_arguments\":[\"limit\",\"offset\"],\"note\":\"只记录参数名与值类型/长度，不记录值；诊断不改变调用的成功/失败结果\",\"null_optional_arguments\":[],\"tool\":\"runs.list\",\"unknown_arguments\":[{\"kind\":\"unknown\",\"name\":\"lmtt\",\"value\":{\"length\":null,\"type\":\"number\"}}]},\"limit\":20,\"offset\":0,\"state\":\"ready\",\"tasks\":[{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":null,\"env_keys\":[\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":null,\"handback\":false,\"latest_attempt\":1,\"status\":null,\"task_id\":\"pm-conc-a-20261105T195253Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":2300,\"env_keys\":[\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-a-20261105T195328Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":2317,\"env_keys\":[\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-a-20261105T195355Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":null,\"env_keys\":[\"PM_E2E_NOTE\",\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":null,\"handback\":false,\"latest_attempt\":1,\"status\":null,\"task_id\":\"pm-conc-b-20261105T195253Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":4311,\"env_keys\":[\"PM_E2E_NOTE\",\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-b-20261105T195328Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":4304,\"env_keys\":[\"PM_E2E_NOTE\",\"PM_E2E_SLEEP_MS\",\"PM_E2E_TAG\",\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-b-20261105T195355Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":2258,\"env_keys\":[\"PM_E2E_WORK\"],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-conc-same-20261105T195355Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":109,\"env_keys\":[],\"exit_code\":0,\"handback\":true,\"latest_attempt\":1,\"status\":\"ok\",\"task_id\":\"pm-e2e-20261105T185851Z\"},{\"attempts\":1,\"blocked_reason\":null,\"duration_ms\":373,\"env_keys\":[\"PM_E2E_PID_DIR\"],\"exit_code\":1,\"handback\":true,\"latest_attempt\":1,\"status\":\"failed\",\"task_id\":\"pm-timeout-20261105T192252Z\"},{\"attempts\":1,\"blocked_reason\":\"timeout：超过 3s 未结束，已终止进程\",\"duration_ms\":3018,\"env_keys\":[\"PM_E2E_PID_DIR\"],\"exit_code\":null,\"handback\":true,\"latest_attempt\":1,\"status\":\"blocked\",\"task_id\":\"pm-timeout-20261105T192336Z\"},{\"attempts\":1,\"blocked_reason\":\"timeout：超过 3s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业\",\"duration_ms\":3012,\"env_keys\":[\"PM_E2E_PID_DIR\"],\"exit_code\":null,\"handback\":true,\"latest_attempt\":1,\"status\":\"blocked\",\"task_id\":\"pm-timeout-20261105T220037Z\"},{\"attempts\":0,\"blocked_reason\":null,\"duration_ms\":null,\"env_keys\":[],\"exit_code\":null,\"handback\":false,\"latest_attempt\":null,\"status\":null,\"task_id\":\"smoke-1\"},{\"attempts\":2,\"blocked_reason\":null,\"duration_ms\":55,\"env_keys\":[],\"exit_code\":0,\"handback\":true,\"latest_attempt\":2,\"status\":\"ok\",\"task_id\":\"smoke-2\"}],\"total\":13,\"total_tasks\":13}","type":"text"}],"isError":false}}
+```
+
+对应 stderr（单行 JSON，与回执内字段同源）：
+
+```text
+[aw-mcp-bridge] arguments_diagnostics {"declared_arguments":["limit","offset"],"note":"只记录参数名与值类型/长度，不记录值；诊断不改变调用的成功/失败结果","null_optional_arguments":[],"tool":"runs.list","unknown_arguments":[{"kind":"unknown","name":"lmtt","value":{"length":null,"type":"number"}}]}
+```
+
+### 24.5 未覆盖与限制（如实标注）
+
+- 别名识别是**规范化匹配**（忽略大小写与 `_`/`-`），不是编辑距离：`timeout_sec`（少一个 s）会被判 `unknown` 而不是 `alias`；`declared_arguments` 足以让调用方自行对照，但本版不提供"最接近参数名"建议。
+- 只对 `arguments` 为 JSON 对象的调用做诊断；非对象 `arguments` 不新增诊断，也不改变原有行为。
+- 诊断只写 stderr 与回执，不落 `runs/` 审计文件；当前没有"跨调用汇总诊断"的持久化。
+- 本次只在 Windows 实跑；POSIX 未复跑（本改动不涉及平台分支），未验证项不写成已验证。
 
 
 

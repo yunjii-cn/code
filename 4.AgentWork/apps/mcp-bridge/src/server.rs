@@ -110,35 +110,43 @@ impl Server {
             .cloned()
             .unwrap_or_else(|| json!({}));
 
-        let payload = match name {
-            "health" => Ok(self.health_payload()),
-            "status" => Ok(self.status_payload()),
-            "task.execute" => self.execute_task(&arguments),
-            "receipt.get" => self.receipt_payload(&arguments),
-            "runs.list" => self.runs_list(&arguments),
-            "runs.prune" => {
-                // 部分失败必须让调用方看到 isError=true：不许把"删了一半"包装成成功
-                return match self.runs_prune(&arguments) {
-                    Ok(payload) => {
-                        let is_error = payload.get("status").and_then(Value::as_str)
-                            == Some("partial");
-                        tool_result(&payload, is_error)
-                    }
-                    Err(error) => tool_result(&json!({ "error": error }), true),
-                };
-            }
-            _ => {
-                return tool_result(
-                    &json!({ "error": format!("未知工具：{name}") }),
-                    true,
-                )
-            }
+        // 参数诊断只观测、不拦截：先算好，调用结果完全不受它影响
+        let diagnostics = argument_diagnostics(name, &arguments);
+
+        let (payload, is_error) = match name {
+            "health" => (self.health_payload(), false),
+            "status" => (self.status_payload(), false),
+            "task.execute" => match self.execute_task(&arguments) {
+                Ok(payload) => (payload, false),
+                Err(error) => (json!({ "error": error }), true),
+            },
+            "receipt.get" => match self.receipt_payload(&arguments) {
+                Ok(payload) => (payload, false),
+                Err(error) => (json!({ "error": error }), true),
+            },
+            "runs.list" => match self.runs_list(&arguments) {
+                Ok(payload) => (payload, false),
+                Err(error) => (json!({ "error": error }), true),
+            },
+            "runs.prune" => match self.runs_prune(&arguments) {
+                Ok(payload) => {
+                    // 部分失败必须让调用方看到 isError=true：不许把"删了一半"包装成成功
+                    let is_error = payload.get("status").and_then(Value::as_str) == Some("partial");
+                    (payload, is_error)
+                }
+                Err(error) => (json!({ "error": error }), true),
+            },
+            _ => (json!({ "error": format!("未知工具：{name}") }), true),
         };
 
-        match payload {
-            Ok(payload) => tool_result(&payload, false),
-            Err(error) => tool_result(&json!({ "error": error }), true),
-        }
+        let payload = match diagnostics {
+            Some(diagnostics) => {
+                log_argument_diagnostics(&diagnostics);
+                attach_argument_diagnostics(payload, diagnostics)
+            }
+            None => payload,
+        };
+        tool_result(&payload, is_error)
     }
 
     fn health_payload(&self) -> Value {
@@ -2231,6 +2239,129 @@ fn default_runs_dir() -> PathBuf {
         .and_then(|exe| exe.parent().map(|parent| parent.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("runs")
+}
+
+/// 参数诊断（v1.25）：只观测、不拦截，不改变任何调用的成功/失败结果。
+///
+/// - 未知参数：请求里出现、但 `inputSchema.properties` 未声明；
+/// - null 可选字段：schema 声明为可选、调用方显式传 `null`；
+/// - 别名：未知参数规范化后能对上某个已声明参数（如 `dryRun` → `dry_run`）；
+/// - 值只给类型/长度，绝不回显值本身（未知参数可能携带密钥）。
+fn argument_diagnostics(tool_name: &str, arguments: &Value) -> Option<Value> {
+    let schema = tool_input_schema(tool_name)?;
+    let args = arguments.as_object()?;
+    let properties = schema.get("properties")?.as_object()?;
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+
+    let mut unknown: Vec<Value> = Vec::new();
+    let mut null_optionals: Vec<Value> = Vec::new();
+    for (key, value) in args {
+        if let Some(field_schema) = properties.get(key) {
+            // 必填字段传 null 由各工具自己的校验负责，不在诊断里重复判定
+            if value.is_null() && !required.contains(&key.as_str()) {
+                let declared_type = field_schema.get("type").cloned().unwrap_or(Value::Null);
+                null_optionals.push(json!({
+                    "name": key,
+                    "kind": "null_optional",
+                    "declared_type": declared_type,
+                    "value": argument_value_meta(value)
+                }));
+            }
+            continue;
+        }
+
+        let alias_of = alias_target(key, properties);
+        let kind = if key == "_meta" {
+            "client_metadata"
+        } else if alias_of.is_some() {
+            "alias"
+        } else {
+            "unknown"
+        };
+        let mut entry = json!({
+            "name": key,
+            "kind": kind,
+            "value": argument_value_meta(value)
+        });
+        if let Some(target) = alias_of {
+            entry
+                .as_object_mut()
+                .expect("entry 是对象")
+                .insert("alias_of".to_string(), json!(target));
+        }
+        unknown.push(entry);
+    }
+
+    if unknown.is_empty() && null_optionals.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "tool": tool_name,
+        "declared_arguments": properties.keys().cloned().collect::<Vec<String>>(),
+        "unknown_arguments": unknown,
+        "null_optional_arguments": null_optionals,
+        "note": "只记录参数名与值类型/长度，不记录值；诊断不改变调用的成功/失败结果"
+    }))
+}
+
+/// 按工具名取 `inputSchema`；未知工具不做参数诊断（调用本身会返回未知工具错误）
+fn tool_input_schema(tool_name: &str) -> Option<Value> {
+    tools()
+        .as_array()?
+        .iter()
+        .find(|tool| tool["name"] == tool_name)
+        .map(|tool| tool["inputSchema"].clone())
+}
+
+/// 别名识别：忽略大小写与 `_` / `-` 后能对上已声明参数，即视为别名而非拼写错误
+fn alias_target(key: &str, properties: &serde_json::Map<String, Value>) -> Option<String> {
+    let normalized = normalize_argument_name(key);
+    if normalized.is_empty() {
+        return None;
+    }
+    properties
+        .keys()
+        .find(|declared| normalize_argument_name(declared) == normalized)
+        .cloned()
+}
+
+fn normalize_argument_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// 只暴露值的元信息：类型 + 长度（字符串字符数 / 数组项数 / 对象键数），永不回显值
+fn argument_value_meta(value: &Value) -> Value {
+    let (type_name, length) = match value {
+        Value::Null => ("null", None),
+        Value::Bool(_) => ("boolean", None),
+        Value::Number(_) => ("number", None),
+        Value::String(text) => ("string", Some(text.chars().count() as u64)),
+        Value::Array(items) => ("array", Some(items.len() as u64)),
+        Value::Object(map) => ("object", Some(map.len() as u64)),
+    };
+    json!({ "type": type_name, "length": length })
+}
+
+fn attach_argument_diagnostics(mut payload: Value, diagnostics: Value) -> Value {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("arguments_diagnostics".to_string(), diagnostics);
+    }
+    payload
+}
+
+/// 日志侧：单行 JSON 到 stderr，与回执里的 `arguments_diagnostics` 是同一份信息
+fn log_argument_diagnostics(diagnostics: &Value) {
+    if let Ok(text) = serde_json::to_string(diagnostics) {
+        eprintln!("[aw-mcp-bridge] arguments_diagnostics {text}");
+    }
 }
 
 fn tools() -> Value {
