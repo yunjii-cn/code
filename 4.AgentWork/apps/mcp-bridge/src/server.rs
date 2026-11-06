@@ -19,6 +19,10 @@ const TASK_HISTORY_DIR: &str = ".task-history";
 const INFLIGHT_VERSION: &str = "inflight-marker/1";
 /// 标记过期宽限：超过 deadlineAt 且 pid 已不可见才判定为残留
 const INFLIGHT_STALE_GRACE_SECS: i64 = 120;
+const INFLIGHT_REPORT_VERSION: &str = "inflight-report/1";
+const CAPABILITIES_VERSION: &str = "capabilities/1";
+/// pid 已消失后的残留宽限：给正常退出留出收尾时间，避免把刚结束的守卫误判为残留
+const INFLIGHT_PID_MISSING_GRACE_SECS: i64 = 5;
 
 // 由 build.rs 注入，缺失时为 "unknown"（不使用当前时间兜底，保证可复现构建）
 pub const BUILD_TIME: &str = env!("AW_BUILD_TIME");
@@ -134,6 +138,11 @@ impl Server {
         let (payload, is_error) = match name {
             "health" => (self.health_payload(), false),
             "status" => (self.status_payload(), false),
+            "capabilities" => (capabilities_payload(), false),
+            "runs.inflight" => match self.runs_inflight(&arguments) {
+                Ok(payload) => (payload, false),
+                Err(error) => (json!({ "error": error }), true),
+            },
             "task.execute" => match self.execute_task(&arguments) {
                 Ok(payload) => (payload, false),
                 Err(error) => (json!({ "error": error }), true),
@@ -1043,6 +1052,300 @@ impl Server {
             object.insert("stale".to_string(), json!(stale));
         }
         Some(record)
+    }
+
+    /// 活跃标记的只读查询与残留清理：只删 stale=true 的标记，读不懂的一律保留
+    fn runs_inflight(&self, args: &Value) -> Result<Value, String> {
+        let action = match args.get("action").and_then(Value::as_str) {
+            Some("list") => "list",
+            Some("clean") => "clean",
+            Some(other) => {
+                return Err(format!(
+                    "invalid_arguments: action 必须是 list 或 clean，收到：{other}"
+                ))
+            }
+            None => {
+                return Err("invalid_arguments: action 必须显式传入 list 或 clean".to_string())
+            }
+        };
+        let task_filter = match args.get("task_id") {
+            None => None,
+            Some(value) => {
+                let id = value
+                    .as_str()
+                    .ok_or_else(|| "invalid_arguments: task_id 必须是字符串".to_string())?;
+                if !is_task_dir_name(id) {
+                    return Err(format!(
+                        "invalid_arguments: task_id 不合法（仅字母数字与 . _ -，且不以 _ 或 . 开头）：{id}"
+                    ));
+                }
+                Some(id.to_string())
+            }
+        };
+        let dry_run = match args.get("dry_run") {
+            None => true,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "invalid_arguments: dry_run 必须是布尔值".to_string())?,
+        };
+        let confirm = match args.get("confirm") {
+            None => false,
+            Some(value) => value.as_bool().ok_or_else(|| {
+                "confirm_required: confirm 必须是布尔值；真删需要显式 confirm=true".to_string()
+            })?,
+        };
+        if action == "clean" && !dry_run && !confirm {
+            return Err(
+                "confirm_required: 真删必须同时显式 dry_run=false 与 confirm=true；本轮未删除任何标记"
+                    .to_string(),
+            );
+        }
+
+        let (markers, unreadable, dir_exists) = self.scan_inflight_markers(task_filter.as_deref());
+        let stale_total = markers
+            .iter()
+            .filter(|marker| marker.assessment["stale"] == json!(true))
+            .count() as u64;
+        let state = if !dir_exists {
+            "missing"
+        } else if markers.is_empty() && unreadable.is_empty() {
+            "empty"
+        } else {
+            "ready"
+        };
+
+        if action == "list" {
+            return Ok(json!({
+                "version": INFLIGHT_REPORT_VERSION,
+                "action": "list",
+                "state": state,
+                "directory": "runs/.inflight",
+                "stale_rule": inflight_stale_rule(),
+                "total": markers.len() as u64,
+                "stale_total": stale_total,
+                "active_total": markers.len() as u64 - stale_total,
+                "unreadable_total": unreadable.len() as u64,
+                "markers": markers.iter().map(marker_report).collect::<Vec<Value>>(),
+                "unreadable": unreadable
+            }));
+        }
+
+        let mut would_remove: Vec<Value> = Vec::new();
+        let mut removed: Vec<Value> = Vec::new();
+        let mut kept: Vec<Value> = Vec::new();
+        let mut failed: Vec<Value> = Vec::new();
+        for marker in &markers {
+            let stale = marker.assessment["stale"].as_bool().unwrap_or(false);
+            if !stale {
+                kept.push(json!({
+                    "task_id": marker.task_id,
+                    "file": marker.file,
+                    "pid": marker.assessment["pid"],
+                    "stale_reason": marker.assessment["stale_reason"],
+                    "reason": "not_stale"
+                }));
+                continue;
+            }
+            if dry_run {
+                would_remove.push(json!({
+                    "task_id": marker.task_id,
+                    "file": marker.file,
+                    "pid": marker.assessment["pid"],
+                    "stale_reason": marker.assessment["stale_reason"],
+                    "path": format!("runs/.inflight/{}", marker.file)
+                }));
+                continue;
+            }
+
+            // 先原子改名为 .tmp：真正被判定删除的就是 rename 到的这一份文件；
+            // 若期间被并发清理者替换成新标记，读到的 pid/startedAt 不同，必须还原而不是删。
+            let tmp = self.runs_dir.join(INFLIGHT_DIR).join(format!(
+                "{}.clean-{}-{}.tmp",
+                marker.task_id,
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            ));
+            let moved = match fs::rename(&marker.path, &tmp) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    kept.push(json!({
+                        "task_id": marker.task_id,
+                        "file": marker.file,
+                        "pid": marker.assessment["pid"],
+                        "stale_reason": marker.assessment["stale_reason"],
+                        "reason": "marker_disappeared"
+                    }));
+                    false
+                }
+                Err(error) => {
+                    failed.push(json!({
+                        "task_id": marker.task_id,
+                        "file": marker.file,
+                        "pid": marker.assessment["pid"],
+                        "stale_reason": marker.assessment["stale_reason"],
+                        "error": error.to_string()
+                    }));
+                    false
+                }
+            };
+            if !moved {
+                continue;
+            }
+            let unchanged = read_json(&tmp)
+                .ok()
+                .map(|after| {
+                    after.get("task_id") == marker.record.get("task_id")
+                        && after.get("pid") == marker.record.get("pid")
+                        && after.get("startedAt") == marker.record.get("startedAt")
+                })
+                .unwrap_or(false);
+            if unchanged {
+                match fs::remove_file(&tmp) {
+                    Ok(()) => removed.push(json!({
+                        "task_id": marker.task_id,
+                        "file": marker.file,
+                        "pid": marker.assessment["pid"],
+                        "stale_reason": marker.assessment["stale_reason"],
+                        "path": format!("runs/.inflight/{}", marker.file)
+                    })),
+                    Err(error) => {
+                        let _ = fs::rename(&tmp, &marker.path);
+                        failed.push(json!({
+                            "task_id": marker.task_id,
+                            "file": marker.file,
+                            "pid": marker.assessment["pid"],
+                            "stale_reason": marker.assessment["stale_reason"],
+                            "error": error.to_string()
+                        }));
+                    }
+                }
+            } else {
+                match fs::rename(&tmp, &marker.path) {
+                    Ok(()) => kept.push(json!({
+                        "task_id": marker.task_id,
+                        "file": marker.file,
+                        "pid": marker.assessment["pid"],
+                        "stale_reason": marker.assessment["stale_reason"],
+                        "reason": "marker_changed"
+                    })),
+                    Err(error) => failed.push(json!({
+                        "task_id": marker.task_id,
+                        "file": marker.file,
+                        "pid": marker.assessment["pid"],
+                        "stale_reason": marker.assessment["stale_reason"],
+                        "error": format!("marker_changed_restore_failed: {error}")
+                    })),
+                }
+            }
+        }
+        for entry in &unreadable {
+            kept.push(json!({
+                "task_id": entry["task_id"],
+                "file": entry["file"],
+                "pid": Value::Null,
+                "stale_reason": "unreadable",
+                "reason": "unreadable"
+            }));
+        }
+
+        Ok(json!({
+            "version": INFLIGHT_REPORT_VERSION,
+            "action": "clean",
+            "dry_run": dry_run,
+            "state": state,
+            "directory": "runs/.inflight",
+            "stale_rule": inflight_stale_rule(),
+            "total": markers.len() as u64,
+            "stale_total": stale_total,
+            "active_total": markers.len() as u64 - stale_total,
+            "unreadable_total": unreadable.len() as u64,
+            "would_remove_total": would_remove.len() as u64,
+            "removed_total": removed.len() as u64,
+            "kept_total": kept.len() as u64,
+            "failed_total": failed.len() as u64,
+            "would_remove": would_remove,
+            "removed": removed,
+            "kept": kept,
+            "failed": failed
+        }))
+    }
+
+    /// 只读扫描 `.inflight/*.json`；非 .json 的临时文件不参与枚举，符号链接不跟随
+    fn scan_inflight_markers(
+        &self,
+        filter: Option<&str>,
+    ) -> (Vec<InflightMarker>, Vec<Value>, bool) {
+        let dir = self.runs_dir.join(INFLIGHT_DIR);
+        let exists = dir.is_dir();
+        let mut markers: Vec<InflightMarker> = Vec::new();
+        let mut unreadable: Vec<Value> = Vec::new();
+        if exists {
+            if let Ok(entries) = fs::read_dir(&dir) {
+                let now = chrono::Utc::now();
+                for entry in entries.flatten() {
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_file() {
+                        continue;
+                    }
+                    let file = entry.file_name().to_string_lossy().to_string();
+                    let Some(task_id) = file.strip_suffix(".json").map(str::to_string) else {
+                        continue;
+                    };
+                    if task_id.is_empty() {
+                        continue;
+                    }
+                    if filter.is_some_and(|wanted| wanted != task_id.as_str()) {
+                        continue;
+                    }
+                    let raw = match fs::read_to_string(entry.path()) {
+                        Ok(raw) => raw,
+                        Err(error) => {
+                            unreadable.push(json!({
+                                "task_id": task_id,
+                                "file": file,
+                                "error": error.to_string(),
+                                "stale": false,
+                                "stale_reason": "unreadable",
+                                "removable": false
+                            }));
+                            continue;
+                        }
+                    };
+                    let record: Value = match serde_json::from_str(&raw) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            unreadable.push(json!({
+                                "task_id": task_id,
+                                "file": file,
+                                "error": error.to_string(),
+                                "stale": false,
+                                "stale_reason": "unreadable",
+                                "removable": false
+                            }));
+                            continue;
+                        }
+                    };
+                    let assessment = assess_inflight_marker(&record, now);
+                    markers.push(InflightMarker {
+                        task_id,
+                        file,
+                        path: entry.path(),
+                        record,
+                        assessment,
+                    });
+                }
+            }
+        }
+        markers.sort_by(|left, right| left.task_id.cmp(&right.task_id));
+        unreadable.sort_by(|left, right| {
+            left["file"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["file"].as_str().unwrap_or(""))
+        });
+        (markers, unreadable, exists)
     }
 
     /// 历史台账：task 目录被整体清理后，仍能凭它判定"这是重跑而不是既有结果"
@@ -3583,6 +3886,83 @@ fn inflight_deadline(args: &Value, mode: &str) -> String {
     (chrono::Utc::now() + chrono::Duration::seconds(total as i64)).to_rfc3339()
 }
 
+struct InflightMarker {
+    task_id: String,
+    file: String,
+    path: PathBuf,
+    record: Value,
+    assessment: Value,
+}
+
+fn marker_report(marker: &InflightMarker) -> Value {
+    let mut report = marker.assessment.clone();
+    if let Some(object) = report.as_object_mut() {
+        object.insert("task_id".to_string(), json!(marker.task_id));
+        object.insert("file".to_string(), json!(marker.file));
+    }
+    report
+}
+
+fn parse_stamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>> {
+    value
+        .and_then(Value::as_str)
+        .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        .map(|stamp| stamp.with_timezone(&chrono::Utc))
+}
+
+/// 与 `marker_is_stale` 同源判定，但把依据拆成机器可判的原因码与时间量
+fn assess_inflight_marker(record: &Value, now: chrono::DateTime<chrono::Utc>) -> Value {
+    let pid = record.get("pid").and_then(Value::as_u64);
+    let pid_alive = pid.map(|value| process_is_alive(value as u32));
+    let started = parse_stamp(record.get("startedAt"));
+    let deadline = parse_stamp(record.get("deadlineAt"));
+    let stale = marker_is_stale(record, now);
+    let stale_reason = if stale {
+        if pid.is_some() {
+            "pid_missing"
+        } else {
+            "deadline_expired"
+        }
+    } else if pid_alive == Some(true) {
+        "pid_alive"
+    } else if pid.is_some() {
+        "pid_missing_grace"
+    } else {
+        "deadline_in_grace"
+    };
+    let age_secs = started.map(|started| (now - started).num_seconds().max(0));
+    let deadline_overdue_secs = deadline
+        .map(|deadline| (now - deadline).num_seconds())
+        .filter(|overdue| *overdue > 0);
+    json!({
+        "pid": pid,
+        "pid_alive": pid_alive,
+        "stale": stale,
+        "stale_reason": stale_reason,
+        "removable": stale,
+        "mode": record.get("mode").cloned().unwrap_or(Value::Null),
+        "state": record.get("state").cloned().unwrap_or(Value::Null),
+        "startedAt": record.get("startedAt").cloned().unwrap_or(Value::Null),
+        "deadlineAt": record.get("deadlineAt").cloned().unwrap_or(Value::Null),
+        "age_secs": age_secs,
+        "deadline_overdue_secs": deadline_overdue_secs
+    })
+}
+
+/// 残留判据自描述：调用方不需要读源码即可复算 stale
+fn inflight_stale_rule() -> Value {
+    json!({
+        "pid_alive": "never_stale",
+        "pid_missing_grace_secs": INFLIGHT_PID_MISSING_GRACE_SECS,
+        "pid_missing": "stale",
+        "deadline_grace_secs": INFLIGHT_STALE_GRACE_SECS,
+        "no_pid": "stale_only_after_deadlineAt_plus_deadline_grace_secs",
+        "live_pid_wins_over_deadline": true,
+        "cleanable_only_when": "stale=true",
+        "unreadable": "kept_never_deleted"
+    })
+}
+
 /// 残留判定：pid 仍存活 → 绝不判残留；pid 已消失 → 5s 后判残留；无 pid 时退回 deadline + 宽限
 fn marker_is_stale(record: &Value, now: chrono::DateTime<chrono::Utc>) -> bool {
     let started = record
@@ -4217,6 +4597,247 @@ fn log_argument_diagnostics(diagnostics: &Value) {
     }
 }
 
+/// 当前平台标识：稳定枚举，供能力声明按平台判定
+fn platform_os() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(unix) {
+        "linux"
+    } else {
+        "other"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capability_entry(
+    id: &str,
+    holds: Option<bool>,
+    status: &str,
+    scope: &str,
+    reason_code: Option<&str>,
+    automatic: bool,
+    platforms_verified: &[&str],
+    platforms_unverified: &[&str],
+    evidence: &[&str],
+    detail: &str,
+) -> Value {
+    json!({
+        "id": id,
+        "holds": holds,
+        "status": status,
+        "scope": scope,
+        "reason_code": reason_code,
+        "automatic": automatic,
+        "platforms_verified": platforms_verified,
+        "platforms_unverified": platforms_unverified,
+        "evidence": evidence,
+        "detail": detail
+    })
+}
+
+/// 机器可读的能力与限制声明：每条 claim 用 holds/status/reason_code/平台覆盖表达，
+/// 调用方按字段判定，不依赖描述散文。
+fn capabilities_payload() -> Value {
+    let both = ["windows", "linux"];
+    let entries = vec![
+        capability_entry(
+            "timeout.terminates_controlled_set",
+            Some(true),
+            "proven",
+            "POSIX 进程组 / Windows Job Object（Windows 子进程以挂起态创建，先加入作业再恢复执行）",
+            None,
+            true,
+            &both,
+            &[],
+            &[
+                "timeout_cleanup_three_states",
+                "posix_process_group_cleanup",
+                "windows_job_object_cleanup",
+            ],
+            "只向受控集合发送终止信号；仅当观测到集合内无存活进程才写「已清理受控集合」。",
+        ),
+        capability_entry(
+            "timeout.terminates_once_no_retry",
+            Some(true),
+            "proven",
+            "同一 attempt 内的终止动作只执行一次，不自动重试",
+            None,
+            true,
+            &both,
+            &[],
+            &["timeout_cleanup_three_states"],
+            "终止只尝试一次；未观测到集合内无存活进程时如实报「受控集合内仍有存活进程」。",
+        ),
+        capability_entry(
+            "timeout.cleans_entire_process_tree",
+            Some(false),
+            "not_proven",
+            "受控集合之外：BREAKAWAY、加入作业失败、setsid / 双 fork 等逃逸后代",
+            Some("no_complete_descendant_enumeration"),
+            false,
+            &both,
+            &[],
+            &["timeout_cleanup_three_states"],
+            "不承诺终止整棵进程树；逃逸进程是否仍在运行未验证。",
+        ),
+        capability_entry(
+            "timeout.enumerates_escaped_descendants",
+            Some(false),
+            "not_proven",
+            "无法枚举受控集合之外的进程，只能观测集合内成员",
+            Some("no_complete_descendant_enumeration"),
+            false,
+            &both,
+            &[],
+            &["timeout_cleanup_three_states"],
+            "没有逃逸后代的完整枚举能力，因此不能把「无残留」写成保证。",
+        ),
+        capability_entry(
+            "path.argv_scope_enforced",
+            Some(true),
+            "proven",
+            "standalone argv[1..] 中可判定的路径形态（独立值、--flag=value、引号、相对/绝对/UNC/盘符）",
+            None,
+            true,
+            &both,
+            &[],
+            &[
+                "standalone_argv_path_escape",
+                "standalone_argv_path_unknown",
+            ],
+            "越界在占号前以 standalone_argv_path_escape 拒绝；无法判定的形态放行并记 standalone_argv_path_unknown。",
+        ),
+        capability_entry(
+            "platform.posix_inflight_semantics_verified",
+            Some(false),
+            "partial",
+            "POSIX 上的 inflight create_new、prune rename 到 .prune-trash、pid 存活判定",
+            Some("posix_unverified"),
+            false,
+            &["windows"],
+            &["linux", "macos"],
+            &["posix_fixture_argv_escape"],
+            "POSIX 仅覆盖 argv 作用域夹具；标记与 rename 的跨进程语义未逐条复核。",
+        ),
+        capability_entry(
+            "concurrency.prune_skips_known_active_task",
+            Some(true),
+            "proven",
+            "inflight 快照在候选枚举入口优先于一切候选条件（含超龄非最新 attempt）",
+            None,
+            true,
+            &both,
+            &[],
+            &["prune_skips_task_with_live_inflight_marker"],
+            "标记存在时该 task 只进 skipped[]，记 task_inflight / task_inflight_stale。",
+        ),
+        capability_entry(
+            "concurrency.check_then_delete_atomic",
+            Some(false),
+            "not_proven",
+            "inflight_snapshot 与 rename-to-trash 之间的 TOCTOU 窗口",
+            Some("check_then_delete_not_atomic"),
+            false,
+            &both,
+            &[],
+            &["prune_skips_task_with_live_inflight_marker"],
+            "PM 删除先 rename 再删；并发 acquire 可落在检查之后，检查与删除不是单个原子操作。",
+        ),
+        capability_entry(
+            "inflight.marker_cross_process_visible",
+            Some(true),
+            "proven",
+            "runs/.inflight/<task_id>.json，create_new 原子占位、异常退出留痕",
+            None,
+            true,
+            &both,
+            &[],
+            &["standalone_inflight_marker_is_visible_then_removed"],
+            "执行期间标记跨进程可见；正常结束由 Drop 删除。",
+        ),
+        capability_entry(
+            "inflight.stale_marker_observable",
+            Some(true),
+            "supported",
+            "runs.inflight action=list：逐个标记给出 stale 与 stale_reason",
+            None,
+            true,
+            &["windows"],
+            &["linux", "macos"],
+            &["runs_inflight_lists_and_cleans_only_stale_markers"],
+            "只读查询，不修改任何标记；判据由 stale_rule 机器可读给出。",
+        ),
+        capability_entry(
+            "inflight.stale_marker_cleanable",
+            Some(true),
+            "supported",
+            "runs.inflight action=clean：默认 dry_run，真删需 confirm",
+            None,
+            false,
+            &["windows"],
+            &["linux", "macos"],
+            &["runs_inflight_lists_and_cleans_only_stale_markers"],
+            "只删 stale=true 的标记；清理需调用方显式执行，不是自动清扫。",
+        ),
+        capability_entry(
+            "inflight.stale_markers_auto_swept",
+            Some(false),
+            "not_proven",
+            "无调用方操作时的自动清扫",
+            Some("explicit_cleanup_required"),
+            false,
+            &["windows"],
+            &["linux", "macos"],
+            &["runs_inflight_clean_requires_explicit_confirmation"],
+            "残留标记不会自行消失；必须调用 runs.inflight action=clean。",
+        ),
+        capability_entry(
+            "inflight.clean_preserves_active_markers",
+            Some(true),
+            "proven",
+            "pid 存活优先于 deadline：活跃标记永不进入可删集合",
+            None,
+            false,
+            &["windows"],
+            &["linux", "macos"],
+            &["runs_inflight_lists_and_cleans_only_stale_markers"],
+            "删除前把标记原子改名为临时文件并复核 pid+startedAt；变化则还原保留。",
+        ),
+    ];
+    let not_proven_total = entries
+        .iter()
+        .filter(|entry| entry["holds"] == json!(false))
+        .count() as u64;
+
+    json!({
+        "version": CAPABILITIES_VERSION,
+        "platform": {
+            "os": platform_os(),
+            "arch": std::env::consts::ARCH
+        },
+        "status_enum": ["proven", "not_proven", "partial", "unverified", "supported"],
+        "decision_rule": {
+            "holds": {
+                "true": "在 scope 与 platforms_verified 内保证成立",
+                "false": "明确不成立或未证明，原因见 reason_code",
+                "null": "本环境未验证"
+            },
+            "status": {
+                "proven": "有可复现的测试证据",
+                "not_proven": "无证据或已证明不成立",
+                "partial": "仅部分平台或部分路径有证据",
+                "unverified": "本环境未验证",
+                "supported": "由本工具运行时提供，可查询或可执行"
+            }
+        },
+        "entries_total": entries.len() as u64,
+        "not_proven_total": not_proven_total,
+        "entries": entries
+    })
+}
+
 fn tools() -> Value {
     json!([
         {
@@ -4227,6 +4848,11 @@ fn tools() -> Value {
         {
             "name": "status",
             "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，初始化审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo；仅审计弱识别，不构成身份），以及连接级计数 connections（unit=connection：进程内无会话概念，stdio 单连接故 active/total/peak 恒为 1，initialize_total 随 initialize 次数累加，多份 initialize 不等于多会话；仅观测，不做准入或上限）；不回显任何配置值",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "capabilities",
+            "description": "机器可读的能力与限制声明（只读，无参数）：entries[] 逐条给出 id、holds（true/false/null）、status、scope、reason_code、platforms_verified、platforms_unverified、automatic、evidence、detail。holds=true 表示在 scope 内保证成立；holds=false 表示明确不成立或未证明，原因必须看 reason_code；holds=null 表示本环境未验证。status 取值 proven/not_proven/partial/unverified/supported。调用方按字段直接判定哪些保证成立、哪些不成立及边界，不依赖描述散文；stale 标记、TOCTOU、POSIX 覆盖等限制均以 reason_code 暴露",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -4314,6 +4940,21 @@ fn tools() -> Value {
                     "offset": { "type": "integer", "minimum": 0, "description": "跳过多少条，默认 0" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本页条数，默认 20" }
                 },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "runs.inflight",
+            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "clean"], "description": "必填：list 只读列出标记；clean 清理 stale=true 的残留标记" },
+                    "task_id": { "type": "string", "description": "可选：只处理该 task_id 的标记；须与任务目录同一命名校验（仅字母数字与 . _ -，且不以 _ 或 . 开头）" },
+                    "dry_run": { "type": "boolean", "description": "clean 默认 true：只报告 would_remove、不删除；false 才真删（还需 confirm=true）" },
+                    "confirm": { "type": "boolean", "description": "clean 真删必须显式 true；单独 true 不隐含真删" }
+                },
+                "required": ["action"],
                 "additionalProperties": false
             }
         },

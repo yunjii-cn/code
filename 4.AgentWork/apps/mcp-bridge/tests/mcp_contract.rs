@@ -75,12 +75,14 @@ fn tools_list_exposes_read_and_execution_tools() {
         vec![
             "health",
             "status",
+            "capabilities",
             "task.execute",
             "receipt.get",
             "runs.list",
+            "runs.inflight",
             "runs.prune"
         ],
-        "执行层至少需要接单、回执读取、只读枚举与显式清理四个入口"
+        "执行层至少需要接单、回执读取、只读枚举与显式清理四个入口；能力声明与活跃标记查询必须机器可读"
     );
     for tool in tools {
         assert!(
@@ -5951,5 +5953,478 @@ fn strict_arguments_meta_allows_declared_and_omitted_optionals() {
             .all(|entry| entry["kind"] == "client_metadata"),
         "严格模式只放行 _meta 这类客户端元数据：{payload}"
     );
+}
+
+// ---- v1.32：机器可读的能力/限制声明与 inflight 残留清理 ----
+
+/// 真实不存在的 pid：POSIX `kill(pid,0)` 与 Windows `OpenProcess` 都必须判为已消失
+const DEAD_PID: u64 = 999_999_999;
+
+fn write_inflight_marker(runs: &Path, task_id: &str, pid: u64, started_at: &str, deadline_at: &str) {
+    let dir = runs.join(".inflight");
+    fs::create_dir_all(&dir).expect("创建 .inflight 目录");
+    fs::write(
+        dir.join(format!("{task_id}.json")),
+        json!({
+            "version": "inflight-marker/1",
+            "task_id": task_id,
+            "pid": pid,
+            "mode": "dispatched",
+            "state": "active",
+            "startedAt": started_at,
+            "deadlineAt": deadline_at
+        })
+        .to_string(),
+    )
+    .expect("写入活跃标记");
+}
+
+fn claim<'a>(payload: &'a Value, id: &str) -> &'a Value {
+    payload["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("entries 必须是数组：{payload}"))
+        .iter()
+        .find(|entry| entry["id"] == id)
+        .unwrap_or_else(|| panic!("缺少能力声明 {id}：{payload}"))
+}
+
+/// 能力/限制必须逐条机器可判定：holds + status + reason_code + 平台覆盖，而不是一段散文
+#[test]
+fn capabilities_declares_machine_readable_boundaries() {
+    let (server, _settings, _runs) = server_with_runs();
+    let response = call_tool(&server, "capabilities", json!({}));
+    assert_eq!(
+        response["result"]["isError"], false,
+        "能力声明必须可读取：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["version"], "capabilities/1", "{payload}");
+    let platform_os = payload["platform"]["os"]
+        .as_str()
+        .expect("platform.os 必须是字符串");
+    assert!(
+        ["windows", "linux", "macos", "other"].contains(&platform_os),
+        "platform.os 必须是稳定枚举之一：{payload}"
+    );
+    assert!(
+        payload["platform"]["arch"].as_str().is_some(),
+        "platform.arch 必须回显：{payload}"
+    );
+
+    let entries = payload["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("entries 必须是数组：{payload}"));
+    assert!(!entries.is_empty(), "能力声明不得为空：{payload}");
+    assert_eq!(
+        payload["entries_total"].as_u64(),
+        Some(entries.len() as u64),
+        "entries_total 必须可核对：{payload}"
+    );
+
+    let statuses = payload["status_enum"]
+        .as_array()
+        .unwrap_or_else(|| panic!("status_enum 必须是数组：{payload}"));
+    let allowed_status: Vec<&str> = ["proven", "not_proven", "partial", "unverified", "supported"]
+        .to_vec();
+    let declared: Vec<&str> = statuses
+        .iter()
+        .map(|value| value.as_str().expect("status_enum 元素必须是字符串"))
+        .collect();
+    assert_eq!(declared, allowed_status, "status 枚举必须稳定：{payload}");
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut not_proven = 0u64;
+    for entry in entries {
+        let id = entry["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("每条声明必须有 id：{entry}"));
+        assert!(!ids.iter().any(|seen| seen == id), "声明 id 不得重复：{id}");
+        ids.push(id.to_string());
+        assert!(
+            entry["scope"].as_str().map(|scope| !scope.is_empty()).unwrap_or(false),
+            "{id} 必须有明确的适用范围 scope"
+        );
+        assert!(entry["holds"].is_boolean() || entry["holds"].is_null(), "{id} holds 必须是 true/false/null：{entry}");
+        assert!(entry["automatic"].is_boolean(), "{id} automatic 必须是布尔：{entry}");
+        assert!(entry["platforms_verified"].is_array(), "{id} platforms_verified 必须是数组：{entry}");
+        assert!(entry["platforms_unverified"].is_array(), "{id} platforms_unverified 必须是数组：{entry}");
+        let status = entry["status"].as_str().expect("status 必须是字符串");
+        assert!(declared.contains(&status), "{id} status={status} 不在枚举内");
+        let holds = entry["holds"].as_bool();
+        if holds == Some(false) {
+            not_proven += 1;
+            let reason = entry["reason_code"].as_str().unwrap_or_default();
+            assert!(
+                !reason.is_empty(),
+                "{id} 不成立时必须给出机器可判的原因码，不能只写散文：{entry}"
+            );
+        }
+        if matches!(status, "proven" | "supported") {
+            assert_eq!(holds, Some(true), "{id} status={status} 必须 holds=true：{entry}");
+        }
+        if status == "unverified" {
+            assert!(holds.is_none(), "{id} 未验证必须 holds=null：{entry}");
+        }
+    }
+    assert_eq!(
+        payload["not_proven_total"].as_u64(),
+        Some(not_proven),
+        "not_proven_total 必须可核对：{payload}"
+    );
+
+    let rule = &payload["decision_rule"]["holds"];
+    for key in ["true", "false", "null"] {
+        assert!(
+            rule[key].as_str().map(|text| !text.is_empty()).unwrap_or(false),
+            "decision_rule.holds.{key} 必须有语义说明：{payload}"
+        );
+    }
+
+    // #3 窄判据：只保证清空受控集合，明确不保证整棵树与逃逸后代
+    let controlled = claim(&payload, "timeout.terminates_controlled_set");
+    assert_eq!(controlled["holds"], true, "{controlled}");
+    assert_eq!(controlled["status"], "proven", "{controlled}");
+    let whole_tree = claim(&payload, "timeout.cleans_entire_process_tree");
+    assert_eq!(whole_tree["holds"], false, "{whole_tree}");
+    assert_eq!(whole_tree["status"], "not_proven", "{whole_tree}");
+    assert_eq!(
+        whole_tree["reason_code"], "no_complete_descendant_enumeration",
+        "{whole_tree}"
+    );
+    let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
+    assert_eq!(escaped["holds"], false, "{escaped}");
+    assert_eq!(
+        escaped["reason_code"], "no_complete_descendant_enumeration",
+        "{escaped}"
+    );
+
+    // POSIX 未覆盖
+    let posix = claim(&payload, "platform.posix_inflight_semantics_verified");
+    assert_eq!(posix["holds"], false, "{posix}");
+    assert_eq!(posix["status"], "partial", "{posix}");
+    assert_eq!(posix["reason_code"], "posix_unverified", "{posix}");
+    assert!(
+        posix["platforms_unverified"]
+            .as_array()
+            .expect("platforms_unverified")
+            .contains(&json!("linux")),
+        "POSIX 未覆盖必须机器可见：{posix}"
+    );
+
+    // TOCTOU：检查与删除不是原子操作
+    let toctou = claim(&payload, "concurrency.check_then_delete_atomic");
+    assert_eq!(toctou["holds"], false, "{toctou}");
+    assert_eq!(toctou["status"], "not_proven", "{toctou}");
+    assert_eq!(toctou["reason_code"], "check_then_delete_not_atomic", "{toctou}");
+
+    // 残留标记：可观察、可清理，但不自动清扫
+    let observable = claim(&payload, "inflight.stale_marker_observable");
+    assert_eq!(observable["holds"], true, "{observable}");
+    assert_eq!(observable["status"], "supported", "{observable}");
+    assert_eq!(observable["automatic"], true, "{observable}");
+    let cleanable = claim(&payload, "inflight.stale_marker_cleanable");
+    assert_eq!(cleanable["holds"], true, "{cleanable}");
+    assert_eq!(cleanable["automatic"], false, "清理需要调用方显式执行：{cleanable}");
+    let auto = claim(&payload, "inflight.stale_markers_auto_swept");
+    assert_eq!(auto["holds"], false, "{auto}");
+    assert_eq!(auto["reason_code"], "explicit_cleanup_required", "{auto}");
+}
+
+/// 残留态可见、可清、且活跃标记永不误删；正常结束后无残留
+#[test]
+fn runs_inflight_lists_and_cleans_only_stale_markers() {
+    let (server, _settings, runs) = server_with_runs();
+
+    // 残留：pid 已消失且已过有效期
+    write_inflight_marker(
+        runs.path(),
+        "stale-task",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    // 活跃：本进程 pid 存活，即使 deadline 已过也不得判残留
+    write_inflight_marker(
+        runs.path(),
+        "active-task",
+        std::process::id() as u64,
+        &days_ago_stamp(0),
+        &days_ago_stamp(1),
+    );
+
+    let listed = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "list" }),
+    ));
+    assert_eq!(listed["version"], "inflight-report/1", "{listed}");
+    assert_eq!(listed["total"], 2, "{listed}");
+    assert_eq!(listed["stale_total"], 1, "{listed}");
+    assert_eq!(listed["active_total"], 1, "{listed}");
+    let markers = listed["markers"].as_array().expect("markers 必须是数组");
+    let stale = markers
+        .iter()
+        .find(|marker| marker["task_id"] == "stale-task")
+        .unwrap_or_else(|| panic!("必须列出 stale-task：{listed}"));
+    assert_eq!(stale["stale"], true, "{stale}");
+    assert_eq!(stale["stale_reason"], "pid_missing", "{stale}");
+    assert_eq!(stale["pid_alive"], false, "{stale}");
+    assert_eq!(stale["removable"], true, "{stale}");
+    let active = markers
+        .iter()
+        .find(|marker| marker["task_id"] == "active-task")
+        .unwrap_or_else(|| panic!("必须列出 active-task：{listed}"));
+    assert_eq!(active["stale"], false, "{active}");
+    assert_eq!(active["stale_reason"], "pid_alive", "{active}");
+    assert_eq!(active["pid_alive"], true, "{active}");
+    assert_eq!(active["removable"], false, "{active}");
+
+    // 标记目录不得污染 runs.list 的任务枚举
+    let task_list = tool_payload(&call_tool(&server, "runs.list", json!({})));
+    assert_eq!(task_list["total_tasks"], 0, "标记目录不是任务：{task_list}");
+
+    // 默认 dry_run：只报告 would_remove，不删除任何文件
+    let dry = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean" }),
+    ));
+    assert_eq!(dry["dry_run"], true, "{dry}");
+    assert_eq!(dry["would_remove_total"], 1, "{dry}");
+    assert_eq!(dry["removed_total"], 0, "{dry}");
+    assert!(inflight_marker(runs.path(), "stale-task").exists(), "dry-run 不得删文件");
+    assert!(inflight_marker(runs.path(), "active-task").exists(), "dry-run 不得删文件");
+
+    // 真清：只删 stale；活跃标记必须保留
+    let cleaned = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean", "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(cleaned["removed_total"], 1, "{cleaned}");
+    assert_eq!(cleaned["failed_total"], 0, "{cleaned}");
+    let removed = cleaned["removed"].as_array().expect("removed 必须是数组");
+    assert_eq!(removed[0]["task_id"], "stale-task", "{cleaned}");
+    assert_eq!(removed[0]["stale_reason"], "pid_missing", "{cleaned}");
+    assert!(
+        !inflight_marker(runs.path(), "stale-task").exists(),
+        "残留标记必须被清理：{cleaned}"
+    );
+    assert!(
+        inflight_marker(runs.path(), "active-task").exists(),
+        "活跃标记不得被误删：{cleaned}"
+    );
+    let kept = cleaned["kept"].as_array().expect("kept 必须是数组");
+    assert!(
+        kept.iter().any(|entry| entry["task_id"] == "active-task"
+            && entry["reason"] == "not_stale"),
+        "保留项必须给出原因：{cleaned}"
+    );
+
+    // 幂等：再次清理不删任何东西
+    let again = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean", "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(again["removed_total"], 0, "{again}");
+    assert_eq!(again["stale_total"], 0, "{again}");
+
+    // 正常结束的任务不得留下标记
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "no-residue", "cmd": "echo done", "timeout_secs": 30 }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert!(
+        !inflight_marker(runs.path(), "no-residue").exists(),
+        "正常结束后必须无残留标记"
+    );
+    let after = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "list" }),
+    ));
+    assert_eq!(after["total"], 1, "只剩活跃标记：{after}");
+    assert_eq!(after["stale_total"], 0, "{after}");
+}
+
+#[test]
+fn runs_inflight_clean_requires_explicit_confirmation() {
+    let (server, _settings, runs) = server_with_runs();
+    write_inflight_marker(
+        runs.path(),
+        "stale-guard",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    let response = call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean", "dry_run": false }),
+    );
+    assert_eq!(response["result"]["isError"], true, "{}", tool_text(&response));
+    let payload = tool_payload(&response);
+    let error = payload["error"].as_str().expect("必须回传具名错误");
+    assert!(
+        error.starts_with("confirm_required"),
+        "真删必须显式 confirm=true：{error}"
+    );
+    assert!(
+        inflight_marker(runs.path(), "stale-guard").exists(),
+        "未确认时不得删除"
+    );
+
+    let invalid = call_tool(&server, "runs.inflight", json!({ "action": "purge" }));
+    assert_eq!(invalid["result"]["isError"], true, "{}", tool_text(&invalid));
+    let payload = tool_payload(&invalid);
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("invalid_arguments"),
+        "{payload}"
+    );
+}
+
+/// 读不懂的标记不得当作可删：保留文件并如实报告 unreadable
+#[test]
+fn runs_inflight_keeps_unreadable_marker() {
+    let (server, _settings, runs) = server_with_runs();
+    let dir = runs.path().join(".inflight");
+    fs::create_dir_all(&dir).expect("创建 .inflight");
+    fs::write(dir.join("bad.json"), "{not-json").expect("写入坏标记");
+
+    let listed = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "list" }),
+    ));
+    assert_eq!(listed["total"], 0, "{listed}");
+    assert_eq!(listed["unreadable_total"], 1, "{listed}");
+    let unreadable = listed["unreadable"].as_array().expect("unreadable 必须是数组");
+    assert_eq!(unreadable[0]["file"], "bad.json", "{listed}");
+    assert_eq!(unreadable[0]["stale_reason"], "unreadable", "{listed}");
+    assert_eq!(unreadable[0]["removable"], false, "{listed}");
+
+    let cleaned = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean", "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(cleaned["removed_total"], 0, "{cleaned}");
+    assert!(
+        dir.join("bad.json").exists(),
+        "不可读标记不得被删除：{cleaned}"
+    );
+    assert!(
+        cleaned["kept"]
+            .as_array()
+            .expect("kept 必须是数组")
+            .iter()
+            .any(|entry| entry["file"] == "bad.json" && entry["reason"] == "unreadable"),
+        "必须逐条说明保留原因：{cleaned}"
+    );
+}
+
+/// 真实 stdio 多进程：正常结束无残留；外部构造的 pid 消失+超时标记可被识别并清掉
+#[test]
+fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let exe = env!("CARGO_BIN_EXE_aw-mcp-bridge");
+    let runs = Path::new(exe).parent().expect("可执行文件目录").join("runs");
+    let task_id = format!("inflight-real-{}", std::process::id());
+    let stale_id = format!("{task_id}-stale");
+    let stale_marker = runs.join(".inflight").join(format!("{stale_id}.json"));
+    let task_dir = runs.join(&task_id);
+    let _ = fs::remove_file(&stale_marker);
+    let _ = fs::remove_dir_all(&task_dir);
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mut child = std::process::Command::new(exe)
+        .env("APPDATA", home.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("启动真实 bridge 进程");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+    let mut exchange = |id: u64, method: &str, params: Value| -> Value {
+        writeln!(
+            stdin,
+            "{}",
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+        )
+        .expect("写入请求");
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("读取响应失败");
+        serde_json::from_str(line.trim()).expect("响应必须是 JSON")
+    };
+    let text_payload = |response: &Value| -> Value {
+        serde_json::from_str(
+            response["result"]["content"][0]["text"]
+                .as_str()
+                .expect("必须是文本载荷"),
+        )
+        .expect("载荷必须是 JSON")
+    };
+
+    exchange(1, "initialize", json!({}));
+    let capabilities = text_payload(&exchange(2, "tools/call", json!({
+        "name": "capabilities", "arguments": {}
+    })));
+    assert_eq!(capabilities["version"], "capabilities/1", "{capabilities}");
+
+    let executed = text_payload(&exchange(3, "tools/call", json!({
+        "name": "task.execute",
+        "arguments": { "task_id": task_id, "cmd": "echo done", "timeout_secs": 30 }
+    })));
+    assert_eq!(executed["status"], "ok", "{executed}");
+    let after_run = text_payload(&exchange(4, "tools/call", json!({
+        "name": "runs.inflight", "arguments": { "action": "list" }
+    })));
+    assert_eq!(after_run["total"], 0, "正常结束后不得有残留标记：{after_run}");
+
+    // 外部构造：pid 已消失 + deadline 已过
+    fs::create_dir_all(runs.join(".inflight")).expect("创建 .inflight");
+    fs::write(
+        &stale_marker,
+        json!({
+            "version": "inflight-marker/1",
+            "task_id": stale_id,
+            "pid": DEAD_PID,
+            "mode": "dispatched",
+            "state": "active",
+            "startedAt": days_ago_stamp(2),
+            "deadlineAt": days_ago_stamp(1)
+        })
+        .to_string(),
+    )
+    .expect("写入残留标记");
+
+    let listed = text_payload(&exchange(5, "tools/call", json!({
+        "name": "runs.inflight", "arguments": { "action": "list" }
+    })));
+    assert_eq!(listed["stale_total"], 1, "{listed}");
+    let marker = &listed["markers"][0];
+    assert_eq!(marker["task_id"], stale_id, "{listed}");
+    assert_eq!(marker["stale_reason"], "pid_missing", "{listed}");
+
+    let cleaned = text_payload(&exchange(6, "tools/call", json!({
+        "name": "runs.inflight",
+        "arguments": { "action": "clean", "dry_run": false, "confirm": true }
+    })));
+    assert_eq!(cleaned["removed_total"], 1, "{cleaned}");
+    assert!(!stale_marker.exists(), "残留标记必须被真实清理");
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = fs::remove_dir_all(&task_dir);
 }
 

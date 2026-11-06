@@ -8,7 +8,7 @@
   - **不一致（已修）**：v1.14 之前描述与实现相反/缺失，**本批已改**。
   - **未实现却写了**：描述承诺了实现里根本不存在的约束或能力。
 
-> 口径提示：`tools/list` 当前是 **6 个工具**（`health` / `status` / `task.execute` / `receipt.get` / `runs.list` / `runs.prune`）。"四/五个工具"是 v1.5 之前（`runs.list` 尚未加入）的口径；本对照按当前实现全量覆盖。
+> 口径提示：`tools/list` 当前是 **8 个工具**（`health` / `status` / `capabilities` / `task.execute` / `receipt.get` / `runs.list` / `runs.inflight` / `runs.prune`）。"四/五个工具"是 v1.5 之前（`runs.list` 尚未加入）的口径；本对照按当前实现全量覆盖。
 
 ---
 
@@ -1245,6 +1245,9 @@ cargo test -p aw-mcp-bridge description_gate
 | G14 | `task.execute` | `inputSchema.properties.acceptance.description` | standalone 必填；file_exists；file_content_match；git_diff_non_empty；standalone_path_escape；未声明验收不得默认通过 | 视为通过 | `description_gate_standalone_mode_boundary` |
 | G15 | `runs.prune` | `inputSchema.properties.exclude.description` | 按条目精确排除；task_id；attempt；不得重复；命名校验；invalid_exclusion；not_in_candidates；枚举入口生效 | 默认排除；自动排除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 | G16 | `task.execute` | `inputSchema.properties.argv.description` | argv[1..]；携带路径；按规范化后的真实位置校验；standalone_argv_path_escape；standalone_argv_path_unknown；argv_path_scan；不按路径校验；占号前 | 不做作用域校验；忽略参数中的路径 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
+| G17 | `capabilities` | `description` | 机器可读；holds（true/false/null）；status；scope；reason_code；platforms_verified；platforms_unverified；automatic；不依赖描述散文 | 仅见文档；无法机器判定 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`capabilities_declares_machine_readable_boundaries` |
+| G18 | `runs.inflight` | `description` | runs/.inflight/<task_id>.json；action=list；stale_reason；pid_alive；pid_missing_grace；deadline_expired；unreadable；dry_run=true；confirm=true；活跃标记永不删除；pid+startedAt；would_remove；不进入 runs.prune 候选 | 自动清扫；自动删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`runs_inflight_lists_and_cleans_only_stale_markers` |
+| G19 | `runs.inflight` | `inputSchema.properties.action.description` | list；clean；stale=true | 默认 clean；隐式删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
 
@@ -1252,7 +1255,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922",
+  "tools_sha256": "37f7f9b0ee7d121e3f588bb65459fdedb7266d17ed744028204f915499dbcd5b",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1366,6 +1369,27 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "inputSchema.properties.argv.description",
       "contains": ["argv[1..]", "携带路径", "按规范化后的真实位置校验", "standalone_argv_path_escape", "standalone_argv_path_unknown", "argv_path_scan", "不按路径校验", "占号前"],
       "not_contains": ["不做作用域校验", "忽略参数中的路径"]
+    },
+    {
+      "id": "G17",
+      "tool": "capabilities",
+      "path": "description",
+      "contains": ["机器可读", "holds（true/false/null）", "status", "scope", "reason_code", "platforms_verified", "platforms_unverified", "automatic", "不依赖描述散文"],
+      "not_contains": ["仅见文档", "无法机器判定"]
+    },
+    {
+      "id": "G18",
+      "tool": "runs.inflight",
+      "path": "description",
+      "contains": ["runs/.inflight/<task_id>.json", "action=list", "stale_reason", "pid_alive", "pid_missing_grace", "deadline_expired", "unreadable", "dry_run=true", "confirm=true", "活跃标记永不删除", "pid+startedAt", "would_remove", "不进入 runs.prune 候选"],
+      "not_contains": ["自动清扫", "自动删除"]
+    },
+    {
+      "id": "G19",
+      "tool": "runs.inflight",
+      "path": "inputSchema.properties.action.description",
+      "contains": ["list", "clean", "stale=true"],
+      "not_contains": ["默认 clean", "隐式删除"]
     }
   ]
 }
@@ -1385,11 +1409,13 @@ cargo test -p aw-mcp-bridge description_gate
 | 三态回执文案 | `timeout_reason` 的三个 `CleanupOutcome` 分支各自必须出现对应措辞；描述必须列出三态；任何分支都不得出现"已终止进程树/无残留" |
 | 超时作用域 | 描述必须写明受控集合（POSIX 进程组 / Windows Job Object）、"不承诺终止整棵进程树"、"逃逸进程……未验证"；不得包含"会终止整棵进程树" |
 | `status` 能力位 | schema 必须声明 `status`（`array`、`minItems=1`、`uniqueItems=true`、`enum=[ok,failed,blocked]`）；行为上显式白名单确实过滤，未知 `tier` 被忽略（无服务端分档） |
-| `additionalProperties` 只声明不强制 | 六个工具的 schema 全部声明 `additionalProperties:false`；同时带未知参数调用不被拒绝、未知参数不生效 |
+| `additionalProperties` 只声明不强制 | 全部工具的 schema 全部声明 `additionalProperties:false`；同时带未知参数调用不被拒绝、未知参数不生效 |
 | `_session` 不作为任务 | `runs.list` 与 `runs.prune` 在有 `_session` 的 runs 目录下都不把它当任务/候选 |
 | `limit` 缺省值 | `runs.list` 缺省回显 `limit=20` 且只回 20 条；`runs.prune` 缺省回显 `limit=100`；`limit` 在 `status` 过滤之后生效（过滤后截断、`truncated=true`） |
 | 连接计数（v1.23） | 描述必须写明连接级 `connections`、无会话概念、`active/total/peak` 恒为 1、`initialize_total` 累加、只观测；真实 stdio 进程两次 `initialize` 后必须读到 `initialize_total=2` 且 `total/peak/active=1` |
 | 终止只尝试一次（v1.24） | `task.execute` 与 `timeout_secs` 描述必须写明「终止只尝试一次（不重试）」「只有观测到集合内无存活进程才写「已清理受控集合」」；不得出现「自动重试」；两平台压力用例必须证明一次终止后判据归零（POSIX `kill(-pgid,0)==ESRCH`、Windows `ActiveProcesses==0`） |
+| 能力边界可判定（v1.32） | `capabilities.entries[]` 必须逐条含 `id`/`holds`/`status`/`scope`/`reason_code`/`platforms_verified`/`platforms_unverified`/`automatic`；`status` 必须落在枚举内；`holds=false` 必须有非空原因码；`#3` 整树、逃逸枚举、POSIX 覆盖、TOCTOU、自动清扫五个限制必须有具名条目；`entries_total`/`not_proven_total` 可核对 |
+| 残留标记可观察可清（v1.32） | `runs.inflight action=list` 必须对构造的 `pid` 消失+超时标记给出 `stale=true`/`stale_reason=pid_missing`；`pid` 存活的活跃标记即使 deadline 已过也必须 `stale=false`；默认 `clean` 只出 `would_remove`；真删需 `confirm`；清理后残留文件消失、活跃文件保留、二次清理幂等；正常执行结束无残留；坏 JSON 保留并记 `unreadable` |
 
 ### 21.5 仍然只能靠人的部分（不做自动覆盖）
 
@@ -1401,6 +1427,7 @@ cargo test -p aw-mcp-bridge description_gate
 | PM 侧能力门禁（先读 schema 再决定是否携带 `status`） | 属调用方行为；服务端只能保证 schema 事实存在，无法验证 PM 是否遵守 |
 | "一次终止即足够"的跨环境普适性（v1.24） | 门禁与两平台用例只能证明本机（Windows 作业对象 / WSL Ubuntu 24.04 内核）在这些夹具下成立；内核调度、D 状态、NFS 等等待无法在本环境穷举。可自动验证的是"未观测到空只能报 StillAlive"与"一次终止后判据归零"两个方向 |
 | `additionalProperties:false` 对严格客户端的效果 | 严格客户端可能在发送前就拒绝未知参数，服务端观测不到；门禁只验证服务端"自己不拒绝" |
+| 残留判定对真实崩溃的普适性（v1.32） | 用例构造的是"pid 数字不存在 + 时间已过"的确定性夹具；真实崩溃后 pid 复用、进程僵死/挂起、时间回拨等无法穷举。能自动验证的是"存活 pid 绝不判残留"与"消失 pid + 超宽限必判残留"两个方向 |
 | 三态文案在真实超时下的分支归属 | 需要真实进程/竞态；门禁只保证文案函数与描述一致，真实分支由 POSIX/Windows 证据用例覆盖 |
 | 回执内容（stdout/stderr 正文、耗时、产物哈希）的运行时正确性 | 依赖真实执行环境与文件系统状态；门禁只对齐描述措辞，正确性由执行层用例承担 |
 
@@ -2964,3 +2991,109 @@ test result: ok. 108 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 
 
+
+## 33. v1.32：能力/限制机器可读 + inflight 残留可观察可清（红→绿 + 真实 stdio 回执）
+
+### 33.1 要关的两件事
+
+1. 文档里的边界（`#3` 窄判据、POSIX 未覆盖、TOCTOU、残留不自动清）此前只有文字，调用方读不到。新增只读工具 `capabilities`，把每条边界做成 claim：`id` / `holds`（`true|false|null`）/ `status` / `scope` / `reason_code` / `platforms_verified` / `platforms_unverified` / `automatic` / `evidence`。判定只看字段，`holds=false` 必带非空 `reason_code`。
+2. 残留 `.inflight` 标记此前只能靠人工删文件。新增 `runs.inflight`（`action=list|clean`）：`list` 只读给出 `stale`/`stale_reason`/`pid_alive`/时间窗与机器可读 `stale_rule`；`clean` 默认 `dry_run=true`，真删需 `dry_run=false`+`confirm=true`，只删 `stale=true`，活跃标记（pid 存活）永不删除。
+
+### 33.2 红原文（HEAD 未实现时，原样）
+
+`cargo test -p aw-mcp-bridge --test mcp_contract capabilities_declares_machine_readable_boundaries`：
+
+```text
+thread 'capabilities_declares_machine_readable_boundaries' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5996:5:
+assertion `left == right` failed: 能力声明必须可读取：{"error":"未知工具：capabilities"}
+  left: Bool(true)
+ right: false
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 114 filtered out
+```
+
+`cargo test -p aw-mcp-bridge --test mcp_contract runs_inflight_`：
+
+```text
+thread 'runs_inflight_clean_requires_explicit_confirmation' panicked at apps\mcp-bridge\tests\mcp_contract.rs:6272:5:
+真删必须显式 confirm=true：未知工具：runs.inflight
+thread 'runs_inflight_keeps_unreadable_marker' panicked at apps\mcp-bridge\tests\mcp_contract.rs:6306:5:
+assertion `left == right` failed: {"error":"未知工具：runs.inflight"}
+  left: Null
+ right: 0
+thread 'runs_inflight_lists_and_cleans_only_stale_markers' panicked at apps\mcp-bridge\tests\mcp_contract.rs:6161:5:
+assertion `left == right` failed: {"error":"未知工具：runs.inflight"}
+  left: Null
+ right: "inflight-report/1"
+thread 'runs_inflight_real_stdio_observes_and_cleans_stale_marker' panicked at apps\mcp-bridge\tests\mcp_contract.rs:6382:5:
+assertion `left == right` failed: {"error":"未知工具：capabilities"}
+  left: Null
+ right: "capabilities/1"
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 111 filtered out
+```
+
+### 33.3 绿
+
+`cargo test -p aw-mcp-bridge`（Windows，本机）：
+
+```text
+running 10 tests
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+running 115 tests
+test result: ok. 115 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+其中新增 6 条用例：`capabilities_declares_machine_readable_boundaries`、`runs_inflight_lists_and_cleans_only_stale_markers`、`runs_inflight_clean_requires_explicit_confirmation`、`runs_inflight_keeps_unreadable_marker`、`runs_inflight_real_stdio_observes_and_cleans_stale_marker`，以及既有 `tools_list_exposes_read_and_execution_tools` 的名单扩到 8 个工具（属加强断言，未放宽任何旧断言）。
+
+### 33.4 真实 stdio 回执（独立进程，非进程内调用）
+
+夹具：`target\debug\runs\.inflight\stdio-stale.json`（`pid=999999999`、`startedAt` 两天前、`deadlineAt` 一天前）与 `stdio-active.json`（`pid` 为当前 PowerShell 进程、`deadlineAt` 一天前）；先真实执行 `task.execute`（`echo done`），再查询/清理。
+
+正常结束后查询（`action=list`，`result.content[0].text` 解码后原样）：
+
+```json
+{"action":"list","active_total":1,"directory":"runs/.inflight","markers":[{"age_secs":3601,"deadlineAt":"2026-11-05T22:26:46Z","deadline_overdue_secs":86401,"file":"stdio-active.json","mode":"dispatched","pid":197288,"pid_alive":true,"removable":false,"stale":false,"stale_reason":"pid_alive","startedAt":"2026-11-06T21:26:46Z","state":"active","task_id":"stdio-active"},{"age_secs":172801,"deadlineAt":"2026-11-05T22:26:46Z","deadline_overdue_secs":86401,"file":"stdio-stale.json","mode":"dispatched","pid":999999999,"pid_alive":false,"removable":true,"stale":true,"stale_reason":"pid_missing","startedAt":"2026-11-04T22:26:46Z","state":"active","task_id":"stdio-stale"}],"stale_rule":{"cleanable_only_when":"stale=true","deadline_grace_secs":120,"live_pid_wins_over_deadline":true,"no_pid":"stale_only_after_deadlineAt_plus_deadline_grace_secs","pid_alive":"never_stale","pid_missing":"stale","pid_missing_grace_secs":5,"unreadable":"kept_never_deleted"},"stale_total":1,"state":"ready","total":2,"unreadable":[],"unreadable_total":0,"version":"inflight-report/1"}
+```
+
+说明：正常执行刚结束时先查过一次 `total=0`（无残留）；随后才写入两个夹具标记。
+
+dry-run（`action=clean`，默认）：
+
+```json
+{"action":"clean","active_total":1,"directory":"runs/.inflight","dry_run":true,"failed":[],"failed_total":0,"kept":[{"file":"stdio-active.json","pid":197288,"reason":"not_stale","stale_reason":"pid_alive","task_id":"stdio-active"}],"kept_total":1,"removed":[],"removed_total":0,"stale_rule":{"cleanable_only_when":"stale=true","deadline_grace_secs":120,"live_pid_wins_over_deadline":true,"no_pid":"stale_only_after_deadlineAt_plus_deadline_grace_secs","pid_alive":"never_stale","pid_missing":"stale","pid_missing_grace_secs":5,"unreadable":"kept_never_deleted"},"stale_total":1,"state":"ready","total":2,"unreadable_total":0,"version":"inflight-report/1","would_remove":[{"file":"stdio-stale.json","path":"runs/.inflight/stdio-stale.json","pid":999999999,"stale_reason":"pid_missing","task_id":"stdio-stale"}],"would_remove_total":1}
+```
+
+真清（`action=clean` + `dry_run=false` + `confirm=true`）：
+
+```json
+{"action":"clean","active_total":1,"directory":"runs/.inflight","dry_run":false,"failed":[],"failed_total":0,"kept":[{"file":"stdio-active.json","pid":197288,"reason":"not_stale","stale_reason":"pid_alive","task_id":"stdio-active"}],"kept_total":1,"removed":[{"file":"stdio-stale.json","path":"runs/.inflight/stdio-stale.json","pid":999999999,"stale_reason":"pid_missing","task_id":"stdio-stale"}],"removed_total":1,"stale_rule":{"cleanable_only_when":"stale=true","deadline_grace_secs":120,"live_pid_wins_over_deadline":true,"no_pid":"stale_only_after_deadlineAt_plus_deadline_grace_secs","pid_alive":"never_stale","pid_missing":"stale","pid_missing_grace_secs":5,"unreadable":"kept_never_deleted"},"stale_total":1,"state":"ready","total":2,"unreadable_total":0,"version":"inflight-report/1","would_remove":[],"would_remove_total":0}
+```
+
+文件核对：`stale_exists=False active_exists=True`。即残留被真实删除，活跃标记（pid 存活、deadline 已过）保留。
+
+能力声明的关键条目（从同一次 stdio 原始回执提取，未改写值）：
+
+```json
+[
+ {"id":"timeout.terminates_controlled_set","holds":true,"status":"proven","reason_code":null,"platforms_verified":["windows","linux"]},
+ {"id":"timeout.cleans_entire_process_tree","holds":false,"status":"not_proven","reason_code":"no_complete_descendant_enumeration"},
+ {"id":"timeout.enumerates_escaped_descendants","holds":false,"status":"not_proven","reason_code":"no_complete_descendant_enumeration"},
+ {"id":"platform.posix_inflight_semantics_verified","holds":false,"status":"partial","reason_code":"posix_unverified","platforms_unverified":["linux","macos"]},
+ {"id":"concurrency.check_then_delete_atomic","holds":false,"status":"not_proven","reason_code":"check_then_delete_not_atomic"},
+ {"id":"inflight.stale_marker_observable","holds":true,"status":"supported","automatic":true},
+ {"id":"inflight.stale_marker_cleanable","holds":true,"status":"supported","automatic":false},
+ {"id":"inflight.stale_markers_auto_swept","holds":false,"status":"not_proven","reason_code":"explicit_cleanup_required"},
+ {"id":"inflight.clean_preserves_active_markers","holds":true,"status":"proven","automatic":false}
+]
+```
+
+顶层为 `entries_total=13`、`not_proven_total=5`、`platform={"arch":"x86_64","os":"windows"}`、`version="capabilities/1"`。
+
+### 33.5 判定与仍然存在的限制
+
+- `#3` 窄判据：`timeout.terminates_controlled_set=true`（受控集合），`timeout.cleans_entire_process_tree=false`、`timeout.enumerates_escaped_descendants=false`（原因码 `no_complete_descendant_enumeration`）。整树仍 `NOT_PROVEN`，没有因为新增声明而放宽。
+- POSIX：`platform.posix_inflight_semantics_verified=false`、`status=partial`、`reason_code=posix_unverified`，未写成已覆盖。
+- TOCTOU：`concurrency.check_then_delete_atomic=false`，原因码 `check_then_delete_not_atomic`；`runs.inflight` 只能清理 AW 自己的残留标记，不能消除外部删除方的检查-删除窗口。
+- 自动清扫：`inflight.stale_markers_auto_swept=false`、`explicit_cleanup_required`；清理必须显式调用，不是后台定时。
+- 残留判定的盲区（pid 复用、僵死/挂起、时间回拨）未在本机穷举，见 §21.5；用例锁定的是"存活 pid 永不判残留"与"消失 pid + 超宽限必判残留"两个方向。
+- `tools/list` 描述新增 G17–G19 行，`tools_sha256` 更新为 `37f7f9b0ee7d121e3f588bb65459fdedb7266d17ed744028204f915499dbcd5b`。
+- **平台覆盖如实标注**：v1.32 的 5 条新用例只在 Windows 实跑；WSL 当前找不到 cargo，未复跑 POSIX，因此 `inflight.stale_marker_observable` / `inflight.stale_marker_cleanable` / `inflight.stale_markers_auto_swept` / `inflight.clean_preserves_active_markers` 的 `platforms_verified` 只写 `["windows"]`，`platforms_unverified` 写 `["linux","macos"]`；`platform.posix_inflight_semantics_verified` 保持 `false/partial/posix_unverified`，没有因为新增查询工具而上调。
