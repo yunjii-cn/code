@@ -779,19 +779,26 @@ impl Server {
         supervisor.configure(&mut command);
         let exit_status = match command.spawn() {
             Ok(mut child) => {
-                supervisor.attach(&child);
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break Some(status),
-                        Ok(None) => {
-                            if started.elapsed() >= deadline {
-                                timed_out = true;
-                                cleanup_outcome = Some(supervisor.terminate(&mut child));
-                                break None;
+                supervisor.attach(&mut child);
+                if let Some(error) = supervisor.attach_error().map(str::to_string) {
+                    // 恢复执行失败：子进程已被终止，不能把"从未执行"记成命令结果
+                    let _ = child.wait();
+                    spawn_error = Some(error);
+                    None
+                } else {
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) => break Some(status),
+                            Ok(None) => {
+                                if started.elapsed() >= deadline {
+                                    timed_out = true;
+                                    cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                    break None;
+                                }
+                                std::thread::sleep(Duration::from_millis(20));
                             }
-                            std::thread::sleep(Duration::from_millis(20));
+                            Err(error) => return Err(format!("等待进程失败：{error}")),
                         }
-                        Err(error) => return Err(format!("等待进程失败：{error}")),
                     }
                 }
             }
@@ -1072,7 +1079,7 @@ fn shell_command(cmd: &str) -> Command {
 }
 
 /// 超时清理只承诺"受控集合"（POSIX 进程组 / Windows Job Object）内无存活进程。
-/// 逃逸后代（setsid、breakaway、spawn→Assign 窗口）不在判据内，`#3` 仍为 `NOT_PROVEN`。
+/// 逃逸后代（POSIX `setsid`、Windows `BREAKAWAY` / 加入作业失败）不在判据内，`#3` 仍为 `NOT_PROVEN`。
 mod process_scope {
     /// 受控集合内的清理结果。`Unavailable` 表示机制未建立/无法观测，绝不等于"已清理"。
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1107,8 +1114,12 @@ mod process_scope {
                 command.process_group(0);
             }
 
-            pub(crate) fn attach(&mut self, child: &Child) {
+            pub(crate) fn attach(&mut self, child: &mut Child) {
                 self.pgid = i32::try_from(child.id()).ok().filter(|pgid| *pgid > 0);
+            }
+
+            pub(crate) fn attach_error(&self) -> Option<&str> {
+                None
             }
 
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
@@ -1294,26 +1305,37 @@ mod process_scope {
     mod imp {
         use super::CleanupOutcome;
         use std::os::windows::io::AsRawHandle;
+        use std::os::windows::process::CommandExt;
         use std::process::{Child, Command};
         use std::time::{Duration, Instant};
-        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+            THREADENTRY32,
+        };
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
             JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
             TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
             JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
+        use windows_sys::Win32::System::Threading::{
+            OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+        };
 
         const CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
 
         /// 作业句柄由 bridge 持有；`KILL_ON_JOB_CLOSE` 在最后一个句柄关闭时兜底清理。
         ///
-        /// 已知窗口：`std::process::Command` 只能在 `spawn` 之后调用
-        /// `AssignProcessToJobObject`。若子进程在这之前已经派生了孙进程，
-        /// 那些孙进程不在作业内，本判据看不到它们。该窗口存在，文档与回执必须写明。
+        /// 窗口收窄（v1.20）：子进程以 `CREATE_SUSPENDED` 创建，先 `AssignProcessToJobObject`
+        /// 再恢复主线程。恢复之前子进程不执行任何代码，因此不可能在"spawn → Assign"之间
+        /// 派生作业外后代；恢复后派生的后代默认继承作业。残余逃逸为 `BREAKAWAY`、
+        /// 加入作业失败或嵌套作业策略，仍不可观测，文档与回执必须写明。
         pub(crate) struct Supervisor {
             job: Option<HANDLE>,
             attached: bool,
+            suspended: bool,
+            attach_error: Option<String>,
         }
 
         impl Supervisor {
@@ -1324,6 +1346,8 @@ mod process_scope {
                         return Self {
                             job: None,
                             attached: false,
+                            suspended: false,
+                            attach_error: None,
                         };
                     }
                     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -1339,23 +1363,42 @@ mod process_scope {
                         return Self {
                             job: None,
                             attached: false,
+                            suspended: false,
+                            attach_error: None,
                         };
                     }
                     Self {
                         job: Some(job),
                         attached: false,
+                        suspended: false,
+                        attach_error: None,
                     }
                 }
             }
 
-            pub(crate) fn configure(&mut self, _command: &mut Command) {}
+            pub(crate) fn configure(&mut self, command: &mut Command) {
+                command.creation_flags(CREATE_SUSPENDED);
+                self.suspended = true;
+            }
 
-            pub(crate) fn attach(&mut self, child: &Child) {
+            pub(crate) fn attach(&mut self, child: &mut Child) {
                 if let Some(job) = self.job {
                     let ok =
                         unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
                     self.attached = ok != 0;
                 }
+                if self.suspended {
+                    if let Err(error) = resume_primary_thread(child.id()) {
+                        let _ = child.kill();
+                        self.attach_error = Some(format!(
+                            "process_resume_failed: 子进程已挂起创建但无法恢复执行：{error}"
+                        ));
+                    }
+                }
+            }
+
+            pub(crate) fn attach_error(&self) -> Option<&str> {
+                self.attach_error.as_deref()
             }
 
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
@@ -1417,6 +1460,55 @@ mod process_scope {
             }
         }
 
+        /// 恢复以 `CREATE_SUSPENDED` 创建的子进程主线程。
+        ///
+        /// `std::process::Command` 不返回主线程句柄，因此按进程 ID 用 Toolhelp 快照
+        /// 找到唯一的主线程，再 `OpenThread + ResumeThread`。任何一步失败都返回错误，
+        /// 由调用方终止该挂起进程并记 `process_resume_failed`，不得让"从未执行"被当成命令结果。
+        fn resume_primary_thread(pid: u32) -> Result<(), String> {
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                if snapshot == INVALID_HANDLE_VALUE {
+                    return Err(format!(
+                        "线程快照失败：{}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                let mut entry: THREADENTRY32 = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+                let mut thread_id = None;
+                let mut ok = Thread32First(snapshot, &mut entry);
+                while ok != 0 {
+                    if entry.th32OwnerProcessID == pid {
+                        thread_id = Some(entry.th32ThreadID);
+                        break;
+                    }
+                    entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+                    ok = Thread32Next(snapshot, &mut entry);
+                }
+                CloseHandle(snapshot);
+                let Some(thread_id) = thread_id else {
+                    return Err("未找到子进程主线程".to_string());
+                };
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, thread_id);
+                if thread.is_null() {
+                    return Err(format!(
+                        "打开主线程失败：{}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                let previous = ResumeThread(thread);
+                CloseHandle(thread);
+                if previous == u32::MAX {
+                    return Err(format!(
+                        "恢复主线程失败：{}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                Ok(())
+            }
+        }
+
         #[cfg(test)]
         mod tests {
             use super::*;
@@ -1433,7 +1525,7 @@ mod process_scope {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
                 let mut child = command.spawn().expect("spawn ping");
-                supervisor.attach(&child);
+                supervisor.attach(&mut child);
                 assert!(supervisor.attached, "进程应成功加入作业");
                 let before = supervisor.active_processes();
                 println!("[evidence] alive_but_idle attached={} ActiveProcesses_before={before:?}", supervisor.attached);
@@ -1459,7 +1551,7 @@ mod process_scope {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
                 let mut child = command.spawn().expect("spawn cmd");
-                supervisor.attach(&child);
+                supervisor.attach(&mut child);
                 assert!(supervisor.attached, "cmd 应成功加入作业");
                 let before = supervisor.active_processes();
                 println!(
@@ -1479,6 +1571,66 @@ mod process_scope {
                 assert_eq!(after, Some(0));
             }
 
+            // 窗口收窄：子进程以挂起态创建，加入作业前不得执行任何代码；
+            // 因此"spawn→Assign 之间派生的孙进程不在作业内"这一窗口对后代不再存在。
+            #[test]
+            fn suspended_start_defers_execution_until_job_assign() {
+                let mut supervisor = Supervisor::new();
+                assert!(supervisor.job.is_some(), "作业应创建成功");
+                let work = tempfile::tempdir().expect("临时目录");
+                let marker = work.path().join("started.txt");
+                let mut command = Command::new("cmd");
+                command
+                    .current_dir(work.path())
+                    .args([
+                        "/C",
+                        "echo started> started.txt & ping -n 30 127.0.0.1 > NUL",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+                let mut child = command.spawn().expect("spawn cmd");
+                // 挂起期间等待 300ms：进程若已执行，标记文件必然出现
+                std::thread::sleep(Duration::from_millis(300));
+                assert!(
+                    !marker.exists(),
+                    "加入作业前子进程不得执行（否则可派生作业外后代）"
+                );
+                assert_eq!(
+                    supervisor.active_processes(),
+                    Some(0),
+                    "未加入作业前作业内计数必须为 0"
+                );
+                supervisor.attach(&mut child);
+                assert!(
+                    supervisor.attach_error().is_none(),
+                    "加入作业并恢复执行不得失败"
+                );
+                assert!(supervisor.attached, "进程应成功加入作业");
+                let mut appeared = false;
+                for _ in 0..150 {
+                    if marker.exists() {
+                        appeared = true;
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = supervisor.active_processes();
+                println!(
+                    "[evidence] suspended_start marker_before_assign=false marker_after_resume={appeared} attached={} ActiveProcesses_before_terminate={before:?}",
+                    supervisor.attached
+                );
+                assert!(appeared, "加入作业并恢复后命令必须开始执行");
+                assert!(before.unwrap_or(0) > 0, "恢复后作业内必须有活动进程");
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.active_processes();
+                println!(
+                    "[evidence] suspended_start terminate={outcome:?} ActiveProcesses_after={after:?}"
+                );
+                assert_eq!(outcome, CleanupOutcome::Cleaned, "作业内成员应被清空");
+                assert_eq!(after, Some(0));
+            }
+
             // 反向：进程已退出，作业内活动进程数应为 0
             #[test]
             fn exited_process_leaves_job_empty() {
@@ -1489,7 +1641,7 @@ mod process_scope {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
                 let mut child = command.spawn().expect("spawn cmd");
-                supervisor.attach(&child);
+                supervisor.attach(&mut child);
                 let _ = child.wait();
                 let mut observed = None;
                 for _ in 0..100 {
@@ -1519,7 +1671,11 @@ mod process_scope {
                 Self
             }
             pub(crate) fn configure(&mut self, _command: &mut Command) {}
-            pub(crate) fn attach(&mut self, _child: &Child) {}
+            pub(crate) fn attach(&mut self, _child: &mut Child) {}
+
+            pub(crate) fn attach_error(&self) -> Option<&str> {
+                None
+            }
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
                 let _ = child.kill();
                 CleanupOutcome::Unavailable
@@ -1541,7 +1697,7 @@ fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutco
             #[cfg(windows)]
             {
                 format!(
-                    "timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业"
+                    "timeout：超过 {timeout_secs}s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建并先加入作业再恢复执行（恢复前不会派生子进程）；BREAKAWAY 或加入作业失败的作业外进程仍不可观测"
                 )
             }
             #[cfg(not(windows))]
@@ -1765,7 +1921,7 @@ fn tools() -> Value {
         },
         {
             "name": "task.execute",
-            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号，仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业。不承诺终止整棵进程树",
+            "description": "接单执行：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号，仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树",
             "inputSchema": {
                 "type": "object",
                 "properties": {

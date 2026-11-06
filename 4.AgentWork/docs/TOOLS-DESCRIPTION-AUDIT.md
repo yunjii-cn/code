@@ -279,7 +279,7 @@ test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ## 11. 仍存在的已知缺口（不在本批范围，不得被本批描述"修好"所掩盖）
 
-1. **`#3` 整棵进程树杀灭仍不可判定**：v1.16 已按窄定义实现**受控集合**清理（POSIX 进程组 / Windows Job），但逃逸后代（`setsid`、`spawn → Assign` 窗口、`BREAKAWAY`）不可见；`#3` 仍为 `NOT_PROVEN`。`timeout:` 文案与契约 §4 已如实说明；`tools/list` 描述已同步至同一口径（见 §12）。
+1. **`#3` 整棵进程树杀灭仍不可判定**：v1.16 已按窄定义实现**受控集合**清理（POSIX 进程组 / Windows Job），但逃逸后代（`setsid`、`BREAKAWAY`、加入作业失败）不可见；v1.20 已关闭"恢复执行前派生后代"的 Windows 窗口，但**未提供逃逸观测点**；`#3` 仍为 `NOT_PROVEN`。`timeout:` 文案与契约 §4 已如实说明；`tools/list` 描述已同步至同一口径（见 §16）。
 2. **`additionalProperties: false` 服务端不强制（v1.18 已定为默认策略）**：见 §7.2 / §14.3；保持忽略以兼容现有调用方；若未来强制，升版并新增 `unknown_argument`，默认不做。
 3. **清理的阈值/分档/`task_id` 退役纪律（v1.18 已定默认；v1.19 按 PM 口径校正）**：统一 365 天为推荐默认、仍须显式传入；默认不分档（分档推荐值仅入契约，未实现）；清理过的 `task_id` 退役。见契约 §8.9。
 4. **认证/准入/并发上限不存在**：`clientInfo` 仅审计、不参与准入（v1.18 已定为默认，参与所需字段见契约 §2.3）；并发上限归 PM 侧排队（契约 §10 第 3 行）；多份 `initialize` 记录不等于多会话、不构成身份。
@@ -288,7 +288,7 @@ test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 
 ## 12. v1.17 复审：超时 / 回执 / `blocked_reason` 相关描述（2026-11-06）
 
-- 复审对象：`tools/list` 中与超时、回执、`blocked_reason` 相关的描述，对齐 **v1.17 实现**（`timeout_reason` 三态 + Windows `spawn→Assign` 窗口）。
+- 复审对象：`tools/list` 中与超时、回执、`blocked_reason` 相关的描述，对齐 **v1.17 实现**（`timeout_reason` 三态 + Windows `spawn→Assign` 窗口）。**v1.20 已把该窗口改为"挂起态创建 → 入作业 → 恢复执行"，本节为历史记录，当前口径以 §16 为准。**
 - 口径：**不删任何基线断言**；本次范围内逐句重判，范围外沿用 v1.14 判定。基线总数仍为 **87**。
 
 ### 12.1 结论与基线对账
@@ -628,3 +628,57 @@ running 64 tests -> test result: ok. 64 passed; 0 failed
 ```
 
 本次改动：`server.rs`（`runs.prune` 的 `limit` 缺省 100、`older_than_days` 描述改为 365）、`prune_defaults_to_dry_run_and_lists_candidates_without_writing` 增补 `limit=100` 断言、契约升 **v1.19**、本文档 §15。**`#3` 仍 `NOT_PROVEN`；W2c 未重开；回执仍只写已观测状态。**
+
+---
+
+## 16. v1.20 窗口收窄：Windows 挂起创建 → 入作业 → 恢复执行（2026-11-06）
+
+> 本节取代 §12/§14 中关于 Windows `spawn→Assign` 窗口的表述；`runs.prune` 的 v1.19 结论不变。
+
+### 16.1 变更
+
+| 项 | v1.19 | v1.20（当前） |
+|---|---|---|
+| Windows 启动路径 | `spawn` 后 `Assign`（W2d，窗口披露） | **`CREATE_SUSPENDED` → `Assign` → `Toolhelp` 定位主线程 → `ResumeThread`**（W2a） |
+| 窗口内派生后代 | 可能不在作业内 | **恢复执行前不产生后代**；该窗口对后代闭合（有确定性夹具） |
+| 回执 Windows 文案 | `Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业` | `Windows 下子进程以挂起态创建并先加入作业再恢复执行（恢复前不会派生子进程）；BREAKAWAY 或加入作业失败的作业外进程仍不可观测` |
+| 恢复失败 | 无此路径 | 终止挂起进程，`blocked_reason` 记 **`process_resume_failed`**，不把“从未执行”当命令结果 |
+| 逃逸判定 | 未验证 | **未验证**（`#3` 仍 `NOT_PROVEN`）；新增 §6.8 机器可判定门槛，四条缺一即保留“未验证” |
+
+### 16.2 对 87 条基线
+
+- **#2 / #10（`task.execute` 超时披露）**：描述改为挂起创建/入作业/恢复执行，并明确残余逃逸；判定仍“与实现一致”。
+- **#13 / #14 / #15（`timeout_secs` 口径）**：语义不变；仍只承诺受控集合、不承诺整棵树。
+- **#50（`blocked_reason` 前缀）**：新增 `process_resume_failed`，前缀集合只增不减；其余前缀不变。
+- **87 条基线不增不减**；无“描述与实现不符”的新条目；`spawn→Assign` 不再出现在任何当前描述中（仅历史章节保留并标注）。
+
+### 16.3 验证证据（两平台，先红后绿）
+
+```text
+红（实现前，Windows）：
+suspended_start_defers_execution_until_job_assign -> FAILED
+  "加入作业前子进程不得执行（否则可派生作业外后代）"
+timeout_reason_states_action_not_tree_death -> FAILED（仍含 spawn→Assign，未写挂起态/加入作业）
+timeout_description_matches_controlled_set_semantics -> FAILED（描述未含挂起态/加入作业）
+test result: FAILED. 2 passed; 2 failed
+
+绿（实现后，Windows）：
+cargo check -q -p aw-mcp-bridge（通过）
+running 4 tests  -> test result: ok. 4 passed; 0 failed
+running 65 tests -> test result: ok. 65 passed; 0 failed（原 64 + 本次 1）
+[evidence] suspended_start marker_before_assign=false marker_after_resume=true attached=true ActiveProcesses_before_terminate=Some(2)
+[evidence] suspended_start terminate=Cleaned ActiveProcesses_after=Some(0)
+
+POSIX（WSL HostGoTest，verify.sh run，离线，AW_VENDOR=/root/vendor）：
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+[evidence] exited pgid=967 group_empty=true
+[evidence] setsid escaped_pid=971 escaped_alive=true original_group_empty=true
+[evidence] stopped pgid=969 kill(-pgid,0)_exists=true
+[evidence] stopped after_SIGKILL group_empty=true
+running 64 tests -> test result: ok. 64 passed; 0 failed
+[evidence] grandchild_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证
+[evidence] timeout_reason=timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证
+[INFO] 四类 POSIX 用例全部通过，证据行齐全
+```
+
+本次改动：`server.rs`（`CREATE_SUSPENDED` + Toolhelp 恢复 + `attach_error` + 回执文案）、`Cargo.toml`（仅启用 `windows-sys` 已有的 `Win32_System_Diagnostics_ToolHelp` feature，未新增包/版本）、新增 Windows 单元用例 `suspended_start_defers_execution_until_job_assign`、两处文案断言改为新口径、契约升 **v1.20**、设计文档 §4.2/§4.5/§6.5/§6.8 与本文档 §16。**`#3` 仍 `NOT_PROVEN`；W2c 未重开；回执仍只写已观测状态，逃逸保持“未验证”。**

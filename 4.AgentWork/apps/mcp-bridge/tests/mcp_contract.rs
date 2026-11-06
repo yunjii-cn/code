@@ -2260,13 +2260,19 @@ fn timeout_reason_states_action_not_tree_death() {
         "永远不得宣称整棵树已终止：{reason}"
     );
     #[cfg(windows)]
-    assert!(
-        reason.contains("spawn→Assign") && reason.contains("窗口"),
-        "Windows 必须写明 spawn→Assign 竞态窗口：{reason}"
-    );
+    {
+        assert!(
+            reason.contains("挂起态") && reason.contains("加入作业"),
+            "Windows 必须写明挂起创建、入作业后才恢复执行：{reason}"
+        );
+        assert!(
+            !reason.contains("spawn→Assign"),
+            "窗口收窄后不得继续宣称未加约束的 spawn→Assign 窗口：{reason}"
+        );
+    }
 }
 
-// 描述必须与 v1.17 三态实现同口径：不承诺整棵树，写明受控集合与 Windows 窗口
+// 描述必须与 v1.20 三态实现同口径：不承诺整棵树，写明受控集合与 Windows 挂起-入作业-恢复顺序
 #[test]
 fn timeout_description_matches_controlled_set_semantics() {
     let (server, _dir) = server_with_settings(None);
@@ -2304,14 +2310,18 @@ fn timeout_description_matches_controlled_set_semantics() {
         "POSIX 进程组",
         "Windows Job Object",
         "已清理受控集合",
-        "spawn→Assign",
-        "窗口",
+        "挂起态",
+        "加入作业",
     ] {
         assert!(
             tool_desc.contains(token),
             "task.execute 描述缺少 `{token}`：{tool_desc}"
         );
     }
+    assert!(
+        !tool_desc.contains("spawn→Assign"),
+        "窗口收窄后描述不得继续宣称未加约束的 spawn→Assign 窗口：{tool_desc}"
+    );
     for token in [
         "三态",
         "已清理受控集合",
