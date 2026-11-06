@@ -320,7 +320,7 @@ impl Server {
             );
         }
         let limit = match args.get("limit") {
-            None => 20,
+            None => 100,
             Some(value) => value.as_u64().ok_or_else(|| {
                 "invalid_retention: limit 必须是 1..=100 的整数".to_string()
             })?,
@@ -1820,10 +1820,10 @@ fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt。默认建议 90 天（覆盖一般验收/审计窗口，偏保守）；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" },
+                    "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt。PM 口径统一推荐 365 天；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" },
                     "dry_run": { "type": "boolean", "description": "默认 true：只列候选、不删不写；false 表示要求真删（还需 confirm=true）" },
                     "confirm": { "type": "boolean", "description": "默认 false：真删必须显式 true；单独 true 不隐含真删" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 20" }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 100" }
                 },
                 "required": ["older_than_days"],
                 "additionalProperties": false

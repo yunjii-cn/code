@@ -2542,6 +2542,7 @@ fn prune_defaults_to_dry_run_and_lists_candidates_without_writing() {
     );
     let payload = tool_payload(&response);
     assert_eq!(payload["dry_run"], true, "未传 dry_run 时必须默认 dry-run");
+    assert_eq!(payload["limit"], 100, "未传 limit 时默认 100");
     assert_eq!(payload["state"], "ready");
     assert_eq!(payload["older_than_days"], 30);
     assert_eq!(payload["candidates_total"], 1);

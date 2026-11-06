@@ -1,8 +1,8 @@
-# PM → AW 派单与回执契约 v1.18
+# PM → AW 派单与回执契约 v1.19
 
-状态：v1.18。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
+状态：v1.19。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema，`runs.prune` 给出 90 天推荐默认但仍须显式传入**
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）**
 
 ## 0. 结论
 
@@ -194,7 +194,7 @@
 | 13 | `runs.list` 的 `total` 与 `attempts` 一致性（第 7 节） | **一致** | `total == Σ attempts`（attempt 目录数，非任务数）；分页不改变 `total`；新增 `total_tasks` 供换算页数 |
 | 14 | `path_prepend`（§3.5） | **一致** | 目录数组前插、继承 PATH 在后、分隔符按平台；参与幂等签名；占号前校验；回执只给目录名 |
 | 15 | `timeout` 文案诚实性（第 4 / 6 节） | **一致** | v1.17：文案只描述**受控集合**（POSIX 进程组 / Windows Job）的清理结果，三态分流（已清理 / 仍存活 / 不可用），明写"逃逸进程是否仍在运行未验证"与 Windows `spawn → Assign` 窗口；任何分支都不出现"已终止进程树 / 无残留"；整树 `#3` 仍 `NOT_PROVEN`；证据见设计文档 §6.5（POSIX 四类实跑 + Windows 三类） |
-| 16 | 默认策略与 schema 声明（§10） | **一致** | `additionalProperties` 仍为声明性忽略（新增用例锁定）；`runs.prune` 的 90 天为推荐默认但缺省仍 `invalid_retention`；`clientInfo` 仅审计、不参与准入；`path_prepend` 的 16 项 / 4096 字符已写入 schema 且实现同源 |
+| 16 | 默认策略与 schema 声明（§10） | **一致** | `additionalProperties` 仍为声明性忽略（新增用例锁定）；`runs.prune` 推荐 365 天、`limit` 缺省 100，但 `older_than_days` 缺省仍 `invalid_retention`；`clientInfo` 仅审计、不参与准入；`path_prepend` 的 16 项 / 4096 字符已写入 schema 且实现同源 |
 
 统计：**已一致 15 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证不在 v1 范围，默认按 §10 第 1 行处理，准入所需字段见 §2.3）。
 
@@ -208,7 +208,7 @@
 | G4 身份记录 | MCP `initialize` 会话层，记录 `clientInfo` 供审计 | **仅审计，不做准入**；记录不得被放行逻辑读取；每次 initialize 一份文件，`status.session` 聚合 | **已落地（仅审计；v1.13 起逐份留存、并发不丢）** |
 | G5 并发上限 | PM 侧排队产生（AW 不内置闸门） | 拒单时不占用 attempt | 归 PM 侧 |
 | G6 上游拒单 | PM 侧，不进入 AW | AW 不感知 | 归 PM 侧 |
-| G7 证据清理 | `runs.prune` 显式入口（默认 dry-run、无自动清理） | 只按 `finishedAt` 判龄、只删非最新 attempt 整目录、先记账后删除 | **已落地（v1.12）**；自动清理**明确不做**（§8.8）；v1.18 给出 90 天推荐默认（§8.9），分档推荐值仅文档、未实现 |
+| G7 证据清理 | `runs.prune` 显式入口（默认 dry-run、无自动清理） | 只按 `finishedAt` 判龄、只删非最新 attempt 整目录、先记账后删除 | **已落地（v1.12）**；自动清理**明确不做**（§8.8）；v1.19 按 PM 口径统一推荐 365 天、`limit` 缺省 100、先 dry-run、不分档（§8.9） |
 | G8 `env.PATH` fail-closed | `task.execute` 参数校验层（占号之前） | `env` 中出现 `PATH`（任意大小写）一律 `invalid_env`；不静默忽略 | **已落地（v1.7）** |
 | G9 超时文案诚实 | `task.execute` 回执生成处 | 文案只写**受控集合**（POSIX 进程组 / Windows Job）的清理结果与可判定判据（`kill(-pgid,0)==ESRCH` / `ActiveProcesses==0`），逃逸进程标"未验证"；不写"已终止进程树 / 无残留" | **已落地（v1.11 文案诚实；v1.16 受控集合实现；v1.17 新措辞启用）**：POSIX 四类用例实跑通过（3 unit + 61 integration）、Windows 三类通过（3 unit + 62 integration）；Windows 逃逸负例仍 `UNPROVEN`；整树杀灭仍不可判定，`#3` 保持 `NOT_PROVEN`；证据见 [`TIMEOUT-PROCESS-TREE-DESIGN.md`](./TIMEOUT-PROCESS-TREE-DESIGN.md) §6.5 |
 
@@ -299,10 +299,10 @@
 | `dry_run` | 布尔，缺省 `true`。`true` 时**零写入**：不删目录、不创建/追加 `prune.jsonl`、不建目录、不改任何文件 |
 | `confirm` | 布尔，缺省 `false`。**只有 `dry_run=false` 且 `confirm=true` 才真删**；缺一即拒绝 |
 | 拒绝语义 | `dry_run=false` 而 `confirm` 不为 `true` → 工具错误 `confirm_required`，**零写入**；反之 `confirm=true` 但未显式 `dry_run=false` → 仍按 dry-run 处理（`confirm` 不隐含真删） |
-| 阈值必填 | `older_than_days` 必填（整数，1..=3650）；缺失或越界 → 工具错误 `invalid_retention`，**零写入**。**不提供隐式默认阈值**——"没写阈值"绝不能变成"按某个默认值删"；调用方按 §8.9 的 90 天推荐值显式传入 |
+| 阈值必填 | `older_than_days` 必填（整数，1..=3650）；缺失或越界 → 工具错误 `invalid_retention`，**零写入**。**不提供隐式默认阈值**——"没写阈值"绝不能变成"按某个默认值删"；调用方按 §8.9 的 365 天推荐值显式传入 |
 | dry-run 输出（稳定可解析） | `dry_run=true`、`state`（`missing`/`empty`/`ready`）、`older_than_days`、`evaluated_at`（UTC）、`limit`、`candidates_total`、`truncated`、`candidates[]`、`skipped_total`、`skipped[]`；`candidates[]` 每项固定字段：`task_id` / `attempt` / `path`（相对路径 `runs/<task_id>/attempt-<N>`）/ `dispatchedAt` / `finishedAt` / `age_days` |
 | `skipped[]` 原因码 | `latest_attempt_retained`（最新 attempt，永不删）/ `unfinished_or_missing_handback`（无回执或不可解析）/ `missing_dispatch`（缺派单签名，年龄与一致性都无法证明）/ `age_unknown`（回执无 `finishedAt`）/ `invalid_finished_at`（时间戳不可解析）/ `future_timestamp`（晚于当前时刻，按时钟异常跳过）/ `not_old_enough`（未达阈值）/ `unsafe_attempt_path`（符号链接或非真实目录） |
-| 单批上限 | `limit` 缺省 20、范围 1..=100；按 `(task_id, attempt)` 升序取前 `limit` 个；`candidates_total > limit` 时 `truncated=true`。**真实删除只删被列出的这一批**，剩余的下一次调用再评估 |
+| 单批上限 | `limit` 缺省 100、范围 1..=100；按 `(task_id, attempt)` 升序取前 `limit` 个；`candidates_total > limit` 时 `truncated=true`。**真实删除只删被列出的这一批**，剩余的下一次调用再评估 |
 | 两段一致性 | 相同参数、磁盘未变时，dry-run 的 `candidates[]` 与真实删除的 `deleted[]` **逐项一致**（同样的排序与同样的 `limit` 截断）；不一致即契约违规 |
 
 ### 8.3 年龄判据：只认 `finishedAt`
@@ -361,23 +361,24 @@
 
 | 方案 | 结论 |
 |---|---|
-| A 统一期限 | 长期可追溯性最差（成功/失败/超时证据同寿）；v1.18 仅作为**保守过渡默认**（90 天，§8.9），长期仍推荐 B |
-| B 按结果分档 | v1.18 已给出推荐值 `ok=30` / `failed=180` / `blocked=365`（§8.9），但当前接口无状态过滤参数，**未实现**；入口仍只收统一阈值 |
+| A 统一期限 | 长期可追溯性最差（成功/失败/超时证据同寿）；但 PM 口径已定为**统一 365 天**（§8.9），v1.19 按此执行 |
+| B 按结果分档 | `ok=30` / `failed=180` / `blocked=365` 仅作另立契约时的历史参考；PM 口径为**不分档**，当前接口无状态过滤参数，**未实现** |
 | C 按引用分档 | 自指（引用表本身成为新证据），且把只读接口变成影响清理结果的状态源，违背 §7 零写原则；不采用 |
 
-### 8.9 默认保留包络（v1.18：给出默认值，仍不自动删）
+### 8.9 默认保留包络（v1.19：按 PM 口径校正，仍不自动删）
 
 取值只在 PM 包络内（显式触发、默认不删、只删非最新 attempt、只认 `finishedAt`、缺字段不删；§8.1-§8.7），**不放宽任何删除条件**；下面的默认值只决定"什么时候可以开始删"，不改变"删什么/怎么删"。
 
 | 项 | 默认值 | 依据 |
 |---|---|---|
-| 统一阈值 | `older_than_days = 90`（由调用方显式传入） | 覆盖一般验收/审计窗口；比 30 天保守；远低于 3650 上限；在"宁可不删"取向下偏保守的实用值 |
-| 是否隐式默认 | **否**：缺省仍 `invalid_retention` | "没写阈值"绝不能变成"按默认值删"（§8.3） |
-| 状态分档 | **默认不分档**，统一 90 天 | 当前接口无状态过滤参数；新增分档会多一个删除维度，需另立契约并复评"宁可不删" |
-| 若未来分档的推荐值（未实现，不作为默认行为） | `ok=30`、`failed=180`、`blocked=365`（天） | 成功证据价值随时间下降最快；失败/超时证据用于复盘与进程问题追溯，保留更久 |
+| 统一阈值 | `older_than_days = 365`（由调用方显式传入） | PM 已定口径：统一 365 天；覆盖验收/审计窗口且偏保守，远低于 3650 上限 |
+| 批量上限 | `limit = 100`（可覆盖，1..=100） | PM 已定口径：单批最多 100 个候选；取上限减少多次调用，同时保留分批能力 |
+| 操作顺序 | 先 `dry_run=true` 预览，再 `dry_run=false` + `confirm=true` 真删；默认 `dry_run=true` | PM 已定口径"必须先 dry-run"；服务端默认不删，真删需显式两段式确认 |
+| 是否隐式默认 | **否**：`older_than_days` 缺省仍 `invalid_retention` | "没写阈值"绝不能变成"按默认值删"（§8.3）；365 是推荐值，不是隐式默认 |
+| 状态分档 | **不做**（PM 口径：不分档） | `ok=30` / `failed=180` / `blocked=365` 仅为另立契约时的历史参考，**未实现、不作为推荐**；当前接口无状态过滤参数 |
 | `task_id` 退役 | **任一 attempt 被清理过的 `task_id` 不得复用**；重投必须换新 id | §8.7：最新 attempt 可能已被删，复用会重新执行并混淆历史 |
 
-可配置：每次调用显式给 `older_than_days`（1..=3650）、`limit`（1..=100）、`dry_run`、`confirm`；本节的 90 天只是**推荐默认**，不是 API 隐式默认。
+可配置：每次调用显式给 `older_than_days`（1..=3650）、`limit`（1..=100）、`dry_run`、`confirm`；本节的 365 天只是**推荐值**，不是 API 隐式默认。
 
 ## 9. 边界（写死）
 
@@ -390,7 +391,7 @@
 - AW 不派单给其他 AI 工具，不做第二个协调者。
 - PM 验收后按 TK 既有事件 schema 记账；AW 仅提供回执证据。
 
-## 10. 默认决策（v1.18：不再等待确认）
+## 10. 默认决策（v1.18 起；v1.19 校正 prune 默认包络）
 
 2026-11-06 起，原先的开放项按下列默认值/默认假设执行；PM 可在派单侧显式覆盖，标注"必须显式"者除外。AW 不再因等待外部拍板而停摆。
 
@@ -399,7 +400,7 @@
 | 1 | 通道归属 | PM 直接以 stdio 子进程拉起 bridge；进程归属即事实准入边界 | §2：谁拉起谁是用调用方；bridge 无独立凭据 | 启动方式由 PM 决定；若改由 MH 拉起，MH 必须提供 peer 归属信息（新契约） | 直接把 bridge 挪到 MH 下而不提供归属信息，身份退回弱识别（现状），不会阻断执行 |
 | 2 | 重跑表达 | 换新 `task_id`（建议 `-r2`/`-r3`），零新增字段 | §3.1：同 id 是幂等键，不是重跑键 | PM 生成新 id | 若改为"同 id 重试"，需扩展输入契约并定义 attempt 语义 |
 | 3 | 失败码归属 | `upstream_rejected` 由 PM 记录；`concurrency_limit` 由 PM 侧排队，AW 不内置闸门 | §5 第 8 条、§6：AW 不做第二个协调者 | PM 侧策略；若 AW 内置限流需新契约 | 在 AW 加闸门会引入"未执行却被计为派单"的语义风险 |
-| 4 | 证据清理 | 统一 `older_than_days=90` 为推荐默认，**仍须显式传入**；默认不分档；清理过的 `task_id` 退役 | §8.9、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm` | 若把 90 变成隐式默认，会让"漏传阈值"变成静默删除 |
+| 4 | 证据清理 | 统一 `older_than_days=365`、`limit=100` 为推荐调用值，**older 仍须显式传入**；先 dry-run 预览再真删；不分档；清理过的 `task_id` 退役 | §8.9、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm` | 若把 365 变成隐式默认，会让"漏传阈值"变成静默删除 |
 | 5 | `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`） | 兼容现有调用方；MCP 客户端可能附加元数据/别名；schema 静态、行为需确定 | 契约版本级；不提供运行时开关 | 强制拒绝会打断携带额外字段的现有调用（§10.1） |
 | 6 | `clientInfo` 准入 | 默认**不参与准入**，仅审计 | §2.3：自报字段不可信 | 需新增票据/进程锚点/授权范围（§2.3） | 仅凭 `clientInfo.name` 放行会让冒充直接通过 |
 | 7 | `path_prepend` 限制 | 默认**写入 schema**：`maxItems=16`、`items.maxLength=4096` | 与实现校验上限一致；声明先于调用，减少无效派单 | 调用方传 0..16 项、每项 ≤4096；上限是契约常量，改动需升版 | 不写入 schema 会让客户端以为可传超量，直到占号前才被拒 |
@@ -440,4 +441,5 @@
 | v1.16 | 2026-11-06 | **按 PM 接受的窄定义实现 `#3`（受控集合，不是整棵树）**：POSIX 用 `process_group(0)` 在 exec 前建组、超时 `kill(-pgid, SIGTERM → SIGKILL)`；Windows 用 Job Object + `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，**采用 W2d（接受 `spawn → Assign` 竞态窗口，未走 W2c）**，窗口已在回执文案与 `TIMEOUT-PROCESS-TREE-DESIGN.md` 明写；判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`（查询失败按不可用，绝不当 0），**不使用超时后 `stat` 比较**；超时文案三态分流（`已清理受控集合；逃逸进程是否仍在运行未验证` / 仍存活 / 不可用），任何分支都不写"已终止进程树 / 无残留"；旧回执原样返回、不改写；依赖仅将已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖（**不新增包、不改版本**）；**整棵树仍不可判定，`#3` 保持 `NOT_PROVEN`**（v1.16.1 已将超时文案退回旧版） |
 | v1.16.1 | 2026-11-06 | **只退文案，保留实现与窄定义**：因状态门未满足（POSIX 四类用例未实跑、Windows 逃逸负例 `UNPROVEN`），`timeout_reason` 退回契约 v1.11 的旧文案"已向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"；受控集合清理实现与判据不动；用例改为断言旧文案且**禁止**出现"已清理受控集合 / 已终止进程树 / 无残留"；契约 §4 / §5 / §6 与设计文档同步标注"新措辞待门禁满足后启用"；`#3` 仍 `NOT_PROVEN` |
 | v1.17 | 2026-11-06 | **状态门满足，启用窄定义文案**：POSIX 四类用例**实跑**通过（3 unit + 61 integration，WSL Ubuntu 24.04 / Rust 1.88.0 / 真实进程，证据见设计文档 §6.5：`group_empty=true`、`escaped_alive=true original_group_empty=true`、`kill(-pgid,0)_exists=true` → SIGKILL 后 `group_empty=true`）；Windows 三类通过（3 unit + 62 integration，`ActiveProcesses_before=Some(1)` → `terminate=Cleaned` → `ActiveProcesses_after=Some(0)`）；`timeout_reason` 恢复三态（已清理受控集合 / 仍存活 / 不可用），Windows 额外明写 `spawn→Assign` 窗口；**Windows 逃逸负例仍 `UNPROVEN`**；`#3` 整棵树仍不可判定，**保持 `NOT_PROVEN`** |
-| v1.18 | 2026-11-06 | **把"待 PM 确认"转为默认决策（§10），不改执行/超时行为**：`additionalProperties` 保持声明性忽略（新增用例锁定；强制拒绝会打断携带 `_meta`/别名/额外字段的现有调用，见 §10.1）；`runs.prune` 给出统一 **90 天推荐默认**（仍须显式传入，缺省仍 `invalid_retention`），分档推荐值 `ok=30` / `failed=180` / `blocked=365` 仅入契约、**未实现**（§8.9）；`clientInfo` 默认不参与准入，并列出参与所需字段（§2.3）；`path_prepend` 的 `maxItems=16` / `items.maxLength=4096` 写入 schema（与实现校验同源）；**`#3` 仍 `NOT_PROVEN`，W2c 不重开，回执仍只写已观测状态** |
+| v1.18 | 2026-11-06 | **把"待 PM 确认"转为默认决策（§10），不改执行/超时行为**：`additionalProperties` 保持声明性忽略（新增用例锁定；强制拒绝会打断携带 `_meta`/别名/额外字段的现有调用，见 §10.1）；`runs.prune` 给出统一推荐默认（该值已在 v1.19 按 PM 口径校正为 365 天，见下行；仍须显式传入，缺省仍 `invalid_retention`），分档参考值 `ok=30` / `failed=180` / `blocked=365` 仅入契约、**未实现且不作为推荐**（§8.9）；`clientInfo` 默认不参与准入，并列出参与所需字段（§2.3）；`path_prepend` 的 `maxItems=16` / `items.maxLength=4096` 写入 schema（与实现校验同源）；**`#3` 仍 `NOT_PROVEN`，W2c 不重开，回执仍只写已观测状态** |
+| v1.19 | 2026-11-06 | **按 PM 口径校正 `runs.prune` 默认包络（不改任何删除条件）**：推荐阈值校正为 **365 天**（不再使用上一版的临时值），`limit` 缺省 **20→100**；明确"先 `dry_run=true` 预览，再 `dry_run=false` + `confirm=true` 真删"；**不分档**；`ok=30` / `failed=180` / `blocked=365` 保留为"未实现、需另立契约"的历史参考，**不作为推荐**；`older_than_days` 仍必填、缺省仍 `invalid_retention`；其余默认决策（§10）不变；**`#3` 仍 `NOT_PROVEN`，W2c 不重开** |

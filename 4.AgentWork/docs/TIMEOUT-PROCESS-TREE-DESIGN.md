@@ -2,7 +2,7 @@
 
 - 状态：**v1.16 已按窄定义实现**：只清理并判定"**受控集合**"（POSIX 进程组 / Windows Job Object）；v1.16.1 曾退回旧文案，**v1.17 状态门满足后已启用新措辞**（POSIX 四类实跑 + Windows 三类 + 版本递增）；**整棵进程树仍不可判定，`#3` 在契约中保持 `NOT_PROVEN`**。
 - 实现边界：代码改 `apps/mcp-bridge/src/server.rs`（`process_scope` 模块 + 超时路径 + `timeout_reason`）；用例改 `apps/mcp-bridge/tests/mcp_contract.rs` 与 `server.rs` 内单元测试；契约升到 v1.16、回执文案门禁满足后升到 v1.17；依赖仅把已锁定的 `windows-sys 0.61.2` / `libc 0.2.186` 转为 target-specific 正常依赖，**未新增包、未改版本**。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.16 起 G9 行指向本文件，当前 v1.18；v1.18 未改超时/回执行为）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（v1.16 起 G9 行指向本文件，当前 v1.19；v1.18/v1.19 未改超时/回执行为）。
 - Windows 取舍：**未走 W2c**（自举 launcher 成本高、回归面大），选择 W2d——接受 `spawn → Assign` 竞态窗口；该窗口在本文 §4.2 明写。**v1.17 起该披露已写入 Windows 回执**（`Windows 下 spawn→Assign 窗口内派生的进程可能未被纳入作业`）；此处不假装窗口不存在。**W2c 已做专项评估并固定结论：不做（§4.5），不是待办项。**
 
 ---
