@@ -1256,7 +1256,13 @@ impl Server {
         let signature = spec.signature(task_id);
 
         if task_root.exists() {
-            return self.replay_standalone(task_id, &task_root, &signature, spec.timeout_secs);
+            return self.replay_standalone(
+                task_id,
+                &task_root,
+                &signature,
+                spec.timeout_secs,
+                spec.max_attempts,
+            );
         }
         fs::create_dir_all(&task_root).map_err(|e| format!("创建运行目录失败：{e}"))?;
 
@@ -1266,7 +1272,13 @@ impl Server {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     // 并发重投：落败方等待胜者的最终结果，不重复执行
-                    return self.replay_standalone(task_id, &task_root, &signature, spec.timeout_secs);
+                    return self.replay_standalone(
+                        task_id,
+                        &task_root,
+                        &signature,
+                        spec.timeout_secs,
+                        spec.max_attempts,
+                    );
                 }
                 Err(error) => return Err(format!("创建尝试目录失败：{error}")),
             }
@@ -1335,6 +1347,7 @@ impl Server {
                 "task_id": task_id,
                 "attempt": attempt,
                 "mode": "standalone",
+                "replayed": false,
                 "finishedAt": now_stamp(),
                 "status": status,
                 "changed_files": changed_files,
@@ -1396,6 +1409,7 @@ impl Server {
         task_root: &Path,
         signature: &Value,
         timeout_secs: u64,
+        max_attempts: u64,
     ) -> Result<Value, String> {
         let dispatch_path = task_root.join("attempt-1").join("dispatch.json");
         let stored = match read_json(&dispatch_path) {
@@ -1426,11 +1440,15 @@ impl Server {
         }
         let result_path = task_root.join(STANDALONE_RESULT);
         if let Ok(result) = read_json(&result_path) {
-            return Ok(result);
+            return Ok(standalone_replay_receipt(result, "existing"));
         }
-        wait_for_json(&result_path, Duration::from_secs(timeout_secs + 5)).ok_or_else(|| {
-            format!("task_in_progress: task_id `{task_id}` 的 standalone 执行仍在进行中，请稍后重试")
-        })
+        // 胜者的总执行上限是 timeout_secs * max_attempts，等待窗口必须覆盖它
+        let wait = timeout_secs.saturating_mul(max_attempts).saturating_add(5);
+        wait_for_json(&result_path, Duration::from_secs(wait))
+            .map(|result| standalone_replay_receipt(result, "waited"))
+            .ok_or_else(|| {
+                format!("task_in_progress: task_id `{task_id}` 的 standalone 执行仍在进行中，请稍后重试")
+            })
     }
 
     /// 按 task_id 读回回执：默认最新一次，include_history 时给出全部尝试
@@ -3345,6 +3363,15 @@ fn component_key(component: Component<'_>) -> String {
     {
         key
     }
+}
+
+/// 回放既有结果时标注来源：existing=调用时已完成，waited=等待并发胜者落盘
+fn standalone_replay_receipt(mut receipt: Value, kind: &str) -> Value {
+    if let Some(object) = receipt.as_object_mut() {
+        object.insert("replayed".to_string(), json!(true));
+        object.insert("replay_kind".to_string(), json!(kind));
+    }
+    receipt
 }
 
 fn standalone_blocked_receipt(task_id: &str, reason: String) -> Value {

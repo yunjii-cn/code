@@ -4158,6 +4158,40 @@ fn write_file_argv(path: &str, content: &str) -> Vec<Value> {
     ]
 }
 
+/// 慢任务：先等待约 2s 再写文件，用于制造真实的并发窗口
+#[cfg(windows)]
+fn slow_write_file_argv(path: &str, content: &str) -> Vec<Value> {
+    vec![
+        json!("cmd.exe"),
+        json!("/C"),
+        json!(format!("ping -n 3 127.0.0.1 >nul & echo {content}>{path}")),
+    ]
+}
+
+#[cfg(not(windows))]
+fn slow_write_file_argv(path: &str, content: &str) -> Vec<Value> {
+    vec![
+        json!("sh"),
+        json!("-c"),
+        json!(format!("sleep 2; printf '%s\\n' '{content}' > {path}")),
+    ]
+}
+
+/// 长任务：远超 1s 超时，用于验证超时清理边界
+#[cfg(windows)]
+fn slow_long_argv() -> Vec<Value> {
+    vec![
+        json!("cmd.exe"),
+        json!("/C"),
+        json!("ping -n 20 127.0.0.1 >nul"),
+    ]
+}
+
+#[cfg(not(windows))]
+fn slow_long_argv() -> Vec<Value> {
+    vec![json!("sh"), json!("-c"), json!("sleep 20")]
+}
+
 fn temp_git_dir() -> TempDir {
     let dir = TempDir::new().expect("创建临时 git 目录");
     let status = Command::new("git")
@@ -4570,6 +4604,10 @@ fn standalone_replay_returns_final_result_without_new_attempts() {
     let first = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
     assert_eq!(first["attempts_total"], 1);
     assert_eq!(first["verdict_conclusion"], "passed");
+    assert_eq!(
+        first["replayed"], false,
+        "首次执行必须标称非回放：{first}"
+    );
 
     let replay = call_tool(&server, "task.execute", arguments);
     assert_eq!(replay["result"]["isError"], false, "{}", tool_text(&replay));
@@ -4577,6 +4615,18 @@ fn standalone_replay_returns_final_result_without_new_attempts() {
     assert_eq!(
         payload["attempts_total"], 1,
         "重投只能回放最终结果，不得新增尝试：{payload}"
+    );
+    assert_eq!(
+        payload["replayed"], true,
+        "重入必须能凭字段判定为回放：{payload}"
+    );
+    assert_eq!(
+        payload["replay_kind"], "existing",
+        "已完成记录的重入应为 existing：{payload}"
+    );
+    assert_eq!(
+        payload["finishedAt"], first["finishedAt"],
+        "回放必须原样返回既有最终结果，不得重写时间戳：{payload}"
     );
     assert_eq!(payload["verdict_locator"], first["verdict_locator"]);
     assert!(
@@ -4601,6 +4651,252 @@ fn standalone_replay_returns_final_result_without_new_attempts() {
         tool_text(&conflicting).contains("task_id_conflict"),
         "参数不一致不得默默回放旧结论：{}",
         tool_text(&conflicting)
+    );
+}
+
+/// 两个独立 Server 实例共享同一 runs/：同一 task_id 并发，必须一个执行、另一个等待回放
+#[test]
+fn standalone_duplicate_execute_is_serialized_across_servers() {
+    let runs = TempDir::new().expect("创建共享运行目录");
+    let settings_a = TempDir::new().expect("创建设置目录 A");
+    let settings_b = TempDir::new().expect("创建设置目录 B");
+    let server_a = Arc::new(Server::with_runs_dir(
+        settings_a.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    ));
+    let server_b = Arc::new(Server::with_runs_dir(
+        settings_b.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    ));
+    let cwd = Arc::new(temp_git_dir());
+    let barrier = Arc::new(Barrier::new(2));
+    let arguments = json!({
+        "task_id": "sa-concurrent",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": slow_write_file_argv("out.txt", "once"),
+        "acceptance": [{ "type": "file_exists", "path": "out.txt" }],
+        "max_attempts": 1
+    });
+
+    let mut handles = Vec::new();
+    for server in [Arc::clone(&server_a), Arc::clone(&server_b)] {
+        let barrier = Arc::clone(&barrier);
+        let arguments = arguments.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            tool_payload(&call_tool(&server, "task.execute", arguments))
+        }));
+    }
+    let payloads: Vec<Value> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("并发调用不应 panic"))
+        .collect();
+
+    let executed = payloads
+        .iter()
+        .filter(|payload| payload["replayed"] == false)
+        .count();
+    let replayed = payloads
+        .iter()
+        .filter(|payload| payload["replayed"] == true)
+        .count();
+    assert_eq!(executed, 1, "同一 task_id 只能有一个调用方真正执行：{payloads:?}");
+    assert_eq!(replayed, 1, "另一个调用方必须明确标记为回放：{payloads:?}");
+
+    let waiter = payloads
+        .iter()
+        .find(|payload| payload["replayed"] == true)
+        .expect("必须有一方回放");
+    assert_eq!(waiter["replay_kind"], "waited", "{waiter}");
+    assert_eq!(waiter["status"], "ok", "{waiter}");
+    assert_eq!(waiter["attempt"], 1, "{waiter}");
+    for payload in &payloads {
+        assert_eq!(payload["finishedAt"], payloads[0]["finishedAt"], "回放必须返回胜者的同一份回执：{payloads:?}");
+        assert_eq!(payload["stdout_digest"], payloads[0]["stdout_digest"], "{payloads:?}");
+    }
+
+    assert!(attempt_dir(&runs, "sa-concurrent", 1).exists());
+    assert!(
+        !attempt_dir(&runs, "sa-concurrent", 2).exists(),
+        "并发重投不得产生第二个 attempt 目录"
+    );
+    let verdicts = fs::read_dir(attempt_dir(&runs, "sa-concurrent", 1))
+        .expect("读取 attempt-1")
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy() == "verdict.json")
+        .count();
+    assert_eq!(verdicts, 1, "verdict.json 只能有一份，不能被两个调用方互相覆盖");
+}
+
+/// 4 条不同 task_id 并发，其中 1 条超时：其余任务不受影响，各自证据独立
+#[test]
+fn standalone_concurrent_tasks_are_isolated_from_one_timeout() {
+    let runs = TempDir::new().expect("创建共享运行目录");
+    let settings: Vec<TempDir> = (0..4).map(|_| TempDir::new().expect("创建设置目录")).collect();
+    let servers: Vec<Arc<Server>> = settings
+        .iter()
+        .map(|dir| {
+            Arc::new(Server::with_runs_dir(
+                dir.path().join("settings.json"),
+                runs.path().to_path_buf(),
+            ))
+        })
+        .collect();
+    let cwd = Arc::new(temp_git_dir());
+    let barrier = Arc::new(Barrier::new(4));
+
+    let fast_cases: Vec<(String, String)> = (1..=3)
+        .map(|index| {
+            (
+                format!("sa-iso-{index}"),
+                format!("out-{index}.txt"),
+            )
+        })
+        .collect();
+    let mut handles = Vec::new();
+    for (index, (task_id, file)) in fast_cases.clone().into_iter().enumerate() {
+        let server = Arc::clone(&servers[index]);
+        let cwd = Arc::clone(&cwd);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let payload = tool_payload(&call_tool(
+                &server,
+                "task.execute",
+                json!({
+                    "task_id": task_id,
+                    "mode": "standalone",
+                    "cwd": cwd.path(),
+                    "argv": slow_write_file_argv(&file, "ok"),
+                    "acceptance": [{ "type": "file_exists", "path": file }],
+                    "max_attempts": 1
+                }),
+            ));
+            (task_id, payload)
+        }));
+    }
+    {
+        let server = Arc::clone(&servers[1]);
+        let cwd = Arc::clone(&cwd);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let payload = tool_payload(&call_tool(
+                &server,
+                "task.execute",
+                json!({
+                    "task_id": "sa-iso-timeout",
+                    "mode": "standalone",
+                    "cwd": cwd.path(),
+                    "argv": slow_long_argv(),
+                    "acceptance": [{ "type": "exit_code", "expected": 0 }],
+                    "max_attempts": 1,
+                    "timeout_secs": 1
+                }),
+            ));
+            ("sa-iso-timeout".to_string(), payload)
+        }));
+    }
+
+    let results: Vec<(String, Value)> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("并发调用不应 panic"))
+        .collect();
+    for (task_id, payload) in &results {
+        if task_id == "sa-iso-timeout" {
+            assert_eq!(payload["status"], "blocked", "超时任务必须明确阻塞：{payload}");
+            assert_eq!(payload["verdict_conclusion"], "undetermined", "{payload}");
+            assert_eq!(payload["exit_code"], Value::Null, "{payload}");
+            assert_eq!(payload["attempt"], 1, "{payload}");
+            let reason = blocked_reason(payload);
+            assert!(reason.contains("timeout"), "超时必须给出原因：{reason}");
+            assert!(reason.contains("已清理受控集合"), "清理必须可核对：{reason}");
+        } else {
+            assert_eq!(payload["status"], "ok", "{task_id} 不得被其它任务的超时清理误伤：{payload}");
+            assert_eq!(payload["replayed"], false, "{payload}");
+            assert_eq!(payload["attempts_total"], 1, "{payload}");
+            let file = fast_cases
+                .iter()
+                .find(|(id, _)| id == task_id)
+                .map(|(_, file)| file.clone())
+                .expect("正例文件");
+            assert!(cwd.path().join(&file).exists(), "{task_id} 的产出文件必须落盘");
+        }
+    }
+    for (task_id, _) in &fast_cases {
+        assert!(attempt_dir(&runs, task_id, 1).exists());
+        assert!(!attempt_dir(&runs, task_id, 2).exists());
+    }
+    assert!(attempt_dir(&runs, "sa-iso-timeout", 1).exists());
+}
+
+/// 同一 task_id、不同参数跨实例并发：后到方必须拿到具名冲突，而不是跑出第二份证据
+#[test]
+fn standalone_concurrent_conflicting_signature_is_named_conflict() {
+    let runs = TempDir::new().expect("创建共享运行目录");
+    let settings_a = TempDir::new().expect("创建设置目录 A");
+    let settings_b = TempDir::new().expect("创建设置目录 B");
+    let server_a = Arc::new(Server::with_runs_dir(
+        settings_a.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    ));
+    let server_b = Arc::new(Server::with_runs_dir(
+        settings_b.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    ));
+    let cwd = Arc::new(temp_git_dir());
+    let barrier = Arc::new(Barrier::new(2));
+
+    let arguments_slow = json!({
+        "task_id": "sa-conflict",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": slow_write_file_argv("out.txt", "slow"),
+        "acceptance": [{ "type": "file_exists", "path": "out.txt" }],
+        "max_attempts": 1
+    });
+    let arguments_fast = json!({
+        "task_id": "sa-conflict",
+        "mode": "standalone",
+        "cwd": cwd.path(),
+        "argv": write_file_argv("out.txt", "fast"),
+        "acceptance": [{ "type": "exit_code", "expected": 0 }],
+        "max_attempts": 1
+    });
+
+    let mut handles = Vec::new();
+    for (server, arguments) in [
+        (Arc::clone(&server_a), arguments_slow),
+        (Arc::clone(&server_b), arguments_fast),
+    ] {
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            call_tool(&server, "task.execute", arguments)
+        }));
+    }
+    let responses: Vec<Value> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("并发调用不应 panic"))
+        .collect();
+    let errors = responses
+        .iter()
+        .filter(|response| response["result"]["isError"] == true)
+        .count();
+    assert_eq!(errors, 1, "异参并发必须恰好一方被拒绝：{responses:?}");
+    let rejected = responses
+        .iter()
+        .find(|response| response["result"]["isError"] == true)
+        .expect("必须有一方被拒绝");
+    assert!(
+        tool_text(rejected).contains("task_id_conflict"),
+        "异参复用必须具名拒绝：{}",
+        tool_text(rejected)
+    );
+    assert!(
+        !attempt_dir(&runs, "sa-conflict", 2).exists(),
+        "异参并发不得产生第二份证据"
     );
 }
 

@@ -1,7 +1,7 @@
 # `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 §23；v1.25 §24）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 见 §23；v1.25 见 §24；v1.26 见 §25；v1.27 见 §26；v1.28 见 §27）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14；v1.19 校正见 §15；v1.20 见 §16；v1.21 见 §17；v1.24 见 §23；v1.25 见 §24；v1.26 见 §25；v1.27 见 §26；v1.28 见 §27；v1.29 见 §28）。
 - 本批性质（v1.14）：**只修描述与契约措辞，不改任何行为、不改回执字段**；v1.25 例外见 §24（回执纯加 `arguments_diagnostics`，仍不改成功/失败）。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
@@ -2525,6 +2525,145 @@ test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 97 filtered out;
 - `file://` URL、含正则元字符的真实路径、`%NAME%` 展开后的真实目标属于**明确盲区**：前者不校验，后两者按 unknown 放行；契约 §2.6.8 已逐条列出，不声称已覆盖。
 - `argv_path_scan.checked[].resolved` 对尚不存在的目标只给到最深已存在祖先（示例 `p7` 为 cwd 本身），不代表最终文件位置。
 - 未验证"参数路径指向 cwd 内符号链接、链接目标在 cwd 内再跳回界外"的多跳组合；当前实现逐组件 canonicalize 会按最终目标判断，但未构造该夹具实测。
+
+## 28. v1.29：standalone 并发与重入实证
+
+### 28.1 结论（按回执字段判定，不按阅读代码判定）
+
+| 场景 | 实际发生 | 判定字段 |
+|---|---|---|
+| 同一 `task_id`、两个独立进程并发 | **一个执行、另一个等待回放**（不是"两个都 ok"） | `replayed=false`（执行方） vs `replayed=true` + `replay_kind="waited"`（回放方）；两方 `finishedAt` / `duration_ms` / `stdout_digest` / `verdict_locator` 完全相同；目录只有 `attempt-1` |
+| 不同 `task_id` 4 条并发，其中 1 条超时 | **互不影响**：3 条 `ok` + 1 条 `blocked`，3 份产出文件均在超时清理后落盘 | 3 条 `status=ok` / `exit_code=0` / `replayed=false`；超时条 `status=blocked` / `exit_code=null` / `verdict_conclusion=undetermined`，`blocked_reason` 含"timeout"与"已清理受控集合" |
+| 两个 bridge 进程共享同一 `runs/` | **靠原子 `create_dir(attempt-1)` 抢占 + 败者轮询回放**；无全局锁，不支持跨进程事务 | 同 id 场景的 `replayed`/`replay_kind`；异参/残缺目录的 `task_id_conflict` |
+| 同一 `task_id` 完成后重入 | **返回既有结果**（不新建 attempt、不重跑、不拒绝） | `replayed=true` + `replay_kind="existing"`；`finishedAt` 不变；`verdict.json` 与 `standalone-result.json` 的 sha256/mtime 前后不变；目录仍只有 `attempt-1` |
+
+### 28.2 先红：HEAD `858b7bf` 上的原始失败（断言未放宽）
+
+做法：`git worktree add --detach D:\Temp\aw-v129-red 858b7bf`，只把本轮 `tests/mcp_contract.rs` 放入工作树，`CARGO_TARGET_DIR` 复用现有 target；跑完 `worktree remove --force`。
+
+命令：`cargo test -p aw-mcp-bridge --test mcp_contract standalone_ -- --nocapture`
+
+```text
+running 13 tests
+thread 'standalone_replay_returns_final_result_without_new_attempts' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4607:5:
+assertion `left == right` failed: 首次执行必须标称非回放：{"argv":["cmd.exe","/C","echo hello>out.txt"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\.tmptJKCMl","unknown":[],"unknown_total":0},"artifacts":[{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stdout","locator":"runs/sa-replay/attempt-1/stdout.txt"},{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stderr","locator":"runs/sa-replay/attempt-1/stderr.txt"},{"hash":"sha256:9ab266195d3d826a0ba264b5475abebec9fd8b0157c91511a25a0af7df2d81f8","kind":"verdict","locator":"runs/sa-replay/attempt-1/verdict.json"}],"attempt":1,"attempts_total":1,"blocked_reason":null,"changed_files":["out.txt"],"changed_files_truncated":false,"commit":null,"cwd":"\\\\?\\D:\\Temp\\.tmptJKCMl","duration_ms":2546,"env_keys":[],"exit_code":0,"finishedAt":"2026-11-06T19:46:46Z","max_attempts":1,"mode":"standalone","path_prepend":[],"status":"ok","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","task_id":"sa-replay","timeout_secs":120,"verdict_conclusion":"passed","verdict_locator":"runs/sa-replay/attempt-1/verdict.json","verify_cmd":"cmd.exe /C echo hello>out.txt"}
+  left: Null
+ right: false
+test standalone_replay_returns_final_result_without_new_attempts ... FAILED
+thread 'standalone_duplicate_execute_is_serialized_across_servers' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4704:5:
+assertion `left == right` failed: 同一 task_id 只能有一个调用方真正执行：[Object {"argv": Array [String("cmd.exe"), String("/C"), String("ping -n 3 127.0.0.1 >nul & echo once>out.txt")], ...}, Object {...}]  ← 左值为两个回执的 Debug 列表，原文见本轮运行输出
+  left: 0
+ right: 1
+test standalone_duplicate_execute_is_serialized_across_servers ... FAILED
+thread 'standalone_concurrent_tasks_are_isolated_from_one_timeout' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4817:13:
+assertion `left == right` failed: {"argv":["cmd.exe","/C","ping -n 3 127.0.0.1 >nul & echo ok>out-1.txt"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\.tmpoFJeUu","unknown":[],"unknown_total":0},...,"finishedAt":"2026-11-06T19:46:48Z","max_attempts":1,"mode":"standalone","path_prepend":[],"status":"ok","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","task_id":"sa-iso-1","timeout_secs":120,"verdict_conclusion":"passed","verdict_locator":"runs/sa-iso-1/attempt-1/verdict.json","verify_cmd":"cmd.exe /C ping -n 3 127.0.0.1 >nul & echo ok>out-1.txt"}
+  left: Null
+ right: false
+test standalone_concurrent_tasks_are_isolated_from_one_timeout ... FAILED
+test result: FAILED. 10 passed; 3 failed; 0 ignored; 0 measured; 90 filtered out; finished in 6.27s
+```
+
+红的关键点：旧代码根本没有 `replayed` 字段（`left: Null`），并发同 id 时两个调用方都把自己算作"执行方"（`executed=0`，期望 1）；不同 id 的 3 条成功回执同样缺该字段。`standalone_concurrent_conflicting_signature_is_named_conflict` 在旧代码上已绿——异参 `task_id_conflict` 是 v1.1 起就有的行为，本轮只补"同参并发"与"重入"的字段证据。
+
+### 28.3 转绿与回归
+
+`cargo test -p aw-mcp-bridge`：`10 passed; 0 failed`（lib）+ `103 passed; 0 failed`（integration，含本轮新增 4 条 standalone 并发/重入用例）。新增用例名：
+
+- `standalone_replay_returns_final_result_without_new_attempts`（重入=existing）
+- `standalone_duplicate_execute_is_serialized_across_servers`（同 id 两实例=一个执行一个 waited）
+- `standalone_concurrent_tasks_are_isolated_from_one_timeout`（4 条含超时互不影响）
+- `standalone_concurrent_conflicting_signature_is_named_conflict`（异参并发=明确拒绝）
+
+### 28.4 真跑夹具与方法
+
+- 可执行文件：`E:\软件开发\云集编程工作站\4.AgentWork\target\debug\aw-mcp-bridge.exe`（v1.29 代码重建于 `2026-11-06T19:48:59Z`）。
+- 共享运行目录：该 exe 同级的 `target\debug\runs`（两个/四个进程都用同一路径，符合"独立进程操作同一 runs/"）。
+- 工作目录：`D:\Temp\aw-v129-live\work`。
+- 客户端：临时 Python stdio 脚本（不入库），每个场景启动 N 个独立 bridge 进程，各自完成 `initialize` + `notifications/initialized`，用 `threading.Barrier` 同时放行 `tools/call task.execute`；回执按 JSON-RPC 原始行解析，以下 `text` 即 `result.content[0].text` 原文。
+
+### 28.5 同一 `task_id` 两进程并发（`v129dup`）
+
+`process-a`（执行方）：
+
+```text
+{"argv":["cmd.exe","/C","ping -n 3 127.0.0.1 >nul & echo hello>out.txt"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v129-live\\work","unknown":[],"unknown_total":0},"artifacts":[{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stdout","locator":"runs/v129dup/attempt-1/stdout.txt"},{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stderr","locator":"runs/v129dup/attempt-1/stderr.txt"},{"hash":"sha256:ec9b5431513f251d09e34f9c6885762a6646b872d7ceb81dbed222be9c8a8926","kind":"verdict","locator":"runs/v129dup/attempt-1/verdict.json"}],"attempt":1,"attempts_total":1,"blocked_reason":null,"changed_files":[],"changed_files_truncated":false,"commit":null,"cwd":"\\\\?\\D:\\Temp\\aw-v129-live\\work","duration_ms":2183,"env_keys":[],"exit_code":0,"finishedAt":"2026-11-06T19:49:30Z","max_attempts":1,"mode":"standalone","path_prepend":[],"replayed":false,"status":"ok","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","task_id":"v129dup","timeout_secs":120,"verdict_conclusion":"passed","verdict_locator":"runs/v129dup/attempt-1/verdict.json","verify_cmd":"cmd.exe /C ping -n 3 127.0.0.1 >nul & echo hello>out.txt"}
+```
+
+`process-b`（等待回放方，注意 `replay_kind` 与 `replayed`）：
+
+```text
+{"argv":["cmd.exe","/C","ping -n 3 127.0.0.1 >nul & echo hello>out.txt"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v129-live\\work","unknown":[],"unknown_total":0},"artifacts":[{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stdout","locator":"runs/v129dup/attempt-1/stdout.txt"},{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stderr","locator":"runs/v129dup/attempt-1/stderr.txt"},{"hash":"sha256:ec9b5431513f251d09e34f9c6885762a6646b872d7ceb81dbed222be9c8a8926","kind":"verdict","locator":"runs/v129dup/attempt-1/verdict.json"}],"attempt":1,"attempts_total":1,"blocked_reason":null,"changed_files":[],"changed_files_truncated":false,"commit":null,"cwd":"\\\\?\\D:\\Temp\\aw-v129-live\\work","duration_ms":2183,"env_keys":[],"exit_code":0,"finishedAt":"2026-11-06T19:49:30Z","max_attempts":1,"mode":"standalone","path_prepend":[],"replay_kind":"waited","replayed":true,"status":"ok","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","task_id":"v129dup","timeout_secs":120,"verdict_conclusion":"passed","verdict_locator":"runs/v129dup/attempt-1/verdict.json","verify_cmd":"cmd.exe /C ping -n 3 127.0.0.1 >nul & echo hello>out.txt"}
+```
+
+落盘核对：`runs/v129dup/` 下只有 `attempt-1/` 与 `standalone-result.json`；`verdict.json` sha256 为 `ec9b5431513f251d09e34f9c6885762a6646b872d7ceb81dbed222be9c8a8926`，与两方回执 `artifacts[verdict].hash` 一致，只有一份。
+
+### 28.6 不同 `task_id` 4 条并发，其中 1 条超时（`v129iso-*`）
+
+3 条慢任务（`ping -n 3`，约 2.2s）全部成功；超时任务 `timeout_secs=1` 先返回。
+
+`v129iso-1`（`v129iso-2`/`v129iso-3` 同形，仅 `task_id`/`finishedAt`/`duration_ms`/verdict sha256 不同）：
+
+```text
+{"attempt":1,"attempts_total":1,"duration_ms":2210,"exit_code":0,"finishedAt":"2026-11-06T19:49:32Z","replayed":false,"status":"ok","task_id":"v129iso-1","verdict_conclusion":"passed","verdict_locator":"runs/v129iso-1/attempt-1/verdict.json"}
+{"attempt":1,"attempts_total":1,"duration_ms":2199,"exit_code":0,"finishedAt":"2026-11-06T19:49:32Z","replayed":false,"status":"ok","task_id":"v129iso-2","verdict_conclusion":"passed","verdict_locator":"runs/v129iso-2/attempt-1/verdict.json"}
+{"attempt":1,"attempts_total":1,"duration_ms":2210,"exit_code":0,"finishedAt":"2026-11-06T19:49:32Z","replayed":false,"status":"ok","task_id":"v129iso-3","verdict_conclusion":"passed","verdict_locator":"runs/v129iso-3/attempt-1/verdict.json"}
+```
+
+超时任务 `v129iso-timeout`（完整原文）：
+
+```text
+{"argv":["cmd.exe","/C","ping -n 20 127.0.0.1 >nul & echo late>out-t.txt"],"argv_path_scan":{"checked":[],"checked_total":0,"scope":"\\\\?\\D:\\Temp\\aw-v129-live\\work","unknown":[],"unknown_total":0},"artifacts":[{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stdout","locator":"runs/v129iso-timeout/attempt-1/stdout.txt"},{"hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","kind":"stderr","locator":"runs/v129iso-timeout/attempt-1/stderr.txt"},{"hash":"sha256:93b3a709566fd4230281b6cd0a6bf7b5e09ba25f20439d82efde7ed0bf3bf745","kind":"verdict","locator":"runs/v129iso-timeout/attempt-1/verdict.json"}],"attempt":1,"attempts_total":1,"blocked_reason":"timeout：超过 1s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建并先加入作业再恢复执行（恢复前不会派生子进程）；BREAKAWAY 或加入作业失败的作业外进程仍不可观测","changed_files":[],"changed_files_truncated":false,"commit":null,"cwd":"\\\\?\\D:\\Temp\\aw-v129-live\\work","duration_ms":1018,"env_keys":[],"exit_code":null,"finishedAt":"2026-11-06T19:49:31Z","max_attempts":1,"mode":"standalone","path_prepend":[],"replayed":false,"status":"blocked","stderr_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","stdout_digest":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","task_id":"v129iso-timeout","timeout_secs":1,"verdict_conclusion":"undetermined","verdict_locator":"runs/v129iso-timeout/attempt-1/verdict.json","verify_cmd":"cmd.exe /C ping -n 20 127.0.0.1 >nul & echo late>out-t.txt"}
+```
+
+互不影响的证据：超时任务 `19:49:31Z` 返回并清理本 attempt 的 Job，3 条慢任务在 `19:49:32Z` 各自正常结束，`exit_code=0`；工作目录里 `out-1.txt` / `out-2.txt` / `out-3.txt` 均为 4 字节，`out-t.txt` 不存在（超时被清理、未产出）。4 个任务目录均只有 `attempt-1`，无交叉 attempt 目录或额外 attempt。
+
+### 28.7 重入：`v129dup` 已有完成记录后再次调用
+
+新起一个 bridge 进程，用**完全相同**参数再次 `task.execute`：
+
+```text
+{"attempt":1,"attempts_total":1,"duration_ms":2183,"finishedAt":"2026-11-06T19:49:30Z","replay_kind":"existing","replayed":true,"status":"ok","task_id":"v129dup","verdict_conclusion":"passed","verdict_locator":"runs/v129dup/attempt-1/verdict.json"}
+```
+
+前后落盘对比（调用前后各取一次）：
+
+| 文件 | 前 | 后 |
+|---|---|---|
+| `attempt-1/verdict.json` sha256 | `ec9b5431513f251d09e34f9c6885762a6646b872d7ceb81dbed222be9c8a8926` | 同左 |
+| `attempt-1/verdict.json` mtime (ns) | `1793994570099226100` | 同左 |
+| `standalone-result.json` sha256 | `876341412c3a475f1f04f5f3a8944f0885f5c62c60bbb7a08b8c5dc09a37717d` | 同左 |
+| `standalone-result.json` mtime (ns) | `1793994570099226100` | 同左 |
+| `runs/v129dup/` 目录 | `["attempt-1"]` | `["attempt-1"]` |
+
+结论：**当前语义是"返回既有结果"**（`existing`），不是新建 attempt，也不是拒绝；要重新执行必须换新 `task_id`。
+
+### 28.8 同一 `task_id`、不同参数并发（`v129conflict`）
+
+两个独立进程同时发：A 为慢任务（`ping -n 3` + `out-a.txt`），B 为快任务（`echo b>out-b.txt`）。本次 B 抢到 `attempt-1` 并执行，A 得到明确工具错误：
+
+```text
+{"error":"task_id_conflict: task_id `v129conflict` 已存在且 standalone 参数不一致（cwd / argv / acceptance / max_attempts / timeout_secs 必须完全一致）；重跑请使用新 task_id"}
+```
+
+B 回执关键字段：`"replayed":false`、`"status":"ok"`、`"finishedAt":"2026-11-06T19:49:33Z"`。`runs/v129conflict/` 只有 `attempt-1`，B 的 `out-b.txt` 存在，A 的 `out-a.txt` 不存在——败者没有执行、没有写第二份证据。
+
+### 28.9 残缺目录的可检测症状（`v129orphan`）
+
+手工创建 `runs/v129orphan/attempt-1/`（不写 `dispatch.json`），再调用 `task.execute`。等待约 5s 后返回：
+
+```text
+{"error":"task_id_conflict: task_id `v129orphan` 已有运行目录但缺少派单签名（dispatch.json），无法证明参数一致；重跑请使用新 task_id"}
+```
+
+这是"胜者在极窄窗口崩溃"的可检测症状：不会被静默当作重放，也不会被覆盖。
+
+### 28.10 未覆盖与限制（如实标注）
+
+- 同 id 并发只跑了 2 轮（首轮因 `target\debug` 二进制未随 v1.29 重建而缺少 `replayed` 字段，重建后重跑；两轮都在执行窗口内命中，均得到"一个执行 + 一个 `waited`"）。这是**采样证据**，不是对所有交错顺序的形式证明；原子性判据仍是 OS 级 `fs::create_dir` 的 `AlreadyExists`，未做高频循环压测。
+- 超时"不误伤其它任务"的判据是：其它 3 条任务随后正常完成且产出落盘、各 attempt 只有自己的目录。未观测到清理误杀，但**不能证明任意逃逸进程都不可观测**——`blocked_reason` 已明写 BREAKAWAY / 加入作业失败 / 嵌套作业不可观测。
+- `runs.prune` 与执行/回放在跨进程下没有全局锁；本轮**未构造**"边 prune 边重放同一任务"的竞争实测，契约 §2.6.9 只把它写成已知限制与症状（`task_id_conflict`）。
+- 未在 POSIX 上重跑本组并发场景；Windows Job Object 语义是本轮唯一实测平台。
+- 本轮未改 `tools/list` 描述，`tools_sha256` 仍为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`。
 
 
 
