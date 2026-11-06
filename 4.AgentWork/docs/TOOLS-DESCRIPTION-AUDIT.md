@@ -1239,6 +1239,7 @@ cargo test -p aw-mcp-bridge description_gate
 | G8 | `health` | `description` | 只读 | — | `description_gate_behavior_additional_properties_declared_only` |
 | G9 | `status` | `description` | 只读；不回显任何配置值 | — | `description_gate_behavior_additional_properties_declared_only` |
 | G10 | `receipt.get` | `description` | 默认返回最新一次 | — | `description_gate_snapshot_matches_audit` |
+| G11 | `status` | `description` | 连接级计数 connections；unit=connection；进程内无会话概念；active/total/peak 恒为 1；initialize_total 随 initialize 次数累加；多份 initialize 不等于多会话；仅观测，不做准入或上限 | 活跃会话数；会话上限；准入拦截 | `description_gate_behavior_connection_counters_real_stdio` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
 
@@ -1246,7 +1247,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "96441bc418decc077810cb13ae1cf76a1c4efc766cef8958a5ddf8cf7b35a736",
+  "tools_sha256": "884952c7686d305356dc0f41b52af5579835edf54ea37f0e7b7378293b093092",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1318,6 +1319,13 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "description",
       "contains": ["默认返回最新一次"],
       "not_contains": []
+    },
+    {
+      "id": "G11",
+      "tool": "status",
+      "path": "description",
+      "contains": ["连接级计数 connections", "unit=connection", "进程内无会话概念", "active/total/peak 恒为 1", "initialize_total 随 initialize 次数累加", "多份 initialize 不等于多会话", "仅观测，不做准入或上限"],
+      "not_contains": ["活跃会话数", "会话上限", "准入拦截"]
     }
   ]
 }
@@ -1340,6 +1348,7 @@ cargo test -p aw-mcp-bridge description_gate
 | `additionalProperties` 只声明不强制 | 六个工具的 schema 全部声明 `additionalProperties:false`；同时带未知参数调用不被拒绝、未知参数不生效 |
 | `_session` 不作为任务 | `runs.list` 与 `runs.prune` 在有 `_session` 的 runs 目录下都不把它当任务/候选 |
 | `limit` 缺省值 | `runs.list` 缺省回显 `limit=20` 且只回 20 条；`runs.prune` 缺省回显 `limit=100`；`limit` 在 `status` 过滤之后生效（过滤后截断、`truncated=true`） |
+| 连接计数（v1.23） | 描述必须写明连接级 `connections`、无会话概念、`active/total/peak` 恒为 1、`initialize_total` 累加、只观测；真实 stdio 进程两次 `initialize` 后必须读到 `initialize_total=2` 且 `total/peak/active=1` |
 
 ### 21.5 仍然只能靠人的部分（不做自动覆盖）
 
@@ -1397,13 +1406,94 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 74 filtered out
 ### 21.7 两平台数字
 
 ```text
-Windows（cargo test -p aw-mcp-bridge）：9 unit + 77 integration，0 failed（门禁 3 + 3）
-POSIX（WSL HostGoTest，verify.sh run 离线）：8 unit + 75 integration，0 failed，四类证据行齐全（门禁 3 + 3）
+Windows（cargo test -p aw-mcp-bridge）：9 unit + 78 integration，0 failed（门禁 3 + 4）
+POSIX（WSL HostGoTest，verify.sh run 离线）：8 unit + 76 integration，0 failed，四类证据行齐全（门禁 3 + 4）
 ```
 
 差额仍为 `cfg(windows)` 用例。POSIX 侧 `verify.sh` 已同步把本文档复制进裁剪 workspace，否则 `include_str!` 会让门禁用例在 POSIX 上无法编译。
 
 结论：门禁把"描述与实现对齐"从"靠人记得更新"变成**可执行、可失败**；上表列出的环境依赖项与否定性断言仍只能靠人，已如实标注，不假装覆盖。
+
+## 22. 「多份 initialize ≠ 多会话」的可观测口径（v1.23）
+
+### 22.1 实测方法与结论
+
+方法：启动**真实** `aw-mcp-bridge.exe`（stdio），同一进程内先发两条 `initialize`（`clientInfo.name` 分别为 `count-probe-1` / `count-probe-2`），再发 `tools/call status`。实测输出（`status.connections` 原文）：
+
+```text
+{"active":1,"initialize_total":2,"note":"进程内无会话概念：stdio 单连接，active/total/peak 恒为 1；同一连接重复 initialize 只累加 initialize_total，不新增连接；仅观测，不做准入或上限","peak":1,"scope":"process","total":1,"unit":"connection"}
+```
+
+结论：**bridge 进程内没有"会话"概念，只有一条 stdio 连接**。多份 `initialize` 不是多个会话，也不产生多条连接；`initialize_total` 是唯一随重复握手变化的量。因此计数按**连接级**命名，不使用"会话数"措辞。
+
+依据（不是读代码推断）：`main` 只从 stdin 读循环、EOF 即退出，没有 accept/重连路径；上述实测中两条 `initialize` 都返回协议版本，而 `total`/`peak`/`active` 保持 1、`initialize_total` 为 2。
+
+### 22.2 暴露字段
+
+`status` 结果新增 `connections`（纯加法；`runs.list` 不变）：
+
+| 字段 | 类型 | 含义 | stdio 下的值 |
+|---|---|---|---|
+| `unit` | string | 计数单位 | `"connection"` |
+| `scope` | string | 作用域 | `"process"` |
+| `active` | number | 当前活跃连接数 | `1`（进程存活期间唯一 stdin 连接） |
+| `total` | number | 累计连接数 | `1` |
+| `peak` | number | 并发峰值 | `1`（没有第二条连接路径，故恒为 1） |
+| `initialize_total` | number | 本连接累计 `initialize` 次数 | 随调用累加 |
+| `note` | string | 口径说明 | 固定文案，明写无会话概念与只观测 |
+
+实现：[connections_payload](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs)。`active`/`total` 由"首条消息即连接建立"的原子标记推导，`peak` 由该标记置 1，`initialize_total` 在每次收到 `initialize` 时原子累加。**不拦截**：没有准入、没有连接上限，`clientInfo` 仍只落审计、不参与任何判断。
+
+### 22.3 与描述门禁打通
+
+- `tools/list` 的 `status` 描述新增连接级计数说明；`tools_sha256` 由 `96441bc4…` 变为 `884952c7…`，未同步文档即失败。
+- 新增门禁行 `G11`：要求描述包含「连接级计数 connections」「unit=connection」「进程内无会话概念」「active/total/peak 恒为 1」「initialize_total 随 initialize 次数累加」「多份 initialize 不等于多会话」「仅观测，不做准入或上限」；禁止「活跃会话数」「会话上限」「准入拦截」。
+- 新增行为用例 `description_gate_behavior_connection_counters_real_stdio`：**真启动二进制**、走真实 stdio，断言两次 `initialize` 后 `initialize_total=2` 且 `active/total/peak=1`。描述或计数任一改动都会让门禁失败。
+
+### 22.4 扰动证明（红原文原样）
+
+红 A：去掉 `initialize_total` 累加（行为扰动），真实 stdio 用例失败：
+
+```text
+test description_gate_behavior_connection_counters_real_stdio ... FAILED
+
+thread 'description_gate_behavior_connection_counters_real_stdio' panicked at apps\mcp-bridge\tests\mcp_contract.rs:3934:5:
+assertion `left == right` failed: 两次 initialize 只累加 initialize_total，不新增连接/session：{"connections":{"active":1,"initialize_total":0,"note":"进程内无会话概念：stdio 单连接，active/total/peak 恒为 1；同一连接重复 initialize 只累加 initialize_total，不新增连接；仅观测，不做准入或上限","peak":1,"scope":"process","total":1,"unit":"connection"},…}
+  left: Number(0)
+ right: 2
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.29s
+```
+
+红 B：把描述里的「仅观测，不做准入或上限」改成「并对连接数做准入拦截」（描述扰动），行断言与快照同时失败：
+
+```text
+thread 'server::description_gate::description_gate_rows_hold_on_tools' panicked at apps\mcp-bridge\src\server.rs:2439:17:
+G11：status 的 description 缺少必需措辞「仅观测，不做准入或上限」：只读汇总桌面端关键状态：…；并对连接数做准入拦截）；不回显任何配置值
+
+thread 'server::description_gate::description_gate_snapshot_matches_audit' panicked at apps\mcp-bridge\src\server.rs:2411:9:
+assertion `left == right` failed: tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。实际=03e1c3dd7b4755ea59985ec1173e44408839ab740d8a6b19a94f11905e3dc840
+  left: "03e1c3dd7b4755ea59985ec1173e44408839ab740d8a6b19a94f11905e3dc840"
+ right: "884952c7686d305356dc0f41b52af5579835edf54ea37f0e7b7378293b093092"
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+```
+
+两处扰动已逐字恢复，门禁回到 3 + 4 全绿。
+
+### 22.5 两平台数字与边界
+
+```text
+Windows：9 unit + 78 integration，0 failed
+POSIX （WSL HostGoTest，verify.sh run 离线）：8 unit + 76 integration，0 failed，四类证据行齐全
+```
+
+边界（如实标注，不扩大口径）：
+
+- 计数的"连接"指 **stdio 进程内唯一连接**，不是 TCP/socket 多连接；`peak` 恒为 1 是因为根本没有第二条连接路径，而不是"测出来恰好为 1"。
+- 计数是**进程级**：不同 bridge 进程各自独立，没有跨进程共享或汇总。
+- 只观测：不参与准入、不做上限、不做限流；`clientInfo` 仍不参与准入。
+- 真实 stdio 用例会把 `initialize` 审计文件写到可执行文件同级的 `runs/_session`（测试目录，非生产 runs）；不影响计数断言。
 
 
 

@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -20,6 +20,10 @@ pub const DESKTOP_BUILD_TIME: &str = env!("AW_DESKTOP_BUILD_TIME");
 pub struct Server {
     settings_path: PathBuf,
     runs_dir: PathBuf,
+    /// 连接级计数：进程内没有"会话"概念，只有一条 stdio 连接。
+    connection_started: AtomicBool,
+    connections_peak: AtomicU64,
+    initialize_total: AtomicU64,
 }
 
 impl Server {
@@ -31,6 +35,9 @@ impl Server {
         Self {
             settings_path,
             runs_dir,
+            connection_started: AtomicBool::new(false),
+            connections_peak: AtomicU64::new(0),
+            initialize_total: AtomicU64::new(0),
         }
     }
 
@@ -51,6 +58,10 @@ impl Server {
     }
 
     pub fn handle_message(&self, message: &Value) -> Option<Value> {
+        // 首条消息即视为 stdio 连接建立；进程存活期间只有这一条连接
+        if !self.connection_started.swap(true, Ordering::SeqCst) {
+            self.connections_peak.fetch_max(1, Ordering::SeqCst);
+        }
         let id = message.get("id").cloned();
         let method = match message.get("method").and_then(|value| value.as_str()) {
             Some(method) => method,
@@ -65,6 +76,7 @@ impl Server {
         let result = match method {
             "initialize" => {
                 // clientInfo 只落审计记录：它是调用方自称，不是身份，任何准入逻辑都不得读它
+                self.initialize_total.fetch_add(1, Ordering::SeqCst);
                 self.record_client_info(message.get("params"));
                 Some(json!({
                     "protocolVersion": PROTOCOL_VERSION,
@@ -144,12 +156,27 @@ impl Server {
         json!({
             "desktop": summarize_settings(&self.settings_path),
             "session": self.session_audit(),
+            "connections": self.connections_payload(),
             "server": {
                 "name": SERVER_NAME,
                 "version": env!("CARGO_PKG_VERSION"),
                 "buildTime": BUILD_TIME,
                 "desktopBuildTime": DESKTOP_BUILD_TIME
             }
+        })
+    }
+
+    /// 连接级计数：如实说明进程内没有会话概念
+    fn connections_payload(&self) -> Value {
+        let started = self.connection_started.load(Ordering::SeqCst);
+        json!({
+            "unit": "connection",
+            "scope": "process",
+            "active": if started { 1 } else { 0 },
+            "total": if started { 1 } else { 0 },
+            "peak": self.connections_peak.load(Ordering::SeqCst),
+            "initialize_total": self.initialize_total.load(Ordering::SeqCst),
+            "note": "进程内无会话概念：stdio 单连接，active/total/peak 恒为 1；同一连接重复 initialize 只累加 initialize_total，不新增连接；仅观测，不做准入或上限"
         })
     }
 
@@ -2141,7 +2168,7 @@ fn tools() -> Value {
         },
         {
             "name": "status",
-            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，以及 initialize 审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo；仅审计弱识别，不构成身份）；不回显任何配置值",
+            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，初始化审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo；仅审计弱识别，不构成身份），以及连接级计数 connections（unit=connection：进程内无会话概念，stdio 单连接故 active/total/peak 恒为 1，initialize_total 随 initialize 次数累加，多份 initialize 不等于多会话；仅观测，不做准入或上限）；不回显任何配置值",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {

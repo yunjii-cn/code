@@ -3872,3 +3872,70 @@ fn description_gate_behavior_session_and_limit_defaults() {
         "_session 不得成为候选：{dry}"
     );
 }
+
+#[test]
+fn description_gate_behavior_connection_counters_real_stdio() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_aw-mcp-bridge"))
+        .env("APPDATA", home.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("启动真实 bridge 进程");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+
+    for id in 1..=2 {
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "initialize",
+                "params": { "clientInfo": { "name": format!("probe-{id}") } }
+            })
+        )
+        .expect("写入 initialize");
+        let mut line = String::new();
+        stdout.read_line(&mut line).expect("读取 initialize 响应失败");
+        let response: Value = serde_json::from_str(line.trim()).expect("initialize 响应必须是 JSON");
+        assert_eq!(
+            response["result"]["protocolVersion"], "2025-06-18",
+            "同一连接必须能重复 initialize：{response}"
+        );
+    }
+
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "status", "arguments": {}}})
+    )
+    .expect("写入 status");
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("读取 status 响应失败");
+    let response: Value = serde_json::from_str(line.trim()).expect("status 响应必须是 JSON");
+    let payload: Value = serde_json::from_str(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("status 必须是文本载荷"),
+    )
+    .expect("status 载荷必须是 JSON");
+
+    let connections = &payload["connections"];
+    assert_eq!(connections["unit"], "connection", "计数单位必须是连接级");
+    assert_eq!(connections["scope"], "process");
+    assert_eq!(connections["active"], 1);
+    assert_eq!(connections["total"], 1);
+    assert_eq!(connections["peak"], 1);
+    assert_eq!(
+        connections["initialize_total"], 2,
+        "两次 initialize 只累加 initialize_total，不新增连接/session：{payload}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
