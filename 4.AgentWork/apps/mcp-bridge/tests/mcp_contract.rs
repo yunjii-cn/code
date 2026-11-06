@@ -5565,7 +5565,10 @@ fn standalone_argv_scope_rejects_escapes_before_execution() {
         ("argv-quoted", vec!["\"../escape.txt\"".to_string()]),
         (
             "argv-backslash",
-            vec!["--out=..\\..\\escape.txt".to_string()],
+            vec![format!(
+                "--out=..{sep}..{sep}escape.txt",
+                sep = std::path::MAIN_SEPARATOR
+            )],
         ),
     ];
 

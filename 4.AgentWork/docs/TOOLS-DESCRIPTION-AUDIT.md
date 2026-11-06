@@ -2838,7 +2838,7 @@ third : replay_basis=rerun_after_records_missing,  prior_attempts=1, replayed=Tr
 [evidence] grandchild pid=126076 process_exists_after=false
 ```
 
-- POSIX（WSL `HostGoTest`，Rust 1.88.0，`verify.sh run` 离线）：四类 `#3` 证据行齐全（`timeout_cleans_controlled_set_including_grandchild` / `timeout_reason_states_action_not_tree_death` 均通过）。同次运行出现 **1 条与本项无关的失败**：`standalone_argv_scope_rejects_escapes_before_execution` 的 `argv-backslash` 用例（`..\..\escape.txt` 在 POSIX 是合法文件名、不是分隔符，扫描判 `in_scope` 后执行成功）。该用例属 v1.28，本轮未改动断言，如实记录为**独立待办**，不计入 `#3` 证据。
+- POSIX（WSL `HostGoTest`，Rust 1.88.0，`verify.sh run` 离线）：四类 `#3` 证据行齐全（`timeout_cleans_controlled_set_including_grandchild` / `timeout_reason_states_action_not_tree_death` 均通过）。同次运行出现 **1 条与本项无关的失败**：`standalone_argv_scope_rejects_escapes_before_execution` 的 `argv-backslash` 用例（`..\..\escape.txt` 在 POSIX 是合法文件名、不是分隔符，扫描判 `in_scope` 后执行成功）。该用例属 v1.28；v1.31.1 已按平台分隔符修正夹具并重跑，POSIX `9 lib + 108 integration` 全绿，原始红/绿见 §32。该失败与 `#3` 无关，不计入 `#3` 证据。
 
 ### 30.5 结论（不改状态）
 
@@ -2912,6 +2912,54 @@ strict_legal: isError=False {"arguments_diagnostics":{"unknown_arguments":[{"kin
 - 严格模式只覆盖 `kind=unknown|alias`；`null_optional` 与 `_meta` 不拒绝。
 - 不新增环境变量/进程级开关（避免契约 §10.1 第 2 条"同一请求不同进程行为不同"）；严格与否由**单次请求**决定，回执可审计。
 - `tools/list` 的 `description` / `inputSchema` 未改，`tools_sha256` 仍为 `919be60becbc358ae0335b17b7a38d3feb063e7acc4deb4f6312204167c52922`。
+
+## 32. POSIX argv 夹具修正（v1.31.1）
+
+### 32.1 红（HEAD `97e76b3`，WSL `HostGoTest`）
+
+```text
+thread 'standalone_argv_scope_rejects_escapes_before_execution' panicked at apps/mcp-bridge/tests/mcp_contract.rs:5592:9:
+assertion `left == right` failed: argv-backslash 参数携带的越界路径必须在执行前拒绝：{"argv":["sh","-c","echo ok","--out=..\\..\\escape.txt"],"argv_path_scan":{"checked":[{"class":"relative_path","decision":"in_scope","encoded":false,"index":4,"raw":"--out=..\\..\\escape.txt","resolved":"/tmp/.tmpb6oV28/..\\..\\escape.txt","value":"..\\..\\escape.txt","via":"flag_equals"}],...},"status":"ok",...}
+  left: String("ok")
+ right: "blocked"
+test result: FAILED. 107 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+原因：夹具把 Windows 分隔符 `\` 硬编码进 POSIX 用例；POSIX 下它是文件名字符，不是路径分隔，扫描判 `in_scope` 是正确行为，错的是夹具而不是实现。
+
+### 32.2 修改（只动夹具，不动断言/实现）
+
+```rust
+(
+    "argv-backslash",
+    vec![format!(
+        "--out=..{sep}..{sep}escape.txt",
+        sep = std::path::MAIN_SEPARATOR
+    )],
+),
+```
+
+- Windows：`MAIN_SEPARATOR` 为 `\`，与旧夹具逐字相同。
+- POSIX：构造真实的 `../../escape.txt`。
+- 无 `cfg` 豁免分支、无断言放宽：仍断言 `status=blocked`、`blocked_reason` 以 `standalone_argv_path_escape` 开头、原因包含具体参数、拒绝发生在占号前（无运行目录）。
+
+### 32.3 绿
+
+Windows（单项回归）：
+
+```text
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out
+```
+
+POSIX（WSL 全量 `verify.sh run`，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-053436.log`）：
+
+```text
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 108 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+[INFO] 四类 POSIX 用例全部通过，证据行齐全
+```
+
+（上一批 POSIX 为 `104 passed; 1 failed`；本批多出的 3 条是 v1.31 新增的严格参数用例，故全绿后为 `108 passed`。）
 
 
 
