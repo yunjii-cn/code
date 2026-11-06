@@ -1780,7 +1780,8 @@ fn tools() -> Value {
                     },
                     "path_prepend": {
                         "type": "array",
-                        "items": { "type": "string" },
+                        "maxItems": 16,
+                        "items": { "type": "string", "maxLength": 4096 },
                         "description": "可选：前插到子进程 PATH 的目录列表（字符串数组）。按数组字面顺序排在最前，其后才是继承的 PATH；平台分隔符自动使用（Windows 为分号，其他平台为冒号）。空数组与缺省完全等价（签名相同）。参与幂等签名：同 task_id 重投必须完全一致。上限 16 项、单项 ≤4096 字符；不做目录存在性校验。非法形态（非字符串数组/空元素/NUL/超量/超长）在占号前以 invalid_path_prepend 拒绝"
                     }
                 },
@@ -1819,7 +1820,7 @@ fn tools() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt；不提供默认阈值" },
+                    "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt。默认建议 90 天（覆盖一般验收/审计窗口，偏保守）；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" },
                     "dry_run": { "type": "boolean", "description": "默认 true：只列候选、不删不写；false 表示要求真删（还需 confirm=true）" },
                     "confirm": { "type": "boolean", "description": "默认 false：真删必须显式 true；单独 true 不隐含真删" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 20" }

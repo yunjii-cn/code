@@ -1,7 +1,7 @@
-# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条）
+# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条；v1.18 变更见 §14）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13；v1.18 见 §14）。
 - 本批性质：**只修描述与契约措辞，不改任何行为、不改回执字段**。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
@@ -190,7 +190,7 @@
 | 69 | "系统内没有定时/启动自动清理" | 全仓无清理定时器/启动调用；`runs.prune` 仅由 `tools/call` 触发 | 与实现一致 |
 | 70 | schema `older_than_days`："必填…" | 缺失 → `invalid_retention`；在一切读写之前 | 与实现一致 |
 | 71 | schema `older_than_days`："只清理 finishedAt 距今不少于该天数的 attempt（1..=3650）" | 范围校验 `1..=3650`；`age_days < older_than_days` 跳过 | 与实现一致 |
-| 72 | schema `older_than_days`："不提供默认阈值" | 缺失即报错，不落任何默认值 | 与实现一致 |
+| 72 | schema `older_than_days`："不提供默认阈值"（v1.18 改为"推荐 90 天、仍须显式传入"，见 §14.2） | 缺失即报错，不落任何默认值 | 与实现一致 |
 | 73 | schema `dry_run`："默认 true：只列候选、不删不写" | 缺省 true；dry-run 返回前零写入 | 与实现一致 |
 | 74 | schema `dry_run`："false 表示要求真删（还需 confirm=true）" | `dry_run=false` 且无 confirm → `confirm_required` | 与实现一致 |
 | 75 | schema `confirm`："默认 false；真删必须显式 true" | 缺省 false；`!dry_run && !confirm` 拒绝 | 与实现一致 |
@@ -205,7 +205,7 @@
 
 | # | 断言 | 实现依据 | 判定 |
 |---|---|---|---|
-| 78 | 六个工具的 `inputSchema.type` 均为 `object` | `call_tool` 要求 `params.arguments` 为对象（缺失时按 `{}` 处理） | 与实现一致 |
+| 78 | 六个工具的 `inputSchema.type` 均为 `object` | 六个 schema 均声明 `type=object`；`call_tool` 在缺失 `arguments` 时按 `{}` 处理，非对象值也透传（不额外校验） | 与实现一致（v1.18 更正：原"`call_tool` 要求为对象"表述过强，见 §13.6 注 5） |
 | 79 | `task.execute.required = ["task_id","cmd"]`：`task_id` 缺失即错误 | `required_str("task_id")` → 工具错误 | 与实现一致 |
 | 80 | `task.execute.required = ["task_id","cmd"]`：`cmd` 缺失按 schema 属必填 | 缺 `cmd` **不报工具错误**，而返回 `blocked` 回执（`command_not_found:`），见契约 §6 | 与实现一致（口径按契约 §6 的 blocked 回执，schema `required` 只约束调用方；服务端容错是既有行为，本批不改） |
 | 81 | `receipt.get.required = ["task_id"]` | 缺失 → 工具错误 | 与实现一致 |
@@ -280,9 +280,9 @@ test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 ## 11. 仍存在的已知缺口（不在本批范围，不得被本批描述"修好"所掩盖）
 
 1. **`#3` 整棵进程树杀灭仍不可判定**：v1.16 已按窄定义实现**受控集合**清理（POSIX 进程组 / Windows Job），但逃逸后代（`setsid`、`spawn → Assign` 窗口、`BREAKAWAY`）不可见；`#3` 仍为 `NOT_PROVEN`。`timeout:` 文案与契约 §4 已如实说明；`tools/list` 描述已同步至同一口径（见 §12）。
-2. **`additionalProperties: false` 服务端不强制**：见 §7.2，属声明性约束。
-3. **清理的阈值/分档/`task_id` 退役纪律未由 PM 定**：`runs.prune` 入口已落地，但契约 §10 仍标"待定"。
-4. **认证/准入/并发上限不存在**：`clientInfo` 仅审计、不参与准入；`initialize` 多份记录不等于多会话、不构成身份。
+2. **`additionalProperties: false` 服务端不强制（v1.18 已定为默认策略）**：见 §7.2 / §14.3；保持忽略以兼容现有调用方；若未来强制，升版并新增 `unknown_argument`，默认不做。
+3. **清理的阈值/分档/`task_id` 退役纪律（v1.18 已定默认）**：统一 90 天为推荐默认、仍须显式传入；默认不分档（分档推荐值仅入契约，未实现）；清理过的 `task_id` 退役。见契约 §8.9。
+4. **认证/准入/并发上限不存在**：`clientInfo` 仅审计、不参与准入（v1.18 已定为默认，参与所需字段见契约 §2.3）；并发上限归 PM 侧排队（契约 §10 第 3 行）；多份 `initialize` 记录不等于多会话、不构成身份。
 
 ---
 
@@ -487,7 +487,7 @@ running 62 tests -> test result: ok. 62 passed; 0 failed（原 61 + 本次 1）
 | 69 | "系统内没有定时/启动自动清理" | 全仓仅 `tools/call` 调用 `runs_prune`；无清理定时器/启动钩子 | 与实现一致 |
 | 70 | schema `older_than_days`："必填…" | 缺失 → `invalid_retention`；在一切读写之前 | 与实现一致 |
 | 71 | schema `older_than_days`："只清理 finishedAt 距今不少于该天数的 attempt（1..=3650）" | 范围校验 `1..=3650`；`age_days < older_than_days` 跳过 | 与实现一致 |
-| 72 | schema `older_than_days`："不提供默认阈值" | 缺失即报错，不落任何默认值 | 与实现一致 |
+| 72 | schema `older_than_days`："不提供默认阈值"（v1.18 改为"推荐 90 天、仍须显式传入"，见 §14.2） | 缺失即报错，不落任何默认值 | 与实现一致 |
 | 73 | schema `dry_run`："默认 true：只列候选、不删不写" | 缺省 true；dry-run 返回前零写入 | 与实现一致 |
 | 74 | schema `dry_run`："false 表示要求真删（还需 confirm=true）" | `dry_run=false` 且无 confirm → `confirm_required` | 与实现一致 |
 | 75 | schema `confirm`："默认 false；真删必须显式 true" | 缺省 false；`!dry_run && !confirm` 拒绝 | 与实现一致 |
@@ -505,7 +505,7 @@ running 62 tests -> test result: ok. 62 passed; 0 failed（原 61 + 本次 1）
 ### 13.7 基线外 #78-#87 的现状复核（不计入 87）
 
 - **#78-#83（声明性结构）**：新增用例 `schema_structure_declares_required_fields_and_bounds` 用 `tools/list` 实际返回守护六个工具的 `type=object`、`properties`、`required` 与数值边界（`timeout_secs` 1..=600、`runs.list` limit 1..=100、`runs.prune` older 1..=3650 / limit 1..=100）。声明与实现一致。
-- **#84（`additionalProperties: false` 服务端不强制）**：仍为**已知缺口**，不是本次可单方面改写的项。服务端只读已知键、未知参数被忽略；若改为强制拒绝，会新增工具错误码并改变调用方兼容性，属需 PM 决定的事项（见 §11 第 2 条与本次交付说明）。
+- **#84（`additionalProperties: false` 服务端不强制）**：v1.18 已定为**默认策略**（契约 §10.1）：保持忽略以兼容现有调用方；服务端只读已知键，未知参数被忽略。若改为强制拒绝，会新增 `unknown_argument` 并改变调用方兼容性，需升版，默认不做。见 §14.3。
 - **#85-#87（契约措辞）**：#85 / #86 两处逐条一致；#87（§3.1 签名口径漏 `path_prepend`）已在 v1.14 修复。本次复核未发现新的"描述与实现不符"条目。
 - 这 10 条不计入 87 基线（基线只统计 §1-§6）；此处复核不改变基线总数。
 
@@ -529,3 +529,56 @@ running 63 tests -> test result: ok. 63 passed; 0 failed（原 62 + 本次 1）
 ```
 
 本次仅新增 1 条用例 + 本文档 §13：**未改实现、未改 `tools/list` 描述、未改契约版本（仍 v1.17）**。
+
+---
+
+## 14. v1.18 变更复审：默认决策与 schema 同步（2026-11-06）
+
+v1.18 只做两类可直接落地的变更，**不改执行/超时行为**：把"待 PM 确认"转成有依据的默认决策（契约 §10），并把已实现的限制写进 schema。
+
+### 14.1 改前 / 改后
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `path_prepend` schema | `"items": {"type":"string"}`，无 `maxItems` / `maxLength` | `"maxItems": 16`，`"items": {"type": "string", "maxLength": 4096}` |
+| `runs.prune.older_than_days` 描述 | "必填：只清理 finishedAt 距今不少于该天数的 attempt；不提供默认阈值" | "必填：只清理 finishedAt 距今不少于该天数的 attempt。默认建议 90 天（覆盖一般验收/审计窗口，偏保守）；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" |
+
+`path_prepend` 的字段描述本身未改（仍写"上限 16 项、单项 ≤4096 字符"）；v1.18 只是让 schema 声明与实现校验同源。
+
+### 14.2 对 87 条基线的影响
+
+- **#39（上限 16）/ #40（单项 ≤4096）**：实现不变；schema 现在声明同一上限。判定仍"与实现一致"，并从"仅描述"升级为"描述 + schema 双重声明"。
+- **#70（必填）**：不变，仍 `required` 且缺失 `invalid_retention`。
+- **#71（1..=3650 且距今不少于）**：不变，范围与判龄逻辑未改。
+- **#72（"不提供默认阈值"）**：语义不变——**没有隐式默认**，缺省仍拒绝；新增的只是"推荐 90 天"的调用方建议。为避免读者误读，v1.18 把措辞改为"不提供隐式默认阈值"。判定仍"与实现一致"。
+- 其余 82 条未触及（87 - #39/#40/#70/#71/#72 共 5 条 = 82）；**87 条基线不增不减**，未出现"描述与实现不符"的新条目。
+
+### 14.3 默认决策（契约 §10 / §2.3 / §8.9 / §10.1）
+
+| 项 | 默认 | 依据 / 可配置方式 |
+|---|---|---|
+| `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`） | 兼容 `_meta`、SDK 序列化的 null 可选字段、camelCase 别名与自定义元数据；强制拒绝会把这些今天可正常执行的调用变成错误。不提供运行时开关（schema 静态、行为需确定）；若未来强制，升版并新增 `unknown_argument`。新增用例 `unknown_arguments_are_ignored_by_default` 锁定默认 |
+| `runs.prune` 阈值/分档 | 统一 **90 天推荐默认**，**仍须显式传入**；默认**不分档**；分档推荐值 `ok=30` / `failed=180` / `blocked=365` 仅入契约、**未实现** | 90 天覆盖一般验收/审计窗口且比 30 天保守；"没写阈值"不能变成"按默认值删"（缺省仍 `invalid_retention`）。每次调用可配 `older_than_days` / `limit` / `dry_run` / `confirm`；分档需新增状态过滤契约，当前不做 |
+| `clientInfo` 准入 | 默认**不参与准入**，仅审计 | 自报 `name`/`version`/`title` 无签名、无进程绑定、无会话票据，按它放行等于虚假安全。若参与，至少需要传输/进程锚点、PM/MH 签发的会话票据、主体标识、授权范围（契约 §2.3）；`clientInfo` 只作展示元数据 |
+| `path_prepend` 限制 | **写入 schema**（`maxItems=16`、`items.maxLength=4096`） | 与实现校验同源；客户端可在调用前发现超量/超长，减少无效派单。上限是契约常量，改动需升版；调用方仍可在 0..16 项、每项 ≤4096 内自由配置 |
+
+### 14.4 验证证据（两平台）
+
+```text
+Windows：
+cargo check -q -p aw-mcp-bridge（通过）
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+running 65 tests -> test result: ok. 65 passed; 0 failed（原 64 + 本次 1）
+
+POSIX（WSL，verify.sh run，离线，AW_VENDOR=/root/vendor）：
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+[evidence] exited pgid=912 group_empty=true
+[evidence] setsid escaped_pid=916 escaped_alive=true original_group_empty=true
+[evidence] stopped pgid=914 kill(-pgid,0)_exists=true
+running 64 tests -> test result: ok. 64 passed; 0 failed（原 63 + 本次 1）
+[INFO] 四类 POSIX 用例全部通过，证据行齐全
+```
+
+新增用例 `unknown_arguments_are_ignored_by_default` 锁定 `additionalProperties` 默认忽略；`schema_structure_declares_required_fields_and_bounds` 增补 `maxItems` / `maxLength` 断言。用例只增不减。
+
+本次改动：`server.rs`（`path_prepend` schema + `older_than_days` 描述）、1 条新用例、契约 §2.3/§8.9/§10/§11、本文档 §14。**`#3` 仍 `NOT_PROVEN`；W2c 未重开；回执仍只写已观测状态，逃逸进程保持"未验证"。**

@@ -229,9 +229,14 @@ fn schema_structure_declares_required_fields_and_bounds() {
         "string"
     );
     assert_eq!(execute["properties"]["path_prepend"]["type"], "array");
+    assert_eq!(execute["properties"]["path_prepend"]["maxItems"], 16);
     assert_eq!(
         execute["properties"]["path_prepend"]["items"]["type"],
         "string"
+    );
+    assert_eq!(
+        execute["properties"]["path_prepend"]["items"]["maxLength"],
+        4096
     );
 
     let receipt = &find("receipt.get")["inputSchema"];
@@ -261,6 +266,33 @@ fn schema_structure_declares_required_fields_and_bounds() {
             "{name} 不该声明输入参数"
         );
     }
+}
+
+#[test]
+fn unknown_arguments_are_ignored_by_default() {
+    let (server, _settings, _runs) = server_with_runs();
+    // v1.18 默认策略：schema 声明 additionalProperties=false 仅用于提示，服务端保持忽略以兼容现有调用方
+    let response = call_tool(
+        &server,
+        "runs.list",
+        json!({
+            "offset": 0,
+            "unexpected": "ignored",
+            "dryRun": true,
+            "_meta": { "source": "compat-test" }
+        }),
+    );
+    assert_eq!(response["result"]["isError"], false);
+    let payload = tool_payload(&response);
+    assert!(payload["state"].is_string(), "正常返回状态：{payload}");
+    assert!(
+        payload["total_tasks"].is_number(),
+        "正常返回计数：{payload}"
+    );
+    assert!(
+        !tool_text(&response).contains("unknown_argument"),
+        "默认策略是忽略未知参数，不得新增拒绝行为"
+    );
 }
 
 #[test]
