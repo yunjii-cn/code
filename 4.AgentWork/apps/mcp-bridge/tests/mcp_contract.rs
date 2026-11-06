@@ -4735,3 +4735,389 @@ fn dispatched_handback_stays_free_of_verdict_fields() {
     );
     assert!(!runs.path().join("disp-argv").exists());
 }
+
+// ---- runs.prune：按条目精确排除（v1.27）----
+
+fn snapshot_dir_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut items: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in fs::read_dir(dir).expect("读目录").flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        items.push((name, fs::read(entry.path()).expect("读文件")));
+    }
+    items.sort();
+    items
+}
+
+#[test]
+fn prune_exclude_schema_declares_capability_and_constraints() {
+    let (server, _settings, _runs) = server_with_runs();
+    let schema = prune_schema(&server);
+    let exclude = &schema["properties"]["exclude"];
+    assert_eq!(exclude["type"], "array", "exclude 必须是数组：{schema}");
+    assert_eq!(exclude["minItems"], 1, "exclude 至少 1 条");
+    assert_eq!(exclude["maxItems"], 100, "exclude 至多 100 条");
+    assert_eq!(exclude["uniqueItems"], true, "exclude 必须声明去重约束");
+    assert_eq!(exclude["items"]["type"], "object");
+    assert_eq!(
+        exclude["items"]["required"],
+        json!(["task_id"]),
+        "每条排除项必须带 task_id"
+    );
+    assert_eq!(exclude["items"]["additionalProperties"], false);
+    assert_eq!(exclude["items"]["properties"]["task_id"]["type"], "string");
+    assert_eq!(exclude["items"]["properties"]["task_id"]["maxLength"], 64);
+    assert_eq!(exclude["items"]["properties"]["attempt"]["type"], "integer");
+    assert_eq!(exclude["items"]["properties"]["attempt"]["minimum"], 1);
+
+    let description = exclude["description"]
+        .as_str()
+        .expect("exclude 必须有描述");
+    for phrase in [
+        "按条目精确排除",
+        "task_id",
+        "attempt",
+        "不得重复",
+        "命名校验",
+        "invalid_exclusion",
+        "not_in_candidates",
+        "枚举入口生效",
+    ] {
+        assert!(
+            description.contains(phrase),
+            "exclude 描述缺少「{phrase}」：{description}"
+        );
+    }
+    let tool_description = prune_tool_description(&server);
+    for phrase in ["按条目精确排除", "计数不变式", "exclude"] {
+        assert!(
+            tool_description.contains(phrase),
+            "runs.prune 描述缺少「{phrase}」：{tool_description}"
+        );
+    }
+}
+
+#[test]
+fn prune_exclude_one_candidate_diverts_it_and_keeps_bytes() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    for task in ["t-a", "t-b", "t-c"] {
+        prune_attempt(runs.path(), task, 1, true, Some(&old), true);
+        prune_attempt(runs.path(), task, 2, true, Some(&old), true);
+    }
+    let kept = attempt_dir(&runs, "t-b", 1);
+    let before = snapshot_dir_bytes(&kept);
+    let exclude = json!([{ "task_id": "t-b", "attempt": 1 }]);
+
+    let dry = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "exclude": exclude }),
+    ));
+    assert_eq!(dry["candidates_total"], 3, "候选总数含被排除项：{dry}");
+    assert_eq!(dry["excluded_total"], 1);
+    assert_eq!(dry["not_in_candidates_total"], 0);
+    assert_eq!(dry["exclude_requests_total"], 1);
+    assert_eq!(dry["batch_candidates_total"], 3);
+    assert_eq!(dry["not_processed_total"], 0);
+    let candidates = dry["candidates"].as_array().expect("candidates");
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        candidates.iter().all(|item| item["task_id"] != "t-b"),
+        "被排除项不得进入候选：{dry}"
+    );
+    assert_eq!(dry["excluded"][0]["task_id"], "t-b");
+    assert_eq!(dry["excluded"][0]["attempt"], 1);
+    assert_eq!(dry["excluded"][0]["reason"], "excluded_by_request");
+    assert_eq!(dry["excluded"][0]["path"], "runs/t-b/attempt-1");
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "older_than_days": 30,
+            "exclude": exclude,
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "带 exclude 的真删应成功：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["deleted_total"], 2, "只删 2 条：{payload}");
+    assert_eq!(payload["excluded_total"], 1);
+    assert_eq!(payload["candidates_total"], 3);
+    assert_eq!(payload["batch_candidates_total"], 3);
+    assert_eq!(payload["not_processed_total"], 0);
+    let deleted_ids: Vec<&str> = payload["deleted"]
+        .as_array()
+        .expect("deleted")
+        .iter()
+        .filter_map(|item| item["task_id"].as_str())
+        .collect();
+    assert_eq!(deleted_ids, vec!["t-a", "t-c"]);
+    assert_eq!(
+        payload["deleted_total"].as_u64().unwrap_or(0)
+            + payload["failed_total"].as_u64().unwrap_or(0)
+            + payload["trashed_total"].as_u64().unwrap_or(0)
+            + payload["excluded_total"].as_u64().unwrap_or(0),
+        payload["batch_candidates_total"].as_u64().unwrap_or(u64::MAX),
+        "计数不变式必须成立：删除+失败+暂存+排除 == 本批候选总数：{payload}"
+    );
+    assert!(kept.is_dir(), "被排除条目不得被删除：{payload}");
+    assert_eq!(snapshot_dir_bytes(&kept), before, "被排除条目必须逐字节未变");
+    let audit = fs::read_to_string(runs.path().join("prune.jsonl")).expect("读审计");
+    let result_line: Value =
+        serde_json::from_str(audit.lines().last().expect("必须有 result 行"))
+            .expect("审计行必须是 JSON");
+    assert_eq!(
+        result_line["excluded_total"], 1,
+        "审计 result 行必须记录排除数：{result_line}"
+    );
+    assert_eq!(
+        result_line["excluded"][0]["reason"], "excluded_by_request",
+        "审计 result 行必须逐条记录排除原因：{result_line}"
+    );
+}
+
+#[test]
+fn prune_exclude_all_candidates_yields_zero_deletes() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    for task in ["t-a", "t-b", "t-c"] {
+        prune_attempt(runs.path(), task, 1, true, Some(&old), true);
+        prune_attempt(runs.path(), task, 2, true, Some(&old), true);
+    }
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "older_than_days": 30,
+            "exclude": [
+                { "task_id": "t-a", "attempt": 1 },
+                { "task_id": "t-b", "attempt": 1 },
+                { "task_id": "t-c", "attempt": 1 }
+            ],
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "排除全部候选应成功返回零删除：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["deleted_total"], 0);
+    assert_eq!(payload["failed_total"], 0);
+    assert_eq!(payload["trashed_total"], 0);
+    assert_eq!(payload["excluded_total"], 3);
+    assert_eq!(payload["candidates_total"], 3, "排除数必须等于候选数");
+    assert_eq!(payload["batch_candidates_total"], 3);
+    assert_eq!(payload["not_processed_total"], 0);
+    assert_eq!(payload["truncated"], false);
+    assert!(
+        payload["deleted"].as_array().expect("deleted").is_empty(),
+        "零删除：{payload}"
+    );
+    for task in ["t-a", "t-b", "t-c"] {
+        assert!(
+            runs.path().join(task).join("attempt-1").is_dir(),
+            "{task} 的旧 attempt 不得被删"
+        );
+    }
+    assert!(
+        !runs.path().join("prune.jsonl").exists(),
+        "没有删除发生就不得写审计"
+    );
+}
+
+#[test]
+fn prune_exclude_reports_not_in_candidates_and_keeps_processing() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt(runs.path(), "t-p", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-p", 2, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-q", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-q", 2, true, Some(&old), true);
+
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({
+            "older_than_days": 30,
+            "exclude": [
+                { "task_id": "t-missing" },
+                { "task_id": "t-p", "attempt": 2 },
+                { "task_id": "t-p", "attempt": 9 }
+            ],
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "not_in_candidates 不是错误：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["candidates_total"], 2);
+    assert_eq!(payload["excluded_total"], 0, "没有候选被请求排除");
+    assert_eq!(payload["not_in_candidates_total"], 3);
+    assert_eq!(payload["exclude_requests_total"], 3);
+    assert_eq!(payload["batch_candidates_total"], 2);
+    assert_eq!(payload["not_processed_total"], 0);
+    let excluded = payload["excluded"].as_array().expect("excluded");
+    assert_eq!(excluded.len(), 3, "三条请求都必须逐条回报：{payload}");
+    for entry in excluded {
+        assert_eq!(
+            entry["reason"], "not_in_candidates",
+            "不得静默忽略：{entry}"
+        );
+    }
+    assert_eq!(excluded[0]["task_id"], "t-missing");
+    assert!(excluded[0]["attempt"].is_null());
+    assert!(
+        excluded[0]["path"].is_null(),
+        "不在候选集的条目没有真实路径，不得编造：{}",
+        excluded[0]
+    );
+    assert_eq!(excluded[1]["task_id"], "t-p");
+    assert_eq!(excluded[1]["attempt"], 2, "最新 attempt 本就不在候选集");
+    assert_eq!(excluded[2]["attempt"], 9, "不存在的 attempt 也不在候选集");
+    assert_eq!(payload["deleted_total"], 2, "不在候选集的排除请求不得干扰正常删除");
+    assert!(!runs.path().join("t-p").join("attempt-1").exists());
+    assert!(!runs.path().join("t-q").join("attempt-1").exists());
+    assert!(
+        runs.path().join("t-p").join("attempt-2").is_dir(),
+        "最新 attempt 始终保留"
+    );
+}
+
+#[test]
+fn prune_exclude_rejects_unsafe_or_ambiguous_entries_without_writes() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    prune_attempt(runs.path(), "t-a", 1, true, Some(&old), true);
+    prune_attempt(runs.path(), "t-a", 2, true, Some(&old), true);
+    let long_id = "a".repeat(65);
+
+    let bad_cases: Vec<(&str, Value)> = vec![
+        ("路径分隔符", json!([{ "task_id": "../escape" }])),
+        ("上跳", json!([{ "task_id": ".." }])),
+        ("Windows 绝对路径", json!([{ "task_id": "C:\\Windows" }])),
+        ("POSIX 绝对路径", json!([{ "task_id": "/etc/passwd" }])),
+        ("通配符", json!([{ "task_id": "t-*" }])),
+        ("预留目录", json!([{ "task_id": "_session" }])),
+        ("内部目录", json!([{ "task_id": ".prune-trash" }])),
+        ("空格", json!([{ "task_id": "t a" }])),
+        ("空字符串", json!([{ "task_id": "" }])),
+        ("超长", json!([{ "task_id": long_id }])),
+        ("空数组", json!([])),
+        ("null", json!(null)),
+        ("非对象条目", json!(["t-a"])),
+        ("缺 task_id", json!([{ "attempt": 1 }])),
+        ("attempt=0", json!([{ "task_id": "t-a", "attempt": 0 }])),
+        ("attempt 为字符串", json!([{ "task_id": "t-a", "attempt": "1" }])),
+        ("重复整任务", json!([{ "task_id": "t-a" }, { "task_id": "t-a" }])),
+        (
+            "重复 attempt",
+            json!([
+                { "task_id": "t-a", "attempt": 1 },
+                { "task_id": "t-a", "attempt": 1 }
+            ]),
+        ),
+        (
+            "整任务与单次混用",
+            json!([{ "task_id": "t-a" }, { "task_id": "t-a", "attempt": 1 }]),
+        ),
+    ];
+    for (label, exclude) in bad_cases {
+        let error = prune_error(
+            &server,
+            json!({ "older_than_days": 30, "exclude": exclude }),
+        );
+        assert!(
+            error.contains("invalid_exclusion"),
+            "{label} 必须按 invalid_exclusion 拒绝：{error}"
+        );
+    }
+    let traversal_error = prune_error(
+        &server,
+        json!({ "older_than_days": 30, "exclude": [{ "task_id": "../escape" }] }),
+    );
+    assert!(
+        traversal_error.contains("命名校验"),
+        "越界拒绝必须写明命名校验规则：{traversal_error}"
+    );
+    // 真删参数组合下同样在写入前拒绝
+    let real_error = prune_error(
+        &server,
+        json!({
+            "older_than_days": 30,
+            "exclude": [{ "task_id": "../escape" }],
+            "dry_run": false,
+            "confirm": true
+        }),
+    );
+    assert!(real_error.contains("invalid_exclusion"), "{real_error}");
+    assert!(
+        runs.path().join("t-a").join("attempt-1").is_dir(),
+        "非法排除参数必须零删除"
+    );
+    assert!(
+        !runs.path().join("prune.jsonl").exists(),
+        "非法排除参数必须零审计"
+    );
+    assert!(
+        !runs.path().join(".prune-trash").exists(),
+        "非法排除参数不得创建暂存目录"
+    );
+}
+
+#[test]
+fn prune_without_exclude_keeps_legacy_behavior_and_invariant() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(40);
+    for task in ["t-a", "t-b", "t-c"] {
+        prune_attempt(runs.path(), task, 1, true, Some(&old), true);
+        prune_attempt(runs.path(), task, 2, true, Some(&old), true);
+    }
+    let response = call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
+    );
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "不带 exclude 的旧调用必须照常成功：{}",
+        tool_text(&response)
+    );
+    let payload = tool_payload(&response);
+    assert_eq!(payload["deleted_total"], 3, "旧行为完全不变：{payload}");
+    assert_eq!(payload["excluded_total"], 0);
+    assert_eq!(payload["not_in_candidates_total"], 0);
+    assert_eq!(payload["exclude_requests_total"], 0);
+    assert!(
+        payload["excluded"].as_array().expect("excluded").is_empty(),
+        "没传 exclude 时 excluded 必须为空数组：{payload}"
+    );
+    assert_eq!(payload["exclude_filter"], Value::Null);
+    assert_eq!(payload["candidates_total"], 3);
+    assert_eq!(payload["batch_candidates_total"], 3);
+    assert_eq!(payload["not_processed_total"], 0);
+    assert_eq!(
+        payload["deleted_total"].as_u64().unwrap_or(0)
+            + payload["failed_total"].as_u64().unwrap_or(0)
+            + payload["trashed_total"].as_u64().unwrap_or(0)
+            + payload["excluded_total"].as_u64().unwrap_or(0),
+        payload["candidates_total"].as_u64().unwrap_or(u64::MAX),
+        "无排除时 删除+失败+暂存+排除 == 候选总数：{payload}"
+    );
+}

@@ -1233,7 +1233,7 @@ cargo test -p aw-mcp-bridge description_gate
 | G2 | `task.execute` | `inputSchema.properties.timeout_secs.description` | 默认 120；三态；终止只尝试一次（不重试）；已清理受控集合；受控集合内仍有存活进程；受控集合未能建立或无法查询；仅向直接子进程发送终止信号；逃逸进程是否仍在运行未验证；不承诺终止整棵进程树 | 已终止进程树；无残留；会终止整棵进程树；自动重试 | `description_gate_timeout_three_states_match_description` |
 | G3 | `runs.prune` | `description` | 显式传入才生效；缺省不过滤；无默认状态；无服务端分档；与 older_than_days 为 AND | 默认 90 天；默认分档；分档 30 | `description_gate_behavior_status_capability_and_filtering` |
 | G4 | `runs.prune` | `inputSchema.properties.status.description` | 显式传入才生效；缺省不过滤；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档 | 默认状态 ok | `description_gate_behavior_status_capability_and_filtering` |
-| G5 | `runs.prune` | `inputSchema.properties.limit.description` | 默认 100；在 status 过滤之后生效 | — | `description_gate_behavior_status_capability_and_filtering`、`description_gate_behavior_session_and_limit_defaults` |
+| G5 | `runs.prune` | `inputSchema.properties.limit.description` | 默认 100；在 status 过滤与 exclude 排除之后生效 | — | `description_gate_behavior_status_capability_and_filtering`、`description_gate_behavior_session_and_limit_defaults` |
 | G6 | `runs.list` | `description` | 排除 _session 等预留目录 | — | `description_gate_behavior_session_and_limit_defaults` |
 | G7 | `runs.list` | `inputSchema.properties.limit.description` | 默认 20 | — | `description_gate_behavior_session_and_limit_defaults` |
 | G8 | `health` | `description` | 只读 | — | `description_gate_behavior_additional_properties_declared_only` |
@@ -1243,6 +1243,7 @@ cargo test -p aw-mcp-bridge description_gate
 | G12 | `task.execute` | `description` | mode=standalone；verdict.json；undetermined；无法判定绝不默认通过；attempt < max_attempts；AW 不定义判据、不做验收 | 自动重试；会终止整棵进程树；已终止进程树；无残留 | `description_gate_standalone_mode_boundary` |
 | G13 | `task.execute` | `inputSchema.properties.mode.description` | 缺省 dispatched；AW 只执行不验收；拒绝 cmd/env/path_prepend；同一 task_id 不得跨模式复用；mode_conflict | 自动推断模式 | `description_gate_standalone_mode_boundary` |
 | G14 | `task.execute` | `inputSchema.properties.acceptance.description` | standalone 必填；file_exists；file_content_match；git_diff_non_empty；standalone_path_escape；未声明验收不得默认通过 | 视为通过 | `description_gate_standalone_mode_boundary` |
+| G15 | `runs.prune` | `inputSchema.properties.exclude.description` | 按条目精确排除；task_id；attempt；不得重复；命名校验；invalid_exclusion；not_in_candidates；枚举入口生效 | 默认排除；自动排除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
 
@@ -1250,7 +1251,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "26481e124bbf5326df50b354b55121d7b3bd459fee89a251cf0fbb43cf758595",
+  "tools_sha256": "f380e5ada343ce3a1fd6d7d4d39242d4f6e1ac2f18f3f774be10c5766990e6e0",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1271,7 +1272,7 @@ cargo test -p aw-mcp-bridge description_gate
       "id": "G3",
       "tool": "runs.prune",
       "path": "description",
-      "contains": ["显式传入才生效", "缺省不过滤", "无默认状态", "无服务端分档", "与 older_than_days 为 AND"],
+      "contains": ["显式传入才生效", "缺省不过滤", "无默认状态", "无服务端分档", "与 older_than_days 为 AND", "按条目精确排除", "计数不变式", "excluded_total"],
       "not_contains": ["默认 90 天", "默认分档", "分档 30"]
     },
     {
@@ -1285,7 +1286,7 @@ cargo test -p aw-mcp-bridge description_gate
       "id": "G5",
       "tool": "runs.prune",
       "path": "inputSchema.properties.limit.description",
-      "contains": ["默认 100", "在 status 过滤之后生效"],
+      "contains": ["默认 100", "在 status 过滤与 exclude 排除之后生效"],
       "not_contains": []
     },
     {
@@ -1350,6 +1351,13 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "inputSchema.properties.acceptance.description",
       "contains": ["standalone 必填", "file_exists", "file_content_match", "git_diff_non_empty", "standalone_path_escape", "未声明验收不得默认通过"],
       "not_contains": ["视为通过"]
+    },
+    {
+      "id": "G15",
+      "tool": "runs.prune",
+      "path": "inputSchema.properties.exclude.description",
+      "contains": ["按条目精确排除", "task_id", "attempt", "不得重复", "命名校验", "invalid_exclusion", "not_in_candidates", "枚举入口生效"],
+      "not_contains": ["默认排除", "自动排除"]
     }
   ]
 }
@@ -2215,6 +2223,144 @@ cargo test -p aw-mcp-bridge --test mcp_contract → 91 passed; 0 failed; 0 ignor
 - `git_diff_non_empty` 以 `git status --porcelain` 判定（含未跟踪文件）；非 git 仓库 → `undetermined`，已有用例覆盖，但**未在真实双单中演示**。
 - 失败单 `attempt-2` 的 `changed_files` 为空：第 1 次已创建 `out.txt`，第 2 次是改写同一文件，按"新增文件差值"口径不重复计入；这是既有 `changed_files` 语义，不是本次新增缺陷。
 - 未实现：跨调用的判定汇总、`acceptance` 的表达式/断言组合、对 `argv` 参数中的路径做逐项作用域校验（当前只校验 `argv[0]` 显式路径与验收路径）。
+
+## 26. v1.27：`runs.prune` 按条目精确排除（`exclude`）
+
+### 26.1 能力位与 schema
+
+`tools/list` 的 `runs.prune.inputSchema.properties.exclude` 是本轮唯一能力位。形状：
+
+```json
+{
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 100,
+  "uniqueItems": true,
+  "items": {
+    "type": "object",
+    "properties": {
+      "task_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "attempt": { "type": "integer", "minimum": 1 }
+    },
+    "required": ["task_id"],
+    "additionalProperties": false
+  }
+}
+```
+
+`tools_sha256` 由 `26481e124bbf5326df50b354b55121d7b3bd459fee89a251cf0fbb43cf758595` 变为 `f380e5ada343ce3a1fd6d7d4d39242d4f6e1ac2f18f3f774be10c5766990e6e0`；§21 新增 G15 行（`exclude.description` 的 contains/not_contains）并把 G3、G5 措辞同步为"按条目精确排除 / 在 status 过滤与 exclude 排除之后生效"。
+
+### 26.2 实现口径（写死）
+
+- 排除在 `prune_candidates` 的**候选枚举入口**一次完成：合格条目命中排除后只进 `excluded[]`，不进 `candidates[]`、不占 `limit`；`eligible_total` 仍把其计入 `candidates_total`。
+- 解析阶段 fail-closed：非数组、空数组、>100 条、条目不对象、缺 `task_id`、`attempt` 非 `>=1` 整数、重复 `(task_id, attempt)`、同一 `task_id` 整任务与单次混用，全部 `invalid_exclusion`，解析发生在任何写入之前（零删除、零审计）。
+- `task_id` 走与任务目录相同的 `is_task_dir_name`：拒路径分隔符、`..`、绝对路径、通配符、`_`/`.` 前缀与超 64 字符。
+- 计数：`excluded_total` 只数 `reason=excluded_by_request`；`not_in_candidates_total` 数 `reason=not_in_candidates`；`exclude_requests_total = 两者之和`；`batch_candidates_total = deleted+failed+trashed+excluded_total`；`not_processed_total = candidates_total - batch_candidates_total`。
+- 边界选择：排除不存在或不在候选集的 id **不报错**，逐条记 `not_in_candidates`、`path=null`、`isError=false`。
+
+### 26.3 先红：当前代码上的原始失败（断言未放宽）
+
+命令：`cargo test -p aw-mcp-bridge --test mcp_contract prune_exclude`（server.rs 临时回到 HEAD `c842b6a`，测试保留）。
+
+```text
+running 5 tests
+test prune_exclude_schema_declares_capability_and_constraints ... FAILED
+test prune_exclude_rejects_unsafe_or_ambiguous_entries_without_writes ... FAILED
+test prune_exclude_reports_not_in_candidates_and_keeps_processing ... FAILED
+test prune_exclude_one_candidate_diverts_it_and_keeps_bytes ... FAILED
+test prune_exclude_all_candidates_yields_zero_deletes ... FAILED
+
+---- prune_exclude_schema_declares_capability_and_constraints stdout ----
+thread 'prune_exclude_schema_declares_capability_and_constraints' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4756:5:
+assertion `left == right` failed: exclude 必须是数组：{...旧 schema，properties 只有 confirm/dry_run/limit/older_than_days/status...}
+  left: Null
+ right: "array"
+
+---- prune_exclude_rejects_unsafe_or_ambiguous_entries_without_writes stdout ----
+[aw-mcp-bridge] arguments_diagnostics {"declared_arguments":["confirm","dry_run","limit","older_than_days","status"],...,"tool":"runs.prune","unknown_arguments":[{"kind":"unknown","name":"exclude","value":{"length":1,"type":"array"}}]}
+thread 'prune_exclude_rejects_unsafe_or_ambiguous_entries_without_writes' panicked at apps\mcp-bridge\tests\mcp_contract.rs:2862:5:
+assertion `left == right` failed: 该形态必须拒绝：{... "candidates_total":1, "dry_run":true ...}
+  left: Bool(false)
+ right: true
+
+---- prune_exclude_reports_not_in_candidates_and_keeps_processing stdout ----
+[aw-mcp-bridge] arguments_diagnostics {... "unknown_arguments":[{"kind":"unknown","name":"exclude","value":{"length":3,"type":"array"}}]}
+thread 'prune_exclude_reports_not_in_candidates_and_keeps_processing' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4970:5:
+assertion `left == right` failed: 没有候选被请求排除
+  left: Null
+ right: 0
+
+---- prune_exclude_one_candidate_diverts_it_and_keeps_bytes stdout ----
+thread 'prune_exclude_one_candidate_diverts_it_and_keeps_bytes' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4817:5:
+assertion `left == right` failed
+  left: Null
+ right: 1
+
+---- prune_exclude_all_candidates_yields_zero_deletes stdout ----
+thread 'prune_exclude_all_candidates_yields_zero_deletes' panicked at apps\mcp-bridge\tests\mcp_contract.rs:4915:5:
+assertion `left == right` failed
+  left: Number(3)
+ right: 0
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 92 filtered out
+```
+
+无参数回归用例同样先红（新字段尚不存在）：
+
+```text
+test prune_without_exclude_keeps_legacy_behavior_and_invariant ... FAILED
+thread '...' panicked at apps\mcp-bridge\tests\mcp_contract.rs:5104:5:
+assertion `left == right` failed
+  left: Null
+ right: 0
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 96 filtered out
+```
+
+### 26.4 转绿
+
+`cargo test -p aw-mcp-bridge`：`10 passed`（lib）+ `97 passed; 0 failed`（integration），其中 21 条 prune 用例（含 6 条新增：schema、排除单条、全排除、`not_in_candidates`、越界/歧义拒绝、无参数回归）。
+
+### 26.5 真跑三次（stdio 直连 `target\debug\aw-mcp-bridge.exe`，原始回执）
+
+夹具：`runs/r-a|r-b|r-c` 各有 `attempt-1`（finishedAt 40 天前）与 `attempt-2`（最新，保留），即 3 条候选。
+
+① 排除 1 条（`r-b/attempt-1`），真删：
+
+```text
+{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"batch_candidates_total\":3,\"batch_id\":\"prune-1793988442636-120876\",\"candidates_total\":3,\"deleted\":[{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-a\"...},{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-c\"...}],\"deleted_total\":2,\"dry_run\":false,\"evaluated_at\":\"2026-11-06T18:07:22Z\",\"exclude_filter\":[{\"attempt\":1,\"task_id\":\"r-b\"}],\"exclude_requests_total\":1,\"excluded\":[{\"attempt\":1,\"path\":\"runs/r-b/attempt-1\",\"reason\":\"excluded_by_request\",\"task_id\":\"r-b\"}],\"excluded_total\":1,\"failed\":[],\"failed_total\":0,\"limit\":100,\"not_in_candidates_total\":0,\"not_processed_total\":0,\"older_than_days\":30,\"status\":\"ok\",\"status_filter\":null,\"trashed\":[],\"trashed_total\":0,\"truncated\":false}","type":"text"}],"isError":false}}
+```
+
+被排除条目逐文件 SHA256 前后一致（`BYTES_UNCHANGED: True`）：
+
+```text
+BEFORE: dispatch.json=2106C81B8DAC54C42F02AFF891C18C0E471A56B235AC6F10065D6AF267B9A9D5; handback.json=0104D90A55E82DD2057BA088EB496AFA4630D823FB5DE570A4D2EF4800549F7B; stderr.txt=B08F13CF26731249045B1C0B34213C0CC6226CEEFEA0F7B4D0FE3308B45FE66C; stdout.txt=09C8628F306839F90CE5BC2B0E7C7129DE33A1434E122869B6F083A383160B54
+AFTER:  dispatch.json=2106C81B8DAC54C42F02AFF891C18C0E471A56B235AC6F10065D6AF267B9A9D5; handback.json=0104D90A55E82DD2057BA088EB496AFA4630D823FB5DE570A4D2EF4800549F7B; stderr.txt=B08F13CF26731249045B1C0B34213C0CC6226CEEFEA0F7B4D0FE3308B45FE66C; stdout.txt=09C8628F306839F90CE5BC2B0E7C7129DE33A1434E122869B6F083A383160B54
+```
+
+② 排除全部候选，真删：
+
+```text
+{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"batch_candidates_total\":3,\"candidates_total\":3,\"deleted\":[],\"deleted_total\":0,\"dry_run\":false,\"evaluated_at\":\"2026-11-06T18:07:31Z\",\"exclude_filter\":[{\"attempt\":1,\"task_id\":\"r-a\"},{\"attempt\":1,\"task_id\":\"r-b\"},{\"attempt\":1,\"task_id\":\"r-c\"}],\"exclude_requests_total\":3,\"excluded\":[{\"attempt\":1,\"path\":\"runs/r-a/attempt-1\",\"reason\":\"excluded_by_request\",\"task_id\":\"r-a\"},{\"attempt\":1,\"path\":\"runs/r-b/attempt-1\",\"reason\":\"excluded_by_request\",\"task_id\":\"r-b\"},{\"attempt\":1,\"path\":\"runs/r-c/attempt-1\",\"reason\":\"excluded_by_request\",\"task_id\":\"r-c\"}],\"excluded_total\":3,\"failed\":[],\"failed_total\":0,\"limit\":100,\"not_in_candidates_total\":0,\"not_processed_total\":0,\"older_than_days\":30,\"status\":\"ok\",\"status_filter\":null,\"trashed\":[],\"trashed_total\":0,\"truncated\":false}","type":"text"}],"isError":false}}
+prune.jsonl exists: False
+r-a/attempt-1 exists: True
+r-b/attempt-1 exists: True
+r-c/attempt-1 exists: True
+```
+
+③ 排除不存在的 id（`r-missing/attempt-1`），真删：
+
+```text
+{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"batch_candidates_total\":3,\"candidates_total\":3,\"deleted\":[{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-a\"...},{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-b\"...},{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-c\"...}],\"deleted_total\":3,\"dry_run\":false,\"evaluated_at\":\"2026-11-06T18:07:04Z\",\"exclude_filter\":[{\"attempt\":1,\"task_id\":\"r-missing\"}],\"exclude_requests_total\":1,\"excluded\":[{\"attempt\":1,\"path\":null,\"reason\":\"not_in_candidates\",\"task_id\":\"r-missing\"}],\"excluded_total\":0,\"failed\":[],\"failed_total\":0,\"limit\":100,\"not_in_candidates_total\":1,\"not_processed_total\":0,\"older_than_days\":30,\"status\":\"ok\",\"status_filter\":null,\"trashed\":[],\"trashed_total\":0,\"truncated\":false}","type":"text"}],"isError":false}}
+```
+
+三次都满足：`deleted_total + failed_total + trashed_total + excluded_total == batch_candidates_total`，且 `candidates_total == batch_candidates_total + not_processed_total`。
+
+### 26.6 未覆盖与限制（如实标注）
+
+- 未验证 POSIX 分支（本机 Windows 10；排除逻辑无平台专有代码，但未跑不写成已验证）。
+- 未验证"排除与 `status` 白名单、`limit` 同时叠加"的真实磁盘场景（叠加逻辑有单测覆盖，未做真实夹具演示）。
+- `excluded[]` 的 `path` 为相对路径字符串，不保证该目录此刻仍存在（排除是"不动它"，不是"验证它存在"）；`not_in_candidates` 一律 `path=null`。
+- 未实现"排除请求与磁盘现状二次核对"（例如排除后目录被人为删除仍报 `excluded_by_request`）；该场景不在本轮范围。
 
 
 

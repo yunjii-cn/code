@@ -401,14 +401,47 @@ impl Server {
             Some(values) => json!(values),
             None => Value::Null,
         };
+        // 排除参数在任何写入之前解析：非法/越界一律 invalid_exclusion，零删除零审计
+        let exclusions = parse_exclusions(args)?;
+        let exclude_filter = if exclusions.is_empty() {
+            Value::Null
+        } else {
+            json!(
+                exclusions
+                    .iter()
+                    .map(|exclusion| json!({
+                        "task_id": exclusion.task_id,
+                        "attempt": exclusion.attempt
+                    }))
+                    .collect::<Vec<Value>>()
+            )
+        };
 
         let evaluated_at = now_stamp();
         let now = chrono::Utc::now();
-        let (candidates, skipped, task_count) =
-            self.prune_candidates(older_than_days, now, status_filter.as_deref());
-        let total_candidates = candidates.len() as u64;
-        let truncated = total_candidates > limit;
+        let PruneScan {
+            candidates,
+            skipped,
+            excluded,
+            eligible_total,
+            task_count,
+        } = self.prune_candidates(older_than_days, now, status_filter.as_deref(), &exclusions);
+        // candidates_total 沿用旧口径：枚举入口的合格总数（含被请求排除的条目）
+        let total_candidates = eligible_total;
+        let excluded_total = excluded
+            .iter()
+            .filter(|item| item["reason"].as_str() == Some("excluded_by_request"))
+            .count() as u64;
+        let not_in_candidates_total = excluded.len() as u64 - excluded_total;
+        let exclude_requests_total = exclusions.len() as u64;
+        let processing_total = candidates.len() as u64;
         let batch: Vec<Value> = candidates.into_iter().take(limit as usize).collect();
+        // 两种可直接核对的等式：
+        // 1) deleted + failed + trashed + excluded_total == batch_candidates_total
+        // 2) candidates_total == batch_candidates_total + not_processed_total（limit 截断部分）
+        let batch_candidates_total = batch.len() as u64 + excluded_total;
+        let not_processed_total = processing_total - batch.len() as u64;
+        let truncated = not_processed_total > 0;
 
         if dry_run {
             let state = if !self.runs_dir.is_dir() {
@@ -423,13 +456,20 @@ impl Server {
                 "state": state,
                 "older_than_days": older_than_days,
                 "status_filter": status_filter_json,
+                "exclude_filter": exclude_filter,
                 "evaluated_at": evaluated_at,
                 "limit": limit,
                 "candidates_total": total_candidates,
+                "batch_candidates_total": batch_candidates_total,
+                "not_processed_total": not_processed_total,
                 "truncated": truncated,
                 "candidates": batch,
                 "skipped_total": skipped.len() as u64,
-                "skipped": skipped
+                "skipped": skipped,
+                "exclude_requests_total": exclude_requests_total,
+                "excluded_total": excluded_total,
+                "not_in_candidates_total": not_in_candidates_total,
+                "excluded": excluded
             }));
         }
 
@@ -440,16 +480,23 @@ impl Server {
                 "status": "ok",
                 "older_than_days": older_than_days,
                 "status_filter": status_filter_json,
+                "exclude_filter": exclude_filter,
                 "evaluated_at": evaluated_at,
                 "limit": limit,
                 "candidates_total": total_candidates,
+                "batch_candidates_total": batch_candidates_total,
+                "not_processed_total": not_processed_total,
                 "truncated": truncated,
                 "deleted_total": 0,
                 "failed_total": 0,
                 "trashed_total": 0,
+                "exclude_requests_total": exclude_requests_total,
+                "excluded_total": excluded_total,
+                "not_in_candidates_total": not_in_candidates_total,
                 "deleted": [],
                 "failed": [],
-                "trashed": []
+                "trashed": [],
+                "excluded": excluded
             }));
         }
 
@@ -464,9 +511,14 @@ impl Server {
             "batch_id": batch_id,
             "older_than_days": older_than_days,
             "status_filter": status_filter_json,
+            "exclude_filter": exclude_filter,
             "limit": limit,
             "candidate_count": batch.len() as u64,
-            "candidates": batch.clone()
+            "candidates": batch.clone(),
+            "exclude_requests_total": exclude_requests_total,
+            "excluded_total": excluded_total,
+            "not_in_candidates_total": not_in_candidates_total,
+            "excluded": excluded
         });
         // 先记账后删除：plan 行写不进去就一个目录都不删
         self.append_prune_record(&plan)
@@ -560,13 +612,19 @@ impl Server {
             "batch_id": batch_id,
             "older_than_days": older_than_days,
             "status_filter": status_filter_json,
+            "exclude_filter": exclude_filter,
             "limit": limit,
             "deleted": deleted.clone(),
             "failed": failed.clone(),
             "trashed": trashed.clone(),
             "deleted_total": deleted_total,
             "failed_total": failed_total,
-            "trashed_total": trashed_total
+            "trashed_total": trashed_total,
+            "exclude_requests_total": exclude_requests_total,
+            "excluded_total": excluded_total,
+            "not_in_candidates_total": not_in_candidates_total,
+            "batch_candidates_total": batch_candidates_total,
+            "excluded": excluded
         });
         if let Err(error) = self.append_prune_record(&result) {
             return Err(format!(
@@ -580,46 +638,60 @@ impl Server {
             "batch_id": batch_id,
             "older_than_days": older_than_days,
             "status_filter": status_filter_json,
+            "exclude_filter": exclude_filter,
             "evaluated_at": evaluated_at,
             "limit": limit,
             "candidates_total": total_candidates,
+            "batch_candidates_total": batch_candidates_total,
+            "not_processed_total": not_processed_total,
             "truncated": truncated,
             "deleted_total": deleted_total,
             "failed_total": failed_total,
             "trashed_total": trashed_total,
+            "exclude_requests_total": exclude_requests_total,
+            "excluded_total": excluded_total,
+            "not_in_candidates_total": not_in_candidates_total,
             "deleted": deleted,
             "failed": failed,
-            "trashed": trashed
+            "trashed": trashed,
+            "excluded": excluded
         }))
     }
 
-    /// 计算清理候选：只认 finishedAt、只碰非最新 attempt、不跟随符号链接
+    /// 计算清理候选：只认 finishedAt、只碰非最新 attempt、不跟随符号链接。
+    ///
+    /// 按条目排除在**枚举入口**一次完成：命中排除的合格条目只进 `excluded[]`，
+    /// 既不会进入 `candidates[]`，也不会被后续 `limit` 截断或删除；`eligible_total`
+    /// 仍把它们算在候选总数内，供回执核对计数不变式。
     fn prune_candidates(
         &self,
         older_than_days: u64,
         now: chrono::DateTime<chrono::Utc>,
         status_filter: Option<&[String]>,
-    ) -> (Vec<Value>, Vec<Value>, usize) {
+        exclusions: &[Exclusion],
+    ) -> PruneScan {
         let mut candidates: Vec<Value> = Vec::new();
         let mut skipped: Vec<Value> = Vec::new();
-        if !self.runs_dir.is_dir() {
-            return (candidates, skipped, 0);
-        }
+        let mut excluded: Vec<Value> = Vec::new();
+        let mut eligible_total: u64 = 0;
+        let mut matched: Vec<bool> = vec![false; exclusions.len()];
         let mut task_ids: Vec<String> = Vec::new();
-        if let Ok(entries) = fs::read_dir(&self.runs_dir) {
-            for entry in entries.flatten() {
-                // file_type 不跟随符号链接：链接不会被当作任务，避免删到 runs 之外的路径
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
-                };
-                if !file_type.is_dir() {
-                    continue;
+        if self.runs_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&self.runs_dir) {
+                for entry in entries.flatten() {
+                    // file_type 不跟随符号链接：链接不会被当作任务，避免删到 runs 之外的路径
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !is_task_dir_name(&name) {
+                        continue;
+                    }
+                    task_ids.push(name);
                 }
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !is_task_dir_name(&name) {
-                    continue;
-                }
-                task_ids.push(name);
             }
         }
         task_ids.sort();
@@ -735,6 +807,20 @@ impl Server {
                         continue;
                     }
                 }
+                eligible_total += 1;
+                if let Some(index) = exclusions
+                    .iter()
+                    .position(|exclusion| exclusion.matches(&task_id, number))
+                {
+                    matched[index] = true;
+                    excluded.push(json!({
+                        "task_id": task_id.clone(),
+                        "attempt": number,
+                        "path": format!("runs/{task_id}/attempt-{number}"),
+                        "reason": "excluded_by_request"
+                    }));
+                    continue;
+                }
                 candidates.push(json!({
                     "task_id": task_id.clone(),
                     "attempt": number,
@@ -746,7 +832,26 @@ impl Server {
                 }));
             }
         }
-        (candidates, skipped, task_count)
+        // 没命中任何合格条目的排除请求不报错、也不静默忽略：逐条记 not_in_candidates
+        for (index, exclusion) in exclusions.iter().enumerate() {
+            if matched[index] {
+                continue;
+            }
+            excluded.push(json!({
+                "task_id": exclusion.task_id.clone(),
+                "attempt": exclusion.attempt,
+                // 不在候选集时没有真实路径可给：写 null，不编造
+                "path": Value::Null,
+                "reason": "not_in_candidates"
+            }));
+        }
+        PruneScan {
+            candidates,
+            skipped,
+            excluded,
+            eligible_total,
+            task_count,
+        }
     }
 
     /// 整目录搬进 .prune-trash 后再删：重命名失败则原样不动，避免"只删了一半文件"
@@ -1480,6 +1585,95 @@ fn is_valid_task_id(value: &str) -> bool {
 /// 以 `_`（`_session` 等预留目录）或 `.`（`.prune-trash` 等内部目录）开头的名字一律不是任务。
 fn is_task_dir_name(name: &str) -> bool {
     !name.starts_with('_') && !name.starts_with('.') && is_valid_task_id(name)
+}
+
+/// 一次候选枚举的完整结果：合格总数（含被排除项）、候选、跳过与排除分桶
+struct PruneScan {
+    candidates: Vec<Value>,
+    skipped: Vec<Value>,
+    excluded: Vec<Value>,
+    eligible_total: u64,
+    task_count: usize,
+}
+
+/// `runs.prune.exclude` 的单条请求：`attempt=None` 表示排除该 task 的全部候选
+#[derive(Clone, Debug)]
+struct Exclusion {
+    task_id: String,
+    attempt: Option<u64>,
+}
+
+impl Exclusion {
+    fn matches(&self, task_id: &str, attempt: u64) -> bool {
+        self.task_id == task_id && self.attempt.map(|number| number == attempt).unwrap_or(true)
+    }
+}
+
+fn exclusion_error(detail: &str) -> String {
+    format!(
+        "invalid_exclusion: {detail}；exclude 每项必须是 {{task_id, attempt?}}；task_id 必须通过任务目录命名校验（仅字母数字与 . _ -，长度 <=64，且不以 _ 或 . 开头；含路径分隔符、..、绝对路径、通配符一律拒绝）"
+    )
+}
+
+/// 解析并校验排除参数：任何非法/歧义形态都在写入之前拒绝（零删除、零审计）
+fn parse_exclusions(args: &Value) -> Result<Vec<Exclusion>, String> {
+    let Some(value) = args.get("exclude") else {
+        return Ok(Vec::new());
+    };
+    let array = value
+        .as_array()
+        .ok_or_else(|| exclusion_error("exclude 必须是非空数组"))?;
+    if array.is_empty() {
+        return Err(exclusion_error(
+            "exclude 必须是非空数组（不需要排除就不要传这个参数）",
+        ));
+    }
+    if array.len() > 100 {
+        return Err(exclusion_error("exclude 最多 100 条"));
+    }
+    let mut parsed: Vec<Exclusion> = Vec::new();
+    for item in array {
+        let Some(object) = item.as_object() else {
+            return Err(exclusion_error(
+                "exclude 的每一项必须是对象 {task_id, attempt?}",
+            ));
+        };
+        let Some(task_id) = object.get("task_id").and_then(Value::as_str) else {
+            return Err(exclusion_error("exclude 项缺少字符串 task_id"));
+        };
+        if !is_task_dir_name(task_id) {
+            return Err(exclusion_error(&format!(
+                "task_id 未通过命名校验：{task_id:?}"
+            )));
+        }
+        let attempt = match object.get("attempt") {
+            None => None,
+            Some(value) => Some(
+                value
+                    .as_u64()
+                    .filter(|number| *number >= 1)
+                    .ok_or_else(|| exclusion_error("attempt 必须是 >=1 的整数"))?,
+            ),
+        };
+        if parsed
+            .iter()
+            .any(|existing| existing.task_id == task_id && existing.attempt == attempt)
+        {
+            return Err(exclusion_error("同一 (task_id, attempt) 不得重复"));
+        }
+        if parsed.iter().any(|existing| {
+            existing.task_id == task_id && (existing.attempt.is_none() || attempt.is_none())
+        }) {
+            return Err(exclusion_error(
+                "同一 task_id 不得同时按整任务与单次 attempt 排除",
+            ));
+        }
+        parsed.push(Exclusion {
+            task_id: task_id.to_string(),
+            attempt,
+        });
+    }
+    Ok(parsed)
 }
 
 /// 单次删除的终态：只有 `Deleted` 表示"已从 `runs/` 移除"；其余两种都还在盘上。
@@ -3250,15 +3444,31 @@ fn tools() -> Value {
         },
         {
             "name": "runs.prune",
-            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。系统内没有定时/启动自动清理",
+            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。系统内没有定时/启动自动清理",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt。PM 口径统一推荐 365 天；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" },
                     "status": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "enum": ["ok", "failed", "blocked"] }, "description": "可选：状态多值白名单，显式传入才生效；缺省不过滤（与旧行为一致）。仅 handback.status 精确匹配才进入候选，与 older_than_days 为 AND；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档" },
+                    "exclude": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "uniqueItems": true,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "task_id": { "type": "string", "minLength": 1, "maxLength": 64, "description": "要排除的 task_id" },
+                                "attempt": { "type": "integer", "minimum": 1, "description": "可选：只排除该 task 的这一 attempt；缺省表示排除该 task 的全部候选" }
+                            },
+                            "required": ["task_id"],
+                            "additionalProperties": false
+                        },
+                        "description": "可选：按条目精确排除候选。数组最小 1 条、最多 100 条；同一 (task_id, attempt) 不得重复，同一 task_id 不得同时按整任务与单次 attempt 排除，违者 invalid_exclusion。task_id 必须通过任务目录命名校验（仅字母数字与 . _ -，长度 <=64，且不以 _ 或 . 开头），含路径分隔符、..、绝对路径、通配符一律拒绝。排除在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，也不占用 limit；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。能力位：schema 含本字段才允许携带 exclude 真删"
+                    },
                     "dry_run": { "type": "boolean", "description": "默认 true：只列候选、不删不写；false 表示要求真删（还需 confirm=true）" },
                     "confirm": { "type": "boolean", "description": "默认 false：真删必须显式 true；单独 true 不隐含真删" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 100；在 status 过滤之后生效" }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "本批最多处理的候选数，默认 100；在 status 过滤与 exclude 排除之后生效" }
                 },
                 "required": ["older_than_days"],
                 "additionalProperties": false

@@ -1,8 +1,8 @@
-# PM → AW 派单与回执契约 v1.26
+# PM → AW 派单与回执契约 v1.27
 
-状态：v1.26。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
+状态：v1.27。§10 的默认决策已落地，不再等待 PM 逐项拍板；PM 可在派单侧显式覆盖（标注"必须显式"者除外）
 适用范围：PM 向 AW 的 `mcp-bridge` 派单、AW 回执、失败处置
-实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**；**v1.23 起 `status` 增加连接级计数 `connections`（纯加法、只观测）：实测确认进程内没有"会话"概念，只有一条 stdio 连接，故 `active`/`total`/`peak` 恒为 1、`initialize_total` 随 `initialize` 次数累加（多份 `initialize` 不等于多会话）；不做准入、不做上限**；**v1.24 起把超时的"单次终止尝试"做实：POSIX 68 轮 + Windows 20 轮实测确认一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内无存活，故不新增第二次尝试；描述明写"终止只尝试一次（不重试）"，判据与回执语义不变（只有观测到无存活才写 `Cleaned`，逃逸仍"未验证"，`#3` 仍 `NOT_PROVEN`）**；**v1.25 起把"未知/多余参数被静默忽略"变为可观测诊断（§2.5）：回执按需追加 `arguments_diagnostics`（未知参数名、camelCase/snake_case 别名指向、显式 `null` 的可选字段，值只给类型/长度），同一份 JSON 同步写 stderr；诊断不改变任何调用的成功/失败结果，`additionalProperties:false` 仍只声明不强制**；**v1.26 起 `task.execute` 显式区分 `dispatched` / `standalone` 两种运行模式（§2.6）：dispatched 下 AW 仍只执行、不验收、不判停；standalone 下由 AW 按任务声明的 `acceptance` 自行判定，并把三态结论（`passed` / `failed` / `undetermined`）落盘到 `runs/<task_id>/attempt-N/verdict.json`，失败有界重试、无法判定绝不默认通过**
+实现状态：G1 / G2 / G3 / G4（仅审计）已落地（见 §11）；v1.3 起回执补充执行上下文；v1.4 起支持 `env` 透传；v1.5 起提供 `runs.list` 只读枚举；v1.6 起派单与回执带 UTC 时间戳；v1.7 起 `env.PATH` fail-closed（不许整体覆盖）；v1.8 起 `runs.list` 的 `total` 与 `attempts` 恒等；v1.9 起 `path_prepend` 已实现；v1.10 起 `path_prepend: []` 与缺省等价；v1.11 起超时文案只写"已发送终止信号、孙进程未验证"；v1.12 起提供显式两段式证据清理 `runs.prune`（**默认不删、无任何自动清理**，见 §8）；v1.13 起 `initialize` 审计改为逐份文件留存、`status.session` 聚合（并发不丢）；v1.14 起 `tools/list` 描述与契约单一措辞（env fail-closed + path_prepend 声明）；v1.15 起新增 `#3` 进程树杀灭的**设计评估**（仅文档，**未实现**，`NOT_PROVEN` 不变）；v1.16 起按窄定义实现 `#3` 的**受控集合**清理（POSIX 进程组 / Windows Job；Windows 采用 `spawn → Assign`，窗口存在），判据只用 `kill(-pgid, 0) == ESRCH` 与 `ActiveProcesses == 0`；v1.16.1 曾因状态门未满足退回旧文案；**v1.17 起状态门已满足（POSIX 四类用例实跑通过 + Windows 三类通过 + 版本递增），启用"已清理受控集合；逃逸进程是否仍在运行未验证"三态文案**，Windows 逃逸负例仍为 `UNPROVEN`；**整棵进程树仍不可判定，`#3` 保持 `NOT_PROVEN`**；认证与并发上限仍未实现；**v1.18 起把原"待 PM 确认"项转为有依据的默认决策（§10），`path_prepend` 的 16/4096 限制写入 schema；v1.19 按 PM 口径把 `runs.prune` 的推荐阈值校正为 365 天、`limit` 缺省 100、明确先 dry-run、不分档（§8.9）；v1.20 收窄 Windows `spawn → Assign` 窗口：子进程以挂起态创建、先加入作业再恢复执行，恢复前不会派生子进程；v1.21 实现 `runs.prune.status` 多值白名单（显式才生效、与年龄 AND、`limit` 后置、无默认状态/无分档，§8.10），分档仍未实现；**v1.22 起删除回执改为自包含可核对（纯加法）：`deleted[]` 新增 `state`/`source_path`/`trash_path`/`deleted_at`/`rule`/`fingerprint`，`failed[]` 新增 `retained_at_source` 状态与同形字段，新增 `trashed[]`/`trashed_total`；`deleted[]` 是唯一表示已移除的集合，指纹为删除前算出的真实 sha256 与字节数（缺文件写 `null`）**；**v1.23 起 `status` 增加连接级计数 `connections`（纯加法、只观测）：实测确认进程内没有"会话"概念，只有一条 stdio 连接，故 `active`/`total`/`peak` 恒为 1、`initialize_total` 随 `initialize` 次数累加（多份 `initialize` 不等于多会话）；不做准入、不做上限**；**v1.24 起把超时的"单次终止尝试"做实：POSIX 68 轮 + Windows 20 轮实测确认一次 `kill(-pgid,SIGKILL)` / 一次 `TerminateJobObject` 后集合内无存活，故不新增第二次尝试；描述明写"终止只尝试一次（不重试）"，判据与回执语义不变（只有观测到无存活才写 `Cleaned`，逃逸仍"未验证"，`#3` 仍 `NOT_PROVEN`）**；**v1.25 起把"未知/多余参数被静默忽略"变为可观测诊断（§2.5）：回执按需追加 `arguments_diagnostics`（未知参数名、camelCase/snake_case 别名指向、显式 `null` 的可选字段，值只给类型/长度），同一份 JSON 同步写 stderr；诊断不改变任何调用的成功/失败结果，`additionalProperties:false` 仍只声明不强制**；**v1.26 起 `task.execute` 显式区分 `dispatched` / `standalone` 两种运行模式（§2.6）：dispatched 下 AW 仍只执行、不验收、不判停；standalone 下由 AW 按任务声明的 `acceptance` 自行判定，并把三态结论（`passed` / `failed` / `undetermined`）落盘到 `runs/<task_id>/attempt-N/verdict.json`，失败有界重试、无法判定绝不默认通过**；**v1.27 起 `runs.prune` 增加可选按条目排除 `exclude`（§8.11）：按 `task_id`、可精确到 `attempt`，在**候选枚举入口**生效，被排除条目只进 `excluded[]`、不进 `candidates[]`；回执新增 `excluded[]` / `excluded_total` / `not_in_candidates_total` / `exclude_requests_total` / `batch_candidates_total` / `not_processed_total`，并写死计数不变式 `deleted + failed + trashed + excluded_total == batch_candidates_total`、`candidates_total == batch_candidates_total + not_processed_total`；越界 id 与任务目录同一命名校验，不存在/不在候选集记 `not_in_candidates`（不报错、不静默忽略）**
 
 ## 0. 结论
 
@@ -502,10 +502,10 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | `confirm` | 布尔，缺省 `false`。**只有 `dry_run=false` 且 `confirm=true` 才真删**；缺一即拒绝 |
 | 拒绝语义 | `dry_run=false` 而 `confirm` 不为 `true` → 工具错误 `confirm_required`，**零写入**；反之 `confirm=true` 但未显式 `dry_run=false` → 仍按 dry-run 处理（`confirm` 不隐含真删） |
 | 阈值必填 | `older_than_days` 必填（整数，1..=3650）；缺失或越界 → 工具错误 `invalid_retention`，**零写入**。**不提供隐式默认阈值**——"没写阈值"绝不能变成"按某个默认值删"；调用方按 §8.9 的 365 天推荐值显式传入 |
-| dry-run 输出（稳定可解析） | `dry_run=true`、`state`（`missing`/`empty`/`ready`）、`older_than_days`、`status_filter`（缺省 `null`，显式时为去重后的数组）、`evaluated_at`（UTC）、`limit`、`candidates_total`（过滤后命中数）、`truncated`、`candidates[]`、`skipped_total`、`skipped[]`；`candidates[]` 每项固定字段：`task_id` / `attempt` / `path`（相对路径 `runs/<task_id>/attempt-<N>`）/ `status`（回执状态，缺省 `null`）/ `dispatchedAt` / `finishedAt` / `age_days` |
+| dry-run 输出（稳定可解析） | `dry_run=true`、`state`（`missing`/`empty`/`ready`）、`older_than_days`、`status_filter`（缺省 `null`，显式时为去重后的数组）、`exclude_filter`（缺省 `null`）、`evaluated_at`（UTC）、`limit`、`candidates_total`（过滤后命中数，含被排除项）、`batch_candidates_total`、`not_processed_total`、`truncated`、`candidates[]`、`skipped_total`、`skipped[]`、`exclude_requests_total`、`excluded_total`、`not_in_candidates_total`、`excluded[]`；`candidates[]` 每项固定字段：`task_id` / `attempt` / `path`（相对路径 `runs/<task_id>/attempt-<N>`）/ `status`（回执状态，缺省 `null`）/ `dispatchedAt` / `finishedAt` / `age_days`；`excluded[]` 见 §8.11 |
 | `skipped[]` 原因码 | `latest_attempt_retained`（最新 attempt，永不删）/ `unfinished_or_missing_handback`（无回执或不可解析）/ `missing_dispatch`（缺派单签名，年龄与一致性都无法证明）/ `age_unknown`（回执无 `finishedAt`）/ `invalid_finished_at`（时间戳不可解析）/ `future_timestamp`（晚于当前时刻，按时钟异常跳过）/ `not_old_enough`（未达阈值）/ `unsafe_attempt_path`（符号链接或非真实目录）/ `status_unknown`（传了 `status` 但回执缺状态或值不认识，宁可不删）/ `status_mismatch`（状态不在白名单） |
-| 单批上限 | `limit` 缺省 100、范围 1..=100；**在 `status` 过滤之后**按 `(task_id, attempt)` 升序取前 `limit` 个；`candidates_total` 是过滤后的命中总数，`candidates_total > limit` 时 `truncated=true`。**真实删除只删被列出的这一批**，剩余的下一次调用再评估 |
-| 两段一致性 | 相同参数、磁盘未变时，dry-run 的 `candidates[]` 与真实删除的 `deleted[]` **逐项一致**（同样的排序与同样的 `limit` 截断）；不一致即契约违规 |
+| 单批上限 | `limit` 缺省 100、范围 1..=100；**在 `status` 过滤与 `exclude` 排除之后**按 `(task_id, attempt)` 升序取前 `limit` 个；`candidates_total` 是过滤后的命中总数（**含被排除项**），`not_processed_total` 是因 `limit` 截断未处理的数量，`not_processed_total > 0` 时 `truncated=true`。**真实删除只删被列出的这一批**，剩余的下一次调用再评估 |
+| 两段一致性 | 相同参数、磁盘未变时，dry-run 的 `candidates[]` 与真实删除的 `deleted[]` **逐项一致**（同样的排序、同样的排除与同样的 `limit` 截断）；`excluded[]` 也逐项一致；不一致即契约违规 |
 
 ### 8.3 年龄判据：只认 `finishedAt`
 
@@ -527,15 +527,15 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 
 - 落点：`runs/prune.jsonl`，append-only JSONL；`runs.list` 只列目录，因此该文件不会出现在任务列表里。
 - **真删（`dry_run=false` + `confirm=true`）且候选非空时**，每批追加两行，共享 `batch_id`：
-  1. `phase="plan"`：**删除之前**写入并 `fsync`。字段：`at`（UTC）、`batch_id`、`older_than_days`、`candidate_count`、`candidates[]`（`task_id` / `attempt` / `path` / `dispatchedAt` / `finishedAt` / `age_days`）。
-  2. `phase="result"`：删除结束后写入。字段：`at`、`batch_id`、`older_than_days`、`status_filter`、`limit`、`deleted[]`、`failed[]`、`trashed[]`、`deleted_total`、`failed_total`、`trashed_total`。
+  1. `phase="plan"`：**删除之前**写入并 `fsync`。字段：`at`（UTC）、`batch_id`、`older_than_days`、`candidate_count`、`candidates[]`（`task_id` / `attempt` / `path` / `dispatchedAt` / `finishedAt` / `age_days`）、`exclude_filter`、`exclude_requests_total`、`excluded_total`、`not_in_candidates_total`、`excluded[]`。
+  2. `phase="result"`：删除结束后写入。字段：`at`、`batch_id`、`older_than_days`、`status_filter`、`exclude_filter`、`limit`、`deleted[]`、`failed[]`、`trashed[]`、`deleted_total`、`failed_total`、`trashed_total`、`exclude_requests_total`、`excluded_total`、`not_in_candidates_total`、`batch_candidates_total`、`excluded[]`。
 - **删除回执（v1.22，纯加法；旧字段全部保留、不改名、不删除）**：
   - `deleted[]`：**唯一**表示"已从 `runs/` 移除"的集合。每条除保留 `task_id`/`attempt`/`path`/`status`/`dispatchedAt`/`finishedAt`/`age_days` 外，新增 `state="deleted"`、`source_path`、`trash_path`、`deleted_at`、`rule`、`fingerprint`。
   - `failed[]`：**仍在原路径**的失败项，`state="retained_at_source"`、`trash_path=null`，同样带 `source_path`/`error`/`rule`/`fingerprint`。
   - `trashed[]`：**已整链移入 `.prune-trash` 但未删掉**的失败项，`state="trashed_not_deleted"`、`trash_path` 指向暂存路径，同样带 `rule`/`fingerprint`。
   - `rule` 逐条自包含：`older_than_days` / `status_filter` / `limit` / `batch_id` 与批次一致，跨批次核对不回连顶层。
   - `fingerprint`：`status` / `finishedAt` / `dispatchedAt` / `handback_sha256` / `dispatch_sha256` / `bytes{handback,dispatch,total}`；sha256 与字节数均在**删除前**读出计算；文件缺失写 `null`（不编造）。
-  - 语义由代码保证：`failed[]`/`trashed[]` 的 `state` 只能来自 `RetainedState`（`retained_at_source` / `trashed_not_deleted`），构造不出 `deleted`；`.prune-trash` 里的一切都不算删除；三集合互斥，`deleted_total + failed_total + trashed_total = 本批候选数`。
+  - 语义由代码保证：`failed[]`/`trashed[]` 的 `state` 只能来自 `RetainedState`（`retained_at_source` / `trashed_not_deleted`），构造不出 `deleted`；`.prune-trash` 里的一切都不算删除；三集合互斥，`deleted_total + failed_total + trashed_total = 本批候选数 - excluded_total`（v1.27 起写死为 `deleted_total + failed_total + trashed_total + excluded_total == batch_candidates_total`，见 §8.11）。
 - **先记账后删除**：`plan` 行写不进去（目录不可写、磁盘满）→ **放弃本轮删除**，返回工具错误，一个目录都不删。禁止"删完再记"。
 - 崩溃可对账：只有 `plan` 没有 `result` = "已记录、未完成"，人工按清单核对；两行都在 = 可回答"删了什么、凭什么时候删的"。
 - `dry_run=true` 或候选为空时**不写审计**（没有发生删除，也就不该产生删除记录）。
@@ -550,7 +550,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | 部分失败 | 某个 attempt 的暂存重命名或删除失败 → 继续处理其余候选，返回 `status="partial"`、`deleted_total`、`failed_total`、`trashed_total` 与逐项错误；工具响应 `isError=true`。失败项要么**原样未动**（`state="retained_at_source"`），要么**整链留在 `.prune-trash/`**（`state="trashed_not_deleted"`，数据未丢）。**不许把"删了一半"报成成功**，也不许把两种未删除状态报成 `deleted` |
 | 不重试 | **不自动重试**任何删除；失败项只能由调用方下一次显式调用重新评估 |
 | 记账失败 | `plan` 行写失败 → 不删；`result` 行写失败 → 删除已发生，返回工具错误并明写"已删除 N 个、失败 M 个、暂存 K 个，结果行写入失败"，不得声称成功 |
-| 非删除类错误 | 参数非法（`invalid_retention` / `confirm_required`）在**任何写入之前**拒绝 |
+| 非删除类错误 | 参数非法（`invalid_retention` / `invalid_exclusion` / `confirm_required`）在**任何写入之前**拒绝 |
 
 ### 8.7 与权威性的关系（对 §7 的补充）
 
@@ -587,7 +587,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | 状态过滤 / 分档 | **`status` 可选多值白名单，显式传入才生效，缺省不过滤；分档仍不做**（PM 口径：不分档） | v1.21 §8.10：无默认状态、无服务端档位；`ok=30` / `failed=180` / `blocked=365` 仍为未实现的历史参考，PM 若要分档须自行展开为 `status` + 显式阈值 |
 | `task_id` 退役 | **任一 attempt 被清理过的 `task_id` 不得复用**；重投必须换新 id | §8.7：最新 attempt 可能已被删，复用会重新执行并混淆历史 |
 
-可配置：每次调用显式给 `older_than_days`（1..=3650）、`limit`（1..=100）、`dry_run`、`confirm`；可选 `status`（多值白名单，见 §8.10）。本节的 365 天只是**推荐值**，不是 API 隐式默认。
+可配置：每次调用显式给 `older_than_days`（1..=3650）、`limit`（1..=100）、`dry_run`、`confirm`；可选 `status`（多值白名单，见 §8.10）、`exclude`（按条目精确排除，见 §8.11）。本节的 365 天只是**推荐值**，不是 API 隐式默认。
 
 ### 8.10 状态过滤（v1.21 已实现；分档仍未实现）
 
@@ -604,6 +604,44 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 **审计**：`runs/prune.jsonl` 的 plan 与 result 两行都必须记录 `status_filter`、`older_than_days`、`limit`、`batch_id`；真删响应回显 `status_filter`，dry-run 响应回显 `status_filter`（缺省 `null`）。
 
 **能力门禁**：`tools/list` 的 `runs.prune.inputSchema.properties.status` 是唯一能力位。PM 只有在 schema 含 `status` 时才允许携带 `status` 并 `dry_run=false + confirm=true`；旧服务端会忽略未知参数，**不得**把"旧服务端忽略 `status`"当成可用降级路径。
+
+### 8.11 按条目精确排除（v1.27 已实现）
+
+**为什么要这个能力位**：PM 分档真删时，同一档里只要有一条"不可自动判定"的条目，整批调用就会把它一起删掉；没有排除参数时，PM 只能把整档所有可判定条目一起暂缓。`exclude` 让 PM 在同一次批量调用里精确留下指定条目，而不是被迫拆成多批或整档放弃。
+
+**能力位**：`tools/list` 的 `runs.prune.inputSchema.properties.exclude` 是否存在，是 PM 判断"能否走批量路径"的唯一能力位。没有该字段的服务端会忽略未知参数并把被标记条目一起删掉，因此 PM **不得**在旧服务端上携带 `exclude` 真删；旧服务端只能整档暂缓。
+
+**参数**：`exclude` 可选 `array`，最小 1 条、最多 100 条，schema 声明 `uniqueItems: true`；每项 `{ "task_id": string, "attempt"?: integer >= 1 }`：
+
+- `task_id` 必填，必须通过与任务目录**同一条**命名校验（`is_task_dir_name`：仅字母数字与 `.` `_` `-`，长度 ≤64，且不以 `_` 或 `.` 开头）。含路径分隔符、`..`、绝对路径、通配符一律 `invalid_exclusion`，**零删除、零审计**；不得借这个参数读取或影响枚举范围之外的任何路径。
+- `attempt` 缺省 = 排除该 task 的**全部候选**；给出时只排除该次 attempt。
+- 去重约束：同一 `(task_id, attempt)` 不得重复；同一 `task_id` **不得**同时按整任务与单次 attempt 排除（歧义形态直接拒绝）。违者 `invalid_exclusion`。
+- 服务端不依赖 schema 的 `uniqueItems`：重复/歧义在解析阶段自行拒绝（fail-closed）。
+
+**生效位置（写死）**：排除在**候选枚举入口**一次完成，不是删除前过滤。命中排除的合格条目只进 `excluded[]`，**不进** `candidates[]`、不占 `limit`、不会被删除；`candidates_total` 仍把它们计入候选总数，因此"候选计数"与"删除口径"一致。
+
+**回执字段（纯加法）**：
+
+| 字段 | 含义 |
+|---|---|
+| `exclude_filter` | 回显归一化后的排除请求；未传时 `null` |
+| `excluded[]` | 逐条 `{task_id, attempt, path, reason}`；`attempt` 缺省为 `null`；`path` 只在 `excluded_by_request` 时给真实相对路径 |
+| `excluded_total` | `reason=excluded_by_request` 的条数（从候选集中被请求排除） |
+| `not_in_candidates_total` | `reason=not_in_candidates` 的条数 |
+| `exclude_requests_total` | 本次排除请求总条数（= `excluded_total + not_in_candidates_total`，可直接核对） |
+| `batch_candidates_total` | 本批候选总数 = `deleted_total + failed_total + trashed_total + excluded_total` |
+| `not_processed_total` | 因 `limit` 截断未处理的本批候选数 |
+
+**计数不变式（回执可直接核对）**：
+
+1. `deleted_total + failed_total + trashed_total + excluded_total == batch_candidates_total`
+2. `candidates_total == batch_candidates_total + not_processed_total`
+
+**边界（择一，写死）**：排除**不存在**或**本就不在候选集**的 id（任务不存在、attempt 不存在、该 attempt 因年龄/状态/最新 attempt/缺 `finishedAt` 等原因未入选）**不报错**，逐条记 `reason="not_in_candidates"`，`path=null`（不编造不存在的路径），`isError=false`，且不影响其余候选正常删除。不得静默忽略、不得计入 `excluded_total`。
+
+**审计**：`runs/prune.jsonl` 的 plan 与 result 两行都记录 `exclude_filter`、`exclude_requests_total`、`excluded_total`、`not_in_candidates_total`、`excluded[]`；result 行另记 `batch_candidates_total`。
+
+**回归**：不传 `exclude` 时，候选集合、删除行为、`candidates_total` / `truncated` 口径与 v1.26 完全一致；新增字段取零值 / 空数组 / `null`。
 
 ## 9. 边界（写死，按模式）
 
@@ -628,7 +666,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | 1 | 通道归属 | PM 直接以 stdio 子进程拉起 bridge；进程归属即事实准入边界 | §2：谁拉起谁是用调用方；bridge 无独立凭据 | 启动方式由 PM 决定；若改由 MH 拉起，MH 必须提供 peer 归属信息（新契约） | 直接把 bridge 挪到 MH 下而不提供归属信息，身份退回弱识别（现状），不会阻断执行 |
 | 2 | 重跑表达 | 换新 `task_id`（建议 `-r2`/`-r3`），零新增字段 | §3.1：同 id 是幂等键，不是重跑键 | PM 生成新 id | 若改为"同 id 重试"，需扩展输入契约并定义 attempt 语义 |
 | 3 | 失败码归属 | `upstream_rejected` 由 PM 记录；`concurrency_limit` 由 PM 侧排队，AW 不内置闸门 | §5 第 8 条、§6：AW 不做第二个协调者 | PM 侧策略；若 AW 内置限流需新契约 | 在 AW 加闸门会引入"未执行却被计为派单"的语义风险 |
-| 4 | 证据清理 | 统一 `older_than_days=365`、`limit=100` 为推荐调用值，**older 仍须显式传入**；先 dry-run 预览再真删；不分档；可选 `status` 多值白名单**显式才生效**；清理过的 `task_id` 退役 | §8.9、§8.10、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm`，可选 `status` | 若把 365 变成隐式默认，会让"漏传阈值"变成静默删除；若给 `status` 默认值，会让"漏传状态"变成按档位静默删 |
+| 4 | 证据清理 | 统一 `older_than_days=365`、`limit=100` 为推荐调用值，**older 仍须显式传入**；先 dry-run 预览再真删；不分档；可选 `status` 多值白名单**显式才生效**；可选 `exclude` 按条目精确排除（v1.27，`task_id` + 可选 `attempt`，枚举入口生效）；清理过的 `task_id` 退役 | §8.9、§8.10、§8.11、§8.7、§8.8 | 每次调用显式传 `older_than_days`/`limit`/`dry_run`/`confirm`，可选 `status`/`exclude` | 若把 365 变成隐式默认，会让"漏传阈值"变成静默删除；若给 `status` 默认值，会让"漏传状态"变成按档位静默删；若用排除参数做"删除前过滤"，会让候选计数与删除口径不一致 |
 | 5 | `additionalProperties` | 保持**忽略未知参数**（schema 仍声明 `false`）；v1.25 起在回执按需追加 `arguments_diagnostics`（§2.5），**可观测但不拒绝** | 兼容现有调用方；MCP 客户端可能附加元数据/别名；schema 静态、行为需确定 | 契约版本级；不提供运行时开关 | 强制拒绝会打断携带额外字段的现有调用（§10.1） |
 | 6 | `clientInfo` 准入 | 默认**不参与准入**，仅审计 | §2.3：自报字段不可信 | 需新增票据/进程锚点/授权范围（§2.3） | 仅凭 `clientInfo.name` 放行会让冒充直接通过 |
 | 7 | `path_prepend` 限制 | 默认**写入 schema**：`maxItems=16`、`items.maxLength=4096` | 与实现校验上限一致；声明先于调用，减少无效派单 | 调用方传 0..16 项、每项 ≤4096；上限是契约常量，改动需升版 | 不写入 schema 会让客户端以为可传超量，直到占号前才被拒 |
