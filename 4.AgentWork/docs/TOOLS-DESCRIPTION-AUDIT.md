@@ -912,4 +912,120 @@ POSIX（verify.sh run）：3 unit + 70 integration，0 failed，四类证据行�
 
 本次改动：`server.rs`（判据收敛为 `is_task_dir_name`，行为不变）、`tests/mcp_contract.rs`（+1 条用例）、本文档 §18。**契约版本不变、未放宽判据、未新增依赖；分档仍未实现；`#3` 仍 `NOT_PROVEN`。**
 
+---
+
+## 19. `runs.prune` 删除回执字段核验与删除后重跑（2026-11-06）
+
+> 本节只核验、**不改实现**（新用例仅锁定既有行为）；**契约版本不变（仍 v1.21）**。
+
+### 19.1 当前回执（真实响应）
+
+沙箱 = 生产 `runs/` 的副本 + 一个探针任务 `probe-receipt`（attempt 1..3，`finishedAt=2024-01-01`，状态 `failed`/`ok`/`ok`），由真实 bridge 可执行文件走 MCP stdio 执行；生产目录未被改动。
+
+`deleted[]` 单项原文：
+
+```json
+{"age_days":1040,"attempt":1,"dispatchedAt":"2026-11-05T18:58:51Z","finishedAt":"2024-01-01T00:00:00Z","path":"runs/probe-receipt/attempt-1","status":"failed","task_id":"probe-receipt"}
+```
+
+顶层：`batch_id=prune-1793969836752-46320`、`older_than_days=365`、`status_filter=null`、`limit=100`、`evaluated_at`、`deleted_total=2`、`failed_total=0`、`failed=[]`；审计 `prune.jsonl` 的 plan/result 两行字段与响应一致。
+
+### 19.2 字段缺口（事后核对所需）
+
+| # | 缺口 | 后果 |
+|---|---|---|
+| 1 | 无内容指纹：没有 `handback.json` / `dispatch.json` 的 sha256，也没有字节数 | 无法证明"被删的就是当时看到的那份回执"，也无法估算释放空间 |
+| 2 | 无去向：`deleted[]` 只有原始 `path`，没有 `trash_path` / `deleted_at` / 状态标注 | 瞬时路径已不存在，但字段仍写原路径，读者无法判断它去了哪里 |
+| 3 | `failed[]` 不可区分两种失败：`rename` 失败（原路径仍在）与 `remove_dir_all` 失败（已在 `.prune-trash`）都只给 `path` + 自由文本 `error` | 同一 `path` 既可能是"还在原处"，也可能是"已进暂存区"，容易被误读成已删除 |
+| 4 | 无 `trashed[]` / `trashed_total`：留在 `.prune-trash` 的条目没有结构化出口 | 只能从 error 文本里抠信息 |
+| 5 | 档位/阈值/`batch_id` 只在批次顶层，条目不自包含 | 跨批次或单独核对某一条时要回连批次上下文 |
+| 6 | `deleted[]` 与 `failed[]` 条目没有显式 `state`，且 `status` 可为 `null` | 单看条目无法区分"已删除 / 未删除（原处）/ 未删除（暂存）" |
+
+### 19.3 建议形状（兼容优先：旧字段全保留，只增不改）
+
+`deleted[]` 条目（新增字段，`path` 保留为兼容别名）：
+
+```json
+{
+  "task_id": "...", "attempt": 1,
+  "state": "deleted",
+  "path": "runs/<task>/attempt-1",
+  "source_path": "runs/<task>/attempt-1",
+  "trash_path": "runs/.prune-trash/<batch_id>/<task>-attempt-1",
+  "deleted_at": "<ISO8601>",
+  "rule": { "older_than_days": 365, "status_filter": ["ok"], "limit": 100, "batch_id": "..." },
+  "fingerprint": {
+    "status": "failed", "finishedAt": "...", "dispatchedAt": "...",
+    "handback_sha256": "...", "dispatch_sha256": "...",
+    "bytes": { "handback": 1234, "dispatch": 567, "total": 1801 }
+  }
+}
+```
+
+`failed[]` 条目（必须显式二选一，禁止裸 `path`）：
+
+```json
+{
+  "task_id": "...", "attempt": 1,
+  "state": "retained_at_source" | "retained_in_trash",
+  "path": "runs/<task>/attempt-1",
+  "source_path": "runs/<task>/attempt-1",
+  "trash_path": null | "runs/.prune-trash/<batch_id>/<task>-attempt-1",
+  "error": "...",
+  "fingerprint": { "…与 deleted 同一形状…" }
+}
+```
+
+新增 `trashed[]`（仅 `remove_dir_all` 失败时出现）与 `trashed_total`，条目：`state:"trashed_not_deleted"` + `trash_path` + `bytes` + `fingerprint`。
+
+语义约束（写进未来契约时必须明确）：`deleted[]` 是**唯一**表示"已从 `runs/` 移除"的集合；`.prune-trash` 里的一切都不算删除；`failed[]` 与 `trashed[]` 都不得使用 `deleted` 字样或 `state:"deleted"`。
+
+### 19.4 删除后重跑（真实响应）
+
+| 步骤 | 响应 |
+|---|---|
+| 真删前 `runs.list` | `total_tasks=14`、`total=16`（探针 3 个 attempt） |
+| 真删（`older_than_days=365`、`limit=100`、`confirm=true`） | `deleted_total=2`、`failed_total=0`、`batch_id=prune-1793969836752-46320` |
+| 真删后 `runs.list` | `total=14`（探针只剩 attempt-3） |
+| 重跑 dry-run（同参数） | `candidates_total=0`、`skipped_total=14`（`latest_attempt_retained`=13、`missing_dispatch`=1），探针相关仅 attempt-3 的 `latest_attempt_retained` |
+| 重跑 dry-run（`status=["ok"]`） | 同上：`candidates_total=0`、`skipped_total=14` |
+
+结论：**当前行为符合**——已删 attempt 不再出现在候选，`skipped` 没有因删除产生新噪声；`.prune-trash` 只留一个空的父目录（0 条目，且不以任务身份进入任何计数）。
+
+### 19.5 锁定用例与先红后绿
+
+用例 `prune_rerun_after_delete_has_no_phantom_candidates_or_skips`：一个任务 3 个 attempt（400 天前），真删 2 个后重跑，断言候选为 0、`skipped_total=1` 且首条是 attempt-3 的 `latest_attempt_retained`、attempt 1/2 不出现在任何候选或跳过项；`.prune-trash` 无残留条目。
+
+红（对照：把 `delete_attempt_dir` 临时改成不删除直接返回 `Ok(())`）：
+
+```text
+running 1 test
+
+thread 'prune_rerun_after_delete_has_no_phantom_candidates_or_skips' panicked at apps\mcp-bridge\tests\mcp_contract.rs:3429:5:
+assertion failed: !runs.path().join("t-rerun").join("attempt-1").exists()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test prune_rerun_after_delete_has_no_phantom_candidates_or_skips ... FAILED
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 72 filtered out; finished in 0.01s
+```
+
+绿（恢复后，文件 SHA256 `9C91EA05…3694` 前后一致）：
+
+```text
+running 1 test
+test prune_rerun_after_delete_has_no_phantom_candidates_or_skips ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 72 filtered out; finished in 0.02s
+```
+
+### 19.6 两平台与结论
+
+```text
+Windows：4 unit + 73 integration，0 failed
+POSIX（verify.sh run）：3 unit + 71 integration，0 failed，四类证据行齐全
+```
+
+本次改动：`tests/mcp_contract.rs`（+1 条用例）、本文档 §19。**实现未改、契约版本不变、未放宽判据；字段缺口只给建议形状，未改代码；分档仍未实现；`#3` 仍 `NOT_PROVEN`。**
+
+
 

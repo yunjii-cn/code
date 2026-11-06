@@ -3409,6 +3409,63 @@ fn prune_limit_is_deterministic_and_resumable() {
     );
 }
 
+/// 删除后重跑：被删 attempt 不得再次成为候选，也不得产生 skipped 噪声。
+#[test]
+fn prune_rerun_after_delete_has_no_phantom_candidates_or_skips() {
+    let (server, _settings, runs) = server_with_runs();
+    let old = days_ago_stamp(400);
+    for attempt in 1..=3 {
+        prune_attempt(runs.path(), "t-rerun", attempt, true, Some(&old), true);
+    }
+
+    let first = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 365, "limit": 100, "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(first["status"], "ok");
+    assert_eq!(first["deleted_total"], 2, "两个旧 attempt 应被删：{first}");
+    assert_eq!(first["failed_total"], 0);
+    assert!(!runs.path().join("t-rerun").join("attempt-1").exists());
+    assert!(!runs.path().join("t-rerun").join("attempt-2").exists());
+    assert!(runs.path().join("t-rerun").join("attempt-3").is_dir());
+    let trash = runs.path().join(".prune-trash");
+    if trash.is_dir() {
+        assert_eq!(
+            fs::read_dir(&trash).expect("读暂存目录").count(),
+            0,
+            "成功删除后 .prune-trash 不得残留条目"
+        );
+    }
+
+    let again = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 365, "limit": 100 }),
+    ));
+    assert_eq!(
+        again["candidates_total"], 0,
+        "已删 attempt 不得再次成为候选：{again}"
+    );
+    assert!(
+        again["candidates"].as_array().expect("candidates").is_empty(),
+        "重跑候选必须为空：{again}"
+    );
+    assert_eq!(
+        again["skipped_total"], 1,
+        "重跑不应产生额外 skipped 噪声：{again}"
+    );
+    let skipped = again["skipped"].as_array().expect("skipped");
+    assert_eq!(skipped[0]["attempt"], 3);
+    assert_eq!(skipped[0]["reason"], "latest_attempt_retained");
+    assert!(
+        !skipped
+            .iter()
+            .any(|item| item["attempt"] == 1 || item["attempt"] == 2),
+        "已删 attempt 不得出现在 skipped：{again}"
+    );
+}
+
 #[test]
 fn prune_does_not_create_runs_dir_when_missing() {
     let settings = TempDir::new().expect("创建设置目录");
