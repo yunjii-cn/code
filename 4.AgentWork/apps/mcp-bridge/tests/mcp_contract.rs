@@ -175,6 +175,95 @@ fn schema_declares_path_prepend_with_contract_limits() {
 }
 
 #[test]
+fn schema_structure_declares_required_fields_and_bounds() {
+    let (server, _dir) = server_with_settings(None);
+    let response = call(
+        &server,
+        json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}),
+    );
+    let tools = response["result"]["tools"]
+        .as_array()
+        .expect("tools 必须是数组");
+    let find = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("缺少工具 {name}"))
+    };
+
+    for name in [
+        "health",
+        "status",
+        "task.execute",
+        "receipt.get",
+        "runs.list",
+        "runs.prune",
+    ] {
+        let schema = &find(name)["inputSchema"];
+        assert_eq!(
+            schema["type"], "object",
+            "{name} 的 inputSchema 必须是 object"
+        );
+        // 声明性约束：服务端只读已知键、不据此拒绝未知参数，故这里只断言声明本身
+        assert_eq!(
+            schema["additionalProperties"], false,
+            "{name} 必须声明 additionalProperties=false"
+        );
+        assert!(
+            schema["properties"].is_object(),
+            "{name} 的 properties 必须是对象"
+        );
+    }
+
+    let execute = &find("task.execute")["inputSchema"];
+    assert_eq!(execute["required"], json!(["task_id", "cmd"]));
+    assert_eq!(execute["properties"]["task_id"]["type"], "string");
+    assert_eq!(execute["properties"]["cmd"]["type"], "string");
+    assert_eq!(execute["properties"]["cwd"]["type"], "string");
+    assert_eq!(execute["properties"]["timeout_secs"]["type"], "integer");
+    assert_eq!(execute["properties"]["timeout_secs"]["minimum"], 1);
+    assert_eq!(execute["properties"]["timeout_secs"]["maximum"], 600);
+    assert_eq!(execute["properties"]["env"]["type"], "object");
+    assert_eq!(
+        execute["properties"]["env"]["additionalProperties"]["type"],
+        "string"
+    );
+    assert_eq!(execute["properties"]["path_prepend"]["type"], "array");
+    assert_eq!(
+        execute["properties"]["path_prepend"]["items"]["type"],
+        "string"
+    );
+
+    let receipt = &find("receipt.get")["inputSchema"];
+    assert_eq!(receipt["required"], json!(["task_id"]));
+    assert_eq!(receipt["properties"]["include_history"]["type"], "boolean");
+
+    let list = &find("runs.list")["inputSchema"];
+    assert_eq!(list["properties"]["offset"]["minimum"], 0);
+    assert_eq!(list["properties"]["limit"]["minimum"], 1);
+    assert_eq!(list["properties"]["limit"]["maximum"], 100);
+
+    let prune = &find("runs.prune")["inputSchema"];
+    assert_eq!(prune["required"], json!(["older_than_days"]));
+    assert_eq!(prune["properties"]["older_than_days"]["minimum"], 1);
+    assert_eq!(prune["properties"]["older_than_days"]["maximum"], 3650);
+    assert_eq!(prune["properties"]["dry_run"]["type"], "boolean");
+    assert_eq!(prune["properties"]["confirm"]["type"], "boolean");
+    assert_eq!(prune["properties"]["limit"]["minimum"], 1);
+    assert_eq!(prune["properties"]["limit"]["maximum"], 100);
+
+    for name in ["health", "status"] {
+        assert!(
+            find(name)["inputSchema"]["properties"]
+                .as_object()
+                .map(|map| map.is_empty())
+                .unwrap_or(false),
+            "{name} 不该声明输入参数"
+        );
+    }
+}
+
+#[test]
 fn health_reports_version_and_build_time() {
     let (server, _dir) = server_with_settings(None);
     let response = call(

@@ -1,7 +1,7 @@
-# `tools/list` 描述与实际行为全量对照（v1.14，v1.17 复审见 §12）
+# `tools/list` 描述与实际行为全量对照（v1.14；v1.17 复审：§12 超时/回执相关 22 条，§13 其余 65 条）
 
 - 对照对象：`apps/mcp-bridge/src/server.rs` 中 `tools()` 返回的**全部工具**的 `description` 与 `inputSchema`（含每个字段的 `description`、`type`、范围、`required`、`additionalProperties`）。
-- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12）。
+- 权威契约：[`PM-AW-DISPATCH-CONTRACT.md`](./PM-AW-DISPATCH-CONTRACT.md)（本批 v1.14；v1.17 复审见 §12 与 §13）。
 - 本批性质：**只修描述与契约措辞，不改任何行为、不改回执字段**。
 - 判定标签（仅这三种，逐句打标）：
   - **与实现一致**：描述句子能在实现里找到对应的无条件行为。
@@ -383,3 +383,149 @@ running 62 tests -> test result: ok. 62 passed; 0 failed（原 61 + 本次 1）
 ```
 
 `cargo check -p aw-mcp-bridge` 通过；本次仅改两条描述字符串 + 1 条用例 + 本文档，**未改实现、未改契约**。
+
+---
+
+## 13. v1.17 复审：其余 65 条（2026-11-06）
+
+- 复审对象：§12 未覆盖的其余 65 条 —— `health` 2、`status` 8、`task.execute` #12-#15（4）与 #18-#42（25）、`runs.list` #50-#55 / #58-#59（8）、`runs.prune` #60-#77（18）。
+- 口径：**不删任何基线断言**；逐条对齐 v1.17 实现。v1.17 只改超时文案与两条描述（见 §12），这 65 条对应的实现与描述均未改动，因此本次是复核而非改写。
+- 编号说明：§1 / §2 各自从 #1 起编号，与 §3 前 8 条**重号**；本节目录用 `H-` / `S-` 前缀，其余沿用 §3-§6 节内编号。重号是原文档的历史编号方式，不影响基线总数。
+
+### 13.1 结论与基线对账
+
+| 统计 | 数量 |
+|---|---|
+| 基线可判定断言（§1-§6） | **87** |
+| §12 已复审（超时 / 回执 / `blocked_reason`） | **22** |
+| §13 本次复审（其余） | **65** |
+| ├ 与实现一致 | **65** |
+| ├ 不一致（已修） | **0** |
+| ├ 未实现却写了 | **0** |
+| └ 不可判定 | **0** |
+| 合计 | **87（22 + 65）** |
+
+65 的构成：`health` 2 + `status` 8 + `task.execute` #12-#15（4）+ #18-#42（25）+ `runs.list` #50-#55 / #58-#59（8）+ `runs.prune` #60-#77（18）= **65**。
+
+**不一致 = 0 的解释**：本次范围内没有发现描述与实现相反或缺失的条目；v1.17 的两处描述修正已在 §12 处理，不属于这 65 条。**未实现却写了 = 0**：每条断言都能在 `server.rs` 找到对应行为（下表给出依据）。**不可判定 = 0**：这 65 条都对应可静态定位的代码路径与既有集成用例，不依赖运行时不可观测信息。
+
+### 13.2 `health` 与 `status`
+
+| # | 断言（原文） | v1.17 实现依据 | 判定 |
+|---|---|---|---|
+| H-1 | "返回 MCP 桥存活状态、版本与构建时间（只读）" | `health_payload` 返回 `status:"ok"`、`server.{name,version,buildTime}`；函数体内无任何写盘 | 与实现一致 |
+| H-2 | schema：`{"type":"object","properties":{},"additionalProperties":false}` | `call_tool` 的 `health` 分支不读任何参数；schema 声明空 `properties` | 与实现一致 |
+| S-1 | "只读汇总桌面端关键状态" | `status_payload` 只读 `settings.json` 与 `_session/`，无写操作 | 与实现一致 |
+| S-2 | "配置文件是否就绪" | `summarize_settings` → `settingsPresent`：文件可读且可解析为 JSON 对象 | 与实现一致 |
+| S-3 | "AI 是否启用" | `aiEnabled` = `settings["ai_enabled"]` 的布尔值，缺失为 `null` | 与实现一致 |
+| S-4 | "启用模型数量" | `enabledModelsCount` = `settings["enabled_models"]` 数组长度，缺失为 `null` | 与实现一致 |
+| S-5 | "仓库路径是否配置" | `repoPathConfigured` = `settings["repo_path"]` 非空白字符串 | 与实现一致 |
+| S-6 | "initialize 审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo）" | `session_audit` 扫描 `initialize.json` 与 `initialize-*.json`，按 `receivedAt` 升序，返回 `{clientInfo, receivedAt, total, records[]}`，顶层取最后一条 | 与实现一致（v1.14 已修，v1.17 未变） |
+| S-7 | "仅审计弱识别，不构成身份" | `record_client_info` 的边界注释；全链路无准入/鉴权读取该记录 | 与实现一致 |
+| S-8 | "不回显任何配置值" | `summarize_settings` 只输出布尔/计数/`null`（含 `aiConfigPresent` 布尔），不含任何字符串配置值 | 与实现一致 |
+
+### 13.3 `task.execute` schema（#12-#15、#18-#42）
+
+| # | 断言（原文） | v1.17 实现依据 | 判定 |
+|---|---|---|---|
+| 12 | "派单标识（字母或数字开头，仅含字母数字 . _ -，≤64）" | `is_valid_task_id`：首字符 ASCII 字母/数字，其余 ∈ `[A-Za-z0-9._-]`，字节长度 ≤64（字符集全 ASCII，字节长度=字符长度） | 与实现一致 |
+| 13 | "派单方指定的执行/验证命令" | `required_str` 取字符串并 `trim` 后作为 shell 命令执行（Windows `cmd /C`，其他 `sh -c`），并写入 `verify_cmd` | 与实现一致（注：首尾空白被 `trim`，描述未承诺逐字保留空白） |
+| 14 | "工作目录，默认进程当前目录" | `cwd` 缺失或 `trim` 后为空 → `std::env::current_dir()` | 与实现一致 |
+| 15 | "回执中的 locator 始终为相对路径" | `artifacts.locator` = `runs/<task_id>/attempt-N/stdout.txt` / `stderr.txt`，无绝对路径 | 与实现一致 |
+| 18 | `env`："可选" | `args.get("env")` 缺失 → 空 `Vec` | 与实现一致 |
+| 19 | "追加/覆盖子进程环境变量" | `command.envs(...)` 只对显式键生效，其余继承父进程 | 与实现一致 |
+| 20 | "字符串 map" | `raw.as_object()` 否则 `invalid_env`；值必须 `as_str()` 否则 `invalid_env` | 与实现一致 |
+| 21 | "仅非 PATH 变量" | `parse_env` 对 `PATH` 任意大小写变体直接拒绝 | 与实现一致 |
+| 22 | "未列出的变量继承 bridge 进程环境" | `Command` 默认继承父环境，实现只追加 `envs`，不清空环境 | 与实现一致 |
+| 23 | "显式同名变量覆盖继承值" | `envs` 覆盖同名变量（仅限非 PATH 键） | 与实现一致 |
+| 24 | "PATH 任意大小写变体一律拒绝（invalid_env）" | `key.eq_ignore_ascii_case("PATH")` → `invalid_env`，且在创建目录之前 | 与实现一致 |
+| 25 | "继承的 PATH 永远保留" | 无 `path_prepend` 时 PATH 原样继承；有 `path_prepend` 时 `std::env::var_os("PATH")` 非空则原样拼在末尾 | 与实现一致（继承值为空串时不拼接，语义等价于"没有可保留内容"） |
+| 26 | "不会整体覆盖" | 拒绝 `env.PATH`；拼接只做"前插 + 继承" | 与实现一致 |
+| 27 | "也不会被静默忽略" | 看见 `PATH` 即返回错误，不忽略、不降级 | 与实现一致 |
+| 28 | "需要追加目录请用 path_prepend" | 唯一追加路径是 `path_prepend` 分支 | 与实现一致 |
+| 29 | "值为空串表示置空，不是 unset" | `Command::env(key, "")` 令变量存在且为空串；无删除变量能力 | 与实现一致 |
+| 30 | "不做任何自动推断" | `parse_env` 只做校验与透传，不注入任何默认值 | 与实现一致 |
+| 31 | `path_prepend`："可选" | 缺失 → 空 `Vec` | 与实现一致 |
+| 32 | "前插到子进程 PATH 的目录列表" | 非空时 `command.env("PATH", joined)`，前插段在继承段之前 | 与实现一致 |
+| 33 | "字符串数组"（`type=array`, `items=string`） | `value.as_array()` + 逐元素 `as_str()`，否则 `invalid_path_prepend` | 与实现一致 |
+| 34 | "按数组字面顺序排在最前" | 按 `path_prepend` 顺序写入 `joined`，无排序/去重 | 与实现一致 |
+| 35 | "其后才是继承的 PATH" | 前插段写完后才 `joined.push(inherited)` | 与实现一致 |
+| 36 | "平台分隔符自动使用（Windows 为分号，其他平台为冒号）" | `let separator = if cfg!(windows) { ';' } else { ':' };` | 与实现一致 |
+| 37 | "空数组与缺省完全等价（签名相同）" | 空数组提前返回空 `Vec`；签名里 `path_prepend: []` 与缺省值同为 `json!([])` | 与实现一致 |
+| 38 | "参与幂等签名：同 task_id 重投必须完全一致" | 签名含 `"path_prepend": path_prepend.clone()`；`replay_existing` 比对；旧签名缺该字段补 `[]` 后再比 | 与实现一致 |
+| 39 | "上限 16 项" | `MAX_ENTRIES = 16`，超出 → `invalid_path_prepend` | 与实现一致 |
+| 40 | "单项 ≤4096 字符" | `MAX_ENTRY_LEN = 4096`，超出 → `invalid_path_prepend` | 与实现一致 |
+| 41 | "不做目录存在性校验" | 解析只校验类型/长度/NUL，无 `is_dir()` 调用 | 与实现一致 |
+| 42 | "非法形态（非字符串数组/空元素/NUL/超量/超长）在占号前以 invalid_path_prepend 拒绝" | `parse_path_prepend` 在 `create_dir_all` / `create_dir` 之前调用；五类非法形态各有具名错误 | 与实现一致 |
+
+### 13.4 `runs.list`（#50-#55、#58-#59）
+
+| # | 断言（原文） | v1.17 实现依据 | 判定 |
+|---|---|---|---|
+| 50 | "只读枚举 runs 目录下的任务" | `runs_list` 只 `read_dir` 与读文件，无写盘、不建目录 | 与实现一致 |
+| 51 | "按 task_id 升序" | `task_ids.sort()`（ASCII task_id，字节序即字典序） | 与实现一致 |
+| 52 | "offset/limit 确定分页" | `pagination_args`：`offset` 缺省 0、`limit` 缺省 20 且 `1..=100`，`skip(offset).take(limit)` | 与实现一致 |
+| 53 | "排除 _session 等预留目录" | `name.starts_with('_')` 或非法 task_id 一律跳过；`.` 开头的 `.prune-trash` 因非法 task_id 同样被排除（"等"覆盖） | 与实现一致 |
+| 54 | "只回 env 键名" | `task_summary` 从 `dispatch.json["env"]` 取 `map.keys()` | 与实现一致 |
+| 55 | "不回 env 值" | 摘要只输出 `env_keys`；`dispatch.json` 里值本身也只是 `sha256:<hex>` 摘要，无明文 | 与实现一致 |
+| 58 | schema `offset`："跳过多少条，默认 0"（`minimum: 0`） | 缺省 0；`as_u64()` 非负，负值/非整数 → `invalid_pagination` | 与实现一致（注：无上限，schema 只声明 `minimum: 0`） |
+| 59 | schema `limit`："本页条数，默认 20"（`1..=100`） | 缺省 20；越界 → `invalid_pagination` | 与实现一致 |
+
+### 13.5 `runs.prune`（#60-#77）
+
+| # | 断言（原文） | v1.17 实现依据 | 判定 |
+|---|---|---|---|
+| 60 | "显式证据清理" | 唯一入口是 `tools/call` 的 `runs.prune`；无定时器、无启动钩子 | 与实现一致 |
+| 61 | "默认 dry_run=true 只列出候选、零写入" | `dry_run` 缺省 true，分支在 `append_prune_record` / 删除之前直接返回，不建目录不写文件 | 与实现一致 |
+| 62 | "真删必须同时 dry_run=false 与 confirm=true" | `!dry_run && !confirm` → `confirm_required`（未删除、未写审计） | 与实现一致 |
+| 63 | "只删非最新 attempt 的整个目录" | 候选只取 `attempt-N`（`N < latest`）；删除单位是 `attempt-N` 目录（`delete_attempt_dir` 整目录 rename + remove） | 与实现一致 |
+| 64 | "最新 attempt 永不进入候选" | `prune_candidates` 先记 `latest_attempt_retained`，循环过滤 `*number < latest` | 与实现一致 |
+| 65 | "年龄只认 handback 的 finishedAt" | `handback.get("finishedAt")`；不使用 mtime / 目录顺序 / 编号 | 与实现一致 |
+| 66 | "缺字段一律不删" | 缺 `finishedAt` → `age_unknown`；缺 `dispatch.json` → `missing_dispatch`；缺 `handback.json` → `unfinished_or_missing_handback`；另有 `unsafe_attempt_path` / `invalid_finished_at` / `future_timestamp` / `not_old_enough` 同样跳过 | 与实现一致 |
+| 67 | "删除前先写 runs/prune.jsonl 记账" | 非空批次先 `append_prune_record(plan)`（失败即一个都不删），再逐项删除，最后写 `result` | 与实现一致（注：空批次没有删除发生，不写审计） |
+| 68 | "部分失败如实报 partial 且 isError=true" | `failed_total > 0` → `status="partial"`；`call_tool` 对 `partial` 置 `isError=true` | 与实现一致 |
+| 69 | "系统内没有定时/启动自动清理" | 全仓仅 `tools/call` 调用 `runs_prune`；无清理定时器/启动钩子 | 与实现一致 |
+| 70 | schema `older_than_days`："必填…" | 缺失 → `invalid_retention`；在一切读写之前 | 与实现一致 |
+| 71 | schema `older_than_days`："只清理 finishedAt 距今不少于该天数的 attempt（1..=3650）" | 范围校验 `1..=3650`；`age_days < older_than_days` 跳过 | 与实现一致 |
+| 72 | schema `older_than_days`："不提供默认阈值" | 缺失即报错，不落任何默认值 | 与实现一致 |
+| 73 | schema `dry_run`："默认 true：只列候选、不删不写" | 缺省 true；dry-run 返回前零写入 | 与实现一致 |
+| 74 | schema `dry_run`："false 表示要求真删（还需 confirm=true）" | `dry_run=false` 且无 confirm → `confirm_required` | 与实现一致 |
+| 75 | schema `confirm`："默认 false；真删必须显式 true" | 缺省 false；`!dry_run && !confirm` 拒绝 | 与实现一致 |
+| 76 | schema `confirm`："单独 true 不隐含真删" | `dry_run` 缺省为 true，单独 confirm 仍走 dry-run 分支 | 与实现一致 |
+| 77 | schema `limit`："本批最多处理的候选数，默认 20"（`1..=100`） | 缺省 20；越界 → `invalid_retention`；`take(limit)` | 与实现一致 |
+
+### 13.6 口径注记（不改变判定）
+
+1. `cmd` / `cwd` 的首尾空白会经 `required_str` / `trim` 去除；描述只承诺"派单方给出的命令 / 工作目录"，未承诺逐字保留空白，故 #13 / #14 判定不变。
+2. `receipt.get` 的 `latest` / `history` 只含**已落盘**的 `handback.json`；进行中的 attempt 尚无回执、不进入历史。§12 #44 / #46 判定不变。
+3. `runs.list` 的 `offset` 无上限（schema 只声明 `minimum: 0`）；负值与非整数由 `as_u64()` 拒绝为 `invalid_pagination`，#58 判定不变。
+4. `runs.prune` 在**没有候选**时不写 `prune.jsonl`（没有删除发生）；"先记账后删除"对非空批次成立。#67 判定不变。
+5. 基线外 #78 的 v1.14 依据措辞"`call_tool` 要求 `arguments` 为对象"**过强**：实现是"缺失按 `{}`、非对象也透传"，只有 schema 声明为 `object`。此处如实更正依据措辞，#78 的声明性判定不变（见 §13.7）。
+
+### 13.7 基线外 #78-#87 的现状复核（不计入 87）
+
+- **#78-#83（声明性结构）**：新增用例 `schema_structure_declares_required_fields_and_bounds` 用 `tools/list` 实际返回守护六个工具的 `type=object`、`properties`、`required` 与数值边界（`timeout_secs` 1..=600、`runs.list` limit 1..=100、`runs.prune` older 1..=3650 / limit 1..=100）。声明与实现一致。
+- **#84（`additionalProperties: false` 服务端不强制）**：仍为**已知缺口**，不是本次可单方面改写的项。服务端只读已知键、未知参数被忽略；若改为强制拒绝，会新增工具错误码并改变调用方兼容性，属需 PM 决定的事项（见 §11 第 2 条与本次交付说明）。
+- **#85-#87（契约措辞）**：#85 / #86 两处逐条一致；#87（§3.1 签名口径漏 `path_prepend`）已在 v1.14 修复。本次复核未发现新的"描述与实现不符"条目。
+- 这 10 条不计入 87 基线（基线只统计 §1-§6）；此处复核不改变基线总数。
+
+### 13.8 验证证据（两平台）
+
+新增用例只增不减，使用 `tools/list` 的实际返回断言，不读源码字符串。
+
+```text
+Windows：
+cargo check -q -p aw-mcp-bridge（通过）
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+running 64 tests -> test result: ok. 64 passed; 0 failed（原 63 + 本次 1）
+
+POSIX（WSL，verify.sh run，离线，AW_VENDOR=/root/vendor）：
+running 3 tests  -> test result: ok. 3 passed; 0 failed
+[evidence] exited pgid=1010 group_empty=true
+[evidence] setsid escaped_pid=1014 escaped_alive=true original_group_empty=true
+[evidence] stopped pgid=1012 kill(-pgid,0)_exists=true
+running 63 tests -> test result: ok. 63 passed; 0 failed（原 62 + 本次 1）
+[INFO] 四类 POSIX 用例全部通过，证据行齐全
+```
+
+本次仅新增 1 条用例 + 本文档 §13：**未改实现、未改 `tools/list` 描述、未改契约版本（仍 v1.17）**。
