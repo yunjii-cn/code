@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Barrier};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 fn server_with_settings(content: Option<&str>) -> (Server, TempDir) {
@@ -77,12 +77,13 @@ fn tools_list_exposes_read_and_execution_tools() {
             "status",
             "capabilities",
             "task.execute",
+            "task.cancel",
             "receipt.get",
             "runs.list",
             "runs.inflight",
             "runs.prune"
         ],
-        "执行层至少需要接单、回执读取、只读枚举与显式清理四个入口；能力声明与活跃标记查询必须机器可读"
+        "执行层至少需要接单、显式取消、回执读取、只读枚举与显式清理五个入口；能力声明与活跃标记查询必须机器可读"
     );
     for tool in tools {
         assert!(
@@ -203,6 +204,7 @@ fn schema_structure_declares_required_fields_and_bounds() {
         "health",
         "status",
         "task.execute",
+        "task.cancel",
         "receipt.get",
         "runs.list",
         "runs.prune",
@@ -3255,7 +3257,7 @@ fn prune_status_schema_and_legacy_compatibility() {
     );
     assert_eq!(
         schema["properties"]["status"]["items"]["enum"],
-        json!(["ok", "failed", "blocked"]),
+        json!(["ok", "failed", "blocked", "canceled"]),
         "case 1"
     );
     assert_eq!(
@@ -3263,7 +3265,7 @@ fn prune_status_schema_and_legacy_compatibility() {
         json!(["older_than_days"]),
         "case 1：年龄阈值仍必填"
     );
-    println!("[case 1] schema status=array(minItems=1,uniqueItems,enum=[ok,failed,blocked]) PASS");
+    println!("[case 1] schema status=array(minItems=1,uniqueItems,enum=[ok,failed,blocked,canceled]) PASS");
 
     let description = prune_tool_description(&server);
     assert!(
@@ -4433,7 +4435,7 @@ fn description_gate_behavior_status_capability_and_filtering() {
         .iter()
         .map(|value| value.as_str().expect("enum 必须是字符串"))
         .collect();
-    assert_eq!(allowed, vec!["ok", "failed", "blocked"]);
+    assert_eq!(allowed, vec!["ok", "failed", "blocked", "canceled"]);
 
     // 行为：attempt 1..3 旧 failed、attempt 4 为最新 → 3 个候选
     let old = days_ago_stamp(400);
@@ -7820,4 +7822,171 @@ fn runs_inflight_list_exposes_sweep_contract() {
             .contains("stale_rule"),
         "atomic_delete 必须写明认领后重跑 stale_rule：{rule}"
     );
+}
+
+// ---- v1.47：显式取消 + `_session` 按天保留 ----
+
+#[test]
+fn task_cancel_terminates_running_execution_and_reports_canceled() {
+    let (server, _settings, runs) = server_with_runs();
+    let server = Arc::new(server);
+    #[cfg(windows)]
+    let slow = "ping -n 30 127.0.0.1 > NUL";
+    #[cfg(not(windows))]
+    let slow = "sleep 30";
+    let worker = {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            call_tool(
+                &server,
+                "task.execute",
+                json!({ "task_id": "t-cancel", "cmd": slow, "timeout_secs": 60 }),
+            )
+        })
+    };
+    // 等 dispatch.json 落盘：标记比 spawn 更早，单等标记可能撞上"启动前取消"分支
+    let dispatch = runs
+        .path()
+        .join("t-cancel")
+        .join("attempt-1")
+        .join("dispatch.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !dispatch.exists() {
+        assert!(Instant::now() < deadline, "dispatch.json 未在 15s 内落盘");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    let canceled = tool_payload(&call_tool(
+        &server,
+        "task.cancel",
+        json!({ "task_id": "t-cancel", "reason": "验收取消" }),
+    ));
+    assert_eq!(canceled["status"], "canceled", "{canceled}");
+    assert_eq!(canceled["canceled"], true, "{canceled}");
+    assert_eq!(canceled["cleanup_claimed"], true, "{canceled}");
+    assert_eq!(canceled["handback_status"], "canceled", "{canceled}");
+
+    let executed = tool_payload(&worker.join().expect("执行线程不得 panic"));
+    assert_eq!(executed["status"], "canceled", "{executed}");
+    let reason = executed["blocked_reason"]
+        .as_str()
+        .expect("取消回执必须有 blocked_reason");
+    assert!(reason.starts_with("canceled："), "{reason}");
+    assert!(reason.contains("请求方理由：验收取消"), "{reason}");
+    assert!(
+        !reason.contains("timeout："),
+        "取消不得被记成超时：{reason}"
+    );
+    assert!(
+        !runs.path().join(".inflight").join("t-cancel.json").exists(),
+        "取消完成后不得留下活跃标记"
+    );
+    let handback: Value = serde_json::from_str(
+        &fs::read_to_string(
+            runs.path()
+                .join("t-cancel")
+                .join("attempt-1")
+                .join("handback.json"),
+        )
+        .expect("取消回执必须落盘"),
+    )
+    .expect("回执必须是 JSON");
+    assert_eq!(handback["status"], "canceled", "{handback}");
+}
+
+#[test]
+fn task_cancel_without_visible_execution_never_claims_cleanup() {
+    let (server, _settings, runs) = server_with_runs();
+    let inflight = runs.path().join(".inflight");
+    fs::create_dir_all(&inflight).expect("创建 .inflight");
+    let marker = inflight.join("t-cancel-ghost.json");
+    fs::write(
+        &marker,
+        json!({
+            "version": "inflight/1",
+            "task_id": "t-cancel-ghost",
+            "pid": 999999,
+            "startedAt": "2000-01-01T00:00:00+00:00",
+            "deadlineAt": "2000-01-01T00:00:05+00:00"
+        })
+        .to_string(),
+    )
+    .expect("写入残标");
+
+    // schema 声明 maxLength=1024：超长理由必须在做任何事之前被拒
+    let too_long = call_tool(
+        &server,
+        "task.cancel",
+        json!({ "task_id": "t-cancel-ghost", "reason": "x".repeat(1025) }),
+    );
+    let error_text = tool_text(&too_long);
+    assert!(
+        error_text.contains("invalid_reason"),
+        "超长 reason 必须拒绝：{error_text}"
+    );
+    assert!(marker.exists(), "被拒的取消不得触碰残标");
+
+    let payload = tool_payload(&call_tool(
+        &server,
+        "task.cancel",
+        json!({ "task_id": "t-cancel-ghost" }),
+    ));
+    assert_eq!(payload["status"], "not_running", "{payload}");
+    assert_eq!(payload["canceled"], false, "{payload}");
+    assert_eq!(
+        payload["cleanup_claimed"], false,
+        "看不到进程时不得宣称已清理：{payload}"
+    );
+    assert_eq!(
+        payload["inflight_marker"]["stale"], true,
+        "残标只作磁盘观测返回：{payload}"
+    );
+    assert!(
+        payload["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("未向任何进程发送信号"),
+        "{payload}"
+    );
+    assert!(marker.exists(), "取消不得顺手删除/清理残标");
+}
+
+#[test]
+fn session_initialize_records_are_retained_by_days_with_audit() {
+    let (server, _settings, runs) = server_with_runs();
+    let dir = runs.path().join("_session");
+    fs::create_dir_all(&dir).expect("创建 _session");
+    let old_ts = (chrono::Utc::now() - chrono::Duration::days(45)).timestamp_millis();
+    let fresh_ts = (chrono::Utc::now() - chrono::Duration::days(1)).timestamp_millis();
+    let old = dir.join(format!("initialize-111-{old_ts}-0.json"));
+    let fresh = dir.join(format!("initialize-222-{fresh_ts}-0.json"));
+    let unparsable = dir.join("initialize-broken-name.json");
+    for path in [&old, &fresh, &unparsable] {
+        fs::write(path, "{\"clientInfo\":{\"name\":\"gate\"}}").expect("写入 initialize 记录");
+    }
+    let old_mtime = SystemTime::now() - Duration::from_secs(45 * 24 * 3600);
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&old)
+        .expect("打开旧记录");
+    file.set_times(fs::FileTimes::new().set_modified(old_mtime))
+        .expect("回拨 mtime");
+
+    server.run_startup_sweep();
+
+    assert!(!old.exists(), "超过保留天数的 initialize 记录必须被删除");
+    assert!(fresh.exists(), "未到保留天数的记录必须保留");
+    assert!(
+        unparsable.exists(),
+        "名字解析不出时间的记录判不准，必须保留"
+    );
+    let audit = fs::read_to_string(runs.path().join("session-retention.jsonl"))
+        .expect("删除必须留下 session-retention 审计");
+    assert!(audit.contains("\"phase\":\"plan\""), "{audit}");
+    assert!(audit.contains("\"phase\":\"result\""), "{audit}");
+    assert!(audit.contains("\"trigger\":\"startup\""), "{audit}");
+    assert!(audit.contains("\"outcome\":\"deleted\""), "{audit}");
+    assert!(audit.contains("\"reason\":\"unparsable_name\""), "{audit}");
+    assert!(audit.contains("\"within_retention_total\":1"), "{audit}");
 }

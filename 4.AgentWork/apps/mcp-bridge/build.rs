@@ -26,7 +26,8 @@ fn read_stamp(path: &PathBuf) -> Option<String> {
 }
 
 fn main() {
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let desktop_stamp_path = manifest_dir.join("../../apps/desktop/.build-version");
 
     let bridge_stamp = std::env::var("AW_BUILD_TIME")

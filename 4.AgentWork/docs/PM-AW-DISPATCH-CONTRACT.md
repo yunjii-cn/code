@@ -486,6 +486,24 @@ v1.44 的结论是「两条都保持 `false/partial`」，把 Windows 的结构�
 - 内核没有 `cgroup.kill`：`terminate` 不写 `cgroup.kill`；v1.45 起仍按「父链闭包 ∪ `cgroup.procs`」名单把已知逃逸成员逐个 `SIGKILL`（进程会死），但判定只认独立观测点——伪造的静态作用域记账仍显示成员（`cgroup.procs` / `populated` 不更新），轮询到 3s 截止后报 `StillAlive`。实测 `[evidence] cgroup_no_kill root=33056 escaped=33038 kill_supported=false outcome=StillAlive escaped_alive=false members=Some(Ok([33038])) populated=Some(Ok(1)) descendants=[DescendantProcess { pid: 33038, in_controlled_set: false }]`（用例 `cgroup_without_kill_reports_still_alive`）。**不因「自己杀掉了名单」就谎报 `Cleaned`**。
 - 作用域建不起来（`Degraded`，如 cgroup v1 / 非 root / 容器未委派）：`terminate` 只按进程组判据，被收养的逃逸进程既收不到信号、也不在父链快照里，结果是受控集合口径的 `Cleaned`。实测 `[evidence] cgroup_degraded after outcome=Cleaned escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")`（用例 `cgroup_degraded_terminate_is_group_only`）。这是**降级分支**的残余缺口：`Cleaned` 只表示「受控集合已清」，不等于「无残留」。它**不是静默**——降级原因写在快照 `escaped_scope_unobservable`，能力位 `scope`/detail 明写该分支；`Cleaned` 回执固定写「逃逸进程是否仍在运行未验证」，读方必须同时读回执与能力位。
 
+**bridge 非正常退出时的直接子进程回收（v1.47，platform split）**
+
+- **Windows**：`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。bridge 进程消失时内核关闭作业句柄，作业内所有进程（含孙进程）被终止。真实链路 B2：`child_heartbeat_before=18 after=18 child_survived=False`。
+- **Linux**：`pre_exec` 里调用 `prctl(PR_SET_PDEATHSIG, SIGKILL)`，覆盖 fork→exec 窗口，跨越 exec 保留；设完立即复查 `getppid()`，若父进程已在 fork 与 `prctl` 之间死亡则 `_exit(128)`，不执行用户命令。正常退出路径不触发（PDEATHSIG 只在父死亡时投递一次），已完成任务不受影响（B2：完成态产物与 `handback.json` 字节未变）。真实链路 B2（WSL）：`child_heartbeat_before=20 after=20 child_survived=False`。
+- **Linux 的边界（必须同时读）**：`PR_SET_PDEATHSIG` **不遗传**。它只收掉 bridge 的**直接子进程**；该子进程再 fork 出来的孙进程在子进程死亡后被 reparent 到 init，继续运行。真实链路 B5（WSL）：`pdeathsig_scope=direct_child_only grandchild_heartbeat_before=10 after=25 grandchild_survived=True`。因此不能把 Linux 写成「整棵树随 bridge 消失」，也不能与 Windows 作业对象混为一谈。
+- **运维兜底（Linux 孙进程孤儿）**：任务 cgroup 名为 `/sys/fs/cgroup/aw-mcp-bridge-<bridge_pid>-<seq>`，`<bridge_pid>` 与 `runs/.inflight/<task_id>.json` 的 `pid` 一致。bridge 猝死后 cgroup 不会自己消失，`cgroup.procs` 就是该任务残留后代的权威名单：
+  ```sh
+  pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' runs/.inflight/<task_id>.json)
+  for d in /sys/fs/cgroup/aw-mcp-bridge-"$pid"-*; do
+    pids=$(cat "$d/cgroup.procs" 2>/dev/null)
+    [ -n "$pids" ] && kill -9 $pids
+    sleep 0.2
+    rmdir "$d" 2>/dev/null || true
+  done
+  ```
+  实测（WSL）：`before: pids=[9428] populated 1` → `kill -9` → `after: pids=[] populated 0` → `rmdir ok`。若残标已被 startup 清扫删除，用 `ls -d /sys/fs/cgroup/aw-mcp-bridge-*` 逐个核对 `<bridge_pid>` 是否存活；留空 cgroup 也应由巡检一并 `rmdir`，否则目录会随崩溃次数累积。
+- **能力位不变**：本条是崩溃路径的进程回收，不是上面 19 条 timeout 能力位的一部分；Windows 与 Linux 的覆盖范围差异写在这里，§2.7 的 `timeout.*` 判据与 `not_proven_total=2` 不受影响。
+
 **`runs.inflight`（`action=list|clean`）**
 
 - `list`：只读枚举 `runs/.inflight/*.json`（非 `.json` 临时文件、符号链接不参与），每个标记给出 `task_id`、`file`、`pid`、`pid_alive`、`stale`、`stale_reason`（`pid_alive` / `pid_missing_grace` / `pid_missing` / `deadline_in_grace` / `deadline_expired` / `unreadable`）、`startedAt`、`deadlineAt`、`age_secs`、`deadline_overdue_secs`、`removable`；顶层给出 `total` / `stale_total` / `active_total` / `unreadable_total` / `state`（`missing|empty|ready`）与机器可读的 `stale_rule`（`pid_alive=never_stale`、`pid_missing_grace_secs=5`、`deadline_grace_secs=120`、`live_pid_wins_over_deadline=true`、`cleanable_only_when=stale=true`、`unreadable=kept_never_deleted`）及 `sweep_rule`（见 §2.9）。
@@ -539,6 +557,22 @@ v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + �
 - **仍然存在的边界**：跨卷 `EXDEV` 时认领失败、零删除；认领与还原之间原名短暂空缺；审计 append 非事务（崩溃可能缺 `result` 行）；坏标记不自愈，只能人工处理。
 
 `list` 的 `sweep_rule` 是本节机器可读副本：`triggers` / `trigger_conditions` / `automatic`（启动/周期开关与 `AW_INFLIGHT_SWEEP_SECS` 语义）/ `audit` / `audit_gate` / `criteria` / `never_removed`（`active_pid_alive`、`unreadable`）/ `atomic_delete` / `outcome_totals`（`deleted_total`、`lost_race_total`、`not_mine_total`）/ `idempotent` / `limits`（`same_volume_rename_required`、`transient_name_absence_during_claim`、`audit_append_not_transactional`、`unreadable_not_self_healing`）。
+
+### 2.10 `runs/_session/initialize-*.json` 按天保留（v1.47，与任务目录分开）
+
+`runs/_session/initialize-<pid>-<毫秒时间戳>-<seq>.json` 是连接审计，不进入 `runs.prune`（它只枚举任务目录），由独立的 `sweep_session_records` 在 `startup` / `periodic` 档执行，和 `.inflight` 清扫共用触发点但**判据与审计文件都分开**：
+
+| 项 | 规则（写死） |
+|---|---|
+| 保留天数 | `AW_SESSION_RETENTION_DAYS`，取值 `1..=3650`，默认 **30**；未设置/空白用默认；非法值不删除、只写 stderr（不静默回退） |
+| 候选 | 文件名严格匹配 `initialize-<pid>-<ts>-<seq>.json` 且能解析出毫秒时间戳；`initialize.json` 旧格式、名字解析不出、时间戳在未来 → **判不准不删** |
+| 双时间一致 | 只有「文件名时间」与文件 `mtime` **都**早于阈值才删；只有一边过期 → 保留并记 `mtime_not_older_than_threshold` |
+| 删除前审计 | 先向 `runs/session-retention.jsonl`（append-only，`session-retention/1`）写 `phase=plan`，写不进去则本轮零删除；删完写 `phase=result` |
+| 审计字段 | `trigger`（`startup|periodic`）、`retention_days`、`candidates[]`（`file`/`createdAt`/`age_days`）、`removed[]`（含 `outcome=deleted`）、`failed[]`、`kept[]`（仅判不准项，含 `reason`）、`within_retention_total`、`removed_total`/`failed_total`/`kept_total` |
+| 幂等 | 没有候选时零删除、不追加审计；重复触发不报错 |
+| 不做 | 不删除旧格式 `initialize.json`、非 `initialize-` 前缀文件、`.tmp`、目录、符号链接 |
+
+阈值来源（真实链路 D3 实测，不是拍脑袋）：Windows `bytes_per_record=106.7–106.8`、WSL `107.0`；即每天 1000 次 initialize 约 `104 KiB/天`，30 天约 `3.05/3.06 MiB`。保留 30 天足以覆盖连接审计追溯，同时把长期驻留体积限制在个位数 MiB；需要更长审计窗口时用环境变量放大，代价按上表线性增长。真实证据：D3 删除 45 天前记录、保留 1 天前记录与 `initialize-broken-name.json`，审计 plan/result 各行点名 `deleted` 与 `unparsable_name`。
 
 ## 3. 幂等
 
@@ -609,6 +643,28 @@ v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + �
 | 回执呈现 | 回执新增 `path_prepend` 字段：**只回目录名列表**（原样、不做规范化），与 `env_keys` 并列；不回任何 env 值 |
 | 工具描述同步（v1.14） | `tools/list` 中 `path_prepend` 的 schema 与 description 与本节一致：`type=array` / `items=string`、字面顺序前插、平台分隔符、空数组等价缺省、参与幂等签名、上限 16 项/单项 4096 字符、不校验目录存在性 |
 
+### 3.6 显式取消 `task.cancel`（v1.47）
+
+**入口**：`task.cancel`（`tools/list` 第 9 个工具），入参 `task_id`（必填，与 `task.execute` 同一命名规则）、`reason`（可选字符串，`maxLength=1024`）。`task_id` 非法 → 工具错误；`reason` 超过 1024 字符 → 工具错误 `invalid_reason`，**零副作用**（不发信号、不落盘）。
+
+**作用域写死：只取消「本进程正在执行、且本进程持有子进程」的那一次执行。**
+
+| 项 | 规则 |
+|---|---|
+| 可见性 | 取消表是进程内的（`cancel_tokens: task_id → CancelToken`）。另一个 bridge 上正在跑的同 `task_id` **无法被本工具取消**；此时返回 `not_running`，`inflight_marker` 只附磁盘观测，不代表进程状态 |
+| 终止由谁做 | 取消只**置位**标记，不跨线程杀进程；持有子进程的执行线程在下一轮轮询中看到标记，走与超时**完全相同**的 `Supervisor::terminate` 流程（POSIX 进程组 + cgroup v2 作用域 + 终前名单逐个 SIGKILL；Windows 作业对象 + 后代快照复核），并落盘回执 |
+| 启动前取消 | 占号后、`spawn` 前检查到取消 → **不创建子进程**，直接落盘 `canceled` 回执（`exit_code=null`） |
+| 状态四态 | `canceled`：回执已落盘且确为 `canceled`；`completed_before_cancel`：取消到达前执行已正常结束（**未终止任何进程**）；`cancel_requested`：已请求但 10s 内未观测到回执，**不得认为已清理**；`not_running`：本进程看不到该 `task_id`，**未发信号、未做清理** |
+| `cleanup_claimed` | 只有 `status=canceled` 才为 `true`；其余三态恒为 `false`，防止把「没看到」写成「已清理」 |
+| 等待窗口 | `CANCEL_WAIT_SECS = 10`；超时即回 `cancel_requested`，由调用方用 `receipt.get` / `runs.inflight` 继续观察 |
+| 盘上回执 | dispatched：`status=canceled`（**不是** `blocked` / `completed`），`exit_code=null`，`blocked_reason` 固定前缀 `canceled：`，并包含请求方 `reason`（原文回显，不做推断） |
+| 审计可区分 | 三种终止原因在盘上互不混淆：超时 `blocked_reason` 前缀 `timeout：`；取消前缀 `canceled：`；失败 `status=failed` 且 `exit_code≠0`。三者都保留 `finishedAt` / `duration_ms` / 摘要 |
+| 清理口径 | 与超时同一条四观测量（`cgroup.procs` 空、`populated 0`、逃逸 PID 不存在、快照无后代）；只有全部成立才写「已清理受控集合」，否则如实写仍存活/不可用；逃逸进程是否仍在运行**未验证**，措辞不含「已终止进程树 / 无残留」 |
+| standalone | 取消当前 attempt，`verdict` 结论记 `canceled`、`action=terminate`，**不重试**（取消不是失败，不消耗 `max_attempts`）；已落盘的此前 attempt 记录不动 |
+| 幂等与重跑 | 取消**不改变**幂等签名，也不额外占 attempt；取消后同 `task_id` 同参重投 → 回放既有 `canceled` 回执（要重跑必须换新 `task_id`，与 §3.1 一致）。取消后同 `task_id` 异参重投 → 仍 `task_id_conflict` |
+| `runs.prune` | `status` 白名单扩为四值 `ok`/`failed`/`blocked`/`canceled`，`canceled` 只作为过滤条件，不改删除判据 |
+| 工具描述同步 | `tools/list` 里 `task.cancel` 的 description 与本节一致；`task.execute` 描述补「执行中可被 `task.cancel` 终止，落盘状态为 `canceled`」。**工具数 8→9**，`tools_sha256` 与门禁同步更新（见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §51） |
+
 ## 4. 回执
 
 字段一律沿用已实现 handback，不新增第二套命名。
@@ -617,9 +673,9 @@ v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + �
 |---|---|---|---|
 | `task_id` | string | 派单标识 | 已实现 |
 | `attempt` | integer | 该 id 的第几次执行，从 1 起连续 | 已实现（原子取号） |
-| `status` | `ok` / `failed` / `blocked` | dispatched：仅描述进程结果，**不是验收结论**；standalone：映射判定结论（`passed→ok` / `failed→failed` / `undetermined→blocked`），结论细节以 `verdict.json` 为准 | 已实现（standalone 映射 v1.26） |
+| `status` | `ok` / `failed` / `blocked` / `canceled` | dispatched：仅描述进程结果，**不是验收结论**（`canceled` 表示被 `task.cancel` 显式终止，见 §3.6）；standalone：映射判定结论（`passed→ok` / `failed→failed` / `undetermined→blocked` / 取消→`canceled`），结论细节以 `verdict.json` 为准 | 已实现（standalone 映射 v1.26，`canceled` v1.47） |
 | `verify_cmd` | string | 实际执行的命令（回显派单参数，供 PM 逐字比对判据） | 已实现 |
-| `exit_code` | integer / null | 进程退出码；`blocked` 时为 null | 已实现 |
+| `exit_code` | integer / null | 进程退出码；`blocked` / `canceled` 时为 null | 已实现 |
 | `changed_files` | string[] | 执行前后 `git status --porcelain` 差集，相对路径，最多 20 条 | 已实现（有 20 条上限） |
 | `changed_files_truncated` | boolean | 差集是否超过 20 条而被截断；`true` 表示还有未列出的改动 | 已实现 |
 | `cwd` | string | 本次实际执行目录（规范化绝对路径；Windows 下可能带 `\\?\` 前缀），供 PM 复算 `changed_files` / `commit` | 已实现 |
@@ -630,8 +686,8 @@ v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + �
 | `artifacts` | object[] | `{kind, locator, hash}`，locator 为相对路径 `runs/<task_id>/attempt-<N>/stdout.txt` 等 | 已实现 |
 | `duration_ms` | integer | 执行耗时（契约要求可审计，字段已存在） | 已实现 |
 | `stderr_digest` | `sha256:<hex>` | stderr 原始日志摘要 | 已实现（既有附加字段） |
-| `blocked_reason` | string / null | 仅 `blocked` 时非空，见第 6 节 | 已实现（自由文本，未分类） |
-| `finishedAt` | string | 该 attempt **结束并落盘回执**的时刻，RFC3339/UTC/秒级/`Z`；`ok` / `failed` / `blocked` 一律写实际结束时间。**落盘回执中必填、不为 null**；不落盘的预检 `blocked` 回执不含此字段（它没有 attempt） | 已实现（v1.6） |
+| `blocked_reason` | string / null | `blocked` 与 `canceled` 时非空，见第 6 节；前缀固定区分来源：`timeout：` / `canceled：` | 已实现（自由文本，未分类；`canceled：` v1.47） |
+| `finishedAt` | string | 该 attempt **结束并落盘回执**的时刻，RFC3339/UTC/秒级/`Z`；`ok` / `failed` / `blocked` / `canceled` 一律写实际结束时间。**落盘回执中必填、不为 null**；不落盘的预检 `blocked` 回执不含此字段（它没有 attempt） | 已实现（v1.6） |
 | `path_prepend` | string[] | 本次实际前插的目录列表（原样，不做规范化）；未提供时为空数组。只给目录名，不含任何 env 值 | 已实现（v1.9） |
 | `mode` | string | **仅 standalone 回执**出现，恒为 `"standalone"`；dispatched 回执不出现该字段 | 已实现（v1.26） |
 | `argv` | string[] | **仅 standalone**：本次实际启动的 argv（程序 + 参数） | 已实现（v1.26） |
@@ -768,7 +824,7 @@ v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + �
 
 ## 8. 证据清理 `runs.prune`（v1.12：显式触发、默认不删、两段式）
 
-**方向写死：默认什么都不删。** 清理一旦写错就是销毁证据，比不清理严重得多，因此本节每条规则都按"宁可不删"取向。**系统内不存在任何自动清理**：没有定时任务、没有启动时扫描、没有"超过 N 天自动删除"；唯一入口是调用方显式调用 `runs.prune`。
+**方向写死：默认什么都不删。** 清理一旦写错就是销毁证据，比不清理严重得多，因此本节每条规则都按"宁可不删"取向。**对任务 attempt 不存在任何自动清理**：没有定时任务、没有启动时扫描、没有"超过 N 天自动删除"；唯一入口是调用方显式调用 `runs.prune`。唯一的按时间自动回收对象是连接审计 `runs/_session/initialize-*.json`（不是任务证据），口径单列在 §2.10，且不进入本节候选。
 
 ### 8.0 前置事实（已核实）
 
@@ -781,11 +837,11 @@ v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + �
 
 | 项 | 规则 |
 |---|---|
-| 唯一入口 | `runs.prune` 工具。**不提供任何其他删除入口**：无命令行、无启动清理、无定时任务，`runs.list` 绝不隐式删除 |
+| 唯一入口 | `runs.prune` 工具（针对任务 attempt）。**不提供任何其他删除任务证据的入口**：无命令行、无启动清理、无定时任务，`runs.list` 绝不隐式删除 |
 | 默认行为 | 不调用就永不删除；调用时 `dry_run` 缺省为 `true` |
-| 自动清理 | **不存在**：不读策略文件、不在启动时扫描、不按天数自动删。若要自动，必须另立契约重新评审，不属本批 |
+| 自动清理 | 任务 attempt 上**不存在**：不读策略文件、不在启动时扫描、不按天数自动删。若要自动，必须另立契约重新评审。`runs/_session/initialize-*.json` 是例外且只限连接审计：v1.47 起按天数单独回收（§2.10），它不读 `prune.jsonl`、不影响本节任何删除判据 |
 | 删除对象 | 只可能是 `runs/<task_id>/attempt-<N>/` **整个目录**，且 `N` 严格小于该 task 的最大 attempt 编号 |
-| 排除 | `_` 前缀目录（`_session` 等）、非任务目录、符号链接、`runs/` 根下任何文件一律不进入候选；不删任务目录之外的任何路径 |
+| 排除 | `_` 前缀目录（`_session` 等）、非任务目录、符号链接、`runs/` 根下任何文件一律不进入候选；不删任务目录之外的任何路径。**`runs/_session/initialize-*.json` 不在本节范围内**（不进入候选、也不被本节删除），它由独立的时间保留策略负责，见 §2.10：按天数、单独审计 `runs/session-retention.jsonl`、判不准不删 |
 
 ### 8.2 两段式：先 dry-run，再显式 confirm
 
@@ -1051,4 +1107,5 @@ v1.25 在不改变接受/拒绝的前提下把"忽略"变成**可观测**：多�
 | v1.44 | 2026-11-08 | **全库核查「rename 返回值当归属/互斥依据」，并把孙进程夹具改成握手式（§2.7 / §8，先红后绿、判据与四态不放宽）**：逐处判定 10 个 rename/替换点，只有 `delete_attempt_dir` 靠返回值判搬成功——Windows 并发下双方 `Ok`、只有一个目的目录，败者被误报成 `trashed_not_deleted`（数据其实已被另一方删掉），POSIX 败者被误报成 `retained_at_source`（源其实已不在）。改为 rename `Ok` 后用 `symlink_metadata(staged)` 复核目的是否存在，源 `NotFound`/目的不存在/删除前被清走 → 具名 `LostRace`；inflight 删除失败回滚 `rename(tmp→原名)` 也改用 `restore_without_clobber`（`create_new`），不再覆盖并发新标记；其余 8 处（session 唯一目的名、inflight 认领、POSIX 语义探针测试、测试刷新者、updater 发布、launcher 下载、安装器/venv 迁移、plan JSONL append）判定为不靠 rename 返回值判归属，不动。prune 结果新增**独立** `lost_race[]` / `lost_race_total`：不计入 `failed_total`、`status` 不因它变 `partial`（只有它时仍 `ok`、`isError=false`），逐条带 `task_id`/`attempt`/`source_path`/`error`/`rule`/`fingerprint`；不变式改为 `deleted + failed + trashed + lost_race + excluded == batch_candidates_total`（代码注释、工具描述、§8.11 三处一致）。与清扫侧 `lost_race` 同词同义（另一方先赢、本进程零删除），区别只在对象：清扫侧是 `.inflight` 认领副本读不到，prune 侧是 attempt 目录源已消失/目的目录不存在。红（HEAD 原文）：`prune_claim_lost_is_named_not_trashed` → `目的目录不存在不是「删除暂存失败」：trashed_not_deleted`；`prune_concurrent_claimers_delete_once_others_lost_race` 第 0 轮 → Windows `[deleted, trashed_not_deleted]`、WSL `[deleted, retained_at_source]`。绿：真并发 20 轮 `[evidence] prune_claim_race rounds=20 deleted=20 lost_race=20 other=0`，每轮恰好一方删除、另一方 `lost_race`、源不存在、无半截暂存目录。孙进程夹具改为握手式：`handshake.cmd` 写 `started`→拉起孙进程→写 `ready`→保持存活；窗口外测量 `spawn→ready` 真实耗时，窗口内 `timeout_secs=max(10, handshake_ms/1000+6)`，`task.execute` 放独立线程、主线程等 `ready` 并记录 `ready_seen`/`ready_delay_ms`；verdict 增加 `ready_seen`/`ready_delay_ms`/`timeout_ms`/`handshake=before_timeout|after_timeout|not_completed`，`ready_seen=false` 明写「握手未完成，本条不构成裁决依据」，四态不变。实测 Windows：`[evidence] grandchild_handshake warm_ms=412 timeout_ms=10000`、`[verdict] grandchild_case=pass ready_seen=true ready_delay_ms=412 timeout_ms=10000 handshake=before_timeout observed=1 survivors=[]`。`timeout.cleans_entire_process_tree` 的 evidence 增加 `timeout_cleans_controlled_set_including_grandchild`，但 **holds 仍 `false/partial`**（只证成受控集合内孙进程，证不到作业外进程）；其余两条 `not_proven`（`timeout.enumerates_escaped_descendants`）的可证路径逐条写入 §2.7。`runs.prune` 描述同步新不变式，`tools_sha256` `915974d2…` → `85da0303…`。回归：Windows `21 lib + 125 integration`、WSL Ubuntu 24.04 `25 lib + 123 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-031610.log`）。详见审计 §47/§48 |
 | v1.45 | 2026-11-08 | **把两条 `not_proven` 里「Linux 可证、当时没证」的部分证掉，能力位按平台拆分（§2.7，先红后绿、判据不放宽）**：新增 `cgroup_kill_terminates_escapee_that_left_cgroup_procs`——父（`sh`）→子（`sh`）→孙（`sh`），孙进程 `setsid` 后把自己写进旁路 cgroup（`sink_members=[<pid>]`、`move_status=moved`），**真正离开本作用域 `cgroup.procs`**；HEAD 实现在 `cgroup.kill` 后误报 `Cleaned` 而逃逸进程仍存活，红证据：`[evidence] cgroup_left after outcome=Cleaned escaped_alive=true members=Ok([]) populated=Ok(0) descendants=[] unobservable=None` → `panicked ... 逃出 cgroup.procs 的后代在终止后必须不再存活（cgroup.kill 打不到它，必须另行收口）`，`test result: FAILED. 25 passed; 1 failed`。修复 `Supervisor::terminate`：动手前用「`/proc` 父链闭包 ∪ `cgroup.procs` 成员」建立名单并附 `starttime`，`cgroup.kill` 后对仍存活者逐个 `SIGKILL`（starttime 不一致即 PID 复用，绝不发信号），每轮把存活名单成员的新后代并入名单；四观测量（`cgroup.procs` 空、`populated 0`、逃逸 PID 不存在、快照无后代）同时成立才报 `Cleaned`，否则 `StillAlive`。绿（WSL Ubuntu 24.04 LTS，root，cgroup2fs，内核 6.18.33.2-microsoft-standard-WSL2）：`[evidence] cgroup_left after outcome=Cleaned escaped_alive=false members=Ok([]) populated=Ok(0) descendants=[] unobservable=None`、`test result: ok. 27 passed`。枚举权威性：`cgroup_scope_enumerates_adopted_escapee` 增断言「根退出、逃逸者被收养（`escaped_ppid` 不再是根）后 `members == vec![escaped]`」——成员集合本身是权威枚举，不依赖父链；新增反例用例 `cgroup_members_unreadable_is_not_empty`（Active 但 `cgroup.procs` 读不出 → `[evidence] cgroup_unreadable ... unobservable=Some("cgroup_procs_unreadable:...") is_empty=false`），并逐条写清退化条件（无写权限→`escaped_scope_unobservable` 退回进程组旁证；无 `cgroup.kill`→枚举仍权威、只影响终止；已离开 `cgroup.procs`→作用域不含它，只在脱离前靠父链可见）。`cgroup_without_kill_reports_still_alive` 口径同步：v1.45 按名单杀掉已知逃逸者（`escaped_alive=false`），但静态记账仍非空 → 如实 `StillAlive`，不因自己的名单放行。能力位：`timeout.cleans_entire_process_tree` 与 `timeout.enumerates_escaped_descendants` 改为 `true/proven`（`platforms_verified=[linux]`、`platforms_unverified=[windows,macos]`，scope/detail 写明 platform=linux + cgroup v2 + `cgroup.kill` + 内核 VERSION 与残余边界）；新增 `timeout.cleans_entire_process_tree_windows` 与 `timeout.enumerates_escaped_descendants_windows` 两条 `false/not_proven`，reason 均为 `requires_out_of_job_enumerable_terminable_os_primitive`，detail 明写「需要作业外进程可枚举可终止的 OS 原语，本机不存在」。条目 17→19，`not_proven_total` 仍 2（均为 Windows 结构性条目）。`mcp_contract` 的平台断言同步。未改 `tools/list` 描述，`tools_sha256` 不变（`85da0303…`，门禁通过）。回归：Windows `21 lib + 125 integration`、WSL `27 lib + 123 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-033331.log`）。详见审计 §49 |
 | v1.46 | 2026-11-08 | **真实链路端到端验证（MCP over stdio，不是夹具）+ 双平台**：新增驱动 `scripts/real-chain-verify/verify.py`（复制真实可执行文件、隔离 `runs/`、逐行 JSON-RPC、请求/响应落 `wire.jsonl`）。A：真实小任务产出文件，`attempt-1/{dispatch,handback,stdout,stderr}`、`.inflight` 空、`artifacts[].hash` 等于盘上 sha256、`receipt.get` 同一条、无 `*.tmp`（Windows + Linux）。B1：真超时 `status=blocked`、`blocked_reason` 三态文案如实（Windows 2090ms 带挂起态/BREAKAWAY 子句，Linux 2509ms 无），返回后心跳静默。B2：产品无 cancel 工具（`tools/list` 8 项实测），取消只能以杀 bridge 进程触达——重启后 startup 清扫审计 `trigger=startup`、`stale_reason=pid_missing`、`removed_total=1`；attempt-1 留在原位且只有 dispatch、无 handback，`receipt.get` 回「回执不存在」，不存在「completed 但产物不在」。B3：5s 容差内重启保留标记（`pid_missing_grace`、`stale=false`）且不写审计，过容差才删。C1：同 id 顺序重投回放逐字段相同（dispatched 口径不引入 `replayed`），异参具名 `task_id_conflict` 且零执行。C2：同 id 两进程同时派只落一个 attempt、命令只跑一次、回执逐字段相同。C3：两 id 并行时 inflight 标记各自点名，两个任务目录与产物互不混入。发现并修复测试基建 `ETXTBSY` 竞态（红原文 `ExecutableFileBusy: "Text file busy"` + `PoisonError`，`121 passed; 2 failed`；新增 `spawn_bridge()` 仅对 ETXTBSY 有界重试）；另记录 `_session/` 不进入 `runs.prune` 回收（未修，待决策）与 Linux bridge 死亡遗留子进程（未承诺路径）。未改 `tools/list` 描述，`tools_sha256` 不变（`85da0303…`）。回归：Windows `21 lib + 125 integration`、WSL `27 lib + 123 integration`（连跑两轮）全绿。详见审计 §50 |
+| v1.47 | 2026-11-08 | **按顺序落地三件事，并把真实链路两项空白补齐（先红证据、双平台实跑）**。**(一) Linux 孤儿兜底**：`process_scope::configure` 在 `process_group(0)` 之后给子进程装 `PR_SET_PDEATHSIG(SIGKILL)`（`pre_exec` 内设置；设置后立即复查 `getppid()`，父已死则 `_exit(128)`，堵住 fork→prctl 竞态）。真实链路 B2 从 v1.46 的 `child_survived=True`（心跳 20→35）变为 `child_survived=False`（心跳 20→20），Windows 同为 `False`；「先完成任务再杀 bridge」的产物与 handback 字节不变（正常退出/已完成任务不受影响）。**边界如实写清**：`PDEATHSIG` 不遗传，孙进程仍存活（B5 WSL `grandchild_survived=True`，心跳 10→25），故契约 §2.7 给出运维兜底（巡检 `runs/.inflight` 标记 + cgroup 清单，实测 `populated 1` pid 9428 → `kill -9` → `populated 0` → `rmdir ok`）。**(二) `_session` 保留**：新增 `AW_SESSION_RETENTION_DAYS`（1..=3650，默认 30）与 `sweep_session_records`，在 `startup`/`periodic` 档执行；只删「文件名毫秒时间戳与 mtime 都过期」的记录，旧格式/不可解析/未来时间/只有一边过期一律保留；先写 `runs/session-retention.jsonl`（`session-retention/1`，plan+result）再删，写不进审计则零删除；口径与任务目录分开（§2.10），`runs.prune` 候选与不变式零变化。**(三) 显式取消 `task.cancel`**：入参 `task_id`/`reason`，只对**本进程**持有子进程的执行生效；取消只置位、由执行线程走与超时相同的终止流程并落盘 `status=canceled`（非 blocked/completed），`blocked_reason` 前缀 `canceled：` 并与 `timeout：`/`failed` 可区分；四态返回 `canceled`/`completed_before_cancel`/`cancel_requested`/`not_running`，只有 `canceled` 才 `cleanup_claimed=true`，看不到的进程不谎报已清理（沿用四观测量）；`runs.prune.status` 扩为四值。**真实链路补跑**：B4（同连接执行中取消，两平台绿）、B5（Linux 孙进程边界，如实存活）、D1（bridge 猝死后 1s 周期清扫点名删除，startup 容差内不删）、D2（Linux `setsid` 孙进程写出旁路 cgroup，超时后 `escaped_pid` 消失、`procs` 空、`populated 0`，平台补齐）、D3（45 天前删除/1 天后保留/坏名保留，实测 106.7–106.8/107.0 B 每条）。`tools/list` 8→9，`tools_sha256` 更新为 `744da2614a3730f08d309033b7ca86c956edfab82d369443f06fd4ceecaba9da`（门禁 G1/G20/G21 同步）；另修并发 prune 的 `batch_id` 同毫秒冲突（加原子序号，Windows 两条 race 用例连跑 3 轮全绿）。回归：Windows `21 lib + 128 integration`、WSL `27 lib + 126 integration`；真实链路两平台各 `17 evidence / 0 failures`。详见审计 §51 |
 

@@ -1255,14 +1255,14 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "85da030305024ac405c9fdecb6cfc0e9d4c46fdc7f2dd4aa000314d346e6a3bc",
+  "tools_sha256": "744da2614a3730f08d309033b7ca86c956edfab82d369443f06fd4ceecaba9da",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
       "id": "G1",
       "tool": "task.execute",
       "path": "description",
-      "contains": ["受控集合（POSIX 进程组 / Windows Job Object）", "终止只尝试一次（不重试）", "仅当观测到集合内无存活进程才写「已清理受控集合」", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树", "挂起态创建、先加入作业再恢复执行"],
+      "contains": ["受控集合（POSIX 进程组 / Windows Job Object）", "终止只尝试一次（不重试）", "仅当观测到集合内无存活进程才写「已清理受控集合」", "逃逸进程是否仍在运行未验证", "不承诺终止整棵进程树", "挂起态创建、先加入作业再恢复执行", "task.cancel", "status=canceled"],
       "not_contains": ["已终止进程树", "无残留", "会终止整棵进程树", "自动重试"]
     },
     {
@@ -1390,6 +1390,20 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "inputSchema.properties.action.description",
       "contains": ["list", "clean", "stale=true"],
       "not_contains": ["默认 clean", "隐式删除"]
+    },
+    {
+      "id": "G20",
+      "tool": "task.cancel",
+      "path": "description",
+      "contains": ["按 task_id 显式取消", "canceled", "completed_before_cancel", "cancel_requested", "not_running", "未发送信号", "不得认为已清理", "不会谎报已清理", "跨进程不可见", "受控集合"],
+      "not_contains": ["一定已清理", "保证终止整棵进程树", "跨进程生效"]
+    },
+    {
+      "id": "G21",
+      "tool": "task.cancel",
+      "path": "inputSchema.properties.task_id.description",
+      "contains": ["命名规则", "派单标识"],
+      "not_contains": ["任意字符串"]
     }
   ]
 }
@@ -4378,3 +4392,62 @@ python scripts/real-chain-verify/verify.py --binary target/debug/aw-mcp-bridge.e
 ```bash
 python3 scripts/real-chain-verify/verify.py --binary /root/.aw-posix-verify/target/debug/aw-mcp-bridge --label linux
 ```
+
+## 51. v1.47：Linux 孤儿兜底 / `_session` 保留 / 显式取消 + 真实链路补跑
+
+本轮按 PM 指定顺序落地三项，并补齐 v1.46 真实链路还空着的两项（周期清扫、逃逸进程整树清理）。**红证据先贴**，再给绿。
+
+### 51.1 红证据（改动前，真实链路原文）
+
+| 项 | 红原文 / 事实 | 性质 |
+|---|---|---|
+| Linux 孤儿 | v1.46 B2 WSL：`child_survived=True`，心跳 `20 → 35` 字节；Windows 同为场景 `child_survived=False` | 平台差异造成的真缺口 |
+| 取消 | v1.46 `tools/list` 实测 8 项，无 `task.cancel`；唯一「取消」入口是杀 bridge | 产品语义缺失 |
+| `_session` | v1.46 §50.7：`initialize-<pid>-<ts>-<seq>.json` 永不回收（`runs.prune` 只枚举任务目录） | 无界增长 |
+| 周期清扫 | v1.46 脚本固定 `AW_INFLIGHT_SWEEP_SECS=0`，周期档**未跑**（仅夹具） | 证据缺口 |
+| 逃逸整树清理 | v1.46 无逃逸构造，仅 v1.45 单测 | 证据缺口 |
+| 并发 prune | Windows 两条 race 用例偶发红，根因 `batch_id` 同毫秒同进程冲突共用 `.prune-trash/<batch>` | 测试基建缺陷 |
+
+### 51.2 三项实现与边界（写进契约，不夸大）
+
+1. **Linux `PR_SET_PDEATHSIG`**：`process_scope::configure` 在 `process_group(0)` 之后安装 `pre_exec`——`prctl(PR_SET_PDEATHSIG, SIGKILL)` 成功后立即复查 `getppid()`，与预期父 pid 不一致（父已死/已换父）则 `_exit(128)`，堵住 fork→prctl 竞态。
+   - **只保直接子进程**：`PDEATHSIG` 不遗传，孙进程在 bridge 猝死后仍存活（B5 实测 `grandchild_survived=True`）。
+   - 契约 §2.7 因此分成两段：Windows 作业对象整树；Linux 直接子进程 + **运维兜底**（`runs/.inflight` 标记 + cgroup 清单巡检，实测 `populated 1` pid 9428 → `kill -9` → `populated 0` → `rmdir ok`）。
+   - 正常退出不受影响：正常收尾仍由既有 `Supervisor` 流程；已完成任务在 bridge 被杀前后产物与 `handback.json` **字节不变**（B2 新增断言）。
+2. **`_session` 按天保留**：`AW_SESSION_RETENTION_DAYS`（1..=3650，默认 30），`sweep_session_records` 在 `startup`/`periodic` 档执行；候选要求「文件名毫秒时间戳 **且** `mtime` 都过期」，旧格式/不可解析/未来时间/仅一边过期 → 保留；先写 `runs/session-retention.jsonl`（`session-retention/1`，plan+result）再删，写入失败零删除；不删 `initialize.json`、`.tmp`、目录、符号链接。阈值不拍脑袋：D3 实测 `106.7–106.8 B/条`（Windows）/ `107.0 B/条`（WSL），1000 次/天、30 天约 `3.05/3.06 MiB`。
+3. **`task.cancel`**：入参 `task_id` / `reason`（`maxLength=1024`，超长 → `invalid_reason`，零副作用）。只对**本进程**持有子进程的执行为生效对象；置位后由执行线程走与超时同一终止流程，落盘 `status=canceled`（非 blocked/completed），`blocked_reason` 前缀 `canceled：`；四态 `canceled` / `completed_before_cancel` / `cancel_requested` / `not_running`，只有 `canceled` 才 `cleanup_claimed=true`。审计三源可区分：`timeout：` / `canceled：` / `status=failed`。
+
+### 51.3 工具描述与门禁
+
+- 工具数 **8→9**，新增 `task.cancel`；`task.execute` 描述补取消语义。
+- `tools_sha256` 更新为 `744da2614a3730f08d309033b7ca86c956edfab82d369443f06fd4ceecaba9da`。
+- 新增门禁行：**G20**（`task.cancel` 描述必须含四种返回状态、`未发送信号`、`不得认为已清理`、`不会谎报已清理`、`跨进程不可见`、`受控集合`；禁止 `一定已清理` / `保证终止整棵进程树` / `跨进程生效`）、**G21**（`task_id.description` 含 `命名规则`、`派单标识`）。
+- G1（`task.execute`）新增 `task.cancel`、`status=canceled` 两个 `contains`；`runs.prune.status` 白名单扩为四值，契约与用例同步。
+
+### 51.4 绿：真实链路（MCP stdio，两平台）
+
+| 场景 | Windows 24H2 | Ubuntu 24.04 (WSL2) |
+|---|---|---|
+| B2 bridge 被 `kill -9` 后直接子进程 | 心跳 `18 → 18`，`child_survived=False` | 心跳 `20 → 20`，`child_survived=False`（v1.46 为 `True`） |
+| B2 已完成任务产物/回执 | 字节不变 | 字节不变 |
+| B4 同连接执行中取消 | `status=canceled`、前缀 `canceled：`、请求方理由回显、心跳停止、标记清理、盘上 `handback.status=canceled` | 同左 |
+| B4 未知 id 取消 | `not_running`，`cleanup_claimed=false`，不发信号 | 同左 |
+| B5 `setsid` 孙进程 | 按能力位 skip（无 POSIX 会话） | `grandchild_survived=True`（心跳 `10 → 25`），**如实记录边界** |
+| D1 周期清扫 | bridge1 猝死 → bridge2 `startup` 容差内不删，`periodic` 审计点名删除 | 同左 |
+| D2 逃逸整树清理 | 按能力位 skip | `escaped_pid=10592 moved_out_of_cgroup=true escaped_gone=true sink_populated=0` |
+| D3 `_session` 保留 | 45 天前删除、1 天前保留、坏名保留；plan/result 点名 | 同左 |
+
+两平台各 `evidence_lines=17 / failures=0`。
+
+### 51.5 回归
+
+- Windows：`21 lib + 128 integration` 全绿（并发 prune/sweep race 用例连跑 3 轮）。
+- WSL Ubuntu 24.04：`27 lib + 126 integration` 全绿；`scripts/posix-timeout-verify/verify.sh run` 四类 POSIX 用例全通过。
+
+### 51.6 未证 / 边界（不得被本轮描述掩盖）
+
+- Linux bridge 猝死后的**孙进程**仍存活（`PDEATHSIG` 不遗传）：不是「已解决」，是「直接子进程已收口 + 孙进程给出运维兜底」。
+- `task.cancel` **跨进程不可见**：另一个 bridge 上的同 `task_id` 不能被本工具取消；此时只能 `runs.inflight` 判残标。
+- `cancel_requested` 是「已请求、未观测到回执」，**不是**已清理；`not_running` 不发信号、不做清理。
+- Windows 侧整树清理能力位不变（`requires_out_of_job_enumerable_terminable_os_primitive`）。
+

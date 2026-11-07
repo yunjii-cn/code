@@ -2,16 +2,22 @@
 # -*- coding: utf-8 -*-
 """真实链路端到端验证（MCP over stdio，不调用任何内部函数）。
 
-跑四组场景，全部经 `aw-mcp-bridge` 的真实 stdio JSON-RPC 路径：
+全部经 `aw-mcp-bridge` 的真实 stdio JSON-RPC 路径：
 
   A. 正常任务：真实产出文件 -> attempt / inflight / dispatch / handback / 产物互相对得上
-  B. 异常：执行中超时；执行中取消（产品没有 cancel 工具，唯一可走的是 bridge 进程死亡）
-     然后重启服务，验证 startup 档自动清扫残留标记与 attempt 目录去向
-  C. 并发：同 task_id 连派（顺序 + 两进程同时）；不同 task_id 并行
-  D. 收尾事实：无 *.tmp、无残标、无 .prune-trash
+  B1. 执行中超时：终止受控集合，心跳停止，回执 blocked + timeout
+  B2. bridge 猝死：进程被杀后子进程是否被连带收掉（Windows 作业对象 / Linux PDEATHSIG）
+      然后重启服务，验证 startup 档自动清扫残留标记
+  B3. bridge 猝死后 5s 容差内立刻重启：不误删活标
+  B4. 显式取消：同一连接上 task.execute 执行中调用 task.cancel，状态必须是 canceled
+  B5. PDEATHSIG 作用域边界（仅 Linux）：孙进程不继承，bridge 猝死后成为孤儿（如实记录）
+  C1/C2/C3. 并发：同 task_id 顺序/两进程、不同 task_id 并行
+  D1. 周期清扫：bridge 猝死留下的残标由 period 档（trigger=periodic）清掉
+  D2. 逃逸进程整树清理（仅 Linux）：祖父/父/孙 + 孙进程逃出进程组与 cgroup.procs，超时后全灭
+  D3. `_session/initialize-*.json` 按天保留：startup 档删除过期记录并留审计
 
 用法：
-  python scripts/real-chain-verify/verify.py --binary <aw-mcp-bridge[.exe]> [--only A,B,C] [--keep]
+  python scripts/real-chain-verify/verify.py --binary <aw-mcp-bridge[.exe]> [--only A,B1,...] [--keep]
 
 退出码：0 全部通过；1 有断言失败；2 环境/参数问题。
 """
@@ -21,7 +27,9 @@ import hashlib
 import json
 import os
 import queue
+import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -104,18 +112,21 @@ def find_tmp(root):
 class Bridge:
     """一条真实的 stdio 连接；所有交互都落到 wire.jsonl。"""
 
-    def __init__(self, exe, sandbox, name="bridge", sweep="0"):
+    def __init__(self, exe, sandbox, name="bridge", sweep="0", extra_env=None):
         self.name = name
         self.exe = Path(exe)
         self.sandbox = Path(sandbox)
         self.work = self.sandbox / "work"
         self.work.mkdir(parents=True, exist_ok=True)
         self.wire_path = self.sandbox / "wire.jsonl"
+        self.pending = {}
         env = dict(os.environ)
         env["APPDATA"] = str(self.sandbox / "appdata")
         env["HOME"] = str(self.sandbox / "appdata")
         # 0 = 只做启动清扫，避免周期线程把证据弄成时序不确定
         env["AW_INFLIGHT_SWEEP_SECS"] = sweep
+        if extra_env:
+            env.update({str(k): str(v) for k, v in extra_env.items()})
         (self.sandbox / "appdata").mkdir(parents=True, exist_ok=True)
         self.proc = subprocess.Popen(
             [str(self.exe)],
@@ -160,6 +171,10 @@ class Bridge:
         return request_id
 
     def await_id(self, request_id, timeout=180):
+        # task.execute 现在在独立线程执行，cancel 的响应可能先到；JSON-RPC 允许按 id 乱序，
+        # 这里只做暂存，不改变"每个 id 必须收到且只收到一次"的判据。
+        if request_id in self.pending:
+            return self.pending.pop(request_id)
         deadline = time.time() + timeout
         while True:
             remaining = deadline - time.time()
@@ -170,8 +185,10 @@ class Bridge:
             self._record("recv", response)
             if response.get("id") == request_id:
                 return response
-            # 不应出现乱序响应；出现即说明桥接层串了响应
-            raise RuntimeError(f"{self.name}: 收到非预期 id={response.get('id')}，期望 {request_id}")
+            other = response.get("id")
+            if other is None:
+                raise RuntimeError(f"{self.name}: 收到无 id 的响应：{response}")
+            self.pending[other] = response
 
     def request(self, method, params, timeout=180):
         return self.await_id(self.send(method, params), timeout=timeout)
@@ -266,11 +283,8 @@ def scenario_a(exe, root, label):
         listing = bridge.request("tools/list", {})
         names = sorted(tool.get("name") for tool in listing.get("result", {}).get("tools", []))
         check("task.execute" in names, f"A tools/list 暴露 task.execute：{names}")
-        check(
-            not any("cancel" in (name or "").lower() for name in names),
-            "A tools/list 里没有 cancel 工具（取消不可从 MCP 触达）",
-        )
-        ev(f"A tool_names={names} cancel_tool_absent=true")
+        check("task.cancel" in names, f"A tools/list 暴露显式取消 task.cancel：{names}")
+        ev(f"A tool_names={names} cancel_tool=true")
         payload, is_error, _ = bridge.call(
             "task.execute",
             {
@@ -406,6 +420,21 @@ def scenario_b_cancel(exe, root, label):
     bridge = Bridge(binary, sandbox, name="B2-first")
     try:
         bridge.initialize()
+        # 先完成一个短任务：bridge 猝死不得误伤已完成任务的产物与回执
+        done_task = "real-b-completed"
+        done_artifact = "artifact-b-completed.txt"
+        done, done_error, _ = bridge.call(
+            "task.execute",
+            {
+                "task_id": done_task,
+                "cmd": cmd_write(done_artifact, "completed-before-kill"),
+                "cwd": str(work),
+                "timeout_secs": 30,
+            },
+        )
+        check(not done_error and done.get("status") == "ok", "B2 先完成一个短任务（ok）")
+        done_handback = runs / done_task / "attempt-1" / "handback.json"
+        done_bytes = done_handback.read_bytes() if done_handback.is_file() else b""
         request_id = bridge.send(
             "tools/call",
             {
@@ -427,22 +456,37 @@ def scenario_b_cancel(exe, root, label):
         check(attempt_dir.is_dir(), "B2 执行中 attempt-1 已占号")
         time.sleep(3)
         bridge.kill()
-        check(bridge.proc.poll() is not None, "B2 bridge 已被杀死（这是唯一的“取消”入口）")
+        check(bridge.proc.poll() is not None, "B2 bridge 已被杀死（模拟非正常退出）")
 
         beat = work / heartbeat
         size_before = beat.stat().st_size if beat.is_file() else 0
         time.sleep(3)
         size_after = beat.stat().st_size if beat.is_file() else 0
-        # Windows：Job Object KILL_ON_JOB_CLOSE；Linux：bridge 死亡不一定带走子进程
+        # Windows：Job Object KILL_ON_JOB_CLOSE；Linux：v1.47 起 pre_exec 设 PR_SET_PDEATHSIG，
+        # 只保证直接子进程；孙进程（fork 后再 exec）不受 PDEATHSIG 约束，见 D2/契约 §2.7。
         ev(
             f"B2 label={label} killed_at=~3s child_heartbeat_before={size_before} after={size_after} "
             f"child_survived={size_after > size_before}"
+        )
+        check(
+            size_after == size_before,
+            f"B2 bridge 猝死后直接子进程在可观测时间内消失（心跳 {size_before} -> {size_after}）",
         )
         check(marker.is_file(), "B2 进程被杀死后残留标记仍在（没有机会执行 Drop）")
         check(
             (attempt_dir / "dispatch.json").is_file()
             and not (attempt_dir / "handback.json").is_file(),
             "B2 取消后 attempt-1 只有 dispatch、无 handback（不宣称完成）",
+        )
+        check(
+            (work / done_artifact).is_file()
+            and (work / done_artifact).read_text(encoding="utf-8", errors="replace").strip()
+            == "completed-before-kill",
+            "B2 已完成的短任务产物未被误杀",
+        )
+        check(
+            done_handback.is_file() and done_handback.read_bytes() == done_bytes,
+            "B2 已完成任务的回执字节未变",
         )
 
         # 5s 容差：startedAt + 5s 之后才判 stale
@@ -570,6 +614,144 @@ def scenario_b_grace(exe, root, label):
             ev(f"B3 label={label} late_restart removed_total={removed} marker_gone=true")
         finally:
             late.close()
+    finally:
+        bridge.close()
+    return sandbox
+
+
+# ---- 场景 B4：显式取消（真实 MCP 同连接） ---------------------------------
+
+def scenario_b4_explicit_cancel(exe, root, label):
+    print("\n== 场景 B4：执行中显式 task.cancel（同一连接）==", flush=True)
+    sandbox = make_sandbox(root, label, "B4")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    work = sandbox / "work"
+    bridge = Bridge(binary, sandbox, name="B4")
+    task_id = "real-b4-cancel"
+    heartbeat = "heartbeat-b4.txt"
+    try:
+        bridge.initialize()
+        execute_id = bridge.send(
+            "tools/call",
+            {
+                "name": "task.execute",
+                "arguments": {
+                    "task_id": task_id,
+                    "cmd": cmd_heartbeat(heartbeat, 60),
+                    "cwd": str(work),
+                    "timeout_secs": 120,
+                },
+            },
+        )
+        marker = runs / ".inflight" / f"{task_id}.json"
+        dispatch = runs / task_id / "attempt-1" / "dispatch.json"
+        check(bool(wait_until(lambda: marker.is_file() and dispatch.is_file(), 15)), "B4 执行已开始")
+        time.sleep(1)
+
+        canceled, canceled_error, _ = bridge.call(
+            "task.cancel", {"task_id": task_id, "reason": "真实链路验收取消"}
+        )
+        check(not canceled_error, "B4 task.cancel 不是工具错误")
+        check(canceled.get("status") == "canceled", f"B4 cancel status=canceled（实际 {canceled.get('status')}）")
+        check(canceled.get("cleanup_claimed") is True, "B4 回执已落盘为 canceled 才宣称清理")
+        check(canceled.get("handback_status") == "canceled", f"B4 cancel 观测到 canceled 回执：{canceled.get('handback_status')}")
+
+        response = bridge.await_id(execute_id, timeout=60)
+        result = response.get("result", {})
+        payload = json.loads(result["content"][0]["text"])
+        check(payload.get("status") == "canceled", f"B4 task.execute 状态是 canceled（实际 {payload.get('status')}）")
+        reason = payload.get("blocked_reason") or ""
+        check(reason.startswith("canceled："), f"B4 blocked_reason 前缀是 canceled：{reason[:50]}...")
+        check("请求方理由：真实链路验收取消" in reason, "B4 请求方理由被写进回执")
+        check(not reason.startswith("timeout："), "B4 取消没有被误记成超时")
+
+        beat = work / heartbeat
+        size_before = beat.stat().st_size if beat.is_file() else 0
+        time.sleep(2)
+        size_after = beat.stat().st_size if beat.is_file() else 0
+        check(size_after == size_before, f"B4 取消后心跳停止（{size_before} -> {size_after}）")
+        check(not marker.is_file(), "B4 取消后活跃标记已清理")
+        handback = read_json(runs / task_id / "attempt-1" / "handback.json")
+        check(handback.get("status") == "canceled", "B4 盘上 handback.status=canceled")
+
+        ghost, ghost_error, _ = bridge.call("task.cancel", {"task_id": "real-b4-ghost"})
+        check(not ghost_error and ghost.get("status") == "not_running", f"B4 看不到的执行返回 not_running：{ghost}")
+        check(ghost.get("cleanup_claimed") is False, "B4 not_running 不宣称已清理")
+
+        pruned, prune_error, _ = bridge.call(
+            "runs.prune", {"older_than_days": 1, "status": ["canceled"], "dry_run": True}
+        )
+        check(not prune_error, f"B4 runs.prune 接受 canceled 状态过滤：{pruned}")
+        ev(
+            f"B4 label={label} execute_status=canceled cancel_status=canceled "
+            f"heartbeat_rate=0 marker_gone=true not_running_claims_cleanup=false canceled_filter_ok=true"
+        )
+    finally:
+        bridge.close()
+    return sandbox
+
+
+# ---- 场景 B5：PDEATHSIG 的作用域边界（仅 Linux） ---------------------------
+
+def scenario_b5_grandchild_scope(exe, root, label):
+    print("\n== 场景 B5：bridge 猝死时孙进程是否被连带收掉 ==", flush=True)
+    if IS_WINDOWS:
+        ev("B5 label=windows skipped reason=Windows 作业对象整棵树回收，无此边界")
+        return None
+    sandbox = make_sandbox(root, label, "B5")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    work = sandbox / "work"
+    bridge = Bridge(binary, sandbox, name="B5")
+    task_id = "real-b5-grandchild"
+    beat = work / "grandchild-beat.txt"
+    pid_file = work / "grandchild.pid"
+    cmd = (
+        f"setsid sh -c 'echo $$ > {shlex.quote(str(pid_file))}; "
+        f"while :; do echo tick >> {shlex.quote(str(beat))}; sleep 1; done' & sleep 60"
+    )
+    try:
+        bridge.initialize()
+        bridge.send(
+            "tools/call",
+            {
+                "name": "task.execute",
+                "arguments": {
+                    "task_id": task_id,
+                    "cmd": cmd,
+                    "cwd": str(work),
+                    "timeout_secs": 120,
+                },
+            },
+        )
+        marker = runs / ".inflight" / f"{task_id}.json"
+        check(
+            bool(wait_until(lambda: marker.is_file() and pid_file.is_file(), 15)),
+            "B5 孙进程已写出 pid",
+        )
+        time.sleep(1)
+        bridge.kill()
+        size_before = beat.stat().st_size if beat.is_file() else 0
+        time.sleep(3)
+        size_after = beat.stat().st_size if beat.is_file() else 0
+        grand_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        survived = size_after > size_before and pid_alive(grand_pid)
+        ev(
+            f"B5 label={label} pdeathsig_scope=direct_child_only grandchild_pid={grand_pid} "
+            f"grandchild_heartbeat_before={size_before} after={size_after} grandchild_survived={survived}"
+        )
+        check(
+            survived,
+            "B5 如实记录边界：PDEATHSIG 不遗传，bridge 猝死时孙进程会成孤儿（预期为 true）",
+        )
+        # 收尾：验证脚本自己清掉这个孤儿，避免污染环境；产品侧兜底见契约 §2.7
+        try:
+            os.kill(grand_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        gone = wait_until(lambda: not pid_alive(grand_pid), 5)
+        check(bool(gone), "B5 验证脚本清掉孤儿（产品不做兜底）")
     finally:
         bridge.close()
     return sandbox
@@ -759,12 +941,261 @@ def scenario_c_parallel(exe, root, label):
     return sandbox
 
 
+# ---- 场景 D1：周期清扫（真实周期线程） ------------------------------------
+
+def scenario_d1_periodic_sweep(exe, root, label):
+    print("\n== 场景 D1：bridge 猝死残标由周期清扫收掉 ==", flush=True)
+    sandbox = make_sandbox(root, label, "D1")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    work = sandbox / "work"
+    task_id = "real-d1-periodic"
+    first = Bridge(binary, sandbox, name="D1-first")
+    second = None
+    try:
+        first.initialize()
+        first.send(
+            "tools/call",
+            {
+                "name": "task.execute",
+                "arguments": {
+                    "task_id": task_id,
+                    "cmd": cmd_heartbeat("heartbeat-d1.txt", 60),
+                    "cwd": str(work),
+                    "timeout_secs": 120,
+                },
+            },
+        )
+        marker = runs / ".inflight" / f"{task_id}.json"
+        check(bool(wait_until(lambda: marker.is_file(), 15)), "D1 执行中标记存在")
+        time.sleep(1)
+        first.kill()
+        check(first.proc.poll() is not None, "D1 bridge 猝死")
+
+        # 立刻起观察者：startup 在 startedAt+5s 容差内，应保留；随后 period 档才清
+        second = Bridge(binary, sandbox, name="D1-periodic", sweep="1")
+        second.initialize()
+        startup_rows = [
+            row
+            for row in read_jsonl(runs / "inflight-sweep.jsonl")
+            if row.get("trigger") == "startup"
+        ]
+        startup_hit = [
+            item
+            for row in startup_rows
+            for item in row.get("removed", [])
+            if item.get("task_id") == task_id
+        ]
+        check(not startup_hit, f"D1 startup 未删除仍处容差内的标记：{startup_hit}")
+
+        gone = wait_until(lambda: not marker.is_file(), 20)
+        check(bool(gone), "D1 周期清扫在 20s 内删除残标")
+        periodic_rows = [
+            row
+            for row in read_jsonl(runs / "inflight-sweep.jsonl")
+            if row.get("trigger") == "periodic"
+        ]
+        removed = [
+            item
+            for row in periodic_rows
+            for item in row.get("removed", [])
+            if item.get("task_id") == task_id
+        ]
+        check(bool(removed), f"D1 审计点名 trigger=periodic 删除：{removed}")
+        ev(
+            f"D1 label={label} startup_removed=False periodic_removed={len(removed)} "
+            f"marker_gone={not marker.is_file()}"
+        )
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+    return sandbox
+
+
+# ---- 场景 D2：逃逸进程整树清理（仅 Linux） ---------------------------------
+
+def scenario_d2_escaped_tree(exe, root, label):
+    print("\n== 场景 D2：逃逸进程整树清理 ==", flush=True)
+    if IS_WINDOWS:
+        ev(
+            "D2 label=windows skipped reason=需要作业外进程可枚举可终止的 OS 原语，本机不存在；"
+            "Windows 侧能力位保持 false（见 capabilities）"
+        )
+        return None
+    sandbox = make_sandbox(root, label, "D2")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    work = sandbox / "work"
+    bridge = Bridge(binary, sandbox, name="D2")
+    task_id = "real-d2-escape"
+    grand = work / "escape-grand.sh"
+    script = work / "escape-tree.sh"
+    pid_file = work / "escaped.pid"
+    move_file = work / "escaped.move"
+    sink_file = work / "escaped.sink"
+    beat = work / "escaped-beat.txt"
+    grand.write_text(
+        "#!/bin/sh\n"
+        "echo $$ > \"$1\"\n"
+        "echo $$ > \"$2/cgroup.procs\" && echo moved > \"$3\" || echo not_moved > \"$3\"\n"
+        "i=0\n"
+        "while [ $i -lt 60 ]; do echo tick >> \"$4\"; sleep 1; i=$((i+1)); done\n",
+        encoding="utf-8",
+    )
+    script.write_text(
+        "#!/bin/sh\n"
+        "me=$(awk -F: '$1==\"0\"{print $3}' /proc/self/cgroup)\n"
+        "base=/sys/fs/cgroup$(dirname \"$me\")\n"
+        "sink=\"$base/aw-real-escape-$$\"\n"
+        "mkdir -p \"$sink\" || true\n"
+        f"printf '%s' \"$sink\" > {shlex.quote(str(sink_file))}\n"
+        f"setsid sh {shlex.quote(str(grand))} {shlex.quote(str(pid_file))} \"$sink\" "
+        f"{shlex.quote(str(move_file))} {shlex.quote(str(beat))} &\n"
+        "sleep 60\n",
+        encoding="utf-8",
+    )
+    try:
+        bridge.initialize()
+        payload, is_error, _ = bridge.call(
+            "task.execute",
+            {
+                "task_id": task_id,
+                "cmd": f"sh {shlex.quote(str(script))}",
+                "cwd": str(work),
+                "timeout_secs": 2,
+            },
+            timeout=120,
+        )
+        check(not is_error, "D2 超时是正常回执")
+        check(payload.get("status") == "blocked", f"D2 status=blocked（实际 {payload.get('status')}）")
+        check(
+            (payload.get("blocked_reason") or "").startswith("timeout："),
+            f"D2 超时档：{(payload.get('blocked_reason') or '')[:60]}...",
+        )
+        has_pid = bool(wait_until(lambda: pid_file.is_file(), 10))
+        check(has_pid, "D2 孙进程写出了自己的 pid")
+        escaped_pid = int(pid_file.read_text(encoding="utf-8").strip()) if has_pid else None
+        moved = move_file.read_text(encoding="utf-8").strip() if move_file.is_file() else ""
+        check(moved == "moved", f"D2 孙进程已逃出 bridge 的 cgroup.procs（move={moved}）")
+
+        if escaped_pid:
+            gone = wait_until(lambda: not pid_alive(escaped_pid), 10)
+            check(bool(gone), f"D2 逃逸 pid {escaped_pid} 在清理后消失")
+        size_before = beat.stat().st_size if beat.is_file() else 0
+        time.sleep(2)
+        size_after = beat.stat().st_size if beat.is_file() else 0
+        check(size_after == size_before, f"D2 逃逸进程心跳停止（{size_before} -> {size_after}）")
+
+        sink = Path(sink_file.read_text(encoding="utf-8")) if sink_file.is_file() else None
+        if sink and sink.is_dir():
+            procs = (sink / "cgroup.procs").read_text(encoding="utf-8").strip()
+            events = (sink / "cgroup.events").read_text(encoding="utf-8")
+            check(procs == "", f"D2 旁路 cgroup 的 cgroup.procs 为空：{procs!r}")
+            check("populated 0" in events, f"D2 旁路 cgroup populated 0：{events.strip()!r}")
+            os.rmdir(str(sink))
+        ev(
+            f"D2 label={label} escaped_pid={escaped_pid} moved_out_of_cgroup=true "
+            f"escaped_gone=true sink_populated=0"
+        )
+    finally:
+        bridge.close()
+    return sandbox
+
+
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+# ---- 场景 D3：`_session/initialize-*.json` 按天保留 + 增长实测 ---------------
+
+def scenario_d3_session_retention(exe, root, label):
+    print("\n== 场景 D3：_session 按天保留与体积实测 ==", flush=True)
+    sandbox = make_sandbox(root, label, "D3")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    session = runs / "_session"
+    session.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    old_ts = int((now - 45 * 86400) * 1000)
+    fresh_ts = int((now - 86400) * 1000)
+    old = session / f"initialize-999-{old_ts}-0.json"
+    fresh = session / f"initialize-998-{fresh_ts}-0.json"
+    unparsable = session / "initialize-broken-name.json"
+    for path in (old, fresh, unparsable):
+        path.write_text('{"clientInfo":{"name":"seed"}}', encoding="utf-8")
+    os.utime(str(old), (now - 45 * 86400, now - 45 * 86400))
+
+    bridge = Bridge(binary, sandbox, name="D3")
+    try:
+        bridge.initialize()
+        check(not old.exists(), "D3 startup 删除了超过 30 天的 initialize 记录")
+        check(fresh.exists(), "D3 1 天前的记录仍在保留期内")
+        check(unparsable.exists(), "D3 名字判不准的记录保留")
+        audit = read_jsonl(runs / "session-retention.jsonl")
+        check(
+            any(row.get("phase") == "plan" and row.get("trigger") == "startup" for row in audit),
+            f"D3 审计有 plan 行：{len(audit)} 行",
+        )
+        check(
+            any(
+                item.get("file") == old.name and item.get("outcome") == "deleted"
+                for row in audit
+                for item in row.get("removed", [])
+            ),
+            "D3 审计点名被删除的文件",
+        )
+        check(
+            any(
+                item.get("file") == unparsable.name
+                for row in audit
+                for item in row.get("kept", [])
+            ),
+            "D3 审计记录了判不准而不删的文件",
+        )
+
+        # 增长实测：每次 initialize 一份新记录，量一量单份体积
+        burst = 100
+        before_files = sorted(session.glob("initialize-*.json"))
+        before_bytes = sum(path.stat().st_size for path in before_files)
+        for _ in range(burst):
+            bridge.request(
+                "initialize",
+                {"clientInfo": {"name": "growth-probe"}, "protocolVersion": "2025-06-18"},
+            )
+        after_files = sorted(session.glob("initialize-*.json"))
+        after_bytes = sum(path.stat().st_size for path in after_files)
+        created = len(after_files) - len(before_files)
+        growth = after_bytes - before_bytes
+        per_file = (growth / created) if created else 0
+        check(created == burst, f"D3 {burst} 次 initialize 生成 {burst} 份记录（实际 {created}）")
+        ev(
+            f"D3 label={label} removed_old=true kept_fresh=true kept_unparsable=true "
+            f"records_created={created} bytes_growth={growth} bytes_per_record={per_file:.1f} "
+            f"per_1000_records={per_file * 1000 / 1024:.1f}KiB"
+        )
+        print(
+            f"[growth] 单份约 {per_file:.1f} B；若每天 1000 次 initialize，"
+            f"30 天约 {per_file * 1000 * 30 / 1024 / 1024:.2f} MiB",
+            flush=True,
+        )
+    finally:
+        bridge.close()
+    return sandbox
+
+
 # ---- 主流程 ---------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, help="aw-mcp-bridge 可执行文件")
-    parser.add_argument("--only", default="A,B1,B2,B3,C1,C2,C3")
+    parser.add_argument("--only", default="A,B1,B2,B3,B4,B5,C1,C2,C3,D1,D2,D3")
     parser.add_argument("--sandbox-root", default="")
     parser.add_argument("--label", default="windows" if IS_WINDOWS else "linux")
     parser.add_argument("--keep", action="store_true", help="保留 sandbox 便于人工核对")
@@ -787,19 +1218,31 @@ def main():
             sandboxes.append(("B2", scenario_b_cancel(exe, args.sandbox_root, args.label)))
         if "B3" in selected:
             sandboxes.append(("B3", scenario_b_grace(exe, args.sandbox_root, args.label)))
+        if "B4" in selected:
+            sandboxes.append(("B4", scenario_b4_explicit_cancel(exe, args.sandbox_root, args.label)))
+        if "B5" in selected:
+            sandboxes.append(("B5", scenario_b5_grandchild_scope(exe, args.sandbox_root, args.label)))
         if "C1" in selected:
             sandboxes.append(("C1", scenario_c_sequential(exe, args.sandbox_root, args.label)))
         if "C2" in selected:
             sandboxes.append(("C2", scenario_c_same_id_two_processes(exe, args.sandbox_root, args.label)))
         if "C3" in selected:
             sandboxes.append(("C3", scenario_c_parallel(exe, args.sandbox_root, args.label)))
+        if "D1" in selected:
+            sandboxes.append(("D1", scenario_d1_periodic_sweep(exe, args.sandbox_root, args.label)))
+        if "D2" in selected:
+            sandboxes.append(("D2", scenario_d2_escaped_tree(exe, args.sandbox_root, args.label)))
+        if "D3" in selected:
+            sandboxes.append(("D3", scenario_d3_session_retention(exe, args.sandbox_root, args.label)))
     finally:
         if not args.keep:
             for _, sandbox in sandboxes:
-                shutil.rmtree(str(sandbox), ignore_errors=True)
+                if sandbox is not None:
+                    shutil.rmtree(str(sandbox), ignore_errors=True)
         else:
             for name, sandbox in sandboxes:
-                print(f"[keep] {name}: {sandbox}", flush=True)
+                if sandbox is not None:
+                    print(f"[keep] {name}: {sandbox}", flush=True)
 
     print("\n==== 汇总 ====", flush=True)
     print(f"evidence_lines={len(EVIDENCE)} failures={len(FAILURES)}", flush=True)

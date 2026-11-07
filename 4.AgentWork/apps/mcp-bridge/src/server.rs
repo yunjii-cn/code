@@ -1,12 +1,12 @@
 // aw-mcp-bridge 方法分发：只读 health/status + 执行层 task.execute/receipt.get
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -26,6 +26,10 @@ const INFLIGHT_SWEEP_VERSION: &str = "inflight-sweep/1";
 const INFLIGHT_SWEEP_AUDIT: &str = "inflight-sweep.jsonl";
 /// 认领临时名序号：同一进程内多个清扫线程并发 rename 时保证 .tmp 名唯一
 static INFLIGHT_CLAIM_SEQ: AtomicU64 = AtomicU64::new(0);
+/// prune 批次序号：批次名原本只有「毫秒 + pid」，同进程同一毫秒的并发 prune 会共用
+/// `.prune-trash/<batch>` 目录，导致两个认领者 rename 到同一目的地（Windows 实测会
+/// 出现 staged 存在但删除失败，被记成 trashed_not_deleted）。加序号保证进程内唯一。
+static PRUNE_BATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 自动清扫周期来源：未设置默认每小时；`0` 仅启动时一次；`off` 完全关闭；正整数按秒
 pub const INFLIGHT_AUTO_SWEEP_ENV: &str = "AW_INFLIGHT_SWEEP_SECS";
 /// 默认周期：每小时一次。选默认开启是因为一次清扫只是只读扫描目录，成本低，
@@ -34,10 +38,124 @@ const INFLIGHT_AUTO_SWEEP_DEFAULT_SECS: u64 = 3600;
 const CAPABILITIES_VERSION: &str = "capabilities/1";
 /// pid 已消失后的残留宽限：给正常退出留出收尾时间，避免把刚结束的守卫误判为残留
 const INFLIGHT_PID_MISSING_GRACE_SECS: i64 = 5;
+/// `runs/_session/initialize-*.json` 保留天数：默认 30 天。阈值来自真实链路的实测增长
+/// （见 docs/PM-AW-DISPATCH-CONTRACT.md §8），可用 AW_SESSION_RETENTION_DAYS 覆盖。
+pub const SESSION_RETENTION_ENV: &str = "AW_SESSION_RETENTION_DAYS";
+pub const SESSION_RETENTION_DEFAULT_DAYS: i64 = 30;
+const SESSION_RETENTION_VERSION: &str = "session-retention/1";
+const SESSION_RETENTION_AUDIT: &str = "session-retention.jsonl";
+/// 取消等待上限：终止本身最多 3s（CLEANUP_DEADLINE），留给回执落盘与调度余量
+const CANCEL_WAIT_SECS: u64 = 10;
 
 // 由 build.rs 注入，缺失时为 "unknown"（不使用当前时间兜底，保证可复现构建）
 pub const BUILD_TIME: &str = env!("AW_BUILD_TIME");
 pub const DESKTOP_BUILD_TIME: &str = env!("AW_DESKTOP_BUILD_TIME");
+
+/// 一次可取消执行的句柄。取消只置位并唤醒，终止动作仍由持有子进程的那条执行线程完成，
+/// 这样 `Supervisor`（非线程安全）不需要跨线程共享，也不会出现两条线程同时终止同一棵树。
+struct CancelToken {
+    canceled: AtomicBool,
+    reason: Mutex<Option<String>>,
+    finished: Mutex<bool>,
+    finished_cv: Condvar,
+}
+
+impl CancelToken {
+    fn new() -> Self {
+        Self {
+            canceled: AtomicBool::new(false),
+            reason: Mutex::new(None),
+            finished: Mutex::new(false),
+            finished_cv: Condvar::new(),
+        }
+    }
+
+    fn request(&self, reason: Option<String>) {
+        let mut slot = self
+            .reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if slot.is_none() {
+            *slot = reason;
+        }
+        drop(slot);
+        self.canceled.store(true, Ordering::SeqCst);
+    }
+
+    fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::SeqCst)
+    }
+
+    fn reason(&self) -> Option<String> {
+        self.reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn finish(&self) {
+        let mut done = self
+            .finished
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *done = true;
+        drop(done);
+        self.finished_cv.notify_all();
+    }
+
+    /// 等执行线程把回执落盘并退出；超时返回 false，调用方不得据此宣称已清理
+    fn wait_finished(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut done = self
+            .finished
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while !*done {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let (guard, _) = self
+                .finished_cv
+                .wait_timeout(done, deadline - now)
+                .unwrap_or_else(|error| error.into_inner());
+            done = guard;
+        }
+        true
+    }
+}
+
+/// 注册守卫：只有真正插入登记表的那次调用负责移除并唤醒等待者；
+/// 同一个 task_id 的重投（replay）不会抢走胜者的句柄。
+struct CancelRegistration<'a> {
+    server: &'a Server,
+    task_id: String,
+    token: Arc<CancelToken>,
+    owner: bool,
+}
+
+impl Drop for CancelRegistration<'_> {
+    fn drop(&mut self) {
+        if !self.owner {
+            return;
+        }
+        {
+            let mut map = self
+                .server
+                .cancel_tokens
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if map
+                .get(&self.task_id)
+                .map(|token| Arc::ptr_eq(token, &self.token))
+                .unwrap_or(false)
+            {
+                map.remove(&self.task_id);
+            }
+        }
+        self.token.finish();
+    }
+}
 
 pub struct Server {
     settings_path: PathBuf,
@@ -46,6 +164,9 @@ pub struct Server {
     connection_started: AtomicBool,
     connections_peak: AtomicU64,
     initialize_total: AtomicU64,
+    /// 本进程正在执行、可被 task.cancel 点名的 task_id。跨进程不可见（取消只能由控住
+    /// 子进程的那个 bridge 执行），因此这里只登记本进程内的执行。
+    cancel_tokens: Mutex<HashMap<String, Arc<CancelToken>>>,
 }
 
 impl Server {
@@ -60,11 +181,27 @@ impl Server {
             connection_started: AtomicBool::new(false),
             connections_peak: AtomicU64::new(0),
             initialize_total: AtomicU64::new(0),
+            cancel_tokens: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn settings_path(&self) -> &Path {
         &self.settings_path
+    }
+
+    /// 登记一次可取消执行。返回 (句柄, 是否由本次调用持有)；
+    /// 同 task_id 已在执行时复用既有句柄，重投方不拥有移除权。
+    fn register_cancel(&self, task_id: &str) -> (Arc<CancelToken>, bool) {
+        let mut map = self
+            .cancel_tokens
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(existing) = map.get(task_id) {
+            return (Arc::clone(existing), false);
+        }
+        let token = Arc::new(CancelToken::new());
+        map.insert(task_id.to_string(), Arc::clone(&token));
+        (token, true)
     }
 
     /// 服务启动时自动清扫一次：与显式 clean / task_start / prune 共用
@@ -103,6 +240,22 @@ impl Server {
             }
             Err(error) => {
                 eprintln!("[inflight-sweep] trigger={trigger} error={error}");
+            }
+        }
+        // `_session/initialize-*.json` 与任务目录口径不同：按天数保留，独立审计。
+        // 清扫失败同样只记 stderr，不影响服务启动/周期线程。
+        match self.sweep_session_records(trigger) {
+            Ok(report) => {
+                let removed = report["removed_total"].as_u64().unwrap_or(0);
+                let failed = report["failed_total"].as_u64().unwrap_or(0);
+                if removed > 0 || failed > 0 {
+                    eprintln!(
+                        "[session-retention] trigger={trigger} removed={removed} failed={failed}"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("[session-retention] trigger={trigger} error={error}");
             }
         }
     }
@@ -195,6 +348,10 @@ impl Server {
                 Err(error) => (json!({ "error": error }), true),
             },
             "task.execute" => match self.execute_task(&arguments) {
+                Ok(payload) => (payload, false),
+                Err(error) => (json!({ "error": error }), true),
+            },
+            "task.cancel" => match self.task_cancel(&arguments) {
                 Ok(payload) => (payload, false),
                 Err(error) => (json!({ "error": error }), true),
             },
@@ -450,12 +607,12 @@ impl Server {
             None => None,
             Some(value) => {
                 let array = value.as_array().ok_or_else(|| {
-                    "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                    "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked/canceled"
                         .to_string()
                 })?;
                 if array.is_empty() {
                     return Err(
-                        "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                        "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked/canceled"
                             .to_string(),
                     );
                 }
@@ -463,13 +620,13 @@ impl Server {
                 for item in array {
                     let Some(text) = item.as_str() else {
                         return Err(
-                            "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                            "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked/canceled"
                                 .to_string(),
                         );
                     };
-                    if !matches!(text, "ok" | "failed" | "blocked") {
+                    if !matches!(text, "ok" | "failed" | "blocked" | "canceled") {
                         return Err(
-                            "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked"
+                            "invalid_retention: status 必须是非空数组，元素只能取 ok/failed/blocked/canceled"
                                 .to_string(),
                         );
                     }
@@ -588,9 +745,10 @@ impl Server {
         }
 
         let batch_id = format!(
-            "prune-{}-{}",
+            "prune-{}-{}-{}",
             chrono::Utc::now().timestamp_millis(),
-            std::process::id()
+            std::process::id(),
+            PRUNE_BATCH_SEQ.fetch_add(1, Ordering::Relaxed)
         );
         let plan = json!({
             "at": now_stamp(),
@@ -912,7 +1070,7 @@ impl Server {
                         }));
                         continue;
                     };
-                    if !matches!(value, "ok" | "failed" | "blocked") {
+                    if !matches!(value, "ok" | "failed" | "blocked" | "canceled") {
                         skipped.push(json!({
                             "task_id": task_id.clone(),
                             "attempt": number,
@@ -1613,6 +1771,207 @@ impl Server {
         Ok(())
     }
 
+    /// `runs/_session/initialize-*.json` 的按天保留清扫。
+    ///
+    /// 口径与任务目录不同：
+    /// - 只处理 `initialize-<pid>-<毫秒时间戳>-<seq>.json`；旧版 `initialize.json`、
+    ///   名字解析不出时间、时间戳在未来、文件 mtime 与文件名时间不一致（判不准）一律保留；
+    /// - 只有「文件名时间」与「mtime」都早于阈值才删；
+    /// - 先写 plan 审计再删；审计写不进去 → 本轮零删除；
+    /// - 无可删候选时不写审计（与 inflight sweep 的幂等口径一致）。
+    fn sweep_session_records(&self, trigger: &str) -> Result<Value, String> {
+        let retention_days = parse_session_retention_days()?;
+        let dir = self.runs_dir.join(SESSION_DIR);
+        if !dir.is_dir() {
+            return Ok(json!({
+                "version": SESSION_RETENTION_VERSION,
+                "trigger": trigger,
+                "state": "missing",
+                "directory": "runs/_session",
+                "retention_days": retention_days,
+                "total": 0,
+                "candidates_total": 0,
+                "removed_total": 0,
+                "failed_total": 0,
+                "kept_total": 0,
+                "removed": [],
+                "failed": [],
+                "kept": []
+            }));
+        }
+        let now = chrono::Utc::now();
+        let retention = chrono::Duration::days(retention_days);
+        let mut candidates: Vec<Value> = Vec::new();
+        let mut kept: Vec<Value> = Vec::new();
+        let mut within_retention = 0u64;
+        let mut total = 0u64;
+        let entries = fs::read_dir(&dir).map_err(|error| {
+            format!("session_retention_failed: 读取 runs/_session 失败：{error}")
+        })?;
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("initialize-") || !name.ends_with(".json") {
+                continue;
+            }
+            total += 1;
+            let Some(created) = parse_initialize_stamp(&name) else {
+                // 判不准：不认识的文件名绝不删
+                kept.push(json!({ "file": name, "reason": "unparsable_name" }));
+                continue;
+            };
+            let name_old = now.signed_duration_since(created) >= retention;
+            let mtime = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .map(chrono::DateTime::<chrono::Utc>::from);
+            let mtime_old = mtime
+                .map(|mtime| now.signed_duration_since(mtime) >= retention)
+                .unwrap_or(false);
+            if !name_old || !mtime_old {
+                if !name_old {
+                    // 保留期内是正常形态，只计数，不逐条写审计（避免审计本身无限增长）
+                    within_retention += 1;
+                } else {
+                    kept.push(json!({
+                        "file": name,
+                        "createdAt": created.to_rfc3339(),
+                        "reason": "mtime_not_older_than_threshold"
+                    }));
+                }
+                continue;
+            }
+            candidates.push(json!({
+                "file": name,
+                "createdAt": created.to_rfc3339(),
+                "age_days": now.signed_duration_since(created).num_days()
+            }));
+        }
+
+        if candidates.is_empty() {
+            return Ok(json!({
+                "version": SESSION_RETENTION_VERSION,
+                "trigger": trigger,
+                "state": "ready",
+                "directory": "runs/_session",
+                "retention_days": retention_days,
+                "total": total,
+                "candidates_total": 0,
+                "removed_total": 0,
+                "failed_total": 0,
+                "kept_total": kept.len() as u64,
+                "within_retention_total": within_retention,
+                "removed": [],
+                "failed": [],
+                "kept": kept
+            }));
+        }
+
+        // 先记账后删除：plan 行写不进去就一条都不删
+        let plan = json!({
+            "version": SESSION_RETENTION_VERSION,
+            "phase": "plan",
+            "at": now_stamp(),
+            "trigger": trigger,
+            "retention_days": retention_days,
+            "within_retention_total": within_retention,
+            "candidates": candidates,
+            "kept": kept
+        });
+        self.append_session_retention_record(&plan)
+            .map_err(|error| format!("{error}；本轮未删除任何 _session 记录"))?;
+
+        let mut removed: Vec<Value> = Vec::new();
+        let mut failed: Vec<Value> = Vec::new();
+        for candidate in &candidates {
+            let name = candidate["file"].as_str().unwrap_or_default().to_string();
+            match fs::remove_file(dir.join(&name)) {
+                Ok(()) => removed.push(json!({
+                    "file": name,
+                    "createdAt": candidate["createdAt"],
+                    "age_days": candidate["age_days"],
+                    "outcome": "deleted"
+                })),
+                Err(error) => failed.push(json!({
+                    "file": name,
+                    "error": error.to_string()
+                })),
+            }
+        }
+        let result = json!({
+            "version": SESSION_RETENTION_VERSION,
+            "phase": "result",
+            "at": now_stamp(),
+            "trigger": trigger,
+            "retention_days": retention_days,
+            "removed_total": removed.len() as u64,
+            "failed_total": failed.len() as u64,
+            "kept_total": kept.len() as u64,
+            "within_retention_total": within_retention,
+            "removed": removed,
+            "failed": failed,
+            "kept": kept
+        });
+        if let Err(error) = self.append_session_retention_record(&result) {
+            return Err(format!(
+                "session_retention_audit_failed: 已删除 {} 条、失败 {} 条，但结果行写入 {SESSION_RETENTION_AUDIT} 失败：{error}",
+                result["removed_total"].as_u64().unwrap_or(0),
+                result["failed_total"].as_u64().unwrap_or(0)
+            ));
+        }
+        Ok(json!({
+            "version": SESSION_RETENTION_VERSION,
+            "trigger": trigger,
+            "state": "ready",
+            "directory": "runs/_session",
+            "retention_days": retention_days,
+            "total": total,
+            "candidates_total": candidates.len() as u64,
+            "removed_total": result["removed_total"],
+            "failed_total": result["failed_total"],
+            "kept_total": result["kept_total"],
+            "within_retention_total": result["within_retention_total"],
+            "removed": result["removed"],
+            "failed": result["failed"],
+            "kept": kept
+        }))
+    }
+
+    /// `_session` 保留审计：append-only JSONL，写一行并 fsync；失败必须让调用方看到
+    fn append_session_retention_record(&self, record: &Value) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.runs_dir.join(SESSION_RETENTION_AUDIT);
+        let line = serde_json::to_string(record).map_err(|error| {
+            format!("session_retention_audit_failed: 序列化审计记录失败：{error}")
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                format!(
+                    "session_retention_audit_failed: 打开 runs/{SESSION_RETENTION_AUDIT} 失败：{error}"
+                )
+            })?;
+        writeln!(file, "{line}").map_err(|error| {
+            format!(
+                "session_retention_audit_failed: 写入 runs/{SESSION_RETENTION_AUDIT} 失败：{error}"
+            )
+        })?;
+        file.sync_all().map_err(|error| {
+            format!(
+                "session_retention_audit_failed: 同步 runs/{SESSION_RETENTION_AUDIT} 失败：{error}"
+            )
+        })?;
+        Ok(())
+    }
+
     /// 只读扫描 `.inflight/*.json`；非 .json 的临时文件不参与枚举，符号链接不跟随
     fn scan_inflight_markers(
         &self,
@@ -1747,14 +2106,113 @@ impl Server {
         };
         // 活跃标记覆盖整个调用生命周期：正常返回、提前报错、被阻断都会在 Drop 时删除
         let _inflight = self.acquire_inflight_marker(task_id, mode, args)?;
+        // 取消登记同样覆盖整个调用；重投方复用胜者句柄，不抢所有权
+        let (cancel, cancel_owner) = self.register_cancel(task_id);
+        let _cancel_guard = CancelRegistration {
+            server: self,
+            task_id: task_id.to_string(),
+            token: Arc::clone(&cancel),
+            owner: cancel_owner,
+        };
         match standalone {
-            false => self.execute_dispatched(args, task_id),
-            true => self.execute_standalone(args, task_id),
+            false => self.execute_dispatched(args, task_id, &cancel),
+            true => self.execute_standalone(args, task_id, &cancel),
         }
     }
 
+    /// 显式取消：只对本进程正在执行的 task_id 生效。
+    ///
+    /// 语义边界（写死，避免谎报）：
+    /// - 找不到执行句柄 → `status=not_running`，不发送任何信号、不宣称已清理；
+    /// - 找到 → 置位取消标记，由持有子进程的执行线程完成终止与回执落盘；
+    ///   本工具只等回执，不跨线程直接杀进程；
+    /// - 回执状态必须是 `canceled`；若执行在取消生效前已正常结束，如实返回 `completed_before_cancel`；
+    /// - 等不到回执 → `cancel_requested`，明写「尚未观测到清理结果」。
+    fn task_cancel(&self, args: &Value) -> Result<Value, String> {
+        let task_id = required_str(args, "task_id")?;
+        if !is_valid_task_id(task_id) {
+            return Err(format!("task_id 非法：{task_id}"));
+        }
+        let reason = args
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if let Some(value) = &reason {
+            // schema 声明 maxLength=1024，这里同源拒绝：超长理由不落盘、不发信号
+            if value.chars().count() > 1024 {
+                return Err("reason 超过 1024 字符：invalid_reason".to_string());
+            }
+        }
+        let token = {
+            let map = self
+                .cancel_tokens
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            map.get(task_id).cloned()
+        };
+        let Some(token) = token else {
+            // 看不到 = 不作任何清理宣称；磁盘上的残标只作为观测事实附回
+            return Ok(json!({
+                "task_id": task_id,
+                "status": "not_running",
+                "canceled": false,
+                "cleanup_claimed": false,
+                "inflight_marker": self.inflight_snapshot(task_id),
+                "message": "本进程没有该 task_id 的可取消执行：未向任何进程发送信号，未做任何清理；inflight_marker 只是磁盘观测，不代表进程状态"
+            }));
+        };
+        token.request(reason.clone());
+        let finished = token.wait_finished(Duration::from_secs(CANCEL_WAIT_SECS));
+        let handback = latest_attempt_dir(&self.runs_dir.join(task_id))
+            .and_then(|(_, dir)| read_json(&dir.join("handback.json")).ok());
+        let handback_status = handback
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let blocked_reason = handback
+            .as_ref()
+            .and_then(|value| value.get("blocked_reason"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let status = if !finished {
+            "cancel_requested"
+        } else {
+            match handback_status.as_deref() {
+                Some("canceled") => "canceled",
+                Some("ok") | Some("failed") | Some("blocked") => "completed_before_cancel",
+                _ => "cancel_requested",
+            }
+        };
+        Ok(json!({
+            "task_id": task_id,
+            "status": status,
+            "canceled": status == "canceled",
+            // 只有回执明确写了 canceled 才允许把清理措辞当成本次取消的结果
+            "cleanup_claimed": status == "canceled",
+            "finished_observed": finished,
+            "handback_status": handback_status,
+            "handback": handback,
+            "cleanup_detail": blocked_reason,
+            "requested_reason": reason,
+            "message": match status {
+                "canceled" => "取消已生效：执行线程完成终止并落盘 canceled 回执",
+                "completed_before_cancel" => "取消请求到达前执行已结束；未终止任何仍在运行的进程",
+                "cancel_requested" => "已发出取消请求，但尚未观测到 canceled 回执；不得据此认为进程已清理",
+                _ => ""
+            }
+        }))
+    }
+
     /// dispatched（缺省）：外部（PM）派单。AW 只执行、交回执、不验收、不判停（既有契约逐字不变）
-    fn execute_dispatched(&self, args: &Value, task_id: &str) -> Result<Value, String> {
+    fn execute_dispatched(
+        &self,
+        args: &Value,
+        task_id: &str,
+        cancel: &CancelToken,
+    ) -> Result<Value, String> {
         // standalone-only 字段在 dispatched 下必须显式拒绝：不许让调用方误以为 AW 会按这些字段验收
         for field in ["argv", "acceptance", "max_attempts"] {
             if args
@@ -1881,38 +2339,49 @@ impl Server {
         let started = Instant::now();
         let deadline = Duration::from_secs(timeout_secs);
         let mut timed_out = false;
+        // 启动前就收到取消：不启动任何进程，也就没有任何"已清理"的宣称
+        let mut canceled = cancel.is_canceled();
         let mut cleanup_outcome = None;
         let mut spawn_error: Option<String> = None;
         let mut supervisor = process_scope::Supervisor::new();
         supervisor.configure(&mut command);
-        let exit_status = match command.spawn() {
-            Ok(mut child) => {
-                supervisor.attach(&mut child);
-                if let Some(error) = supervisor.attach_error().map(str::to_string) {
-                    // 恢复执行失败：子进程已被终止，不能把"从未执行"记成命令结果
-                    let _ = child.wait();
-                    spawn_error = Some(error);
-                    None
-                } else {
-                    loop {
-                        match child.try_wait() {
-                            Ok(Some(status)) => break Some(status),
-                            Ok(None) => {
-                                if started.elapsed() >= deadline {
-                                    timed_out = true;
-                                    cleanup_outcome = Some(supervisor.terminate(&mut child));
-                                    break None;
+        let exit_status = if canceled {
+            None
+        } else {
+            match command.spawn() {
+                Ok(mut child) => {
+                    supervisor.attach(&mut child);
+                    if let Some(error) = supervisor.attach_error().map(str::to_string) {
+                        // 恢复执行失败：子进程已被终止，不能把"从未执行"记成命令结果
+                        let _ = child.wait();
+                        spawn_error = Some(error);
+                        None
+                    } else {
+                        loop {
+                            match child.try_wait() {
+                                Ok(Some(status)) => break Some(status),
+                                Ok(None) => {
+                                    if cancel.is_canceled() {
+                                        canceled = true;
+                                        cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                        break None;
+                                    }
+                                    if started.elapsed() >= deadline {
+                                        timed_out = true;
+                                        cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                        break None;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(20));
                                 }
-                                std::thread::sleep(Duration::from_millis(20));
+                                Err(error) => return Err(format!("等待进程失败：{error}")),
                             }
-                            Err(error) => return Err(format!("等待进程失败：{error}")),
                         }
                     }
                 }
-            }
-            Err(error) => {
-                spawn_error = Some(format!("command_not_found: 启动命令失败：{error}"));
-                None
+                Err(error) => {
+                    spawn_error = Some(format!("command_not_found: 启动命令失败：{error}"));
+                    None
+                }
             }
         };
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -1920,9 +2389,14 @@ impl Server {
         let stdout_digest = digest_file(&stdout_path)?;
         let stderr_digest = digest_file(&stderr_path)?;
         let blocked_reason = spawn_error
+            .or_else(|| {
+                canceled.then(|| cancel_reason(cancel.reason().as_deref(), cleanup_outcome))
+            })
             .or_else(|| timed_out.then(|| timeout_reason(timeout_secs, cleanup_outcome)));
         let exit_code = exit_status.and_then(|status| status.code());
-        let status = if blocked_reason.is_some() {
+        let status = if canceled {
+            "canceled"
+        } else if blocked_reason.is_some() {
             "blocked"
         } else if exit_code == Some(0) {
             "ok"
@@ -2040,7 +2514,12 @@ impl Server {
     }
 
     /// standalone：没有外部派单方时由 AW 自己闭环——执行、按任务声明的 acceptance 判定、失败有界重试
-    fn execute_standalone(&self, args: &Value, task_id: &str) -> Result<Value, String> {
+    fn execute_standalone(
+        &self,
+        args: &Value,
+        task_id: &str,
+        cancel: &CancelToken,
+    ) -> Result<Value, String> {
         let spec = match StandaloneSpec::parse(args) {
             Ok(spec) => spec,
             Err(reason) => return Ok(standalone_blocked_receipt(task_id, reason)),
@@ -2092,13 +2571,18 @@ impl Server {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
             let before = git_paths(&spec.cwd);
-            let run = run_standalone_command(&spec, &run_dir)?;
+            let run = run_standalone_command(&spec, &run_dir, cancel)?;
             let after = git_paths(&spec.cwd);
             let (changed_files, changed_files_truncated) = changed_between(&before, &after);
 
             let (criteria, missing, all_passed) = evaluate_acceptance(&spec, &run);
-            let (conclusion, action, reason, last_failure) =
+            let (mut conclusion, mut action, reason, last_failure) =
                 decide_standalone(&run, &missing, all_passed, &spec, attempt);
+            // 显式取消优先于验收判定：被取消的尝试必须停在 canceled，不能因为退码 0 被记成 passed
+            if run.canceled {
+                conclusion = "canceled".to_string();
+                action = "terminate".to_string();
+            }
 
             let verdict = json!({
                 "version": "standalone-verdict/1",
@@ -2151,10 +2635,13 @@ impl Server {
             let status = match conclusion.as_str() {
                 "passed" => "ok",
                 "failed" => "failed",
+                "canceled" => "canceled",
                 _ => "blocked",
             };
             let blocked_reason = if status == "blocked" {
                 Some(standalone_blocked_detail(&run, &missing))
+            } else if status == "canceled" {
+                run.blocked_reason.clone()
             } else {
                 None
             };
@@ -2331,6 +2818,39 @@ fn write_dispatch(run_dir: &Path, signature: &Value) -> Result<(), String> {
 /// 证据时间戳统一口径：RFC3339 / UTC / 秒级（`Z` 结尾），`dispatchedAt` 与 `finishedAt` 共用
 fn now_stamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// `_session` 保留天数：环境变量覆盖，未设置/空白取默认；非法值明确报错而不是静默回退。
+fn parse_session_retention_days() -> Result<i64, String> {
+    let raw = match std::env::var(SESSION_RETENTION_ENV) {
+        Ok(raw) if !raw.trim().is_empty() => raw,
+        _ => return Ok(SESSION_RETENTION_DEFAULT_DAYS),
+    };
+    let days: i64 = raw.trim().parse().map_err(|_| {
+        format!(
+            "invalid_session_retention: {SESSION_RETENTION_ENV} 必须是 1..=3650 的整数，收到：{raw}"
+        )
+    })?;
+    if !(1..=3650).contains(&days) {
+        return Err(format!(
+            "invalid_session_retention: {SESSION_RETENTION_ENV} 必须是 1..=3650 的整数，收到：{days}"
+        ));
+    }
+    Ok(days)
+}
+
+/// 从 `initialize-<pid>-<毫秒时间戳>-<seq>.json` 解析创建时刻。
+/// 解析不出来返回 None：调用方必须保留，不得按 mtime 猜。
+fn parse_initialize_stamp(name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let body = name.strip_prefix("initialize-")?.strip_suffix(".json")?;
+    let mut parts = body.split('-');
+    let _pid = parts.next()?;
+    let millis = parts.next()?.parse::<i64>().ok()?;
+    let _seq = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_millis(millis)
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
@@ -2796,6 +3316,8 @@ mod process_scope {
             pub(crate) fn configure(&mut self, command: &mut Command) {
                 command.process_group(0);
                 #[cfg(target_os = "linux")]
+                install_pdeathsig_pre_exec(command);
+                #[cfg(target_os = "linux")]
                 {
                     match CgroupScope::prepare() {
                         Ok(scope) => match scope.writer() {
@@ -3204,6 +3726,36 @@ mod process_scope {
 
         #[cfg(target_os = "linux")]
         static SCOPE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        /// bridge 猝死时连带收掉直接子进程（Linux 缺口兜底）。
+        ///
+        /// `PR_SET_PDEATHSIG` 的特点是：
+        /// - 在 fork 出的子进程里设置，跨越 exec 保留；
+        /// - 只在"父进程死亡"这一刻由内核投递一次信号，之后不影响正常退出；
+        /// - **不会遗传给孙进程**（fork 时清零）。因此这里只保证 bridge 的直接子进程被收掉；
+        ///   子进程自己 fork 出来的后代仍会 reparent 到 init 继续运行。该限制必须如实写入
+        ///   契约与 capability（Windows 作业对象是整棵树，两者不可混为一谈）。
+        ///
+        /// 竞态：父进程可能在 fork 与 `prctl` 之间死亡，此时 PDEATHSIG 已来不及生效。
+        /// 设完立即复查 `getppid()`；如果不等于预期的 bridge pid，说明父已死，直接 `_exit`
+        /// 而不是去执行用户命令。`pre_exec` 里只能用异步信号安全的调用，这里都用 libc。
+        #[cfg(target_os = "linux")]
+        fn install_pdeathsig_pre_exec(command: &mut Command) {
+            use std::os::unix::process::CommandExt;
+            let parent_pid = std::process::id() as libc::pid_t;
+            unsafe {
+                command.pre_exec(move || {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::getppid() != parent_pid {
+                        // 父进程已经死了：不再执行任何用户代码，直接退出
+                        libc::_exit(128);
+                    }
+                    Ok(())
+                });
+            }
+        }
 
         /// 在 fork 之后、exec 之前把自身 PID 写进 `cgroup.procs`。
         ///
@@ -5811,6 +6363,42 @@ fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutco
     }
 }
 
+/// 取消回执措辞：与 timeout 同为三态分流，但前缀固定 `canceled：`，调用方据此与超时/失败区分。
+/// `outcome=None` 只有一种合法来源：启动前就收到取消（没有进程需要清理）。
+fn cancel_reason(
+    requested_reason: Option<&str>,
+    outcome: Option<process_scope::CleanupOutcome>,
+) -> String {
+    use process_scope::CleanupOutcome;
+    let suffix = requested_reason
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("；请求方理由：{value}"))
+        .unwrap_or_default();
+    match outcome {
+        Some(CleanupOutcome::Cleaned) => {
+            #[cfg(windows)]
+            {
+                format!(
+                    "canceled：收到 task.cancel，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建并先加入作业再恢复执行；BREAKAWAY 或加入作业失败的作业外进程仍不可观测{suffix}"
+                )
+            }
+            #[cfg(not(windows))]
+            {
+                format!("canceled：收到 task.cancel，已清理受控集合；逃逸进程是否仍在运行未验证{suffix}")
+            }
+        }
+        Some(CleanupOutcome::StillAlive) => format!(
+            "canceled：收到 task.cancel，已向受控集合发送终止信号，但受控集合内仍有存活进程，或快照仍枚举到存活后代；集合外后代是否仍存活取决于观测作用域（见 capabilities.timeout.enumerates_escaped_descendants）{suffix}"
+        ),
+        Some(CleanupOutcome::Unavailable) => format!(
+            "canceled：收到 task.cancel，但受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证{suffix}"
+        ),
+        None => {
+            format!("canceled：在启动任何进程之前收到 task.cancel，未启动任何进程，无清理动作{suffix}")
+        }
+    }
+}
+
 fn digest_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
@@ -7230,12 +7818,17 @@ struct StandaloneRun {
     stderr_truncated: bool,
     duration_ms: u64,
     timed_out: bool,
+    canceled: bool,
     spawn_error: Option<String>,
     blocked_reason: Option<String>,
 }
 
 /// 不经 shell：直接启动 argv[0]，其余参数逐项传入；current_dir 固定为 cwd
-fn run_standalone_command(spec: &StandaloneSpec, run_dir: &Path) -> Result<StandaloneRun, String> {
+fn run_standalone_command(
+    spec: &StandaloneSpec,
+    run_dir: &Path,
+    cancel: &CancelToken,
+) -> Result<StandaloneRun, String> {
     let stdout_path = run_dir.join("stdout.txt");
     let stderr_path = run_dir.join("stderr.txt");
     let stdout_file =
@@ -7253,37 +7846,47 @@ fn run_standalone_command(spec: &StandaloneSpec, run_dir: &Path) -> Result<Stand
     let started = Instant::now();
     let deadline = Duration::from_secs(spec.timeout_secs);
     let mut timed_out = false;
+    let mut canceled = cancel.is_canceled();
     let mut cleanup_outcome = None;
     let mut spawn_error: Option<String> = None;
     let mut supervisor = process_scope::Supervisor::new();
     supervisor.configure(&mut command);
-    let exit_status = match command.spawn() {
-        Ok(mut child) => {
-            supervisor.attach(&mut child);
-            if let Some(error) = supervisor.attach_error().map(str::to_string) {
-                let _ = child.wait();
-                spawn_error = Some(error);
-                None
-            } else {
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => break Some(status),
-                        Ok(None) => {
-                            if started.elapsed() >= deadline {
-                                timed_out = true;
-                                cleanup_outcome = Some(supervisor.terminate(&mut child));
-                                break None;
+    let exit_status = if canceled {
+        None
+    } else {
+        match command.spawn() {
+            Ok(mut child) => {
+                supervisor.attach(&mut child);
+                if let Some(error) = supervisor.attach_error().map(str::to_string) {
+                    let _ = child.wait();
+                    spawn_error = Some(error);
+                    None
+                } else {
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) => break Some(status),
+                            Ok(None) => {
+                                if cancel.is_canceled() {
+                                    canceled = true;
+                                    cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                    break None;
+                                }
+                                if started.elapsed() >= deadline {
+                                    timed_out = true;
+                                    cleanup_outcome = Some(supervisor.terminate(&mut child));
+                                    break None;
+                                }
+                                std::thread::sleep(Duration::from_millis(20));
                             }
-                            std::thread::sleep(Duration::from_millis(20));
+                            Err(error) => return Err(format!("等待进程失败：{error}")),
                         }
-                        Err(error) => return Err(format!("等待进程失败：{error}")),
                     }
                 }
             }
-        }
-        Err(error) => {
-            spawn_error = Some(format!("standalone_spawn_failed: 启动程序失败：{error}"));
-            None
+            Err(error) => {
+                spawn_error = Some(format!("standalone_spawn_failed: 启动程序失败：{error}"));
+                None
+            }
         }
     };
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -7309,6 +7912,7 @@ fn run_standalone_command(spec: &StandaloneSpec, run_dir: &Path) -> Result<Stand
     let (stderr_preview, stderr_bytes, stderr_truncated) = file_preview(&stderr_path);
     let blocked_reason = spawn_error
         .clone()
+        .or_else(|| canceled.then(|| cancel_reason(cancel.reason().as_deref(), cleanup_outcome)))
         .or_else(|| timed_out.then(|| timeout_reason(spec.timeout_secs, cleanup_outcome)));
     Ok(StandaloneRun {
         exit_code: exit_status.and_then(|status| status.code()),
@@ -7322,6 +7926,7 @@ fn run_standalone_command(spec: &StandaloneSpec, run_dir: &Path) -> Result<Stand
         stderr_truncated,
         duration_ms,
         timed_out,
+        canceled,
         spawn_error,
         blocked_reason,
     })
@@ -8173,7 +8778,7 @@ fn tools() -> Value {
         },
         {
             "name": "task.execute",
-            "description": "接单执行，两种运行模式必须显式区分。dispatched（缺省，外部派单）：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。standalone（mode=standalone，无外部派单方）：由 AW 自行闭环，必须显式给出 cwd/argv/acceptance，按每条验收标准逐 attempt 判定，把依据哪条标准、观测到什么、结论一起落盘 verdict.json，结论三态 passed/failed/undetermined；undetermined 即无法判定绝不默认通过并说明缺什么；只有 failed 且 attempt < max_attempts 才重试，每次尝试独立记录、不覆盖，耗尽写 retry_exhausted。两种模式互斥，同一 task_id 不得跨模式复用。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号；终止只尝试一次（不重试），仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树",
+            "description": "接单执行，两种运行模式必须显式区分。dispatched（缺省，外部派单）：由派单方给出命令，执行并把 stdout/stderr、退出码、耗时、产物哈希写成可审计回执（含实际 cwd、生效 timeout_secs、env_keys、changed_files 是否截断）；AW 不定义判据、不做验收。standalone（mode=standalone，无外部派单方）：由 AW 自行闭环，必须显式给出 cwd/argv/acceptance，按每条验收标准逐 attempt 判定，把依据哪条标准、观测到什么、结论一起落盘 verdict.json，结论三态 passed/failed/undetermined；undetermined 即无法判定绝不默认通过并说明缺什么；只有 failed 且 attempt < max_attempts 才重试，每次尝试独立记录、不覆盖，耗尽写 retry_exhausted。两种模式互斥，同一 task_id 不得跨模式复用。超时只向受控集合（POSIX 进程组 / Windows Job Object）发送终止信号；终止只尝试一次（不重试），仅当观测到集合内无存活进程才写「已清理受控集合」，并注明逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建、先加入作业再恢复执行（恢复前不会派生子进程），但 BREAKAWAY 或加入作业失败的作业外进程仍不可观测。不承诺终止整棵进程树。执行期间可由 task.cancel 按 task_id 显式取消：取消生效时回执 status=canceled（与超时 blocked、执行失败 failed 区分），blocked_reason 以 canceled： 开头；取消请求在进程启动前到达则不启动任何进程",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -8235,6 +8840,19 @@ fn tools() -> Value {
             }
         },
         {
+            "name": "task.cancel",
+            "description": "按 task_id 显式取消本进程正在执行的任务（只读查询没有意义，找不到执行就什么都不做）。只影响由当前 bridge 进程持有子进程的那次执行：置位取消标记后由执行线程对受控集合（POSIX 进程组 / Windows Job Object）执行与超时相同的终止流程，并等 canceled 回执落盘。返回 status：canceled（回执已落盘且确为 canceled）、completed_before_cancel（取消到达前已结束，未终止任何进程）、cancel_requested（已请求但未观测到回执，不得认为已清理）、not_running（本进程看不到该 task_id：未发送信号、未做清理，inflight_marker 仅为磁盘观测）。取消的观测口径与超时一致：只有观测到受控集合内无存活进程才写「已清理受控集合」，逃逸进程是否仍在运行未验证；看不到的进程不会谎报已清理。跨进程不可见：另一个 bridge 上的执行无法被本工具取消，需由持有子进程的进程取消，或用 runs.inflight 判定残标",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string", "description": "要取消的派单标识（与 task.execute 同一命名规则：字母或数字开头，仅含字母数字 . _ -，≤64）" },
+                    "reason": { "type": "string", "maxLength": 1024, "description": "可选：取消理由，写入回执 blocked_reason 的「请求方理由」并保留在取消响应里；不做任何推断" }
+                },
+                "required": ["task_id"],
+                "additionalProperties": false
+            }
+        },
+        {
             "name": "receipt.get",
             "description": "按 task_id 读回执行回执：默认返回最新一次；include_history=true 时返回 attempts 次数与全部历史（每次 exit_code 与耗时）",
             "inputSchema": {
@@ -8281,7 +8899,7 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": {
                     "older_than_days": { "type": "integer", "minimum": 1, "maximum": 3650, "description": "必填：只清理 finishedAt 距今不少于该天数的 attempt。PM 口径统一推荐 365 天；仍须显式传入，不提供隐式默认阈值，缺省按 invalid_retention 拒绝" },
-                    "status": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "enum": ["ok", "failed", "blocked"] }, "description": "可选：状态多值白名单，显式传入才生效；缺省不过滤（与旧行为一致）。仅 handback.status 精确匹配才进入候选，与 older_than_days 为 AND；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档" },
+                    "status": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "enum": ["ok", "failed", "blocked", "canceled"] }, "description": "可选：状态多值白名单，显式传入才生效；缺省不过滤（与旧行为一致）。仅 handback.status 精确匹配才进入候选，与 older_than_days 为 AND；空数组/null/未知值按 invalid_retention 拒绝；无默认状态、无服务端分档" },
                     "exclude": {
                         "type": "array",
                         "minItems": 1,
