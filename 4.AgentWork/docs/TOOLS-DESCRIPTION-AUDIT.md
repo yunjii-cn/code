@@ -1255,7 +1255,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "37f7f9b0ee7d121e3f588bb65459fdedb7266d17ed744028204f915499dbcd5b",
+  "tools_sha256": "a3591dbfe339e2ddb61400bd810ca58e17faf7b098756b044f186cb4cce88084",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1416,6 +1416,7 @@ cargo test -p aw-mcp-bridge description_gate
 | 终止只尝试一次（v1.24） | `task.execute` 与 `timeout_secs` 描述必须写明「终止只尝试一次（不重试）」「只有观测到集合内无存活进程才写「已清理受控集合」」；不得出现「自动重试」；两平台压力用例必须证明一次终止后判据归零（POSIX `kill(-pgid,0)==ESRCH`、Windows `ActiveProcesses==0`） |
 | 能力边界可判定（v1.32） | `capabilities.entries[]` 必须逐条含 `id`/`holds`/`status`/`scope`/`reason_code`/`platforms_verified`/`platforms_unverified`/`automatic`；`status` 必须落在枚举内；`holds=false` 必须有非空原因码；`#3` 整树、逃逸枚举、POSIX 覆盖、TOCTOU、自动清扫五个限制必须有具名条目；`entries_total`/`not_proven_total` 可核对 |
 | 残留标记可观察可清（v1.32） | `runs.inflight action=list` 必须对构造的 `pid` 消失+超时标记给出 `stale=true`/`stale_reason=pid_missing`；`pid` 存活的活跃标记即使 deadline 已过也必须 `stale=false`；默认 `clean` 只出 `would_remove`；真删需 `confirm`；清理后残留文件消失、活跃文件保留、二次清理幂等；正常执行结束无残留；坏 JSON 保留并记 `unreadable` |
+| PM 判活口径统一（v1.32.1） | `runs.inflight action=list` 必须回传 `liveness_rule`：`authoritative_fields` 恰为 `["markers[].task_id","markers[].stale"]`；`cleanup_fields` 恰为 `["markers[].removable"]`；`diagnostic_fields` 含 `pid`/`pid_alive`/`stale_reason`/`age_secs`；`not_liveness_evidence` 含 `attempt_missing_handback`/`attempt_missing_dispatch`/`raw_marker_file_presence`；`fallback.allowed=false`；契约 §2.8 写死同一口径 |
 
 ### 21.5 仍然只能靠人的部分（不做自动覆盖）
 
@@ -1428,6 +1429,7 @@ cargo test -p aw-mcp-bridge description_gate
 | "一次终止即足够"的跨环境普适性（v1.24） | 门禁与两平台用例只能证明本机（Windows 作业对象 / WSL Ubuntu 24.04 内核）在这些夹具下成立；内核调度、D 状态、NFS 等等待无法在本环境穷举。可自动验证的是"未观测到空只能报 StillAlive"与"一次终止后判据归零"两个方向 |
 | `additionalProperties:false` 对严格客户端的效果 | 严格客户端可能在发送前就拒绝未知参数，服务端观测不到；门禁只验证服务端"自己不拒绝" |
 | 残留判定对真实崩溃的普适性（v1.32） | 用例构造的是"pid 数字不存在 + 时间已过"的确定性夹具；真实崩溃后 pid 复用、进程僵死/挂起、时间回拨等无法穷举。能自动验证的是"存活 pid 绝不判残留"与"消失 pid + 超宽限必判残留"两个方向 |
+| POSIX 活性判定的平台差异（v1.32.1） | WSL 全量用例在 Linux 上跑通，但 POSIX 上 rename 活跃 attempt 目录、进程组逃逸等语义未单独构造；`platform.posix_inflight_semantics_verified` 保持 `partial`。macOS 仍未验证 |
 | 三态文案在真实超时下的分支归属 | 需要真实进程/竞态；门禁只保证文案函数与描述一致，真实分支由 POSIX/Windows 证据用例覆盖 |
 | 回执内容（stdout/stderr 正文、耗时、产物哈希）的运行时正确性 | 依赖真实执行环境与文件系统状态；门禁只对齐描述措辞，正确性由执行层用例承担 |
 
@@ -3096,4 +3098,139 @@ dry-run（`action=clean`，默认）：
 - 自动清扫：`inflight.stale_markers_auto_swept=false`、`explicit_cleanup_required`；清理必须显式调用，不是后台定时。
 - 残留判定的盲区（pid 复用、僵死/挂起、时间回拨）未在本机穷举，见 §21.5；用例锁定的是"存活 pid 永不判残留"与"消失 pid + 超宽限必判残留"两个方向。
 - `tools/list` 描述新增 G17–G19 行，`tools_sha256` 更新为 `37f7f9b0ee7d121e3f588bb65459fdedb7266d17ed744028204f915499dbcd5b`。
-- **平台覆盖如实标注**：v1.32 的 5 条新用例只在 Windows 实跑；WSL 当前找不到 cargo，未复跑 POSIX，因此 `inflight.stale_marker_observable` / `inflight.stale_marker_cleanable` / `inflight.stale_markers_auto_swept` / `inflight.clean_preserves_active_markers` 的 `platforms_verified` 只写 `["windows"]`，`platforms_unverified` 写 `["linux","macos"]`；`platform.posix_inflight_semantics_verified` 保持 `false/partial/posix_unverified`，没有因为新增查询工具而上调。
+- **平台覆盖如实标注**：v1.32 的 5 条新用例只在 Windows 实跑；WSL 当前找不到 cargo，未复跑 POSIX，因此 `inflight.stale_marker_observable` / `inflight.stale_marker_cleanable` / `inflight.stale_markers_auto_swept` / `inflight.clean_preserves_active_markers` 的 `platforms_verified` 只写 `["windows"]`，`platforms_unverified` 写 `["linux","macos"]`；`platform.posix_inflight_semantics_verified` 保持 `false/partial/posix_unverified`，没有因为新增查询工具而上调。（该状态已由 §34 更新：四条的 `platforms_verified` 现为 `["windows","linux"]`，`platforms_unverified` 仅剩 `["macos"]`。）
+
+## 34. v1.32.1：POSIX 双侧复跑 + PM 判活口径（红→绿）
+
+### 34.1 WSL `cargo` 缺失的诊断（原始输出）
+
+WSL 侧唯一发行版为 `HostGoTest`（`wsl -l -v` 只有这一条，STATE 为 Stopped），`/etc/os-release`：
+
+```text
+PRETTY_NAME="Ubuntu 24.04 LTS"
+NAME="Ubuntu"
+VERSION="24.04 LTS (Noble Numbat)"
+```
+
+诊断脚本由 Windows 侧写入、经 `/mnt/d` 在 WSL 执行（避免 PowerShell 提前展开 `$?`），原始输出：
+
+```text
+which cargo
+which_rc=1
+
+ls -la /root/.cargo/bin
+ls: cannot access '/root/.cargo/bin': No such file or directory
+ls_rc=2
+
+command -v rustc
+rustc_rc=1
+```
+
+`command -v cargo` 的输出为 `CARGO_NOT_FOUND`，`command -v rustup` 为 `RUSTUP_NOT_FOUND`。PATH 中与 cargo 有关的只有 Windows 侧挂载（节选）：`/mnt/d/AppData/cargo/bin`、`/mnt/c/Users/Administrator/.cargo/bin`。结论：**不是 PATH 拼接问题**，而是 Linux 侧的 rustup shim（`~/.cargo/bin`）从未安装；Windows 的 `cargo.exe` 不会在 Linux 上解析为 `cargo`。
+
+已有可直接使用的工具链（即使没有 rustup shim）：
+
+```text
+ls /root/.rustup/toolchains
+1.88.0-x86_64-unknown-linux-gnu
+1.88.0-x86_64-unknown-linux-musl
+
+/root/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu/bin/cargo --version
+cargo 1.88.0 (873a06493 2025-05-10)
+```
+
+### 34.2 rustup 最小安装：卡在下载，原始报错
+
+（1）用 `curl` 直接取官方 `rustup-init`：
+
+```text
+curl: (28) Operation timed out after 120001 milliseconds with 1136884 out of 21347088 bytes received
+```
+
+（2）改走 rsproxy 镜像取同一个二进制：
+
+```text
+curl: (28) Operation timed out after 90000 milliseconds with 707396 bytes received
+```
+
+（3）此前三次 `rustup-init -y --profile minimal ...` 安装均在 `rustup-init` 下载阶段超时，由工具层 10 分钟超时终止（进程退出码 15）；其中包含 `--default-toolchain none --no-modify-path` 与设置 `RUSTUP_DIST_SERVER=https://rsproxy.cn` / `RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup` 的两次，结果相同。端点本身可达（探测返回 `HTTP/2 200`），但有效带宽约 6–9 KB/s，21 MB 的 `rustup-init` 无法在可接受时间内完成。
+
+结论：**卡在 rustup-init 二进制下载的带宽上，不是“环境不支持”**；`/root/.cargo/bin` 从未生成，因此没有 `cargo` shim。复跑改用上述已存在的 1.88.0 工具链，以下测试结果均由 `cargo 1.88.0` 实跑。
+
+### 34.3 复跑环境与一次真实的红灯（文档快照）
+
+精简工作区：`/root/.aw-posix-verify/src`（只含 `apps/mcp-bridge` 成员）+ vendored 依赖 `/root/vendor`；`server.rs` 与仓库工作区逐字节同步（`sha256=18f4616ad113c56e15755d6ad6980182f672482f85d0a92ec48632b6c813c95a`）。
+
+首次全量在 WSL 上跑时，`description_gate_snapshot_matches_audit` 真实红（验证工作区里的审计快照仍是 v1.32 的旧摘要）：
+
+```text
+assertion `left == right` failed: tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。实际=a3591dbfe339e2ddb61400bd810ca58e17faf7b098756b044f186cb4cce88084
+  left: "a3591dbfe339e2ddb61400bd810ca58e17faf7b098756b044f186cb4cce88084"
+ right: "37f7f9b0ee7d121e3f588bb65459fdedb7266d17ed744028204f915499dbcd5b"
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+把审计快照同步为 `a3591db...` 后全量：
+
+```text
+running 9 tests
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+running 115 tests
+test result: ok. 115 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+### 34.4 红→绿：平台覆盖（HEAD v1.32 旧代码 + v1.32.1 新断言，WSL）
+
+用 `git show HEAD:4.AgentWork/apps/mcp-bridge/src/server.rs` 覆盖验证工作区副本（保留新断言），只跑新用例：
+
+```text
+test capabilities_inflight_entries_cover_current_platform ... FAILED
+thread '...' panicked at apps/mcp-bridge/tests/mcp_contract.rs:6156:9:
+inflight.stale_marker_observable 已在 linux 实跑，platforms_verified 必须包含 linux：{...,"platforms_unverified":["linux","macos"],"platforms_verified":["windows"],...}
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 114 filtered out
+```
+
+换回当前实现（四条 `inflight.*` 与 `platform.posix_inflight_semantics_verified` 的 `platforms_verified=["windows","linux"]`、`platforms_unverified=["macos"]`）：
+
+```text
+test capabilities_inflight_entries_cover_current_platform ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 114 filtered out
+```
+
+### 34.5 红→绿：PM 判活约定（HEAD 旧代码 + v1.32.1 新断言，WSL）
+
+```text
+test runs_inflight_list_exposes_pm_liveness_contract ... FAILED
+assertion `left == right` failed: {...,"stale_rule":{...},"total":1,...}
+  left: Null
+ right: "inflight-liveness/1"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 114 filtered out
+```
+
+实现 `liveness_rule` 后：
+
+```text
+test runs_inflight_list_exposes_pm_liveness_contract ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 114 filtered out
+```
+
+约定本体写在契约 §2.8；`liveness_rule` 只出现在 `action=list`（`clean` 不加），字段取值与禁止项以 §2.8 表格为准。
+
+### 34.6 全量回归与描述门禁
+
+Windows（本机）：
+
+```text
+description_gate: 3 passed (lib) + 4 passed (integration)
+running 10 tests -> test result: ok. 10 passed; 0 failed
+running 117 tests -> test result: ok. 117 passed; 0 failed
+```
+
+WSL：见 §34.3（`9 lib + 115 integration` 全绿）。`tools_sha256` 因 `runs.inflight` 描述追加判活约定而更新为 `a3591dbfe339e2ddb61400bd810ca58e17faf7b098756b044f186cb4cce88084`（§33.5 的 `37f7f9b0...` 为 v1.32 当时值，已被本节取代）；§21.4 增补“PM 判活口径统一（v1.32.1）”门禁行，§21.5 增补 POSIX 平台差异行。
+
+### 34.7 仍然存在的限制
+
+- macOS 未验证：五条能力的 `platforms_unverified` 仍含 `macos`。
+- `platform.posix_inflight_semantics_verified` 保持 `holds=false / status=partial / reason_code=posix_unverified`：POSIX 上 rename 活跃 attempt 目录的语义未单独构造复核，不因功能用例跑通而上调为 `proven`。
+- rustup shim 未安装：WSL 复跑依赖已存在的 `/root/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu`；换一台没有预置工具链、且下载带宽同样受限的机器，仍会卡在 §34.2 的同一步骤。
+- 自动清扫仍不成立（`inflight.stale_markers_auto_swept=false`），TOCTOU 未消除（`concurrency.check_then_delete_atomic=false`）。

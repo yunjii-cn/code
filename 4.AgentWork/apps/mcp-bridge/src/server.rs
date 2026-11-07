@@ -1121,6 +1121,7 @@ impl Server {
                 "state": state,
                 "directory": "runs/.inflight",
                 "stale_rule": inflight_stale_rule(),
+                "liveness_rule": inflight_liveness_rule(),
                 "total": markers.len() as u64,
                 "stale_total": stale_total,
                 "active_total": markers.len() as u64 - stale_total,
@@ -3949,6 +3950,45 @@ fn assess_inflight_marker(record: &Value, now: chrono::DateTime<chrono::Utc>) ->
     })
 }
 
+/// PM 判活约定：权威字段只有 task_id + stale；诊断字段与 attempt 启发式不得参与判活
+fn inflight_liveness_rule() -> Value {
+    json!({
+        "version": "inflight-liveness/1",
+        "authoritative_fields": ["markers[].task_id", "markers[].stale"],
+        "cleanup_fields": ["markers[].removable"],
+        "diagnostic_fields": [
+            "markers[].pid",
+            "markers[].pid_alive",
+            "markers[].stale_reason",
+            "markers[].startedAt",
+            "markers[].deadlineAt",
+            "markers[].age_secs",
+            "markers[].deadline_overdue_secs",
+            "markers[].mode",
+            "markers[].state"
+        ],
+        "decision": {
+            "task_live": "markers[] 中存在该 task_id 且 stale=false",
+            "task_not_live": "markers[] 中不存在该 task_id，或存在但 stale=true",
+            "not_live_does_not_prove": "只表示当前没有活跃执行者；不表示任务未执行、未完成或记录不可用",
+            "result_authority": "任务结果仍以 receipt.get / verdict.json / standalone-result.json 为准"
+        },
+        "not_liveness_evidence": [
+            "attempt_missing_handback",
+            "attempt_missing_dispatch",
+            "raw_marker_file_presence",
+            "marker_age",
+            "pid_number"
+        ],
+        "fallback": {
+            "allowed": false,
+            "only_when": "runs.inflight 不存在（旧版 AW）",
+            "legacy_heuristic": "任一 attempt 缺 handback.json 或 dispatch.json 视为可能活跃",
+            "warning": "legacy 结果与 AW 判定不一致，仅作降级"
+        }
+    })
+}
+
 /// 残留判据自描述：调用方不需要读源码即可复算 stale
 fn inflight_stale_rule() -> Value {
     json!({
@@ -4713,13 +4753,17 @@ fn capabilities_payload() -> Value {
             "platform.posix_inflight_semantics_verified",
             Some(false),
             "partial",
-            "POSIX 上的 inflight create_new、prune rename 到 .prune-trash、pid 存活判定",
+            "POSIX 上的 inflight create_new、stale 判定、prune 跳过与标记删除保护",
             Some("posix_unverified"),
             false,
-            &["windows"],
-            &["linux", "macos"],
-            &["posix_fixture_argv_escape"],
-            "POSIX 仅覆盖 argv 作用域夹具；标记与 rename 的跨进程语义未逐条复核。",
+            &both,
+            &["macos"],
+            &[
+                "standalone_inflight_marker_is_visible_then_removed",
+                "prune_skips_task_with_live_inflight_marker",
+                "runs_inflight_lists_and_cleans_only_stale_markers",
+            ],
+            "POSIX 与 Windows 均跑通 inflight 标记、stale 判定、prune 跳过与清理保护用例；POSIX 上 rename 活跃 attempt 目录的语义未单独构造复核，macOS 未验证。",
         ),
         capability_entry(
             "concurrency.prune_skips_known_active_task",
@@ -4764,8 +4808,8 @@ fn capabilities_payload() -> Value {
             "runs.inflight action=list：逐个标记给出 stale 与 stale_reason",
             None,
             true,
-            &["windows"],
-            &["linux", "macos"],
+            &both,
+            &["macos"],
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
             "只读查询，不修改任何标记；判据由 stale_rule 机器可读给出。",
         ),
@@ -4776,8 +4820,8 @@ fn capabilities_payload() -> Value {
             "runs.inflight action=clean：默认 dry_run，真删需 confirm",
             None,
             false,
-            &["windows"],
-            &["linux", "macos"],
+            &both,
+            &["macos"],
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
             "只删 stale=true 的标记；清理需调用方显式执行，不是自动清扫。",
         ),
@@ -4788,8 +4832,8 @@ fn capabilities_payload() -> Value {
             "无调用方操作时的自动清扫",
             Some("explicit_cleanup_required"),
             false,
-            &["windows"],
-            &["linux", "macos"],
+            &both,
+            &["macos"],
             &["runs_inflight_clean_requires_explicit_confirmation"],
             "残留标记不会自行消失；必须调用 runs.inflight action=clean。",
         ),
@@ -4800,8 +4844,8 @@ fn capabilities_payload() -> Value {
             "pid 存活优先于 deadline：活跃标记永不进入可删集合",
             None,
             false,
-            &["windows"],
-            &["linux", "macos"],
+            &both,
+            &["macos"],
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
             "删除前把标记原子改名为临时文件并复核 pid+startedAt；变化则还原保留。",
         ),
@@ -4945,7 +4989,7 @@ fn tools() -> Value {
         },
         {
             "name": "runs.inflight",
-            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选",
+            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选；并给出 PM 判活约定 liveness_rule：判活只认 markers[].task_id + markers[].stale，pid/age_secs/stale_reason 仅作诊断，attempt 缺 handback/dispatch 启发式与裸看标记文件不得用于判活，fallback.allowed=false",
             "inputSchema": {
                 "type": "object",
                 "properties": {

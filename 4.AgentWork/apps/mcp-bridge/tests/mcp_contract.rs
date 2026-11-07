@@ -6105,11 +6105,18 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(posix["status"], "partial", "{posix}");
     assert_eq!(posix["reason_code"], "posix_unverified", "{posix}");
     assert!(
+        posix["platforms_verified"]
+            .as_array()
+            .expect("platforms_verified")
+            .contains(&json!("linux")),
+        "POSIX 已跑通的用例必须机器可见：{posix}"
+    );
+    assert!(
         posix["platforms_unverified"]
             .as_array()
             .expect("platforms_unverified")
-            .contains(&json!("linux")),
-        "POSIX 未覆盖必须机器可见：{posix}"
+            .contains(&json!("macos")),
+        "未覆盖的 macOS 必须机器可见：{posix}"
     );
 
     // TOCTOU：检查与删除不是原子操作
@@ -6129,6 +6136,108 @@ fn capabilities_declares_machine_readable_boundaries() {
     let auto = claim(&payload, "inflight.stale_markers_auto_swept");
     assert_eq!(auto["holds"], false, "{auto}");
     assert_eq!(auto["reason_code"], "explicit_cleanup_required", "{auto}");
+}
+
+/// 已在当前平台实跑的能力必须把当前平台写进 platforms_verified，不能只标 Windows
+#[test]
+fn capabilities_inflight_entries_cover_current_platform() {
+    let (server, _settings, _runs) = server_with_runs();
+    let payload = tool_payload(&call_tool(&server, "capabilities", json!({})));
+    let current = payload["platform"]["os"]
+        .as_str()
+        .expect("platform.os 必须是字符串");
+    for id in [
+        "inflight.stale_marker_observable",
+        "inflight.stale_marker_cleanable",
+        "inflight.stale_markers_auto_swept",
+        "inflight.clean_preserves_active_markers",
+    ] {
+        let entry = claim(&payload, id);
+        assert!(
+            entry["platforms_verified"]
+                .as_array()
+                .expect("platforms_verified 必须是数组")
+                .contains(&json!(current)),
+            "{id} 已在 {current} 实跑，platforms_verified 必须包含 {current}：{entry}"
+        );
+        assert!(
+            !entry["platforms_unverified"]
+                .as_array()
+                .expect("platforms_unverified 必须是数组")
+                .contains(&json!(current)),
+            "{id} 不得同时把已实跑的 {current} 列为未验证：{entry}"
+        );
+    }
+}
+
+/// PM 判活只依赖 list 的明确字段；启发式与诊断字段不得当判活依据
+#[test]
+fn runs_inflight_list_exposes_pm_liveness_contract() {
+    let (server, _settings, runs) = server_with_runs();
+    write_inflight_marker(
+        runs.path(),
+        "liveness-stale",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    let listed = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "list" }),
+    ));
+    let rule = &listed["liveness_rule"];
+    assert_eq!(rule["version"], "inflight-liveness/1", "{listed}");
+    assert_eq!(
+        rule["authoritative_fields"],
+        json!(["markers[].task_id", "markers[].stale"]),
+        "判活权威字段必须唯一且明确：{rule}"
+    );
+    assert_eq!(
+        rule["cleanup_fields"],
+        json!(["markers[].removable"]),
+        "清理依据必须与判活分开：{rule}"
+    );
+    let diagnostic = rule["diagnostic_fields"]
+        .as_array()
+        .expect("diagnostic_fields 必须是数组");
+    for field in [
+        "markers[].pid",
+        "markers[].pid_alive",
+        "markers[].stale_reason",
+        "markers[].age_secs",
+    ] {
+        assert!(
+            diagnostic.contains(&json!(field)),
+            "{field} 只能作诊断，必须从判活权威字段中分离：{rule}"
+        );
+    }
+    let forbidden = rule["not_liveness_evidence"]
+        .as_array()
+        .expect("not_liveness_evidence 必须是数组");
+    for item in [
+        "attempt_missing_handback",
+        "attempt_missing_dispatch",
+        "raw_marker_file_presence",
+    ] {
+        assert!(
+            forbidden.contains(&json!(item)),
+            "{item} 不得作为判活依据：{rule}"
+        );
+    }
+    assert_eq!(
+        rule["fallback"]["allowed"], false,
+        "AW 提供 runs.inflight 时不得回退 attempt 文件启发式：{rule}"
+    );
+    for key in ["task_live", "task_not_live", "not_live_does_not_prove", "result_authority"] {
+        assert!(
+            rule["decision"][key]
+                .as_str()
+                .map(|text| !text.is_empty())
+                .unwrap_or(false),
+            "decision.{key} 必须给出明确语义：{rule}"
+        );
+    }
 }
 
 /// 残留态可见、可清、且活跃标记永不误删；正常结束后无残留
