@@ -3171,6 +3171,40 @@ mod process_scope {
                 false
             }
 
+            /// 起一个真实的新会话（setsid）进程，并返回持有它的 shell 与逃逸进程 PID。
+            /// 本机没有 `setsid` 时返回 `None`，由调用方显式跳过，不当成通过。
+            #[cfg(target_os = "linux")]
+            fn setsid_escapee(dir: &std::path::Path) -> Option<(std::process::Child, u32)> {
+                let pid_file = dir.join("pid.txt");
+                let script = format!(
+                    "if command -v setsid >/dev/null 2>&1; then setsid sleep 30 >/dev/null 2>&1 & echo $! > '{}'; wait; else echo skip > '{}'; fi",
+                    pid_file.display(),
+                    pid_file.display()
+                );
+                let mut holder = Command::new("sh")
+                    .arg("-c")
+                    .arg(script)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn setsid fixture");
+                for _ in 0..100 {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        let text = text.trim().to_string();
+                        if text == "skip" {
+                            break;
+                        }
+                        if let Ok(pid) = text.parse::<u32>() {
+                            return Some((holder, pid));
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let _ = holder.kill();
+                let _ = holder.wait();
+                None
+            }
+
             // v1.40 判据：同号 PID 复用后，旧父链留下的子进程启动时刻早于新根，这条边必须
             // 被拒绝；只有启动时刻不早于父进程的边才允许进入后代集合。启动时刻读不到的边
             // 退回旧行为（接受），避免因缺证据扩大误判。
@@ -3905,6 +3939,187 @@ mod process_scope {
                     !snapshot.covers_escaped_descendants(),
                     "降级后空快照不得读成整树已清"
                 );
+            }
+
+            // v1.41 判据：内核没有 `cgroup.kill` 时，终止不得误报 Cleaned。
+            // 用临时目录伪造一个"仍有成员"的作用域（`cgroup.procs` 非空、`populated 1`、无 `cgroup.kill`），
+            // 配合真实 setsid 逃逸进程；受控进程组被杀后作用域成员仍存活 → 必须 StillAlive。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn cgroup_without_kill_reports_still_alive() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-cgroup-no-kill-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let Some((mut holder, escaped)) = setsid_escapee(&dir) else {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                };
+                // 伪造作用域：成员只有逃逸进程；本目录没有 cgroup.kill，覆盖 no-kill 分支
+                std::fs::write(dir.join("cgroup.procs"), format!("{escaped}\n"))
+                    .expect("写 cgroup.procs");
+                std::fs::write(dir.join("cgroup.events"), "populated 1\n")
+                    .expect("写 cgroup.events");
+                let scope = CgroupScope {
+                    procs: dir.join("cgroup.procs"),
+                    dir: dir.clone(),
+                    writer: std::cell::RefCell::new(None),
+                };
+
+                let mut command = Command::new("sleep");
+                command
+                    .arg("30")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0);
+                let mut child = command.spawn().expect("spawn controlled root");
+                let root = child.id();
+                let mut supervisor = Supervisor::new();
+                supervisor.pgid = i32::try_from(root).ok();
+                supervisor.root_start = proc_start_time(root);
+                supervisor.cgroup.scope = Some(scope);
+                supervisor.cgroup.status = CgroupStatus::Active;
+
+                let kill_supported = supervisor
+                    .cgroup
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.kill_supported())
+                    .unwrap_or(false);
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] cgroup_no_kill root={root} escaped={escaped} kill_supported={kill_supported} outcome={outcome:?} escaped_alive={} members={:?} populated={:?} descendants={:?}",
+                    pid_exists(escaped as i32),
+                    supervisor
+                        .cgroup
+                        .scope
+                        .as_ref()
+                        .map(|scope| scope.members()),
+                    supervisor
+                        .cgroup
+                        .scope
+                        .as_ref()
+                        .map(|scope| scope.populated()),
+                    after.descendants
+                );
+                assert!(
+                    !kill_supported,
+                    "临时目录必须没有 cgroup.kill，才覆盖无 kill 分支"
+                );
+                assert!(
+                    pid_exists(escaped as i32),
+                    "无 cgroup.kill 时逃逸进程必然存活"
+                );
+                assert_eq!(
+                    outcome,
+                    CleanupOutcome::StillAlive,
+                    "作用域内仍有存活成员时不得报告 Cleaned"
+                );
+                assert!(
+                    after.descendants.iter().any(|entry| entry.pid == escaped),
+                    "无 cgroup.kill 时仍应枚举到作用域成员"
+                );
+
+                unsafe {
+                    libc::kill(escaped as i32, libc::SIGKILL);
+                }
+                let _ = holder.kill();
+                let _ = holder.wait();
+                drop(supervisor);
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+
+            // v1.41 判据：作用域建不起来（降级）时，终止只覆盖进程组；
+            // 被收养的逃逸进程既打不到也看不见——判定为受控集合口径的 Cleaned，
+            // 但降级原因必须一直带在快照里，不得静默。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn cgroup_degraded_terminate_is_group_only() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-cgroup-degraded-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let Some((mut holder, escaped)) = setsid_escapee(&dir) else {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                };
+
+                let mut command = Command::new("sleep");
+                command
+                    .arg("30")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .process_group(0);
+                let mut child = command.spawn().expect("spawn controlled root");
+                let root = child.id();
+                let mut supervisor = Supervisor::new();
+                supervisor.cgroup.status = CgroupStatus::Degraded("cgroup_v2_unavailable".into());
+                supervisor.attach(&mut child);
+
+                let before = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] cgroup_degraded before root={root} escaped={escaped} scope={:?} escaped_scope_unobservable={:?} descendants={:?}",
+                    before.scope, before.escaped_scope_unobservable, before.descendants
+                );
+                assert_eq!(
+                    before.scope,
+                    SnapshotScope::ProcessGroup,
+                    "降级只能是进程组观测"
+                );
+                assert_eq!(
+                    before.escaped_scope_unobservable.as_deref(),
+                    Some("cgroup_v2_unavailable"),
+                    "降级必须带原因"
+                );
+                assert!(before.unobservable.is_none(), "降级不等于整份快照不可用");
+                assert!(
+                    !before.covers_escaped_descendants(),
+                    "降级后空快照不得读成整树已清"
+                );
+
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] cgroup_degraded after outcome={outcome:?} escaped_alive={} descendants={:?} scope={:?} unobservable={:?} escaped_scope_unobservable={:?}",
+                    pid_exists(escaped as i32),
+                    after.descendants,
+                    after.scope,
+                    after.unobservable,
+                    after.escaped_scope_unobservable
+                );
+                assert!(
+                    pid_exists(escaped as i32),
+                    "降级判据下 setsid 逃逸必然存活（进程组打不到）"
+                );
+                assert_eq!(
+                    outcome,
+                    CleanupOutcome::Cleaned,
+                    "降级时只对进程组作判定，受控集合口径为 Cleaned"
+                );
+                assert!(after.is_empty(), "父链断开的逃逸进程不在降级快照里");
+                assert_eq!(
+                    after.escaped_scope_unobservable.as_deref(),
+                    Some("cgroup_v2_unavailable"),
+                    "降级原因必须一直带在快照里，不能静默"
+                );
+
+                unsafe {
+                    libc::kill(escaped as i32, libc::SIGKILL);
+                }
+                let _ = holder.kill();
+                let _ = holder.wait();
+                let _ = std::fs::remove_dir_all(&dir);
             }
 
             // v1.38 判据：POSIX 上 rename 活跃 attempt 目录的语义必须单独复核。
@@ -6889,8 +7104,8 @@ fn capabilities_payload() -> Value {
             "timeout.cleans_entire_process_tree",
             Some(false),
             "partial",
-            "Windows：作业覆盖全部后代，终止后父链快照与作业记账同时为空；Linux：仅在可写 cgroup v2 且内核提供 `cgroup.kill`（>=5.14）时终止整个作用域，否则逃逸成员仍存活并被如实报为「仍有存活进程」；macOS 未验证",
-            Some("posix_escaped_scope_requires_cgroup_v2_and_kill"),
+            "Windows：作业只覆盖加入作业的进程，作业外进程（BREAKAWAY、加入失败、不进作业的 conhost.exe 等）可能在终止后存活，整树不成立；Linux：cgroup v2 可写且内核提供 `cgroup.kill`（>=5.14）时已用真实 setsid 逃逸进程证成整作用域终止（cgroup.procs 空 + populated 0 + 逃逸进程消失 + 快照空）；无 `cgroup.kill` 时成员仍存活并如实报 StillAlive；作用域建不起来时退回进程组窄判据，被收养的逃逸进程既打不到也枚举不到；macOS 未验证",
+            Some("processes_outside_controlled_scope_may_survive"),
             false,
             &both,
             &["macos"],
@@ -6900,8 +7115,10 @@ fn capabilities_payload() -> Value {
                 "descendant_snapshot_cross_checks_process_group",
                 "cgroup_scope_enumerates_adopted_escapee",
                 "cgroup_kill_terminates_adopted_escapee",
+                "cgroup_without_kill_reports_still_alive",
+                "cgroup_degraded_terminate_is_group_only",
             ],
-            "Windows 侧能证的只有两件事：终止后作业记账 ActiveProcesses 归零；父链快照在创建时间与存活状态可读时，既按「子进程创建时间 ≥ 父进程创建时间」校验边、并对根→直接子进程加「≤ 根退出时间」上界，不把同号 PID 复用后的无关进程树误连为后代，也剔除已终止或 PID 已不存在的行（v1.39，审计 §42）。证不到：作业外进程（BREAKAWAY 或加入作业失败，例如不进作业的 conhost.exe）、换父后被收养的进程、以及创建时间或存活状态读不到时的 PID 复用边——这些情形下快照只能作旁证，报 StillAlive 可能是真实观测。Linux 侧 cgroup.kill 可用时终止整个作用域并复核三个独立观测量，不可用时退回窄判据——条件性能力不写成无条件整树。",
+            "证成范围按平台与内核分支拆开（v1.41，审计 §44）。Linux 满足条件（cgroup v2 可写 + 内核 >= 5.14 提供 cgroup.kill）：终止后 cgroup.procs 为空、cgroup.events populated 0、被收养的 setsid 逃逸进程不再存活、父链快照无可枚举后代，四个观测量同时成立才报 Cleaned；WSL Ubuntu 24.04（root，cgroup v2）实测成立。内核没有 cgroup.kill：不写 cgroup.kill，作用域成员仍在，终止以 StillAlive 结束，不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：只终止进程组，被收养的逃逸进程既收不到信号也枚举不到，结果是受控集合口径的 Cleaned——这是本能力位的残余缺口；降级原因写入快照 escaped_scope_unobservable，超时回执明写「逃逸进程是否仍在运行未验证」，不是静默漏杀，但也不能读成「无残留」。Windows 侧作业外进程（BREAKAWAY、加入作业失败、不进作业的 conhost.exe）仍可能在终止后存活，结构性证不到整树。macOS 未验证。",
         ),
         capability_entry(
             "timeout.enumerates_escaped_descendants",

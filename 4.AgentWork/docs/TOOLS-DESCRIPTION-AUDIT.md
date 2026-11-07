@@ -3834,3 +3834,98 @@ test result: FAILED. 0 passed; 1 failed
 
 - `tools/list` 描述未改，`tools_sha256` 不变（`docs/TOOLS-DESCRIPTION-AUDIT.md` 的 `include_str!` 门禁通过）。
 - macOS 侧父链边校验仍未验证，能力位不因 Linux 单侧修复上调。
+
+## §44 v1.41：Linux 整树清理的证成范围与降级路径（2026-11-08）
+
+只回答两件事：(1) 满足条件的环境里，「超时终止清掉整个受控作用域」到底能不能证成；(2) `cgroup.kill` 缺失或作用域建不起来时，行为、报告与「有没有可能悄悄漏杀」。
+
+### 44.1 结论先行
+
+- **能证成，但只在满足条件的分支**：cgroup v2 可写且内核提供 `cgroup.kill`（>= 5.14）时，Linux 侧终止的是**整个作用域**，且用真实 `setsid` 逃逸进程（被收养、进程组打不到）实测：终止后 `cgroup.procs` 为空、`cgroup.events populated 0`、逃逸进程已不存在、父链快照无后代，四项同时成立才报 `Cleaned`。这是「整作用域」，不是「整棵任意逃逸树」——逃出作用域（主动迁移 cgroup、无权限写作用域）的进程不在判据内。
+- **跨平台能力位不上调**：`timeout.cleans_entire_process_tree` 保持 `holds=false/partial`。同一字段还要覆盖 Windows（作业外进程结构性证不到）与 macOS（未验证）；Linux 侧的条件性能力已由 `timeout.cgroup_kill_terminates_scope=true/proven` 单独表达。把跨平台三态上调会把 Windows 的结构性缺口一起说成「已证」。
+- **reason 不再笼统**：由 `posix_escaped_scope_requires_cgroup_v2_and_kill` 改为 `processes_outside_controlled_scope_may_survive`，点明所有平台共同的残余卡点——**受控作用域之外的进程可能存活**；`statement`/`detail` 拆成「有 kill / 无 kill / 作用域建不起」三分支。
+
+### 44.2 WSL 真实进程证据
+
+环境：WSL Ubuntu 24.04，root，cgroup v2，内核 `6.18.33.2-microsoft-standard-WSL2`；日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-013424.log`。用例 `cgroup_kill_terminates_adopted_escapee` 原文：
+
+```
+[evidence] cgroup_kill opened root=2122 scope=CgroupV2 escaped_scope_unobservable=None cgroup_kill_supported=true
+[evidence] cgroup_kill before escaped=2127 scope=CgroupV2 descendants=[DescendantProcess { pid: 2127, in_controlled_set: false }]
+[evidence] cgroup_kill after outcome=Cleaned escaped_alive=false members=Ok([]) populated=Ok(0) descendants=[] unobservable=None
+```
+
+配套的枚举用例 `cgroup_scope_enumerates_adopted_escapee` 同时证明「受控集合为空但作用域仍看得见」：
+
+```
+[evidence] cgroup_scope adopted escaped_alive=true escaped_ppid=Some(1504) root=2126 descendants=[DescendantProcess { pid: 2134, in_controlled_set: false }] controlled=Some([]) scope=CgroupV2
+[evidence] cgroup_scope after outcome=Cleaned escaped_alive=false kill_supported=true descendants=[] controlled=Some([]) scope=CgroupV2
+```
+
+判读：逃逸者已被收养（`escaped_ppid` 不是根），**受控进程组为空**（`controlled=Some([])`，`kill(-pgid)` 打不到它），cgroup 仍枚举到它；写 `cgroup.kill` 后三个观测量加快照同时为空，才写 `Cleaned`。因此「满足条件时整树清理」在 Linux 侧有真实进程证据，不是纸面推断。
+
+### 44.3 能力位改动（仅此一条，其他能力位零改动）
+
+| 字段 | v1.40 | v1.41 |
+| --- | --- | --- |
+| `holds` / `status` | `false` / `partial` | **不变** |
+| `reason_code` | `posix_escaped_scope_requires_cgroup_v2_and_kill` | `processes_outside_controlled_scope_may_survive` |
+| `statement` | 「Windows 覆盖全部后代；Linux 仅在…时终止整个作用域，否则逃逸成员仍存活并如实报…」 | 拆三分支，明写 Linux 满足条件时已用真实 setsid 逃逸进程证成 |
+| `evidence` | 2 条 Linux 用例 | 增 `cgroup_without_kill_reports_still_alive`、`cgroup_degraded_terminate_is_group_only` |
+| `platforms_verified` / `unverified` | `["windows","linux"]` / `["macos"]` | 不变 |
+
+契约测试同步断言新 reason，并要求 evidence 同时包含三条 Linux 用例。条目仍 17，`not_proven_total` 仍 4，`tools_sha256` 不变（改的是 capabilities 资源，不是 `tools/list` 描述）。
+
+### 44.4 降级路径：行为、报告与「悄悄漏杀」判定
+
+**分支 A：内核没有 `cgroup.kill`。** `terminate` 不写 `cgroup.kill`，作用域成员仍在；轮询到 3s 截止报 `StillAlive`，快照仍枚举到成员。用例 `cgroup_without_kill_reports_still_alive`（临时目录伪造 `cgroup.procs`/`cgroup.events`，无 `cgroup.kill`，配合真实 `setsid` 逃逸进程）：
+
+```
+[evidence] cgroup_no_kill root=2128 escaped=2118 kill_supported=false outcome=StillAlive escaped_alive=true members=Some(Ok([2118])) populated=Some(Ok(1)) descendants=[DescendantProcess { pid: 2118, in_controlled_set: false }]
+```
+
+结论：**不会谎报 `Cleaned`**。实现里有三道互相独立的拦截——不调用 `kill_members`、`members()/populated()` 非空即不返回 `Cleaned`、父链快照仍把作用域成员并进来复核。为证明用例真能抓住「悄悄漏杀」，在 WSL 副本里把三道判据**全部**临时停用（不碰工作树），用例原文变红：
+
+```
+[evidence] cgroup_no_kill root=1242 escaped=1241 kill_supported=false outcome=Cleaned escaped_alive=true members=Some(Ok([1241])) populated=Some(Ok(1)) descendants=[]
+thread '...cgroup_without_kill_reports_still_alive' panicked at apps/mcp-bridge/src/server.rs:4015:17:
+assertion `left == right` failed: 作用域内仍有存活成员时不得报告 Cleaned
+  left: Cleaned
+ right: StillAlive
+test result: FAILED. 0 passed; 1 failed
+```
+
+只停用其中一道（例如只跳过 `kill_members`）时用例仍是绿的——另外两道接住了，说明这不是「单点守卫」式的假绿。恢复副本后复跑全绿。
+
+**分支 B：作用域建不起来（`Degraded`，cgroup v1 / 非 root / 容器未委派）。** `terminate` 只按进程组判据；被收养的逃逸进程既收不到信号，也不在父链快照里，结果是受控集合口径的 `Cleaned`。用例 `cgroup_degraded_terminate_is_group_only`：
+
+```
+[evidence] cgroup_degraded before root=2121 escaped=2116 scope=ProcessGroup escaped_scope_unobservable=Some("cgroup_v2_unavailable") descendants=[]
+[evidence] cgroup_degraded after outcome=Cleaned escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")
+```
+
+结论：这是**残余缺口**——`Cleaned` 只表示「受控集合已清」，不等于「无残留」。但它**不是静默漏杀**：降级原因始终写在快照 `escaped_scope_unobservable` 和 capabilities 的 reason 里，`Cleaned` 回执固定写「逃逸进程是否仍在运行未验证」。为证明用例能抓住静默降级，把 `cgroup_degradation()` 对 `Degraded` 的返回临时改成 `None`，用例原文变红：
+
+```
+[evidence] cgroup_degraded before root=1499 escaped=1498 scope=ProcessGroup escaped_scope_unobservable=None descendants=[]
+thread '...cgroup_degraded_terminate_is_group_only' panicked at apps/mcp-bridge/src/server.rs:4080:17:
+assertion `left == right` failed: 降级必须带原因
+  left: None
+ right: Some("cgroup_v2_unavailable")
+test result: FAILED. 0 passed; 1 failed
+```
+
+**读法边界**：这两个分支意味着调用方**不能只看结果枚举**。`Cleaned` + POSIX 时必须同时读回执尾句「逃逸进程是否仍在运行未验证」与快照 `escaped_scope_unobservable`；只认 `Cleaned` 就会在「作用域建不起来」时把逃逸进程的存活当成已清理。能力位保持 `partial` 正是为了在机器可读层保留这个区别。
+
+### 44.5 新增用例与回归
+
+- `cgroup_without_kill_reports_still_alive`（Linux）：覆盖 no-kill 分支，断言 `StillAlive` + 逃逸进程存活 + 快照仍枚举到成员。
+- `cgroup_degraded_terminate_is_group_only`（Linux）：覆盖 `Degraded` 分支，断言只按进程组判定、`Cleaned` 与逃逸进程存活并存、降级原因始终带在快照里。
+- 两个用例都先起真实 `setsid` 进程；本机没有 `setsid` 时显式跳过而不是当成通过。
+- 回归：WSL `21 lib + 120 integration` 全绿（日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-013424.log`）；Windows `17 lib + 122 integration` 全绿（平台门禁，两个新用例不在 Windows 编译）。
+
+### 44.6 未改动的边界
+
+- 其他能力位（`timeout.cgroup_kill_terminates_scope`、`timeout.enumerates_escaped_descendants`、`timeout.descendant_snapshot_cross_check` 等）的 `holds`/`status`/`reason`/`evidence` 均未改。
+- `tools/list` 描述未改，`tools_sha256` 不变。
+- macOS 仍未验证；Linux 的结论只在「cgroup v2 可写 + 内核提供 `cgroup.kill`」分支成立，不外推到容器/非 root/cgroup v1。

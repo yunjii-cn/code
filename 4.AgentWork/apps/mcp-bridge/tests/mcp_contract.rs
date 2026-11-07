@@ -6512,7 +6512,9 @@ fn capabilities_declares_machine_readable_boundaries() {
         );
     }
 
-    // #3 判据按平台分裂：Windows 已证整树；Linux 仅在 cgroup.kill 可用时证作用域，条件性能力不上调
+    // #3 判据按平台分裂：Windows 结构上证不到整树；Linux 仅在 cgroup v2 + cgroup.kill 可用时
+    // 证成作用域，条件性能力不上调；reason 点名真正卡点（作用域外进程可能存活），
+    // 不再用「需要 cgroup v2 且内核有 cgroup.kill」笼统概括（v1.41，审计 §44）。
     let controlled = claim(&payload, "timeout.terminates_controlled_set");
     assert_eq!(controlled["holds"], true, "{controlled}");
     assert_eq!(controlled["status"], "proven", "{controlled}");
@@ -6520,9 +6522,22 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(whole_tree["holds"], false, "{whole_tree}");
     assert_eq!(whole_tree["status"], "partial", "{whole_tree}");
     assert_eq!(
-        whole_tree["reason_code"], "posix_escaped_scope_requires_cgroup_v2_and_kill",
+        whole_tree["reason_code"], "processes_outside_controlled_scope_may_survive",
         "{whole_tree}"
     );
+    let whole_tree_evidence = whole_tree["evidence"]
+        .as_array()
+        .expect("evidence 必须是数组");
+    for case in [
+        "cgroup_kill_terminates_adopted_escapee",
+        "cgroup_without_kill_reports_still_alive",
+        "cgroup_degraded_terminate_is_group_only",
+    ] {
+        assert!(
+            whole_tree_evidence.iter().any(|item| item == case),
+            "整树能力位必须引用 {case}：{whole_tree}"
+        );
+    }
     let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
     assert_eq!(escaped["holds"], false, "{escaped}");
     assert_eq!(escaped["status"], "partial", "{escaped}");
