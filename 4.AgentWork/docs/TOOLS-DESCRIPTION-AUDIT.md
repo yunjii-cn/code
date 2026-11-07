@@ -3567,7 +3567,7 @@ test server::process_scope::imp::tests::posix_rename_active_attempt_semantics ..
 
 - 能力位改为 `holds=true/status=proven/reason_code=null`，`evidence` 增加 `posix_rename_active_attempt_semantics`，detail 写实；`platforms_verified=["windows","linux"]`、`platforms_unverified=["macos"]` 均不变；条目仍 17，`not_proven_total` 5→4。
 - WSL Ubuntu 24.04（`cargo 1.88.0`）：`16 lib + 120 integration` 全绿，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-213638.log`；契约断言通过。
-- Windows：`13 lib + 122 integration` 全绿。首次全量时 `descendant_snapshot_cross_checks_job_accounting` 在并发负载下抖动（`after terminate=StillAlive descendants=[] controlled=Some([])`），单跑 `Cleaned` 通过、二次全量通过；与本轮 Linux-only 改动路径无关，未改判据。
+- Windows：`13 lib + 122 integration` 全绿。首次全量时 `descendant_snapshot_cross_checks_job_accounting` 报 `StillAlive`（`after terminate=StillAlive descendants=[] controlled=Some([])`），当时按并发抖动记录；**v1.38.1 专项复核证明该判断错误**——不是窗口太紧，而是父链闭包在 PID 复用下把无关进程树误判为后代（复现证据与结论见 §41）。本轮 Linux-only 改动路径与此无关，但「抖动」这一旧口径已作废。
 - `cargo fmt -p aw-mcp-bridge -- --check` 对本轮改动无差异（`build.rs` / `main.rs` 的既有差异未触碰）。
 
 ### 40.4 实现口径
@@ -3581,5 +3581,61 @@ test server::process_scope::imp::tests::posix_rename_active_attempt_semantics ..
 - 该用例证明的是 POSIX 文件系统语义与 `delete_attempt_dir` 的 rename-then-delete 假设，不证明 macOS（`platforms_unverified=["macos"]` 保留）。
 - 仍不等于「prune 与执行无并发问题」：`concurrency.check_then_delete_atomic` 的 TOCTOU 仍 `holds=false`；本条只说明「rename/删除不会被活跃进程的 cwd/fd 阻止」。
 - Windows 仍走 `RetainedAtSource`（v1.30 实测 rename 被拒 `WinError 5`），本条不上调 Windows 相关结论。
+
+## 41. v1.38.1：修复脚本后的 v1.33–v1.38 复跑（无假绿）与 Windows 父链快照 PID 复用缺陷
+
+### 41.1 复跑方法与结果
+
+`verify.sh` 原缺陷：`local rc` 单独一行执行后，下一行 `rc=${PIPESTATUS[0]}` 读到的是 `local` 自身的 0，测试失败仍打印「四类 POSIX 用例全部通过」。修复为 `local rc=${PIPESTATUS[0]}`（赋值展开发生在 `local` 执行之前）。
+
+用**同一份修复版脚本**在六个干净 worktree 上逐个重跑（WSL Ubuntu 24.04，`AW_VENDOR=/root/vendor`，共享 `AW_WORK` 复用依赖缓存）：
+
+| 版本 | commit | 退出码 | lib | integration | 关键用例 | 当时结论 |
+|---|---|---|---|---|---|---|
+| v1.33 | `6598d09` | 0 | 9 | 120 | `inflight_sweep_on_task_start_removes_only_target_stale_marker`、`inflight_sweep_on_prune_removes_stale_marker_and_unblocks_candidate` 均 ok | 成立 |
+| v1.34 | `52b03b4` | 0 | 11 | 120 | `descendant_snapshot_cross_checks_process_group`、`timeout_cleans_controlled_set_including_grandchild` 均 ok | 成立（范围见 §41.3） |
+| v1.35 | `6cb5e69` | 0 | 13 | 120 | `cgroup_scope_enumerates_adopted_escapee` ok | 成立 |
+| v1.36 | `37dad57` | 0 | 14 | 120 | `sweep_restore_never_clobbers_concurrent_new_marker` ok | 成立 |
+| v1.37 | `94aca63` | 0 | 15 | 120 | `cgroup_kill_terminates_adopted_escapee` ok | 成立 |
+| v1.38 | `07cf253` | 0 | 16 | 120 | `posix_rename_active_attempt_semantics` ok | 成立 |
+
+结论：**这六版没有发现假绿**。旧脚本只在「测试已失败但四类证据行仍齐全」时才可能误报成功；复跑中没有任何 `FAILED`/`panicked` 行，证据行也齐全。该复跑只覆盖 Linux（脚本定位即 POSIX 超时清理）；Windows 结论不在其覆盖内，macOS 仍未验证。
+
+### 41.2 Windows `descendant_snapshot_cross_checks_job_accounting` 的 `StillAlive` 定性
+
+先定判据，避免把「窗口紧」和「观测错」混为一谈：
+
+- 若 3s `CLEANUP_DEADLINE` 太紧 → `terminate` 耗时应接近 3000ms，且届时 `active_processes()>0`（作业里确实还有活进程）；
+- 若观测层误判 → 耗时应远小于 3s，`active_processes()==Some(0)`，但父链快照仍非空。
+
+复现：24 路 CPU 负载下重复全量 lib（第 9 次命中，`FAILED. 13 passed; 1 failed`）。临时探针现场（已还原，未入库）：
+
+```
+[probe] race round=102 root=165548 active=Some(0) snapshot=[DescendantProcess { pid: 127140, in_controlled_set: false }, ... 共 20 个 ...]
+[probe]   pid=127140 ppid=Some(165548) exe=WXWork.exe
+[probe]   pid=28132  ppid=Some(127140) exe=WeChatAppEx.exe
+[probe]   pid=...    ppid=Some(127140) exe=crashpad_handler.exe / conhost.exe
+[probe] root_rows=[(127140, 165548), (28132, 127140), ...]
+[probe] slowest_ms=1392
+```
+
+判定：**不是测试窗口太紧，是父链闭包的真实缺陷**。
+
+1. `active=Some(0)` 说明作业成员已全部终止；`slowest_ms=1392 < 3000`，排除 deadline。
+2. 快照把这 20 个进程算成 `165548` 的后代，而 `165548` 是本轮新建 `cmd` 的 PID；`WXWork.exe` 的 `ParentProcessID=165548` 是它**创建时**的父进程，那个父进程早已退出，Windows 随后把同号 PID 复用给了本轮 `cmd`。
+3. 因此 `descendants_of` 按 `ppid` 匹配时把无关进程树整棵连了进来；另一轮复现是单进程 `pid=92344 ppid=Some(137288)`（root），机制相同。
+
+影响：
+- `terminate` 会误报 `StillAlive`（保守，但不是真实存活后代）；
+- `in_controlled_set=false` 会把无关进程误标为「逃逸后代」，即 `timeout.enumerates_escaped_descendants` 的 Windows 枚举只能作旁证；
+- `timeout.cleans_entire_process_tree` 的 Windows 侧只能证「作业记账归零」，不能证「父链快照为空」。
+
+### 41.3 能力位处置
+
+`timeout.descendant_snapshot_cross_check` 的 detail 原本就写明「不覆盖换父后被收养、**PID 复用**与集合未能建立的情形」，本轮实测落在其声明的排除项内，故**不新增降级**；但把契约 §2.7 的边界栏补上「PID 复用不在覆盖内（实测会误连）」，并把 v1.38 里「并发抖动」的旧口径作废。测试本身仍按确定性 `Cleaned` 断言，未放宽——它在 PID 复用时仍会失败，这是已知缺陷的可见信号，而不是改判据的理由。
+
+### 41.4 未实现的修复方向
+
+父链闭包加边校验：只接受「子进程创建时间 ≥ 父进程创建时间」的 `ppid` 边（`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetProcessTimes`，或 Toolhelp 之外补一次查询）。PID 复用时「旧父链的孩子」创建时间早于新持有者，该边会被拒绝，从而消除这类误连。需要同步加一个可注入进程表/创建时间的确定性单测，再跑两平台回归；未在本轮实现，避免在证据复核轮顺手改实现。
 
 
