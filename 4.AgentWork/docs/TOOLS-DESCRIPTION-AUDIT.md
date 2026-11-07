@@ -3632,10 +3632,75 @@ test server::process_scope::imp::tests::posix_rename_active_attempt_semantics ..
 
 ### 41.3 能力位处置
 
-`timeout.descendant_snapshot_cross_check` 的 detail 原本就写明「不覆盖换父后被收养、**PID 复用**与集合未能建立的情形」，本轮实测落在其声明的排除项内，故**不新增降级**；但把契约 §2.7 的边界栏补上「PID 复用不在覆盖内（实测会误连）」，并把 v1.38 里「并发抖动」的旧口径作废。测试本身仍按确定性 `Cleaned` 断言，未放宽——它在 PID 复用时仍会失败，这是已知缺陷的可见信号，而不是改判据的理由。
+`timeout.descendant_snapshot_cross_check` 的 detail 原本就写明「不覆盖换父后被收养、**PID 复用**与集合未能建立的情形」，本轮实测落在其声明的排除项内，故**不新增降级**；但把契约 §2.7 的边界栏补上「PID 复用不在覆盖内（实测会误连）」，并把 v1.38 里「并发抖动」的旧口径作废。测试本身仍按确定性 `Cleaned` 断言，未放宽；v1.39 已在实现侧修复该缺陷（见 §42），测试判据保持不变。
 
-### 41.4 未实现的修复方向
+### 41.4 修复方向（v1.39 已实现，见 §42）
 
-父链闭包加边校验：只接受「子进程创建时间 ≥ 父进程创建时间」的 `ppid` 边（`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetProcessTimes`，或 Toolhelp 之外补一次查询）。PID 复用时「旧父链的孩子」创建时间早于新持有者，该边会被拒绝，从而消除这类误连。需要同步加一个可注入进程表/创建时间的确定性单测，再跑两平台回归；未在本轮实现，避免在证据复核轮顺手改实现。
+父链闭包加边校验：只接受「子进程创建时间 ≥ 父进程创建时间」的 `ppid` 边（`OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetProcessTimes`）。PID 复用时「旧父链的孩子」创建时间早于新持有者，该边会被拒绝，从而消除这类误连。v1.39 已实现并补可注入进程表的确定性单测，见 §42。
 
 
+
+## §42 v1.39：Windows 父链闭包的 PID 复用边校验（2026-11-07）
+
+### 42.1 判据
+
+只回答一件事：`snapshot_descendants` 枚举出的 PID 是否**真的**属于本次任务。为此进程表改为可注入的 `ProcEntry { pid, parent_pid, created_at, alive }`，闭包加三道过滤：
+
+1. **创建时间下界**：每条边要求「子进程创建时间 ≥ 父进程创建时间」。旧父进程退出后同号 PID 被新进程持有，旧子进程残留的 `ParentProcessID` 会把无关树挂到新根上；时间顺序能拒绝这条边。
+2. **根退出时间上界**：只对「根 → 直接子进程」生效，要求「子创建时间 ≤ 根退出时间」。根 PID 被后来者复用后，后来者的子进程创建时间晚于根，仅靠下界无法拒绝；退出时间从子进程句柄读 `GetProcessTimes`（不经 PID），不受复用影响。
+3. **存活/存在性剔除**：`GetExitCodeProcess` 判为已终止，或 `OpenProcess` 返回 `ERROR_INVALID_PARAMETER`（PID 已不存在，Toolhelp 枚举与逐个打开之间的残行）的行直接剔除。
+
+任一时间/存活状态读不到（权限不足等）时保留该行，维持旧行为——宁可保守报仍有后代，也不把无法鉴定的进程当成已清理。
+
+### 42.2 红→绿
+
+红（临时把 `edge_respects_creation_order` 改成恒 `true`）：
+
+```
+[evidence] pid_reuse rows=6 result=[900, 901, 902, 903, 905, 906]
+thread 'server::process_scope::imp::tests::pid_reuse_parent_chain_edge_is_rejected' panicked:
+  left: [900, 901, 902, 903, 905, 906]
+ right: [902, 903, 906]
+test result: FAILED. 0 passed; 1 failed
+```
+
+红（临时把 `child_created_before_root_exit` 改成恒 `true`）：新用例红出 `result=[902, 903, 906, 907]`，`907` 是根退出后复用者的子进程。
+
+绿：`[evidence] pid_reuse rows=7 result=[902, 903, 906]`、`[evidence] terminated_rows rows=4 result=[912, 913]`，`test result: ok. 15 passed`；补 `create_evidence_error` 单测后 `17 passed`。
+
+### 42.3 24 路负载复跑（判据未改）
+
+- **lib 单测最终版：连跑 20 轮全绿**（含 `descendant_snapshot_cross_checks_job_accounting`、`suspended_start_defers_execution_until_job_assign`），未再出现 `StillAlive`。
+- **全量 4 轮**（`--no-fail-fast`）：每轮 `15 lib` 全绿 + integration `120 passed / 2 failed`，两个失败均与父链快照无关：
+  1. `timeout_cleans_controlled_set_including_grandchild`：同一负载下实测 PowerShell 从启动到写出 `pids.txt` 需 **10.7–16.2 s**，用例窗口 8 s，属夹具启动延迟；不放宽。
+  2. `standalone_active_attempt_deleted_is_reported_not_silent_ok`：目录在创建 `stdout.txt` 前已被删掉，报出裸错误 `创建 stdout 失败：系统找不到指定的路径。 (os error 3)`，而非具名 `attempt_dir_lost`。本轮补 `create_evidence_error`（`NotFound` 且目录不存在 → `attempt_dir_lost`），并加确定性单测。
+
+中途取证（修复前、负载下）确认误报不是 3 s 窗口太紧：
+
+```
+[probe] cross_check root=26468 elapsed_ms=396 active_after=Some(0) recorded_root_created=Some(134385355652414131) current_root_row=None edges=[]
+[probe] suspended_start root=39580 elapsed_ms=384 active_after=Some(0) edges=[29456@Some(134385358588524392)]
+```
+
+`elapsed_ms` 远小于 3000，说明走的是「记账归零 → 看快照」分支；`edges` 在探测瞬间又为空，指向 Toolhelp 枚举与逐个打开之间的残行（`OpenProcess` 失败被当成「时间不可读 → 接受」）。这就是第 3 道过滤要解决的形态。
+
+最终回归：Windows `17 lib + 122 integration` 全绿；WSL Ubuntu 24.04 `18 lib + 120 integration` 全绿（日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-231315.log`，`standalone_active_attempt_deleted_is_reported_not_silent_ok` 在 WSL 与 Windows 均为 `ok`）。
+
+### 42.4 `cleans_entire_process_tree` 在 Windows 侧能证/证不到
+
+**能证**：
+
+- 终止后作业记账 `ActiveProcesses` 归零（`JobObjectBasicAccountingInformation`）；
+- 父链快照在创建时间与存活状态可读时，不再把 PID 复用树或枚举残行算作后代（§42.1 三道过滤，确定性单测覆盖六类边）。
+
+**证不到**：
+
+- 作业外进程（`BREAKAWAY`、`AssignProcessToJobObject` 失败）——例如由 csrss 创建、不进作业的 `conhost.exe`；它若在终止瞬间仍存活，快照报 `StillAlive` 是**真实观测**而非误报；
+- 换父后被收养的进程是否仍存活（Windows 无 cgroup 等价的作用域观测）；
+- 创建时间或存活状态读不到时的同号 PID 复用。
+
+因此该条仍 `holds=false/partial`，父链快照只作旁证，不因 Windows 单侧修复上调。
+
+### 42.5 未改动的边界
+
+Linux `descendants_of` 仍用 `/proc/<pid>/stat` 的 `ppid` 闭环，未加创建时间边校验（本轮用户明确限定 Windows 侧）；macOS 仍未验证。

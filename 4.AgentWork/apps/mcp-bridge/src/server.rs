@@ -1689,10 +1689,10 @@ impl Server {
         write_dispatch(&run_dir, &signature)?;
         let stdout_path = run_dir.join("stdout.txt");
         let stderr_path = run_dir.join("stderr.txt");
-        let stdout_file =
-            fs::File::create(&stdout_path).map_err(|e| format!("创建 stdout 失败：{e}"))?;
-        let stderr_file =
-            fs::File::create(&stderr_path).map_err(|e| format!("创建 stderr 失败：{e}"))?;
+        let stdout_file = fs::File::create(&stdout_path)
+            .map_err(|e| create_evidence_error(&run_dir, "stdout", e))?;
+        let stderr_file = fs::File::create(&stderr_path)
+            .map_err(|e| create_evidence_error(&run_dir, "stderr", e))?;
 
         let before = git_paths(&cwd);
         let commit = git_output(&cwd, &["rev-parse", "--short", "HEAD"])
@@ -3945,7 +3945,10 @@ mod process_scope {
         use std::os::windows::process::CommandExt;
         use std::process::{Child, Command};
         use std::time::{Duration, Instant};
-        use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_INVALID_PARAMETER, FALSE, FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+            STILL_ACTIVE,
+        };
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, Process32First, Process32Next, Thread32First, Thread32Next,
             PROCESSENTRY32, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -3958,7 +3961,8 @@ mod process_scope {
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
         use windows_sys::Win32::System::Threading::{
-            OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
+            GetExitCodeProcess, GetProcessTimes, OpenProcess, OpenThread, ResumeThread,
+            CREATE_SUSPENDED, PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
         };
 
         const CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
@@ -3974,6 +3978,13 @@ mod process_scope {
             attached: bool,
             suspended: bool,
             attach_error: Option<String>,
+            /// 根进程创建时间（FILETIME 100ns 刻度）；用于父链边校验，拒绝把同号 PID
+            /// 复用后的无关进程当成后代。
+            root_created_at: Option<u64>,
+            /// 根进程退出时间（FILETIME 100ns 刻度，终止时从子进程句柄读取）。
+            /// 根 PID 被后来者复用后，后来者的子进程创建时间必然晚于本时间；
+            /// 用它给「根 → 直接子进程」的边加上界，避免把并发进程树算成后代。
+            root_exited_at: Option<u64>,
         }
 
         impl Supervisor {
@@ -3986,6 +3997,8 @@ mod process_scope {
                             attached: false,
                             suspended: false,
                             attach_error: None,
+                            root_created_at: None,
+                            root_exited_at: None,
                         };
                     }
                     let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
@@ -4003,6 +4016,8 @@ mod process_scope {
                             attached: false,
                             suspended: false,
                             attach_error: None,
+                            root_created_at: None,
+                            root_exited_at: None,
                         };
                     }
                     Self {
@@ -4010,6 +4025,8 @@ mod process_scope {
                         attached: false,
                         suspended: false,
                         attach_error: None,
+                        root_created_at: None,
+                        root_exited_at: None,
                     }
                 }
             }
@@ -4020,6 +4037,8 @@ mod process_scope {
             }
 
             pub(crate) fn attach(&mut self, child: &mut Child) {
+                self.root_created_at =
+                    process_times(child.as_raw_handle() as HANDLE).map(|(created, _)| created);
                 if let Some(job) = self.job {
                     let ok =
                         unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
@@ -4048,7 +4067,8 @@ mod process_scope {
                 let Some(processes) = process_table() else {
                     return unobservable_snapshot(root, "process_snapshot_failed");
                 };
-                let descendants = descendants_of(root, &processes);
+                let descendants =
+                    descendants_of(root, self.root_created_at, self.root_exited_at, &processes);
                 let Some(job) = self.job else {
                     return unobservable_snapshot(root, "job_unavailable");
                 };
@@ -4087,6 +4107,9 @@ mod process_scope {
                 }
                 let root = child.id();
                 let _ = child.wait();
+                // 用子进程句柄读退出时间：按 PID 读会读到复用该 PID 的后来者。
+                self.root_exited_at = process_times(child.as_raw_handle() as HANDLE)
+                    .and_then(|(_, exited)| (exited != 0).then_some(exited));
 
                 let deadline = Instant::now() + CLEANUP_DEADLINE;
                 loop {
@@ -4153,9 +4176,18 @@ mod process_scope {
             }
         }
 
-        /// 一次 Toolhelp 进程快照读出的 `(pid, parent_pid)` 表。
+        /// 一次 Toolhelp 进程快照读出的 `(pid, parent_pid, created_at, alive)` 表。
+        /// 创建时间取 `GetProcessTimes` 的 FILETIME；`alive` 取 `GetExitCodeProcess`。
+        /// 任一项读不到时记 `None`（不放大误判）。
         /// 空表或快照句柄失败都按"不可观测"处理，绝不当成"没有后代"。
-        fn process_table() -> Option<Vec<(u32, u32)>> {
+        struct ProcEntry {
+            pid: u32,
+            parent_pid: u32,
+            created_at: Option<u64>,
+            alive: Option<bool>,
+        }
+
+        fn process_table() -> Option<Vec<ProcEntry>> {
             unsafe {
                 let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                 if snapshot == INVALID_HANDLE_VALUE {
@@ -4166,7 +4198,14 @@ mod process_scope {
                 let mut rows = Vec::new();
                 let mut ok = Process32First(snapshot, &mut entry);
                 while ok != 0 {
-                    rows.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    let pid = entry.th32ProcessID;
+                    let (created_at, alive) = process_facts(pid);
+                    rows.push(ProcEntry {
+                        pid,
+                        parent_pid: entry.th32ParentProcessID,
+                        created_at,
+                        alive,
+                    });
                     entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
                     ok = Process32Next(snapshot, &mut entry);
                 }
@@ -4179,23 +4218,127 @@ mod process_scope {
             }
         }
 
+        /// 一次 `OpenProcess` 读出创建时间与存活状态。
+        ///
+        /// `alive` 用 `GetExitCodeProcess` 判定：`STILL_ACTIVE` 才算活。已终止但尚未被回收的
+        /// 进程仍会出现在 Toolhelp 快照里（句柄未全部关闭前进程对象不删除），如果不剔除，
+        /// 终止后的快照会把刚被杀的成员当成"仍可枚举的后代"，误报 `StillAlive`。
+        fn process_facts(pid: u32) -> (Option<u64>, Option<bool>) {
+            unsafe {
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                if handle.is_null() {
+                    // `ERROR_INVALID_PARAMETER` = 该 PID 已不存在。Toolhelp 枚举与逐个
+                    // 打开之间进程可能已退出并被回收，这种行必须按已终止处理；权限不足
+                    // 等其它错误仍记 `None`（未知），交由调用方保守保留。
+                    return (
+                        None,
+                        liveness_from_open_error(std::io::Error::last_os_error().raw_os_error()),
+                    );
+                }
+                let created_at = process_times(handle).map(|(created, _)| created);
+                let mut code: u32 = 0;
+                let code_ok = GetExitCodeProcess(handle, &mut code);
+                CloseHandle(handle);
+                let alive = if code_ok != 0 {
+                    Some(code == STILL_ACTIVE as u32)
+                } else {
+                    None
+                };
+                (created_at, alive)
+            }
+        }
+
+        /// 把 `OpenProcess` 失败码映射成存活判断：只把「PID 不存在」判为已终止，
+        /// 其余（尤其是权限不足）保持未知。
+        fn liveness_from_open_error(code: Option<i32>) -> Option<bool> {
+            match code {
+                Some(code) if code as u32 == ERROR_INVALID_PARAMETER => Some(false),
+                _ => None,
+            }
+        }
+
+        /// 从已打开的进程句柄读取 `(创建时间, 退出时间)`（FILETIME 100ns 刻度）。
+        /// 运行中的进程退出时间为 0；查询失败返回 `None`。
+        ///
+        /// 用句柄而不是 PID 读取：PID 被复用后按 PID 打开的是后来者，句柄始终指向
+        /// 本进程对象。
+        fn process_times(handle: HANDLE) -> Option<(u64, u64)> {
+            unsafe {
+                let mut creation: FILETIME = std::mem::zeroed();
+                let mut exit: FILETIME = std::mem::zeroed();
+                let mut kernel: FILETIME = std::mem::zeroed();
+                let mut user: FILETIME = std::mem::zeroed();
+                let ok = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user);
+                if ok == 0 {
+                    return None;
+                }
+                let ticks =
+                    |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+                Some((ticks(creation), ticks(exit)))
+            }
+        }
+
         /// 按创建时父链做传递闭包（含环保护），返回排好序的后代 PID。
-        fn descendants_of(root: u32, rows: &[(u32, u32)]) -> Vec<u32> {
+        ///
+        /// 三道过滤：
+        /// - 只接受「子进程创建时间 ≥ 父进程创建时间」的边。Windows 会复用 PID：旧父进程
+        ///   退出后同号 PID 被新进程持有，旧子进程记录的 `ParentProcessID` 会把无关进程树
+        ///   挂到新根上；创建时间顺序能识别并拒绝这类边。任一端时间读不到时保留旧行为
+        ///   （接受该边），避免因缺证据扩大误判。
+        /// - 剔除已终止的进程。Toolhelp 会列出已退出但进程对象尚未删除的成员，杀完立刻
+        ///   拍快照会把它们当成存活后代。存活状态读不到（权限不足）时保留该行，宁可保守
+        ///   报仍有后代，也不把无法鉴定的进程当成已清理。
+        /// - 「根 → 直接子进程」的边还要求子进程创建时间不晚于根进程退出时间：根 PID 被
+        ///   后来者复用后，后来者的子进程结构上与本任务无关，但创建时间晚于根，仅靠下界
+        ///   无法拒绝；退出时间给出上界。根未退出或读不到退出时间时不加上界。
+        fn descendants_of(
+            root: u32,
+            root_created_at: Option<u64>,
+            root_exited_at: Option<u64>,
+            rows: &[ProcEntry],
+        ) -> Vec<u32> {
             use std::collections::HashSet;
             let mut seen = HashSet::new();
             seen.insert(root);
-            let mut frontier = vec![root];
+            let mut frontier = vec![(root, root_created_at)];
             let mut descendants = Vec::new();
-            while let Some(parent) = frontier.pop() {
-                for &(pid, parent_pid) in rows {
-                    if parent_pid == parent && seen.insert(pid) {
-                        descendants.push(pid);
-                        frontier.push(pid);
+            while let Some((parent, parent_created_at)) = frontier.pop() {
+                for row in rows {
+                    if row.parent_pid != parent || seen.contains(&row.pid) {
+                        continue;
                     }
+                    if row.alive == Some(false) {
+                        continue;
+                    }
+                    if !edge_respects_creation_order(parent_created_at, row.created_at) {
+                        continue;
+                    }
+                    if parent == root
+                        && !child_created_before_root_exit(root_exited_at, row.created_at)
+                    {
+                        continue;
+                    }
+                    seen.insert(row.pid);
+                    descendants.push(row.pid);
+                    frontier.push((row.pid, row.created_at));
                 }
             }
             descendants.sort_unstable();
             descendants
+        }
+
+        fn child_created_before_root_exit(root_exited_at: Option<u64>, child: Option<u64>) -> bool {
+            match (root_exited_at, child) {
+                (Some(exited), Some(created)) => created <= exited,
+                _ => true,
+            }
+        }
+
+        fn edge_respects_creation_order(parent: Option<u64>, child: Option<u64>) -> bool {
+            match (parent, child) {
+                (Some(parent), Some(child)) => child >= parent,
+                _ => true,
+            }
         }
 
         /// `JobObjectBasicProcessIdList` 的缓冲区；固定容量，超过容量按截断（不可观测）处理。
@@ -4393,8 +4536,17 @@ mod process_scope {
                 );
                 assert!(appeared, "加入作业并恢复后命令必须开始执行");
                 assert!(before.unwrap_or(0) > 0, "恢复后作业内必须有活动进程");
+                let started = Instant::now();
                 let outcome = supervisor.terminate(&mut child);
+                let elapsed_ms = started.elapsed().as_millis();
                 let after = supervisor.active_processes();
+                if outcome != CleanupOutcome::Cleaned {
+                    println!(
+                        "[probe] suspended_start root={} elapsed_ms={elapsed_ms} active_after={after:?} {}",
+                        child.id(),
+                        dump_parent_edges(child.id(), supervisor.root_created_at)
+                    );
+                }
                 println!(
                     "[evidence] suspended_start terminate={outcome:?} ActiveProcesses_after={after:?}"
                 );
@@ -4468,6 +4620,147 @@ mod process_scope {
                 assert_eq!(observed, Some(0), "进程退出后作业内活动进程数应为 0");
             }
 
+            // v1.39 判据：同号 PID 复用后，旧父链留下的子进程创建时间早于新根，
+            // 这条边必须被拒绝；只有创建时间不早于父进程的边才允许进入后代集合。
+            // 时间读不到时保留旧行为（接受），避免因缺证据扩大误判。
+            #[test]
+            fn pid_reuse_parent_chain_edge_is_rejected() {
+                let root = 500;
+                let root_created = Some(5000);
+                let rows = vec![
+                    // 旧父进程（pid 500）的遗留子进程：创建时间早于新根，必须拒绝
+                    ProcEntry {
+                        pid: 900,
+                        parent_pid: root,
+                        created_at: Some(1000),
+                        alive: Some(true),
+                    },
+                    ProcEntry {
+                        pid: 901,
+                        parent_pid: 900,
+                        created_at: Some(1100),
+                        alive: Some(true),
+                    },
+                    // 真正的新后代：创建时间晚于根，必须保留
+                    ProcEntry {
+                        pid: 902,
+                        parent_pid: root,
+                        created_at: Some(6000),
+                        alive: Some(true),
+                    },
+                    ProcEntry {
+                        pid: 903,
+                        parent_pid: 902,
+                        created_at: Some(7000),
+                        alive: Some(true),
+                    },
+                    // 中间层 PID 复用：905 早于父进程 902，必须拒绝
+                    ProcEntry {
+                        pid: 905,
+                        parent_pid: 902,
+                        created_at: Some(4000),
+                        alive: Some(true),
+                    },
+                    // 创建时间不可读：保留旧行为，接受该边
+                    ProcEntry {
+                        pid: 906,
+                        parent_pid: root,
+                        created_at: None,
+                        alive: Some(true),
+                    },
+                    // 根退出后同号 PID 被并发进程复用：后来者的子进程 907 创建时间晚于
+                    // 根退出时间（6500），必须拒绝
+                    ProcEntry {
+                        pid: 907,
+                        parent_pid: root,
+                        created_at: Some(8000),
+                        alive: Some(true),
+                    },
+                ];
+                println!(
+                    "[evidence] pid_reuse rows={} result={:?}",
+                    rows.len(),
+                    descendants_of(root, root_created, Some(6500), &rows)
+                );
+                assert_eq!(
+                    descendants_of(root, root_created, Some(6500), &rows),
+                    vec![902, 903, 906]
+                );
+                assert!(!edge_respects_creation_order(Some(5000), Some(1000)));
+                assert!(edge_respects_creation_order(Some(5000), Some(6000)));
+                assert!(edge_respects_creation_order(None, Some(1)));
+                assert!(!child_created_before_root_exit(Some(6500), Some(8000)));
+                assert!(child_created_before_root_exit(Some(6500), Some(6000)));
+                assert!(child_created_before_root_exit(None, Some(8000)));
+                assert_eq!(liveness_from_open_error(Some(87)), Some(false));
+                assert_eq!(liveness_from_open_error(Some(5)), None);
+                assert_eq!(liveness_from_open_error(None), None);
+            }
+
+            // v1.39 判据：Toolhelp 会列出已终止但尚未回收的进程（进程对象要等句柄全关才删），
+            // 终止后立刻拍快照会把它们当成存活后代。存活状态可读且为 `false` 的行必须剔除；
+            // 存活状态读不到时保留该行——宁可保守报仍有后代，也不把无法鉴定的进程当已清理。
+            #[test]
+            fn terminated_rows_are_not_counted_as_descendants() {
+                let root = 500;
+                let rows = vec![
+                    ProcEntry {
+                        pid: 910,
+                        parent_pid: root,
+                        created_at: Some(6000),
+                        alive: Some(false),
+                    },
+                    ProcEntry {
+                        pid: 911,
+                        parent_pid: 910,
+                        created_at: Some(7000),
+                        alive: Some(true),
+                    },
+                    ProcEntry {
+                        pid: 912,
+                        parent_pid: root,
+                        created_at: Some(8000),
+                        alive: Some(true),
+                    },
+                    ProcEntry {
+                        pid: 913,
+                        parent_pid: root,
+                        created_at: Some(9000),
+                        alive: None,
+                    },
+                ];
+                println!(
+                    "[evidence] terminated_rows rows={} result={:?}",
+                    rows.len(),
+                    descendants_of(root, Some(5000), None, &rows)
+                );
+                assert_eq!(
+                    descendants_of(root, Some(5000), None, &rows),
+                    vec![912, 913],
+                    "已终止行连同其子树必须剔除；存活状态不可读时保留"
+                );
+            }
+
+            /// 失败取证：区分「根 PID 被复用」（当前根行创建时间不等于记录值）与
+            /// 「子进程创建时间读不到导致边被接受」（边时间为 None）。
+            fn dump_parent_edges(root: u32, recorded: Option<u64>) -> String {
+                let Some(rows) = process_table() else {
+                    return "process_table_unavailable".to_string();
+                };
+                let current_root = rows
+                    .iter()
+                    .find(|row| row.pid == root)
+                    .map(|row| row.created_at);
+                let edges: Vec<String> = rows
+                    .iter()
+                    .filter(|row| row.parent_pid == root)
+                    .map(|row| format!("{}@{:?} alive={:?}", row.pid, row.created_at, row.alive))
+                    .collect();
+                format!(
+                    "recorded_root_created={recorded:?} current_root_row={current_root:?} edges={edges:?}"
+                )
+            }
+
             // 观测点：Toolhelp 进程树快照 × 作业 PID 列表交叉核对（终止前后）
             #[test]
             fn descendant_snapshot_cross_checks_job_accounting() {
@@ -4519,8 +4812,17 @@ mod process_scope {
                     "作业覆盖下的后代不应出现逃逸标记"
                 );
 
+                let started = Instant::now();
                 let outcome = supervisor.terminate(&mut child);
+                let elapsed_ms = started.elapsed().as_millis();
                 let after = supervisor.snapshot_descendants(root);
+                if outcome != CleanupOutcome::Cleaned {
+                    println!(
+                        "[probe] cross_check root={root} elapsed_ms={elapsed_ms} active_after={:?} {}",
+                        supervisor.active_processes(),
+                        dump_parent_edges(root, supervisor.root_created_at)
+                    );
+                }
                 println!(
                     "[evidence] descendant_snapshot after terminate={outcome:?} descendants={:?} controlled={:?} unobservable={:?}",
                     after.descendants, after.controlled_pids, after.unobservable
@@ -5836,6 +6138,45 @@ fn attempt_dir_lost_message(run_dir: &Path) -> String {
     )
 }
 
+/// 证据文件创建失败时的错误文本。
+///
+/// `NotFound` 且目录确实已不存在，说明是 attempt 目录被外部清理/改名，必须具名报
+/// `attempt_dir_lost`；其它情况（目录还在但文件建不出来）保留原始 IO 错误。
+fn create_evidence_error(run_dir: &Path, name: &str, error: std::io::Error) -> String {
+    if error.kind() == std::io::ErrorKind::NotFound && !run_dir.is_dir() {
+        attempt_dir_lost_message(run_dir)
+    } else {
+        format!("创建 {name} 失败：{error}")
+    }
+}
+
+#[cfg(test)]
+mod evidence_error_tests {
+    use super::*;
+
+    // 目录已被外部删除时，创建证据文件必须报具名的 attempt_dir_lost，
+    // 而不是把裸 IO 错误（os error 3）直接抛给调用方。
+    #[test]
+    fn missing_dir_maps_to_attempt_dir_lost() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("attempt-1");
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let text = create_evidence_error(&dir, "stdout", error);
+        println!("[evidence] missing_dir text={text}");
+        assert!(text.contains("attempt_dir_lost"), "{text}");
+    }
+
+    // 目录还在时不得误报 attempt_dir_lost，保留原始错误。
+    #[test]
+    fn present_dir_keeps_raw_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let text = create_evidence_error(dir.path(), "stdout", error);
+        assert!(text.contains("创建 stdout 失败"), "{text}");
+        assert!(!text.contains("attempt_dir_lost"), "{text}");
+    }
+}
+
 /// 回放既有结果时标注来源：existing=调用时已完成，waited=等待并发胜者落盘
 fn standalone_replay_receipt(mut receipt: Value, kind: &str) -> Value {
     if let Some(object) = receipt.as_object_mut() {
@@ -5874,9 +6215,9 @@ fn run_standalone_command(spec: &StandaloneSpec, run_dir: &Path) -> Result<Stand
     let stdout_path = run_dir.join("stdout.txt");
     let stderr_path = run_dir.join("stderr.txt");
     let stdout_file =
-        fs::File::create(&stdout_path).map_err(|e| format!("创建 stdout 失败：{e}"))?;
+        fs::File::create(&stdout_path).map_err(|e| create_evidence_error(run_dir, "stdout", e))?;
     let stderr_file =
-        fs::File::create(&stderr_path).map_err(|e| format!("创建 stderr 失败：{e}"))?;
+        fs::File::create(&stderr_path).map_err(|e| create_evidence_error(run_dir, "stderr", e))?;
 
     let mut command = Command::new(&spec.argv[0]);
     command
@@ -6476,13 +6817,13 @@ fn capabilities_payload() -> Value {
                 "cgroup_scope_enumerates_adopted_escapee",
                 "cgroup_kill_terminates_adopted_escapee",
             ],
-            "Windows 侧作业记账可证明终止后成员归零，但父链快照在 PID 复用下会把无关进程树误判为后代（v1.38.1 复核，审计 §41），不能据此证明整树已清；Linux 侧 cgroup.kill 可用时终止整个作用域并复核三个独立观测量，不可用时退回窄判据——条件性能力不写成无条件整树。",
+            "Windows 侧能证的只有两件事：终止后作业记账 ActiveProcesses 归零；父链快照在创建时间与存活状态可读时，既按「子进程创建时间 ≥ 父进程创建时间」校验边、并对根→直接子进程加「≤ 根退出时间」上界，不把同号 PID 复用后的无关进程树误连为后代，也剔除已终止或 PID 已不存在的行（v1.39，审计 §42）。证不到：作业外进程（BREAKAWAY 或加入作业失败，例如不进作业的 conhost.exe）、换父后被收养的进程、以及创建时间或存活状态读不到时的 PID 复用边——这些情形下快照只能作旁证，报 StillAlive 可能是真实观测。Linux 侧 cgroup.kill 可用时终止整个作用域并复核三个独立观测量，不可用时退回窄判据——条件性能力不写成无条件整树。",
         ),
         capability_entry(
             "timeout.enumerates_escaped_descendants",
             Some(false),
             "partial",
-            "Windows：父链快照可枚举作业外后代，但 PID 复用后旧父链会挂到无关进程树上，枚举存在误报（v1.38.1 复核，审计 §41），只能作旁证；Linux：cgroup v2 可写时成员集合不随换父消失，已能枚举被收养后代，但该作用域在容器/非 root/ cgroup v1 下建不起来，此时如实标 unobservable",
+            "Windows：父链快照可枚举作业外后代；v1.39 起每条父链边要求「子进程创建时间 ≥ 父进程创建时间」、根→直接子进程加「≤ 根退出时间」上界，并剔除已终止或 PID 已不存在的行，同号 PID 复用后的无关树与枚举残行不再被误连（审计 §42），但作业外进程（如 conhost.exe）、创建时间或存活状态读不到时仍可能误报，因此只作旁证；Linux：cgroup v2 可写时成员集合不随换父消失，已能枚举被收养后代，但该作用域在容器/非 root/ cgroup v1 下建不起来，此时如实标 unobservable",
             Some("posix_escaped_scope_requires_writable_cgroup_v2"),
             false,
             &both,
@@ -6534,8 +6875,10 @@ fn capabilities_payload() -> Value {
                 "descendant_snapshot_cross_checks_job_accounting",
                 "descendant_snapshot_cross_checks_process_group",
                 "descendant_snapshot_flags_descendants_outside_controlled_set",
+                "pid_reuse_parent_chain_edge_is_rejected",
+                "terminated_rows_are_not_counted_as_descendants",
             ],
-            "只回答「枚举到的后代是否都在受控集合内、终止后是否仍可枚举到」；不覆盖换父后被收养、PID 复用与集合未能建立的情形。",
+            "只回答「枚举到的后代是否都在受控集合内、终止后是否仍可枚举到」；v1.39 起 Windows 父链边带创建时间校验（子 ≥ 父）、根→直接子进程再加「≤ 根退出时间」上界，并剔除 `GetExitCodeProcess` 判为已终止或 `OpenProcess` 返回 `ERROR_INVALID_PARAMETER`（PID 已不存在）的行（`pid_reuse_parent_chain_edge_is_rejected` / `terminated_rows_are_not_counted_as_descendants` 确定性覆盖）；不覆盖换父后被收养、作业外进程（如不进作业的 `conhost.exe`）、以及创建时间/存活状态读不到时的同号 PID 复用，也不覆盖集合未能建立的情形。",
         ),
         capability_entry(
             "path.argv_scope_enforced",
