@@ -3341,10 +3341,79 @@ test result: FAILED. 0 passed; 2 failed
 - Windows：`CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` 父链传递闭包 × `JobObjectBasicProcessIdList`；两者集合相等才说明"枚举到的后代都在作业内"。父链在 Windows 上不因父进程退出而改写，这是整树可证的平台前提。
 - Linux：`/proc/<pid>/stat` 的 `pid (comm) state ppid pgrp`（以最后一个 `)` 为界），父链闭包 × 同 `pgrp` 成员集合；`NotFound` 跳过，其余读失败（权限/hidepid）一律 `unobservable`。
 - 生产终止路径在原有判据后追加复核：快照不可观测 → `Unavailable`；仍有可枚举后代 → `StillAlive`；两观测点都空才 `Cleaned`。属于收紧，不放宽原有三态。`StillAlive` 回执措辞同步扩为"受控集合内仍有存活进程，或父链快照仍枚举到存活后代"，避免把逃逸后代误报成集合内成员（`tools/list` 描述未改，`tools_sha256` 不变）。
-- `capabilities` 新增 `timeout.descendant_snapshot_cross_check=true/proven/automatic=true`；`timeout.cleans_entire_process_tree` 与 `timeout.enumerates_escaped_descendants` 由 `not_proven` 改为 `holds=false/partial/posix_escaped_after_reparent_unobservable`；条目 13→14，`not_proven_total` 仍 4。
+- `capabilities` 新增 `timeout.descendant_snapshot_cross_check=true/proven/automatic=true`；`timeout.cleans_entire_process_tree` 与 `timeout.enumerates_escaped_descendants` 由 `not_proven` 改为 `holds=false/partial/posix_escaped_after_reparent_unobservable`；条目 13→14，`not_proven_total` 实数为 5（本节早期写的 4 为笔误）。
 
 ### 36.4 结论与仍然缺的那一段
 
 - Windows：作业覆盖全部后代（`CREATE_SUSPENDED` 先入作业、恢复前不派生、本作业未设 `BREAKAWAY_OK`、嵌套作业仍在外层作业内），父链快照可枚举全部存活后代，终止后快照与 `ActiveProcesses` 同时为空 → **整树清理在 Windows 侧成立**。
 - POSIX：`setsid` / 双 fork 换父后被 init/子收割者收养，父链断开；`setsid_escape_is_flagged_then_unobservable_after_reparent` 实测 `escaped_alive=true` 而快照 `descendants=[]`，即"快照为空 ≠ 无逃逸"。因此 POSIX **不能**宣称整树，`cleans_entire_process_tree` 只能保持 `holds=false`。
-- 仍缺的边界：Linux 收养后的后代枚举（需 cgroup v2 委派或 subreaper + 启动时间全量扫描，均未实现）；macOS 无 `/proc`；Windows PID 复用可能多报后代（保守方向）；观测是终止后采样而非内核级订阅。
+- 仍缺的边界：Linux 收养后的后代枚举（需 cgroup v2 委派或 subreaper + 启动时间全量扫描，均未实现——**cgroup v2 一条已在 v1.35 落地，见 §37**）；macOS 无 `/proc`；Windows PID 复用可能多报后代（保守方向）；观测是终止后采样而非内核级订阅。
+
+## 37. v1.35：Linux cgroup v2 作用域观测（被收养的逃逸后代可见）
+
+### 37.1 前提探测（先确认本机能不能走这条路）
+
+```
+$ stat -fc %T /sys/fs/cgroup
+cgroup2fs
+$ cat /sys/fs/cgroup/cgroup.controllers
+cpuset cpu io memory hugetlb pids rdma misc dmem
+$ id -u
+0
+$ mkdir /sys/fs/cgroup/aw-probe; sleep 5 & echo $! > /sys/fs/cgroup/aw-probe/cgroup.procs
+$ cat /sys/fs/cgroup/aw-probe/cgroup.procs
+<写入的 pid>
+$ rmdir /sys/fs/cgroup/aw-probe
+rmdir: failed to remove '/sys/fs/cgroup/aw-probe': Device or resource busy
+```
+
+结论：WSL Ubuntu 24.04 是 cgroup v2 单挂载、root 可建子 cgroup 并迁移进程；`rmdir` 失败仅因成员仍在（预期）。
+
+### 37.2 红
+
+临时让 `CgroupScope::prepare()` 恒返回 `Err("cgroup_v2_unavailable")`（模拟"建不起来"，运行后已逐字还原）：
+
+```
+thread 'server::process_scope::imp::tests::cgroup_scope_enumerates_adopted_escapee' panicked at apps/mcp-bridge/src/server.rs:
+本机未能建立 cgroup v2 观测作用域：Some("cgroup_v2_unavailable")
+[left: ProcessGroup / right: CgroupV2]
+test result: FAILED. 0 passed; 1 failed
+```
+
+另有一条既有用例在实现过程中暴露为不稳定（`setsid_escape_is_outside_the_observed_group` 的 `original_group_empty=false`）：`sh` 写完 PID 就退出，`setsid` 尚未切到新会话。已改为轮询等待其真正离组（测试夹具修正，不改判据）。
+
+### 37.3 绿
+
+- Windows：`12 lib + 122 integration` 全绿。
+- WSL Ubuntu 24.04（`cargo 1.88.0`）：`13 lib + 120 integration` 全绿；跑完 `ls -d /sys/fs/cgroup/aw-mcp-bridge-*` 计数为 0。
+
+证据行（真实进程）：
+
+```
+[evidence] cgroup_scope opened root=936 scope=CgroupV2 escaped_scope_unobservable=None controlled=Some([936])
+[evidence] cgroup_scope before escaped=945 scope=CgroupV2 descendants=[DescendantProcess { pid: 945, in_controlled_set: false }] outside=[945]
+[evidence] cgroup_scope after outcome=StillAlive escaped_alive=true escaped_ppid=Some(740) root=936 descendants=[DescendantProcess { pid: 945, in_controlled_set: false }] controlled=Some([]) scope=CgroupV2
+[evidence] setsid_snapshot after outcome=StillAlive escaped_alive=true scope=CgroupV2 escaped_scope_unobservable=None descendants=[DescendantProcess { pid: 943, in_controlled_set: false }]
+[evidence] cgroup_unavailable reason=Some("cgroup_v2_unavailable")
+[evidence] cgroup_degraded scope=ProcessGroup escaped_scope_unobservable=Some("cgroup_v2_unavailable") unobservable=None
+```
+
+读法：945 在根退出后被收养（`ppid=740 ≠ root=936`），父链看不到，但 cgroup 仍列出它；终止结果由 v1.34 的 `Cleaned` 修正为 `StillAlive`——修掉了一个假通过。
+
+### 37.4 实现口径
+
+- `DescendantSnapshot` 增 `scope: SnapshotScope{JobObject,CgroupV2,ProcessGroup}` 与 `escaped_scope_unobservable`。
+- Linux 建 cgroup 在 `configure`，入组在 `pre_exec`（fork 后、exec 前写自身 PID，仅 `write(2)`，不分配不加锁）；`attach` 核对成员关系，失败补写一次，仍失败记 `cgroup_membership_not_established`。
+- 后代集合 = 父链闭包 ∪ cgroup 成员 − 根；`controlled_pids` 恒为**终止作用域**（`pgrp`），`in_controlled_set=false` 即"可见但杀不到"。
+- 降级不阻断执行，也不把整份快照置为不可用；`escaped_scope_unobservable` 必须带原因，`covers_escaped_descendants()` 为 false。
+- 能力位：新增 `timeout.cgroup_v2_scope_observation=true/proven`（`platforms_verified=["linux"]`、`platforms_unverified=["windows","macos"]`）；`cleans_entire_process_tree` → `posix_escaped_descendant_observable_not_terminated`，`enumerates_escaped_descendants` → `posix_escaped_scope_requires_writable_cgroup_v2`，两者仍 `holds=false/partial`；条目 14→15，`not_proven_total` 仍为 5。
+- `StillAlive` 回执删掉"换父被收养的逃逸进程是否仍在运行不可观测"这一定论（cgroup 下已可观测），改为"取决于观测作用域"，`tools/list` 描述未动，`tools_sha256` 不变。
+
+### 37.5 仍然缺的那一段
+
+- **终止未闭合**：`kill(-pgid)` 打不到 `setsid` 逃逸者，cgroup 只用来看。要闭合需 `cgroup.kill`（内核 ≥5.14，写 `1` 即整组 SIGKILL，成员关系保证不漏）或对成员逐个 SIGKILL；本版明确不做，故 `cleans_entire_process_tree` 保持 `holds=false`。
+- cgroup 建不起来时（容器/非 root/cgroup v1）观测退回进程组，逃逸不可枚举，只能靠 `escaped_scope_unobservable` 告警。
+- 外部可把进程移出 cgroup，移出后不可见。
+- 成员未退出时 Drop 删不掉目录，会留空目录（不杀进程）。
+- macOS 无 `/proc`、无 cgroup，恒不可观测。
+

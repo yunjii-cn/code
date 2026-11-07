@@ -290,7 +290,12 @@ impl Server {
             left.get("receivedAt")
                 .and_then(Value::as_str)
                 .unwrap_or("")
-                .cmp(right.get("receivedAt").and_then(Value::as_str).unwrap_or(""))
+                .cmp(
+                    right
+                        .get("receivedAt")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                )
         });
         let total = records.len() as u64;
         let latest = records.last().cloned().unwrap_or(Value::Null);
@@ -311,8 +316,8 @@ impl Server {
         let exists = self.runs_dir.is_dir();
         let mut task_ids: Vec<String> = Vec::new();
         if exists {
-            let entries = fs::read_dir(&self.runs_dir)
-                .map_err(|e| format!("读取 runs 目录失败：{e}"))?;
+            let entries =
+                fs::read_dir(&self.runs_dir).map_err(|e| format!("读取 runs 目录失败：{e}"))?;
             for entry in entries.flatten() {
                 if !entry.path().is_dir() {
                     continue;
@@ -386,9 +391,9 @@ impl Server {
         }
         let limit = match args.get("limit") {
             None => 100,
-            Some(value) => value.as_u64().ok_or_else(|| {
-                "invalid_retention: limit 必须是 1..=100 的整数".to_string()
-            })?,
+            Some(value) => value
+                .as_u64()
+                .ok_or_else(|| "invalid_retention: limit 必须是 1..=100 的整数".to_string())?,
         };
         if !(1..=100).contains(&limit) {
             return Err("invalid_retention: limit 必须在 1..=100 之间".to_string());
@@ -436,15 +441,13 @@ impl Server {
         let exclude_filter = if exclusions.is_empty() {
             Value::Null
         } else {
-            json!(
-                exclusions
-                    .iter()
-                    .map(|exclusion| json!({
-                        "task_id": exclusion.task_id,
-                        "attempt": exclusion.attempt
-                    }))
-                    .collect::<Vec<Value>>()
-            )
+            json!(exclusions
+                .iter()
+                .map(|exclusion| json!({
+                    "task_id": exclusion.task_id,
+                    "attempt": exclusion.attempt
+                }))
+                .collect::<Vec<Value>>())
         };
 
         let evaluated_at = now_stamp();
@@ -569,7 +572,10 @@ impl Server {
             "batch_id": batch_id.clone()
         });
         for candidate in &batch {
-            let task_id = candidate["task_id"].as_str().unwrap_or_default().to_string();
+            let task_id = candidate["task_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
             let attempt = candidate["attempt"].as_u64().unwrap_or_default();
             let source_path = candidate["path"].as_str().unwrap_or_default().to_string();
             let attempt_dir = self
@@ -620,16 +626,18 @@ impl Server {
                     &rule,
                     &fingerprint,
                 )),
-                DeleteOutcome::RetainedInTrash { trash_path, error } => trashed.push(retained_entry(
-                    RetainedState::InTrash,
-                    &task_id,
-                    attempt,
-                    &source_path,
-                    Some(&trash_path),
-                    &error,
-                    &rule,
-                    &fingerprint,
-                )),
+                DeleteOutcome::RetainedInTrash { trash_path, error } => {
+                    trashed.push(retained_entry(
+                        RetainedState::InTrash,
+                        &task_id,
+                        attempt,
+                        &source_path,
+                        Some(&trash_path),
+                        &error,
+                        &rule,
+                        &fingerprint,
+                    ))
+                }
             }
         }
         let deleted_total = deleted.len() as u64;
@@ -906,7 +914,10 @@ impl Server {
 
     /// 整目录搬进 .prune-trash 后再删：重命名失败则原样不动，避免"只删了一半文件"
     fn delete_attempt_dir(&self, task_id: &str, attempt: u64, batch_id: &str) -> DeleteOutcome {
-        let source = self.runs_dir.join(task_id).join(format!("attempt-{attempt}"));
+        let source = self
+            .runs_dir
+            .join(task_id)
+            .join(format!("attempt-{attempt}"));
         let stage_root = self.runs_dir.join(".prune-trash").join(batch_id);
         if let Err(error) = fs::create_dir_all(&stage_root) {
             return DeleteOutcome::RetainedAtSource {
@@ -921,7 +932,8 @@ impl Server {
             };
         }
         if let Err(error) = fs::remove_dir_all(&staged) {
-            let error_text = format!("已整链移至 {staged_rel}，但删除暂存失败（数据未丢）：{error}");
+            let error_text =
+                format!("已整链移至 {staged_rel}，但删除暂存失败（数据未丢）：{error}");
             return DeleteOutcome::RetainedInTrash {
                 trash_path: staged_rel,
                 error: error_text,
@@ -1002,9 +1014,8 @@ impl Server {
         args: &Value,
     ) -> Result<Option<InflightGuard>, String> {
         let dir = self.runs_dir.join(INFLIGHT_DIR);
-        fs::create_dir_all(&dir).map_err(|error| {
-            format!("inflight_marker_failed: 创建活跃标记目录失败：{error}")
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("inflight_marker_failed: 创建活跃标记目录失败：{error}"))?;
         let path = dir.join(format!("{task_id}.json"));
         let deadline = inflight_deadline(args, mode);
         for _ in 0..3 {
@@ -1025,7 +1036,11 @@ impl Server {
                 Ok(mut file) => {
                     use std::io::Write;
                     if let Err(error) = file
-                        .write_all(serde_json::to_string(&record).unwrap_or_default().as_bytes())
+                        .write_all(
+                            serde_json::to_string(&record)
+                                .unwrap_or_default()
+                                .as_bytes(),
+                        )
                         .and_then(|_| file.sync_all())
                     {
                         let _ = fs::remove_file(&path);
@@ -1053,7 +1068,10 @@ impl Server {
 
     /// 只读快照：给 prune 与外部调用方判断"该 task 是否有活跃执行"，不改动标记
     fn inflight_snapshot(&self, task_id: &str) -> Option<Value> {
-        let path = self.runs_dir.join(INFLIGHT_DIR).join(format!("{task_id}.json"));
+        let path = self
+            .runs_dir
+            .join(INFLIGHT_DIR)
+            .join(format!("{task_id}.json"));
         let mut record = read_json(&path).ok()?;
         let stale = marker_is_stale(&record, chrono::Utc::now());
         if let Some(object) = record.as_object_mut() {
@@ -1072,9 +1090,7 @@ impl Server {
                     "invalid_arguments: action 必须是 list 或 clean，收到：{other}"
                 ))
             }
-            None => {
-                return Err("invalid_arguments: action 必须显式传入 list 或 clean".to_string())
-            }
+            None => return Err("invalid_arguments: action 必须显式传入 list 或 clean".to_string()),
         };
         let task_filter = match args.get("task_id") {
             None => None,
@@ -1418,15 +1434,16 @@ impl Server {
     fn append_inflight_sweep_record(&self, record: &Value) -> Result<(), String> {
         use std::io::Write;
         let path = self.runs_dir.join(INFLIGHT_SWEEP_AUDIT);
-        let line = serde_json::to_string(record).map_err(|error| {
-            format!("inflight_sweep_audit_failed: 序列化审计记录失败：{error}")
-        })?;
+        let line = serde_json::to_string(record)
+            .map_err(|error| format!("inflight_sweep_audit_failed: 序列化审计记录失败：{error}"))?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(|error| {
-                format!("inflight_sweep_audit_failed: 打开 runs/{INFLIGHT_SWEEP_AUDIT} 失败：{error}")
+                format!(
+                    "inflight_sweep_audit_failed: 打开 runs/{INFLIGHT_SWEEP_AUDIT} 失败：{error}"
+                )
             })?;
         writeln!(file, "{line}").map_err(|error| {
             format!("inflight_sweep_audit_failed: 写入 runs/{INFLIGHT_SWEEP_AUDIT} 失败：{error}")
@@ -1565,7 +1582,11 @@ impl Server {
             ));
         }
         let standalone = standalone_mode(args)?;
-        let mode = if standalone { "standalone" } else { "dispatched" };
+        let mode = if standalone {
+            "standalone"
+        } else {
+            "dispatched"
+        };
         // 活跃标记覆盖整个调用生命周期：正常返回、提前报错、被阻断都会在 Drop 时删除
         let _inflight = self.acquire_inflight_marker(task_id, mode, args)?;
         match standalone {
@@ -2144,8 +2165,8 @@ fn write_dispatch(run_dir: &Path, signature: &Value) -> Result<(), String> {
         object.insert("dispatchedAt".to_string(), json!(now_stamp()));
     }
     let path = run_dir.join("dispatch.json");
-    let text = serde_json::to_string_pretty(&record)
-        .map_err(|e| format!("序列化派单签名失败：{e}"))?;
+    let text =
+        serde_json::to_string_pretty(&record).map_err(|e| format!("序列化派单签名失败：{e}"))?;
     fs::write(&path, text).map_err(|e| format!("写入派单签名失败：{e}"))
 }
 
@@ -2185,7 +2206,11 @@ fn latest_attempt_dir(root: &Path) -> Option<(u64, PathBuf)> {
             else {
                 continue;
             };
-            if latest.as_ref().map(|(seen, _)| number > *seen).unwrap_or(true) {
+            if latest
+                .as_ref()
+                .map(|(seen, _)| number > *seen)
+                .unwrap_or(true)
+            {
                 latest = Some((number, entry.path()));
             }
         }
@@ -2354,16 +2379,9 @@ fn parse_exclusions(args: &Value) -> Result<Vec<Exclusion>, String> {
 
 /// 单次删除的终态：只有 `Deleted` 表示"已从 `runs/` 移除"；其余两种都还在盘上。
 enum DeleteOutcome {
-    Deleted {
-        trash_path: String,
-    },
-    RetainedAtSource {
-        error: String,
-    },
-    RetainedInTrash {
-        trash_path: String,
-        error: String,
-    },
+    Deleted { trash_path: String },
+    RetainedAtSource { error: String },
+    RetainedInTrash { trash_path: String, error: String },
 }
 
 /// 未删除条目的状态：类型层面只可能取这两个值，构造不出 `deleted`
@@ -2444,20 +2462,34 @@ mod process_scope {
         Unavailable,
     }
 
+    /// 后代观测的作用域。它决定"快照为空"能证明什么，不是实现细节。
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    // 变体按平台构造，单平台编译时另一个变体必然"未使用"
+    #[allow(dead_code)]
+    pub(crate) enum SnapshotScope {
+        /// Windows 作业：成员关系与父进程是否存活无关
+        JobObject,
+        /// Linux cgroup v2：成员关系在换父被收养后仍然保留
+        CgroupV2,
+        /// POSIX 进程组：只覆盖同组进程，换组或换父的后代不在其中
+        ProcessGroup,
+    }
+
     /// 一次"后代快照"：只读观测，不参与终止动作。
     ///
-    /// - `descendants`：从 `root` 出发、按创建时父链能枚举到的存活进程；
-    /// - `controlled_pids`：受控集合（Windows 作业 / Linux 进程组）当时的成员；
-    ///   `None` 表示该平台或该时刻**无法观测**，绝不能当成"空集合"；
+    /// - `descendants`：本作用域能枚举到的存活后代（父链 ∪ 作用域成员，去根）；
+    /// - `controlled_pids`：作用域成员（Windows 作业 / Linux cgroup / POSIX 进程组）；
+    ///   `None` 表示该时刻**无法观测**，绝不能当成"空集合"；
+    /// - `escaped_scope_unobservable`：期望的"换父后仍可枚举"作用域没建起来的原因。
+    ///   非空时 `descendants` 只覆盖父链/进程组，**不代表**没有逃逸后代；
     /// - `unobservable`：非空时整份快照不可用，调用方不得把 `is_empty()` 当成"没有后代"。
-    ///
-    /// 边界：POSIX 后代一旦 `setsid` / 双 fork 换父并被收养，就不再出现在父链里；
-    /// 快照只能覆盖"仍可枚举"的后代，所以它不是整棵树的证明。
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub(crate) struct DescendantSnapshot {
         pub(crate) root: u32,
         pub(crate) descendants: Vec<DescendantProcess>,
         pub(crate) controlled_pids: Option<Vec<u32>>,
+        pub(crate) scope: SnapshotScope,
+        pub(crate) escaped_scope_unobservable: Option<String>,
         pub(crate) unobservable: Option<String>,
     }
 
@@ -2492,12 +2524,30 @@ mod process_scope {
         pub(crate) fn observed_descendants_are_controlled(&self) -> bool {
             self.unobservable.is_none()
                 && self.controlled_pids.is_some()
-                && self.descendants.iter().all(|descendant| descendant.in_controlled_set)
+                && self
+                    .descendants
+                    .iter()
+                    .all(|descendant| descendant.in_controlled_set)
+        }
+
+        /// 该快照的枚举是否与父链无关：只有作业/cgroup 作用域才覆盖"换父被收养"的后代。
+        /// 降级到进程组时恒为 false——空快照不能读成"整树已清"。
+        #[cfg(test)]
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+        pub(crate) fn covers_escaped_descendants(&self) -> bool {
+            self.unobservable.is_none()
+                && self.escaped_scope_unobservable.is_none()
+                && matches!(
+                    self.scope,
+                    SnapshotScope::JobObject | SnapshotScope::CgroupV2
+                )
         }
     }
 
     #[cfg(unix)]
     mod imp {
+        #[cfg(target_os = "linux")]
+        use super::SnapshotScope;
         use super::{CleanupOutcome, DescendantProcess, DescendantSnapshot};
         use std::os::unix::process::CommandExt;
         use std::process::{Child, Command};
@@ -2508,35 +2558,107 @@ mod process_scope {
 
         pub(crate) struct Supervisor {
             pgid: Option<i32>,
+            /// cgroup v2 作用域是可选观测点：建得起来就用，建不起来记原因，绝不当成"没有后代"
+            #[cfg(target_os = "linux")]
+            cgroup: CgroupState,
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) struct CgroupState {
+            scope: Option<CgroupScope>,
+            status: CgroupStatus,
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) enum CgroupStatus {
+            /// 尚未尝试建立（configure 前）
+            Pending,
+            /// 子进程已在独立 cgroup 内，成员集合可读
+            Active,
+            /// 建立失败，附原因；观测退回进程组，逃逸后代不可枚举
+            Degraded(String),
+        }
+
+        #[cfg(target_os = "linux")]
+        impl Default for CgroupState {
+            fn default() -> Self {
+                Self {
+                    scope: None,
+                    status: CgroupStatus::Pending,
+                }
+            }
         }
 
         impl Supervisor {
             pub(crate) fn new() -> Self {
-                Self { pgid: None }
+                Self {
+                    pgid: None,
+                    #[cfg(target_os = "linux")]
+                    cgroup: CgroupState::default(),
+                }
             }
 
             /// 在 exec 之前建组：`process_group(0)` 让子进程成为新进程组的组长，
             /// 因此不存在 Windows 那种"spawn 之后再加入"的竞态窗口。
+            ///
+            /// 同时尝试建独立 cgroup：`pre_exec` 在 fork 之后、exec 之前把自身 PID 写入
+            /// `cgroup.procs`，此刻还没有执行任何用户代码，所以也不存在"先派生后代再入组"的窗口。
             pub(crate) fn configure(&mut self, command: &mut Command) {
                 command.process_group(0);
+                #[cfg(target_os = "linux")]
+                {
+                    match CgroupScope::prepare() {
+                        Ok(scope) => match scope.writer() {
+                            Ok(fd) => {
+                                install_cgroup_pre_exec(command, fd);
+                                self.cgroup.scope = Some(scope);
+                                self.cgroup.status = CgroupStatus::Pending;
+                            }
+                            Err(reason) => {
+                                self.cgroup.scope = Some(scope);
+                                self.cgroup.status = CgroupStatus::Degraded(reason);
+                            }
+                        },
+                        Err(reason) => {
+                            self.cgroup.status = CgroupStatus::Degraded(reason);
+                        }
+                    }
+                }
             }
 
             pub(crate) fn attach(&mut self, child: &mut Child) {
                 self.pgid = i32::try_from(child.id()).ok().filter(|pgid| *pgid > 0);
+                #[cfg(target_os = "linux")]
+                {
+                    let Some(scope) = self.cgroup.scope.as_ref() else {
+                        return;
+                    };
+                    if let CgroupStatus::Degraded(_) = self.cgroup.status {
+                        return;
+                    }
+                    let pid = child.id();
+                    // pre_exec 已经写过一次；这里只做核对，核对失败再补写一次（内核/权限差异）
+                    let confirmed = scope.contains(pid)
+                        || (scope.write_pid(pid).is_ok() && scope.contains(pid));
+                    self.cgroup.status = if confirmed {
+                        CgroupStatus::Active
+                    } else {
+                        CgroupStatus::Degraded("cgroup_membership_not_established".to_string())
+                    };
+                }
             }
 
             pub(crate) fn attach_error(&self) -> Option<&str> {
                 None
             }
 
-            /// 观测点：`/proc` 父链快照 × 进程组成员交叉核对。
+            /// 观测点：`/proc` 父链快照 × 终止作用域成员交叉核对。
             ///
             /// - 父链快照：遍历 `/proc/<pid>/stat` 的 `PPid` 做传递闭包；
-            /// - 受控集合：同一份扫描里 `pgrp` 等于本组 pgid 的进程；
+            /// - `controlled_pids`：**终止作用域**（本组 pgid）成员，即真正会被 `kill(-pgid)` 打到的进程；
+            /// - cgroup v2 可建时，后代集合额外并入 `cgroup.procs` 成员——成员关系不随父进程退出而消失，
+            ///   因此换父被收养的后代仍能被枚举，这是 v1.34 最大的观测缺口；
             /// - 任一 `/proc` 条目不可读（非"已退出"）都按不可观测处理，绝不当成"没有后代"。
-            ///
-            /// 边界：Linux 会在父进程退出时把孤儿立即收养给 init/子收割者，父链随即断开；
-            /// 因此本快照只覆盖"仍可通过父链枚举"的后代，不能证明整棵树。
             pub(crate) fn snapshot_descendants(&self, root: u32) -> DescendantSnapshot {
                 #[cfg(target_os = "linux")]
                 {
@@ -2546,28 +2668,80 @@ mod process_scope {
                     let Some(rows) = proc_table() else {
                         return unobservable_snapshot(root, "procfs_unavailable");
                     };
-                    let controlled: Vec<u32> = rows
+                    let group: Vec<u32> = rows
                         .iter()
                         .filter(|row| row.pgrp == pgid as u32)
                         .map(|row| row.pid)
                         .collect();
-                    let entries = descendants_of(root, &rows)
-                        .into_iter()
-                        .map(|pid| DescendantProcess {
-                            pid,
-                            in_controlled_set: controlled.contains(&pid),
-                        })
-                        .collect();
-                    DescendantSnapshot {
-                        root,
-                        descendants: entries,
-                        controlled_pids: Some(controlled),
-                        unobservable: None,
+                    match &self.cgroup.status {
+                        CgroupStatus::Active => {
+                            let Some(scope) = self.cgroup.scope.as_ref() else {
+                                return unobservable_snapshot(root, "cgroup_scope_lost");
+                            };
+                            let members = match scope.members() {
+                                Ok(members) => members,
+                                // 作用域读不出来时整份快照不可用：不能退回"空"
+                                Err(reason) => {
+                                    return unobservable_snapshot(
+                                        root,
+                                        &format!("cgroup_procs_unreadable:{reason}"),
+                                    );
+                                }
+                            };
+                            let mut pids = descendants_of(root, &rows);
+                            for pid in &members {
+                                if *pid != root && !pids.contains(pid) {
+                                    pids.push(*pid);
+                                }
+                            }
+                            pids.sort_unstable();
+                            let entries = pids
+                                .into_iter()
+                                .map(|pid| DescendantProcess {
+                                    pid,
+                                    in_controlled_set: group.contains(&pid),
+                                })
+                                .collect();
+                            DescendantSnapshot {
+                                root,
+                                descendants: entries,
+                                controlled_pids: Some(group),
+                                scope: SnapshotScope::CgroupV2,
+                                escaped_scope_unobservable: None,
+                                unobservable: None,
+                            }
+                        }
+                        _ => {
+                            let entries = descendants_of(root, &rows)
+                                .into_iter()
+                                .map(|pid| DescendantProcess {
+                                    pid,
+                                    in_controlled_set: group.contains(&pid),
+                                })
+                                .collect();
+                            DescendantSnapshot {
+                                root,
+                                descendants: entries,
+                                controlled_pids: Some(group),
+                                scope: SnapshotScope::ProcessGroup,
+                                escaped_scope_unobservable: self.cgroup_degradation(),
+                                unobservable: None,
+                            }
+                        }
                     }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
                     unobservable_snapshot(root, "procfs_unavailable")
+                }
+            }
+
+            /// cgroup 作用域建立失败的原因；`None` 表示作用域可用（或尚未尝试）。
+            #[cfg(target_os = "linux")]
+            fn cgroup_degradation(&self) -> Option<String> {
+                match &self.cgroup.status {
+                    CgroupStatus::Degraded(reason) => Some(reason.clone()),
+                    _ => None,
                 }
             }
 
@@ -2621,7 +2795,144 @@ mod process_scope {
                 root,
                 descendants: Vec::new(),
                 controlled_pids: None,
+                scope: SnapshotScope::ProcessGroup,
+                escaped_scope_unobservable: Some(reason.to_string()),
                 unobservable: Some(reason.to_string()),
+            }
+        }
+
+        /// 独立 cgroup v2 作用域：只做观测，终止仍走进程组。
+        ///
+        /// 成员关系写在 `cgroup.procs` 里，与父进程是否存活无关——这正是"换父被收养后
+        /// 仍能枚举后代"的依据。目录在 Drop 时尝试删除；成员还在时删不掉，留给后续清理，
+        /// 但不会影响判定（只读观测）。
+        #[cfg(target_os = "linux")]
+        pub(crate) struct CgroupScope {
+            dir: std::path::PathBuf,
+            procs: std::path::PathBuf,
+            writer: std::cell::RefCell<Option<std::fs::File>>,
+        }
+
+        #[cfg(target_os = "linux")]
+        impl CgroupScope {
+            /// 建立失败一律返回原因字符串（`cgroup_v2_unavailable` / `cgroup_create_failed:...`），
+            /// 调用方把它记进 `escaped_scope_unobservable`，绝不静默当成空集合。
+            fn prepare() -> Result<Self, String> {
+                Self::prepare_from(std::path::Path::new("/sys/fs/cgroup"))
+            }
+
+            fn prepare_from(base: &std::path::Path) -> Result<Self, String> {
+                if !base.join("cgroup.controllers").exists() {
+                    return Err("cgroup_v2_unavailable".to_string());
+                }
+                let name = format!(
+                    "aw-mcp-bridge-{}-{}",
+                    std::process::id(),
+                    SCOPE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                );
+                let dir = base.join(name);
+                std::fs::create_dir(&dir)
+                    .map_err(|error| format!("cgroup_create_failed:{error}"))?;
+                Ok(Self {
+                    procs: dir.join("cgroup.procs"),
+                    dir,
+                    writer: std::cell::RefCell::new(None),
+                })
+            }
+
+            /// 打开写端并取出 fd，供 `pre_exec` 在子进程内写自身 PID。
+            fn writer(&self) -> Result<std::os::fd::RawFd, String> {
+                use std::os::fd::AsRawFd;
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.procs)
+                    .map_err(|error| format!("cgroup_procs_unwritable:{error}"))?;
+                let fd = file.as_raw_fd();
+                self.writer.borrow_mut().replace(file);
+                Ok(fd)
+            }
+
+            fn members(&self) -> Result<Vec<u32>, String> {
+                let text =
+                    std::fs::read_to_string(&self.procs).map_err(|error| format!("{error}"))?;
+                let mut members: Vec<u32> = text
+                    .lines()
+                    .filter_map(|line| line.trim().parse::<u32>().ok())
+                    .collect();
+                members.sort_unstable();
+                Ok(members)
+            }
+
+            fn contains(&self, pid: u32) -> bool {
+                self.members()
+                    .map(|members| members.contains(&pid))
+                    .unwrap_or(false)
+            }
+
+            fn write_pid(&self, pid: u32) -> std::io::Result<()> {
+                std::fs::write(&self.procs, format!("{pid}\n"))
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        impl Drop for CgroupScope {
+            fn drop(&mut self) {
+                self.writer.borrow_mut().take();
+                // 成员还在（逃逸后代未退出）时删不掉：重试几次，仍失败就留空目录。
+                // 不在这里杀进程——观测点不做终止动作。
+                for _ in 0..3 {
+                    if std::fs::remove_dir(&self.dir).is_ok() {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        static SCOPE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        /// 在 fork 之后、exec 之前把自身 PID 写进 `cgroup.procs`。
+        ///
+        /// 这里只能调用异步信号安全的系统调用：不分配内存、不加锁、不碰 std 的错误类型。
+        /// 写失败不阻断 exec；父进程在 `attach` 里核对成员关系，核对不上就降级记录原因。
+        #[cfg(target_os = "linux")]
+        fn install_cgroup_pre_exec(command: &mut Command, fd: std::os::fd::RawFd) {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                command.pre_exec(move || {
+                    let pid = libc::getpid();
+                    if pid <= 0 {
+                        return Ok(());
+                    }
+                    let mut reversed = [0u8; 20];
+                    let mut len = 0usize;
+                    let mut value = pid as u64;
+                    loop {
+                        reversed[len] = b'0' + (value % 10) as u8;
+                        len += 1;
+                        value /= 10;
+                        if value == 0 {
+                            break;
+                        }
+                    }
+                    let mut buffer = [0u8; 21];
+                    for index in 0..len {
+                        buffer[index] = reversed[len - 1 - index];
+                    }
+                    buffer[len] = b'\n';
+                    let total = len + 1;
+                    let mut written = 0usize;
+                    while written < total {
+                        let rc =
+                            libc::write(fd, buffer[written..].as_ptr().cast(), total - written);
+                        if rc <= 0 {
+                            break;
+                        }
+                        written += rc as usize;
+                    }
+                    Ok(())
+                });
             }
         }
 
@@ -2678,6 +2989,13 @@ mod process_scope {
             let ppid: u32 = fields.next()?.parse().ok()?;
             let pgrp: u32 = fields.next()?.parse().ok()?;
             Some(ProcRow { pid, ppid, pgrp })
+        }
+
+        /// 读某进程当前父 PID；进程不存在或读不到返回 `None`（测试用于确认"已被收养"）。
+        #[cfg(all(test, target_os = "linux"))]
+        fn proc_ppid(pid: u32) -> Option<u32> {
+            let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            parse_stat(&text, pid).map(|row| row.ppid)
         }
 
         /// 按父链做传递闭包（含环保护），返回排好序的后代 PID。
@@ -2861,6 +3179,11 @@ mod process_scope {
                     return;
                 }
                 let escaped: i32 = content.parse().expect("setsid 子进程 PID");
+                // sh 写完 PID 就退出，此时 setsid 可能还没真正切到新会话：等它离开原组
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while group_exists(pgid) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
                 println!(
                     "[evidence] setsid escaped_pid={escaped} escaped_alive={} original_group_empty={}",
                     pid_exists(escaped),
@@ -3017,35 +3340,226 @@ mod process_scope {
                 let outcome = supervisor.terminate(&mut child);
                 let after = supervisor.snapshot_descendants(root);
                 println!(
-                    "[evidence] setsid_snapshot after outcome={outcome:?} escaped_alive={} descendants={:?} unobservable={:?}",
+                    "[evidence] setsid_snapshot after outcome={outcome:?} escaped_alive={} scope={:?} escaped_scope_unobservable={:?} descendants={:?}",
                     pid_exists(escaped),
-                    after.descendants,
-                    after.unobservable
+                    after.scope,
+                    after.escaped_scope_unobservable,
+                    after.descendants
                 );
                 assert!(
                     pid_exists(escaped),
                     "setsid 逃逸不在进程组内，终止整组后必须仍存活（窄判据）"
                 );
                 assert!(after.unobservable.is_none());
-                assert!(
-                    after.is_empty(),
-                    "根退出后逃逸后代被收养，父链快照不得再枚举到它（边界）"
-                );
-                assert!(
-                    !after.descendants.iter().any(|entry| entry.pid == escaped as u32),
-                    "被收养的后代不得出现在父链快照"
-                );
+                if after.covers_escaped_descendants() {
+                    // cgroup v2 可用：换父被收养后仍在作用域内，必须被枚举；不得宣称已清理
+                    assert_eq!(
+                        outcome,
+                        CleanupOutcome::StillAlive,
+                        "作用域内仍有存活进程时不得报告 Cleaned"
+                    );
+                    assert!(
+                        after
+                            .descendants
+                            .iter()
+                            .any(|entry| entry.pid == escaped as u32),
+                        "被收养的逃逸后代必须出现在 cgroup 快照里"
+                    );
+                    assert!(!after.is_empty(), "快照非空，不能读成没有后代");
+                } else {
+                    // 作用域降级：必须写明原因，且空快照只能读成"本作用域内没有"
+                    assert_eq!(
+                        outcome,
+                        CleanupOutcome::Cleaned,
+                        "进程组判据下逃逸不可见，仍报窄口径 Cleaned"
+                    );
+                    assert!(
+                        after.escaped_scope_unobservable.is_some(),
+                        "作用域降级必须带原因，不能静默"
+                    );
+                    assert!(after.is_empty());
+                    assert!(
+                        !after
+                            .descendants
+                            .iter()
+                            .any(|entry| entry.pid == escaped as u32),
+                        "降级时父链已断开，逃逸后代不在快照内"
+                    );
+                }
                 unsafe {
                     libc::kill(escaped, libc::SIGKILL);
                 }
                 let _ = std::fs::remove_dir_all(&dir);
+            }
+
+            // cgroup v2 作用域：换父被收养的后代仍在成员集合里，必须被枚举，且不得误报 Cleaned
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn cgroup_scope_enumerates_adopted_escapee() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-cgroup-snapshot-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let pid_file = dir.join("pid.txt");
+                let script = format!(
+                    "if command -v setsid >/dev/null 2>&1; then setsid sleep 30 & echo $! > '{}'; wait; else echo skip > '{}'; fi",
+                    pid_file.display(),
+                    pid_file.display()
+                );
+                let mut supervisor = Supervisor::new();
+                let mut command = Command::new("sh");
+                command
+                    .arg("-c")
+                    .arg(script)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+                let mut child = command.spawn().expect("spawn setsid fixture");
+                supervisor.attach(&mut child);
+                let root = child.id();
+
+                // 前置：本机必须真的建起了 cgroup 作用域；建不起来就如实失败，不假装覆盖
+                let opened = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] cgroup_scope opened root={root} scope={:?} escaped_scope_unobservable={:?} controlled={:?}",
+                    opened.scope, opened.escaped_scope_unobservable, opened.controlled_pids
+                );
+                assert_eq!(
+                    opened.scope,
+                    SnapshotScope::CgroupV2,
+                    "本机未能建立 cgroup v2 观测作用域：{:?}",
+                    opened.escaped_scope_unobservable
+                );
+                assert!(opened.covers_escaped_descendants());
+
+                let mut content = None;
+                for _ in 0..100 {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        let text = text.trim().to_string();
+                        if text != "skip" {
+                            content = Some(text);
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let Some(content) = content else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                };
+                let escaped: u32 = content.parse().expect("setsid 子进程 PID");
+
+                let mut before = None;
+                for _ in 0..150 {
+                    let snapshot = supervisor.snapshot_descendants(root);
+                    // 要等 setsid 真正切到新会话：只出现还不够，必须被标成终止作用域外
+                    if snapshot.outside_controlled_set().contains(&escaped) {
+                        before = Some(snapshot);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = before.expect("cgroup 作用域必须能枚举逃逸后代");
+                println!(
+                    "[evidence] cgroup_scope before escaped={escaped} scope={:?} descendants={:?} outside={:?}",
+                    before.scope,
+                    before.descendants,
+                    before.outside_controlled_set()
+                );
+                assert!(
+                    before.outside_controlled_set().contains(&escaped),
+                    "setsid 逃逸不在进程组内，必须被标为终止作用域外"
+                );
+
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] cgroup_scope after outcome={outcome:?} escaped_alive={} escaped_ppid={:?} root={root} descendants={:?} controlled={:?} scope={:?}",
+                    pid_exists(escaped as i32),
+                    proc_ppid(escaped),
+                    after.descendants,
+                    after.controlled_pids,
+                    after.scope
+                );
+                assert!(
+                    pid_exists(escaped as i32),
+                    "setsid 逃逸不在进程组内，终止整组后必须仍存活"
+                );
+                assert_ne!(
+                    proc_ppid(escaped),
+                    Some(root),
+                    "根退出后逃逸后代应被收养，父链不再指向根"
+                );
+                assert_eq!(after.scope, SnapshotScope::CgroupV2);
+                assert_eq!(
+                    outcome,
+                    CleanupOutcome::StillAlive,
+                    "作用域内仍有存活进程时不得报告 Cleaned"
+                );
+                assert!(
+                    after.descendants.iter().any(|entry| entry.pid == escaped),
+                    "被收养的逃逸后代必须仍被 cgroup 作用域枚举到"
+                );
+                assert_eq!(after.controlled_pids, Some(Vec::new()), "进程组已清空");
+
+                unsafe {
+                    libc::kill(escaped as i32, libc::SIGKILL);
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+
+            // 降级必须如实：cgroup v1 / 无权限时记原因，退回进程组观测且不得当成"没有后代"
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn cgroup_unavailable_degrades_with_reason() {
+                let base = std::env::temp_dir().join(format!(
+                    "aw-cgroup-v1-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&base).expect("创建临时目录");
+                // 没有 cgroup.controllers：模拟 cgroup v1 / 未挂载 v2
+                let reason = CgroupScope::prepare_from(&base).err();
+                println!("[evidence] cgroup_unavailable reason={reason:?}");
+                assert_eq!(reason.as_deref(), Some("cgroup_v2_unavailable"));
+                let _ = std::fs::remove_dir_all(&base);
+
+                let mut supervisor = Supervisor::new();
+                supervisor.pgid = Some(1);
+                supervisor.cgroup.status = CgroupStatus::Degraded("cgroup_v2_unavailable".into());
+                let snapshot = supervisor.snapshot_descendants(std::process::id());
+                println!(
+                    "[evidence] cgroup_degraded scope={:?} escaped_scope_unobservable={:?} unobservable={:?}",
+                    snapshot.scope, snapshot.escaped_scope_unobservable, snapshot.unobservable
+                );
+                assert_eq!(snapshot.scope, SnapshotScope::ProcessGroup);
+                assert_eq!(
+                    snapshot.escaped_scope_unobservable.as_deref(),
+                    Some("cgroup_v2_unavailable"),
+                    "降级必须带原因"
+                );
+                assert!(snapshot.unobservable.is_none(), "降级不等于整份快照不可用");
+                assert!(
+                    !snapshot.covers_escaped_descendants(),
+                    "降级后空快照不得读成整树已清"
+                );
             }
         }
     }
 
     #[cfg(windows)]
     mod imp {
-        use super::{CleanupOutcome, DescendantProcess, DescendantSnapshot};
+        use super::{CleanupOutcome, DescendantProcess, DescendantSnapshot, SnapshotScope};
         use std::os::windows::io::AsRawHandle;
         use std::os::windows::process::CommandExt;
         use std::process::{Child, Command};
@@ -3171,6 +3685,8 @@ mod process_scope {
                     root,
                     descendants: entries,
                     controlled_pids: Some(controlled),
+                    scope: SnapshotScope::JobObject,
+                    escaped_scope_unobservable: None,
                     unobservable: None,
                 }
             }
@@ -3250,6 +3766,8 @@ mod process_scope {
                 root,
                 descendants: Vec::new(),
                 controlled_pids: None,
+                scope: SnapshotScope::JobObject,
+                escaped_scope_unobservable: Some(reason.to_string()),
                 unobservable: Some(reason.to_string()),
             }
         }
@@ -3328,12 +3846,7 @@ mod process_scope {
                 if count > buffer.pids.len() {
                     return None;
                 }
-                Some(
-                    buffer.pids[..count]
-                        .iter()
-                        .map(|pid| *pid as u32)
-                        .collect(),
-                )
+                Some(buffer.pids[..count].iter().map(|pid| *pid as u32).collect())
             }
         }
 
@@ -3346,10 +3859,7 @@ mod process_scope {
             unsafe {
                 let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
                 if snapshot == INVALID_HANDLE_VALUE {
-                    return Err(format!(
-                        "线程快照失败：{}",
-                        std::io::Error::last_os_error()
-                    ));
+                    return Err(format!("线程快照失败：{}", std::io::Error::last_os_error()));
                 }
                 let mut entry: THREADENTRY32 = std::mem::zeroed();
                 entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
@@ -3405,7 +3915,10 @@ mod process_scope {
                 supervisor.attach(&mut child);
                 assert!(supervisor.attached, "进程应成功加入作业");
                 let before = supervisor.active_processes();
-                println!("[evidence] alive_but_idle attached={} ActiveProcesses_before={before:?}", supervisor.attached);
+                println!(
+                    "[evidence] alive_but_idle attached={} ActiveProcesses_before={before:?}",
+                    supervisor.attached
+                );
                 assert!(
                     before.unwrap_or(0) > 0,
                     "活着但不写盘的进程必须计入 ActiveProcesses"
@@ -3607,7 +4120,10 @@ mod process_scope {
                     before.descendants.iter().map(|entry| entry.pid).collect();
                 expected.push(root);
                 expected.sort_unstable();
-                let mut actual = before.controlled_pids.clone().expect("作业 PID 列表必须可读");
+                let mut actual = before
+                    .controlled_pids
+                    .clone()
+                    .expect("作业 PID 列表必须可读");
                 actual.sort_unstable();
                 println!(
                     "[evidence] descendant_snapshot before root={root} descendants={:?} controlled={:?}",
@@ -3682,7 +4198,7 @@ mod process_scope {
 
     #[cfg(not(any(unix, windows)))]
     mod imp {
-        use super::{CleanupOutcome, DescendantSnapshot};
+        use super::{CleanupOutcome, DescendantSnapshot, SnapshotScope};
         use std::process::{Child, Command};
 
         pub(crate) struct Supervisor;
@@ -3702,6 +4218,10 @@ mod process_scope {
                     root,
                     descendants: Vec::new(),
                     controlled_pids: None,
+                    scope: SnapshotScope::ProcessGroup,
+                    escaped_scope_unobservable: Some(
+                        "descendant_snapshot_unsupported_platform".to_string(),
+                    ),
                     unobservable: Some("descendant_snapshot_unsupported_platform".to_string()),
                 }
             }
@@ -3735,7 +4255,7 @@ fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutco
             }
         }
         Some(CleanupOutcome::StillAlive) => format!(
-            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程，或父链快照仍枚举到存活后代；换父被收养的逃逸进程是否仍在运行不可观测"
+            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程，或快照仍枚举到存活后代；集合外后代是否仍存活取决于观测作用域（见 capabilities.timeout.enumerates_escaped_descendants）"
         ),
         _ => format!(
             "timeout：超过 {timeout_secs}s 未结束，受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
@@ -3958,7 +4478,8 @@ impl StandaloneSpec {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
-                "standalone_cwd_required: standalone 必须显式给出 cwd（执行与验收的作用域根目录）".to_string()
+                "standalone_cwd_required: standalone 必须显式给出 cwd（执行与验收的作用域根目录）"
+                    .to_string()
             })?;
         let cwd = fs::canonicalize(raw_cwd)
             .map_err(|e| format!("standalone_cwd_invalid: cwd 无法解析为目录：{raw_cwd}（{e}）"))?;
@@ -4067,7 +4588,10 @@ fn validate_acceptance(item: &Value, index: usize) -> Result<(), String> {
         ));
     };
     let kind = object.get("type").and_then(Value::as_str).unwrap_or("");
-    let prefix = format!("standalone_acceptance_invalid: 第 {} 条（{kind}）", index + 1);
+    let prefix = format!(
+        "standalone_acceptance_invalid: 第 {} 条（{kind}）",
+        index + 1
+    );
     match kind {
         "exit_code" => {
             if object.get("expected").and_then(Value::as_i64).is_none() {
@@ -4277,7 +4801,10 @@ fn classify_argv_token(raw: &str, cwd: &Path) -> Option<ArgvTokenScan> {
     // 正则/通配符形态不按路径校验（宁可漏报；盲区见契约 §2.6.8）
     if !verbatim
         && value.chars().any(|c| {
-            matches!(c, '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '*' | '+' | '?')
+            matches!(
+                c,
+                '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '*' | '+' | '?'
+            )
         })
     {
         return None;
@@ -4415,9 +4942,7 @@ fn env_expansion_reason(value: &str) -> Option<String> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '(' | ')'))
                 {
-                    return Some(format!(
-                        "环境变量 %{name}% 未展开，无法判定真实位置"
-                    ));
+                    return Some(format!("环境变量 %{name}% 未展开，无法判定真实位置"));
                 }
             }
         }
@@ -4437,7 +4962,8 @@ fn percent_decode(input: &str) -> Option<String> {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
             {
                 out.push(high * 16 + low);
                 index += 3;
@@ -4905,10 +5431,7 @@ struct StandaloneRun {
 }
 
 /// 不经 shell：直接启动 argv[0]，其余参数逐项传入；current_dir 固定为 cwd
-fn run_standalone_command(
-    spec: &StandaloneSpec,
-    run_dir: &Path,
-) -> Result<StandaloneRun, String> {
+fn run_standalone_command(spec: &StandaloneSpec, run_dir: &Path) -> Result<StandaloneRun, String> {
     let stdout_path = run_dir.join("stdout.txt");
     let stderr_path = run_dir.join("stderr.txt");
     let stdout_file =
@@ -5009,10 +5532,7 @@ fn file_preview(path: &Path) -> (String, u64, bool) {
     (preview, bytes.len() as u64, truncated)
 }
 
-fn changed_between(
-    before: &HashSet<String>,
-    after: &HashSet<String>,
-) -> (Vec<String>, bool) {
+fn changed_between(before: &HashSet<String>, after: &HashSet<String>) -> (Vec<String>, bool) {
     let mut changed: Vec<String> = after.difference(before).cloned().collect();
     changed.sort();
     let truncated = changed.len() > 20;
@@ -5505,8 +6025,8 @@ fn capabilities_payload() -> Value {
             "timeout.cleans_entire_process_tree",
             Some(false),
             "partial",
-            "Windows：作业覆盖全部后代，终止后父链快照与作业记账同时为空；POSIX：仅保证进程组清空，setsid / 双 fork 换父后被收养的后代不可枚举也不可终止",
-            Some("posix_escaped_after_reparent_unobservable"),
+            "Windows：作业覆盖全部后代，终止后父链快照与作业记账同时为空；POSIX：cgroup 作用域能观测到被收养的逃逸后代，但终止仍只打进程组，逃逸成员会存活并被如实报为「仍有存活进程」",
+            Some("posix_escaped_descendant_observable_not_terminated"),
             false,
             &both,
             &[],
@@ -5514,29 +6034,46 @@ fn capabilities_payload() -> Value {
                 "timeout_cleanup_three_states",
                 "descendant_snapshot_cross_checks_job_accounting",
                 "descendant_snapshot_cross_checks_process_group",
+                "cgroup_scope_enumerates_adopted_escapee",
             ],
-            "Windows 侧已用「作业 PID 列表 × 进程树快照」交叉验证终止后无存活后代；POSIX 侧逃逸后代换父后失去观测，不能宣称整棵树。",
+            "Windows 侧已用「作业 PID 列表 × 进程树快照」交叉验证终止后无存活后代；POSIX 侧逃逸后代已可见（cgroup 成员），但不在终止作用域内，因此不宣称整棵树。",
         ),
         capability_entry(
             "timeout.enumerates_escaped_descendants",
             Some(false),
             "partial",
-            "Windows：按创建时父链可枚举作业外后代（父链不因父进程退出而改写）；POSIX：逃逸进程在根存活期间可枚举，换父被收养后失去父链",
-            Some("posix_escaped_after_reparent_unobservable"),
+            "Windows：按创建时父链可枚举作业外后代（父链不因父进程退出而改写）；Linux：cgroup v2 可写时成员集合不随换父消失，已能枚举被收养后代，但该作用域在容器/非 root/ cgroup v1 下建不起来，此时如实标 unobservable",
+            Some("posix_escaped_scope_requires_writable_cgroup_v2"),
             false,
             &both,
-            &[],
+            &["macos"],
             &[
                 "descendant_snapshot_flags_descendants_outside_controlled_set",
+                "cgroup_scope_enumerates_adopted_escapee",
                 "setsid_escape_is_flagged_then_unobservable_after_reparent",
             ],
-            "逃逸枚举能力按平台分裂：Windows 可枚举；POSIX 只覆盖仍可通过父链枚举的阶段，收养后不可观测。",
+            "枚举能力按平台分裂：Windows 恒可枚举；Linux 依赖 cgroup v2 委派，建立失败时记 escaped_scope_unobservable 而不是当成没有后代。",
+        ),
+        capability_entry(
+            "timeout.cgroup_v2_scope_observation",
+            Some(true),
+            "proven",
+            "Linux：子进程在 exec 前写入独立 cgroup v2，成员集合独立于父链；换父被收养后仍可枚举。建立失败不阻断执行，只降级并记原因",
+            None,
+            true,
+            &["linux"],
+            &["windows", "macos"],
+            &[
+                "cgroup_scope_enumerates_adopted_escapee",
+                "cgroup_unavailable_degrades_with_reason",
+            ],
+            "只做观测，终止仍走进程组；实测 WSL Ubuntu 24.04（cgroup v2，root）下被收养逃逸后代仍被枚举，且终止结果由 Cleaned 修正为 StillAlive。",
         ),
         capability_entry(
             "timeout.descendant_snapshot_cross_check",
             Some(true),
             "proven",
-            "从任务根 PID 按创建时父链枚举存活后代，并与受控集合成员（Windows 作业 PID 列表 / Linux 进程组成员）交叉核对；任一查询失败记 Unavailable",
+            "从任务根 PID 按创建时父链枚举存活后代，并与受控集合成员（Windows 作业 PID 列表 / Linux 进程组成员，cgroup 可建时并入 cgroup 成员）交叉核对；任一查询失败记 Unavailable",
             None,
             true,
             &both,
@@ -6044,9 +6581,10 @@ mod description_gate {
                 .unwrap_or_else(|| panic!("{id} 缺少 path"));
             let tool = tool_by_name(&list, name);
             let text = text_at(tool, path);
-            for phrase in row["contains"].as_array().unwrap_or_else(|| {
-                panic!("{id} 缺少 contains 数组")
-            }) {
+            for phrase in row["contains"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} 缺少 contains 数组"))
+            {
                 let phrase = phrase
                     .as_str()
                     .unwrap_or_else(|| panic!("{id} 的 contains 必须是字符串"));
@@ -6055,9 +6593,10 @@ mod description_gate {
                     "{id}：{name} 的 {path} 缺少必需措辞「{phrase}」：{text}"
                 );
             }
-            for phrase in row["not_contains"].as_array().unwrap_or_else(|| {
-                panic!("{id} 缺少 not_contains 数组")
-            }) {
+            for phrase in row["not_contains"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{id} 缺少 not_contains 数组"))
+            {
                 let phrase = phrase
                     .as_str()
                     .unwrap_or_else(|| panic!("{id} 的 not_contains 必须是字符串"));
@@ -6104,10 +6643,7 @@ mod description_gate {
             );
         }
         assert!(cleaned.contains("已清理受控集合"), "{cleaned}");
-        assert!(
-            cleaned.contains("逃逸进程是否仍在运行未验证"),
-            "{cleaned}"
-        );
+        assert!(cleaned.contains("逃逸进程是否仍在运行未验证"), "{cleaned}");
         assert!(
             !cleaned.contains("受控集合内仍有存活进程"),
             "已清理分支不得同时声明仍有存活进程：{cleaned}"
@@ -6133,12 +6669,8 @@ mod description_gate {
             "无法查询时不得自称已清理：{unavailable}"
         );
         for reason in [&cleaned, &still_alive, &unavailable] {
-            for forbidden in [
-                "已终止进程树",
-                "无残留",
-                "会终止整棵进程树",
-                "保证清理全部",
-            ] {
+            for forbidden in ["已终止进程树", "无残留", "会终止整棵进程树", "保证清理全部"]
+            {
                 assert!(
                     !reason.contains(forbidden),
                     "超时文案不得含「{forbidden}」：{reason}"

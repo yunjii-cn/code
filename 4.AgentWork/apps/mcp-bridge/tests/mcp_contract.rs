@@ -86,7 +86,10 @@ fn tools_list_exposes_read_and_execution_tools() {
     );
     for tool in tools {
         assert!(
-            tool["description"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+            tool["description"]
+                .as_str()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
             "每个工具都要有描述"
         );
         assert_eq!(
@@ -660,7 +663,9 @@ fn execute_returns_auditable_handback() {
         sha256_prefixed(&stdout_file)
     );
 
-    let artifacts = payload["artifacts"].as_array().expect("artifacts 必须是数组");
+    let artifacts = payload["artifacts"]
+        .as_array()
+        .expect("artifacts 必须是数组");
     assert_eq!(artifacts.len(), 2, "stdout 与 stderr 都应作为证据");
     assert_eq!(artifacts[0]["locator"], "runs/t-1/attempt-1/stdout.txt");
     assert_eq!(
@@ -763,12 +768,10 @@ fn missing_cmd_returns_blocked_command_not_found_without_consuming_attempt() {
     );
     let payload = tool_payload(&response);
     assert_eq!(payload["status"], "blocked");
-    assert!(
-        payload["blocked_reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("command_not_found:")
-    );
+    assert!(payload["blocked_reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("command_not_found:"));
     assert!(payload["attempt"].is_null(), "拒绝发生在占号之前");
     assert!(!runs.path().join("t-5").exists(), "不得创建 attempt 目录");
 }
@@ -785,12 +788,10 @@ fn missing_cwd_returns_blocked_cwd_not_found_without_consuming_attempt() {
     assert_eq!(response["result"]["isError"], false);
     let payload = tool_payload(&response);
     assert_eq!(payload["status"], "blocked");
-    assert!(
-        payload["blocked_reason"]
-            .as_str()
-            .unwrap()
-            .starts_with("cwd_not_found:")
-    );
+    assert!(payload["blocked_reason"]
+        .as_str()
+        .unwrap()
+        .starts_with("cwd_not_found:"));
     assert!(payload["attempt"].is_null(), "拒绝发生在占号之前");
     assert!(!runs.path().join("t-5b").exists(), "不得创建 attempt 目录");
 }
@@ -865,7 +866,11 @@ fn same_task_id_with_different_params_is_rejected() {
         !runs.path().join("t-8").join("attempt-2").exists(),
         "异参不得静默追加 attempt"
     );
-    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-8" })));
+    let latest = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-8" }),
+    ));
     assert_eq!(latest["attempt"], 1);
     assert_eq!(latest["verify_cmd"], "echo one", "旧回执必须保持原参数");
 }
@@ -887,7 +892,11 @@ fn receipt_history_is_still_readable() {
         .unwrap();
     }
 
-    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-9" })));
+    let latest = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-9" }),
+    ));
     assert_eq!(latest["attempt"], 2);
     let history = tool_payload(&call_tool(
         &server,
@@ -1024,7 +1033,10 @@ fn initialize_records_client_info_as_audit_only() {
     );
     assert_eq!(audit["clientInfo"]["extraField"], "kept-as-is");
     assert!(
-        audit["receivedAt"].as_str().map(|value| !value.is_empty()).unwrap_or(false),
+        audit["receivedAt"]
+            .as_str()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false),
         "审计记录必须带接收时间"
     );
 
@@ -1084,7 +1096,10 @@ fn client_info_is_never_used_for_admission() {
 
     let records = initialize_records(runs.path());
     assert_eq!(records.len(), 1, "initialize 必须落审计记录");
-    assert_eq!(records[0]["clientInfo"]["name"], "../../untrusted", "只记录、不解释");
+    assert_eq!(
+        records[0]["clientInfo"]["name"], "../../untrusted",
+        "只记录、不解释"
+    );
 }
 
 #[test]
@@ -1129,7 +1144,9 @@ fn concurrent_initialize_writers_keep_every_record_and_status_aggregates() {
         .filter_map(|record| record["clientInfo"]["name"].as_str().map(str::to_string))
         .collect();
     names.sort();
-    let mut expected: Vec<String> = (0..writers).map(|index| format!("writer-{index}")).collect();
+    let mut expected: Vec<String> = (0..writers)
+        .map(|index| format!("writer-{index}"))
+        .collect();
     expected.push("legacy-bridge".to_string());
     expected.sort();
     assert_eq!(
@@ -1148,14 +1165,18 @@ fn concurrent_initialize_writers_keep_every_record_and_status_aggregates() {
     );
     let status = tool_payload(&call_tool(&server, "status", json!({})));
     assert_eq!(
-        status["session"]["total"], writers + 1,
+        status["session"]["total"],
+        writers + 1,
         "status 必须聚合全部 initialize 记录"
     );
     let listed = status["session"]["records"]
         .as_array()
         .expect("status.session.records 必须是数组");
     assert_eq!(listed.len(), writers + 1);
-    assert_eq!(listed[0]["source"], "initialize.json", "聚合必须包含旧版单文件");
+    assert_eq!(
+        listed[0]["source"], "initialize.json",
+        "聚合必须包含旧版单文件"
+    );
     assert!(
         status["session"]["clientInfo"]["name"]
             .as_str()
@@ -1200,7 +1221,11 @@ fn handback_records_execution_context_for_recompute() {
     );
 
     // receipt.get 只读回原记录，不得回填或改写旧回执
-    let readback = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-12" })));
+    let readback = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-12" }),
+    ));
     assert_eq!(readback["cwd"], payload["cwd"]);
     assert_eq!(readback["timeout_secs"], 45);
     assert_eq!(readback["changed_files_truncated"], false);
@@ -1344,7 +1369,11 @@ fn omitted_env_and_empty_env_map_are_equivalent() {
         "task.execute",
         json!({ "task_id": "t-18", "cmd": "echo same" }),
     ));
-    assert_eq!(first["env_keys"], json!([]), "缺省 env 的回执应给出空键列表");
+    assert_eq!(
+        first["env_keys"],
+        json!([]),
+        "缺省 env 的回执应给出空键列表"
+    );
 
     // 同 task_id 换成显式空 map：行为一致，且签名相同，必须复用同一 attempt
     let second = tool_payload(&call_tool(
@@ -1372,7 +1401,11 @@ fn different_env_is_rejected_as_conflict_without_storing_values() {
     );
     assert_eq!(first["result"]["isError"], false);
 
-    let dispatch_path = runs.path().join("t-19").join("attempt-1").join("dispatch.json");
+    let dispatch_path = runs
+        .path()
+        .join("t-19")
+        .join("attempt-1")
+        .join("dispatch.json");
     let dispatch_raw = fs::read_to_string(&dispatch_path).expect("读取派单签名");
     let dispatch: Value = serde_json::from_str(&dispatch_raw).unwrap();
     assert!(
@@ -1401,9 +1434,16 @@ fn different_env_is_rejected_as_conflict_without_storing_values() {
         "同 id 不同 env 必须拒绝，不能静默返回旧回执"
     );
     let text = tool_text(&second);
-    assert!(text.contains("task_id_conflict"), "必须给具名错误码：{text}");
+    assert!(
+        text.contains("task_id_conflict"),
+        "必须给具名错误码：{text}"
+    );
     assert!(!runs.path().join("t-19").join("attempt-2").exists());
-    let latest = tool_payload(&call_tool(&server, "receipt.get", json!({ "task_id": "t-19" })));
+    let latest = tool_payload(&call_tool(
+        &server,
+        "receipt.get",
+        json!({ "task_id": "t-19" }),
+    ));
     assert_eq!(latest["attempt"], 1, "拒绝异参不得覆盖既有回执");
 }
 
@@ -1422,9 +1462,15 @@ fn invalid_env_is_rejected_before_claiming_attempt() {
             "task.execute",
             json!({ "task_id": task_id, "cmd": "echo x", "env": env }),
         );
-        assert_eq!(response["result"]["isError"], true, "非法 env 必须拒绝：{task_id}");
+        assert_eq!(
+            response["result"]["isError"], true,
+            "非法 env 必须拒绝：{task_id}"
+        );
         let text = tool_text(&response);
-        assert!(text.contains("invalid_env"), "必须给具名错误码 invalid_env：{text}");
+        assert!(
+            text.contains("invalid_env"),
+            "必须给具名错误码 invalid_env：{text}"
+        );
         assert!(
             !runs.path().join(task_id).exists(),
             "非法 env 必须在占号之前拒绝，不得创建目录"
@@ -1480,7 +1526,8 @@ fn legacy_dispatch_without_env_is_still_replayed() {
 fn runs_list_payload(server: &Server, arguments: Value) -> Value {
     let response = call_tool(server, "runs.list", arguments);
     assert_eq!(
-        response["result"]["isError"], false,
+        response["result"]["isError"],
+        false,
         "runs.list 应可用：{}",
         tool_text(&response)
     );
@@ -1614,7 +1661,10 @@ fn runs_list_rejects_invalid_pagination() {
         let response = call_tool(&server, "runs.list", arguments);
         assert_eq!(response["result"]["isError"], true, "非法分页必须拒绝");
         let text = tool_text(&response);
-        assert!(text.contains("invalid_pagination"), "必须给具名错误码：{text}");
+        assert!(
+            text.contains("invalid_pagination"),
+            "必须给具名错误码：{text}"
+        );
     }
 }
 
@@ -1676,10 +1726,7 @@ fn dispatch_and_handback_record_utc_timestamps() {
         dispatched <= finished,
         "结束时间不得早于派单时间：{dispatched} vs {finished}"
     );
-    assert_eq!(
-        handback["task_id"], "t-30",
-        "新增时间戳不得改变既有字段"
-    );
+    assert_eq!(handback["task_id"], "t-30", "新增时间戳不得改变既有字段");
 
     let receipt = tool_payload(&call_tool(
         &server,
@@ -1996,7 +2043,10 @@ fn runs_list_totals_fixture() -> (Server, TempDir, TempDir) {
         fs::create_dir_all(&dir).expect("创建 t-b 的跳号 attempt");
     }
     fs::write(
-        runs.path().join("t-b").join("attempt-7").join("handback.json"),
+        runs.path()
+            .join("t-b")
+            .join("attempt-7")
+            .join("handback.json"),
         "{ this is not json",
     )
     .expect("写入损坏回执");
@@ -2049,10 +2099,7 @@ fn runs_list_total_equals_sum_of_attempts_and_ignores_pagination() {
         "total 是 attempt 目录总数，不是任务数（任务只有 3 个）"
     );
     assert_eq!(whole["total_tasks"], 3, "total_tasks 才是任务数");
-    assert_eq!(
-        whole["tasks"].as_array().map(|tasks| tasks.len()),
-        Some(3)
-    );
+    assert_eq!(whole["tasks"].as_array().map(|tasks| tasks.len()), Some(3));
 
     let mut attempts = Vec::new();
     for task in whole["tasks"].as_array().expect("tasks 必须是数组") {
@@ -2103,7 +2150,10 @@ fn runs_list_counts_attempt_dirs_regardless_of_handback_and_gaps() {
         gap_task["handback"], false,
         "最新 attempt 的回执损坏，必须判为不可解析"
     );
-    assert!(gap_task["status"].is_null(), "回执损坏时 status 必须为 null");
+    assert!(
+        gap_task["status"].is_null(),
+        "回执损坏时 status 必须为 null"
+    );
     assert!(gap_task["exit_code"].is_null());
 
     let empty_task = by_id("t-c");
@@ -2134,8 +2184,22 @@ fn reserved_directories_are_never_tasks_in_list_or_prune() {
     // 伪装成任务的内部目录：都放了两个 attempt，且都足够旧、状态都可删
     prune_attempt_status(runs.path(), "_session", 1, Some("ok"), Some(&old), true);
     prune_attempt_status(runs.path(), "_session", 2, Some("ok"), Some(&old), true);
-    prune_attempt_status(runs.path(), ".prune-trash", 1, Some("failed"), Some(&old), true);
-    prune_attempt_status(runs.path(), ".prune-trash", 2, Some("failed"), Some(&old), true);
+    prune_attempt_status(
+        runs.path(),
+        ".prune-trash",
+        1,
+        Some("failed"),
+        Some(&old),
+        true,
+    );
+    prune_attempt_status(
+        runs.path(),
+        ".prune-trash",
+        2,
+        Some("failed"),
+        Some(&old),
+        true,
+    );
 
     let list = runs_list_payload(&server, json!({}));
     assert_eq!(list["total_tasks"], 1, "只有 t-live 是任务：{list}");
@@ -2146,11 +2210,7 @@ fn reserved_directories_are_never_tasks_in_list_or_prune() {
         .iter()
         .map(|task| task["task_id"].as_str().unwrap_or_default())
         .collect();
-    assert_eq!(
-        names,
-        vec!["t-live"],
-        "预留目录不得出现在任务列表：{list}"
-    );
+    assert_eq!(names, vec!["t-live"], "预留目录不得出现在任务列表：{list}");
 
     let dry = prune_dry(&server, json!({ "older_than_days": 365, "limit": 100 }));
     assert_eq!(dry["state"], "ready");
@@ -2180,11 +2240,7 @@ fn reserved_directories_are_never_tasks_in_list_or_prune() {
     // dry-run 零写入、零删除
     assert!(!runs.path().join("prune.jsonl").exists());
     assert!(runs.path().join("_session").join("attempt-1").is_dir());
-    assert!(runs
-        .path()
-        .join(".prune-trash")
-        .join("attempt-1")
-        .is_dir());
+    assert!(runs.path().join(".prune-trash").join("attempt-1").is_dir());
 }
 
 // ---- path_prepend：显式前插继承 PATH（v1.9）----
@@ -2195,7 +2251,11 @@ fn path_prepend_is_placed_before_inherited_path() {
     let extra = TempDir::new().expect("创建前插目录");
     let prepend_dir = fs::canonicalize(extra.path()).expect("规范化前插目录");
     let expected = prepend_dir.to_string_lossy().to_string();
-    let echo_path = if cfg!(windows) { "echo %PATH%" } else { "echo $PATH" };
+    let echo_path = if cfg!(windows) {
+        "echo %PATH%"
+    } else {
+        "echo $PATH"
+    };
     let response = call_tool(
         &server,
         "task.execute",
@@ -2417,10 +2477,7 @@ fn empty_path_prepend_is_equivalent_to_omitted() {
     );
     assert_eq!(first["stdout_digest"], replay["stdout_digest"]);
     assert!(
-        !runs.path()
-            .join("t-pp-empty")
-            .join("attempt-2")
-            .exists(),
+        !runs.path().join("t-pp-empty").join("attempt-2").exists(),
         "等价空集合不得产生新 attempt"
     );
 
@@ -2464,7 +2521,8 @@ fn empty_env_and_path_prepend_combinations_share_one_signature() {
     for (index, arguments) in combos.into_iter().enumerate() {
         let payload = tool_payload(&call_tool(&server, "task.execute", arguments));
         assert_eq!(
-            payload["attempt"], 1,
+            payload["attempt"],
+            1,
             "第 {} 种空/缺省组合必须命中同一 attempt",
             index + 1
         );
@@ -2473,17 +2531,14 @@ fn empty_env_and_path_prepend_combinations_share_one_signature() {
             baseline = text;
         } else {
             assert_eq!(
-                text, baseline,
+                text,
+                baseline,
                 "第 {} 种组合改写了签名，说明空集合没有归一",
                 index + 1
             );
         }
         assert!(
-            !runs
-                .path()
-                .join("t-pp-matrix")
-                .join("attempt-2")
-                .exists(),
+            !runs.path().join("t-pp-matrix").join("attempt-2").exists(),
             "第 {} 种组合产生了新 attempt",
             index + 1
         );
@@ -2567,10 +2622,7 @@ fn timeout_description_matches_controlled_set_semantics() {
 
     for (label, text) in [("task.execute", tool_desc), ("timeout_secs", field_desc)] {
         for token in ["受控集合", "未验证", "不承诺终止整棵进程树"] {
-            assert!(
-                text.contains(token),
-                "{label} 描述缺少 `{token}`：{text}"
-            );
+            assert!(text.contains(token), "{label} 描述缺少 `{token}`：{text}");
         }
         assert!(
             !text.contains("已终止进程树"),
@@ -2717,10 +2769,7 @@ fn process_exists(pid: u32) -> bool {
 #[test]
 fn legacy_timeout_reason_is_returned_verbatim_and_not_rewritten() {
     let (server, _settings, runs) = server_with_runs();
-    let attempt = runs
-        .path()
-        .join("t-to-legacy")
-        .join("attempt-1");
+    let attempt = runs.path().join("t-to-legacy").join("attempt-1");
     fs::create_dir_all(&attempt).expect("创建旧格式 attempt");
     let legacy_reason = "timeout：超过 120s 未结束，已终止进程";
     let handback = json!({
@@ -2890,7 +2939,10 @@ fn prune_status_schema_and_legacy_compatibility() {
     let schema = prune_schema(&server);
     assert_eq!(schema["properties"]["status"]["type"], "array", "case 1");
     assert_eq!(schema["properties"]["status"]["minItems"], 1, "case 1");
-    assert_eq!(schema["properties"]["status"]["uniqueItems"], true, "case 1");
+    assert_eq!(
+        schema["properties"]["status"]["uniqueItems"], true,
+        "case 1"
+    );
     assert_eq!(
         schema["properties"]["status"]["items"]["type"], "string",
         "case 1"
@@ -2919,7 +2971,11 @@ fn prune_status_schema_and_legacy_compatibility() {
     println!("[case 23] runs.prune 描述与 status 语义一致 PASS");
 
     let old = days_ago_stamp(40);
-    for (task, status) in [("t-ok", "ok"), ("t-failed", "failed"), ("t-blocked", "blocked")] {
+    for (task, status) in [
+        ("t-ok", "ok"),
+        ("t-failed", "failed"),
+        ("t-blocked", "blocked"),
+    ] {
         prune_attempt_status(runs.path(), task, 1, Some(status), Some(&old), true);
         prune_attempt_status(runs.path(), task, 2, Some(status), Some(&old), true);
     }
@@ -2962,7 +3018,14 @@ fn prune_status_whitelist_selection() {
     prune_attempt_status(runs.path(), "t-failed", 1, Some("failed"), Some(&old), true);
     prune_attempt_status(runs.path(), "t-failed", 2, Some("failed"), Some(&old), true);
     // t-young：attempt-1=failed 但只有 5 天，attempt-2=failed 最新
-    prune_attempt_status(runs.path(), "t-young", 1, Some("failed"), Some(&young), true);
+    prune_attempt_status(
+        runs.path(),
+        "t-young",
+        1,
+        Some("failed"),
+        Some(&young),
+        true,
+    );
     prune_attempt_status(runs.path(), "t-young", 2, Some("failed"), Some(&old), true);
     // t-nostatus：attempt-1 缺 status，attempt-2=ok 最新
     prune_attempt_status(runs.path(), "t-nostatus", 1, None, Some(&old), true);
@@ -2971,7 +3034,10 @@ fn prune_status_whitelist_selection() {
     prune_attempt_status(runs.path(), "t-weird", 1, Some("weird"), Some(&old), true);
     prune_attempt_status(runs.path(), "t-weird", 2, Some("ok"), Some(&old), true);
 
-    let failed = prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"] }));
+    let failed = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"] }),
+    );
     assert_eq!(failed["status_filter"], json!(["failed"]), "case 3");
     let candidates = failed["candidates"].as_array().expect("candidates");
     assert_eq!(candidates.len(), 1, "case 3：只保留 failed 的非最新候选");
@@ -3003,9 +3069,11 @@ fn prune_status_whitelist_selection() {
         "case 4：failed 不得进入候选：{multi}"
     );
     assert!(
-        multi_candidates.iter().any(|item| item["task_id"] == "t-mix"
-            && item["attempt"] == 2
-            && item["status"] == "blocked"),
+        multi_candidates
+            .iter()
+            .any(|item| item["task_id"] == "t-mix"
+                && item["attempt"] == 2
+                && item["status"] == "blocked"),
         "case 4：blocked 必须在白名单内被选中"
     );
     println!("[case 4] 多值白名单取并集，failed 不进入候选 PASS");
@@ -3031,7 +3099,10 @@ fn prune_status_whitelist_selection() {
     );
     println!("[case 10] status + older_than_days 为 AND，未满阈值不删 PASS");
 
-    let latest_check = prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"] }));
+    let latest_check = prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"] }),
+    );
     assert!(
         latest_check["skipped"]
             .as_array()
@@ -3044,7 +3115,10 @@ fn prune_status_whitelist_selection() {
     );
     println!("[case 11] 最新 attempt 永不删，status 白名单不能选中 PASS");
 
-    for (task, expected_reason) in [("t-nostatus", "status_unknown"), ("t-weird", "status_unknown")] {
+    for (task, expected_reason) in [
+        ("t-nostatus", "status_unknown"),
+        ("t-weird", "status_unknown"),
+    ] {
         let check = prune_dry(&server, json!({ "older_than_days": 30, "status": ["ok"] }));
         assert!(
             !check["candidates"]
@@ -3088,8 +3162,14 @@ fn prune_status_whitelist_selection() {
     );
     println!("[case 14] limit 在 status 过滤之后生效，candidates_total 为过滤后总数 PASS");
 
-    prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"], "limit": 1 }));
-    prune_dry(&server, json!({ "older_than_days": 30, "status": ["failed"], "limit": 100 }));
+    prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"], "limit": 1 }),
+    );
+    prune_dry(
+        &server,
+        json!({ "older_than_days": 30, "status": ["failed"], "limit": 100 }),
+    );
     for bad in [0, 101] {
         let text = prune_error(
             &server,
@@ -3115,10 +3195,7 @@ fn prune_status_validation_is_fail_closed() {
         (Value::Null, "case 8"),
     ];
     for (status, label) in invalid_forms {
-        let text = prune_error(
-            &server,
-            json!({ "older_than_days": 30, "status": status }),
-        );
+        let text = prune_error(&server, json!({ "older_than_days": 30, "status": status }));
         assert!(text.contains("invalid_retention"), "{label}：{text}");
     }
     println!("[case 5] 空数组 → invalid_retention，零删除零审计 PASS");
@@ -3194,7 +3271,12 @@ fn prune_status_audit_and_mixed_batch() {
             "confirm": true
         }),
     );
-    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&response)
+    );
     let payload = tool_payload(&response);
     assert_eq!(payload["status_filter"], json!(["ok", "failed"]), "case 19");
     assert_eq!(payload["deleted_total"], 2, "case 19：ok+failed 两类都删");
@@ -3218,7 +3300,10 @@ fn prune_status_audit_and_mixed_batch() {
     println!("[case 19] 混合白名单按状态删除，blocked 保留、计数正确 PASS");
 
     let audit = fs::read_to_string(runs.path().join("prune.jsonl")).expect("必须写审计");
-    let lines: Vec<&str> = audit.lines().filter(|line| !line.trim().is_empty()).collect();
+    let lines: Vec<&str> = audit
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert_eq!(lines.len(), 2, "case 18：plan + result 两行");
     for line in &lines {
         let record: Value = serde_json::from_str(line).expect("审计行必须是 JSON");
@@ -3237,9 +3322,30 @@ fn prune_status_partial_failure_is_reported_as_partial() {
 
     let (server, _settings, runs) = server_with_runs();
     let old = days_ago_stamp(40);
-    prune_attempt_status(runs.path(), "t-partial", 1, Some("failed"), Some(&old), true);
-    prune_attempt_status(runs.path(), "t-partial", 2, Some("failed"), Some(&old), true);
-    prune_attempt_status(runs.path(), "t-partial", 3, Some("failed"), Some(&old), true);
+    prune_attempt_status(
+        runs.path(),
+        "t-partial",
+        1,
+        Some("failed"),
+        Some(&old),
+        true,
+    );
+    prune_attempt_status(
+        runs.path(),
+        "t-partial",
+        2,
+        Some("failed"),
+        Some(&old),
+        true,
+    );
+    prune_attempt_status(
+        runs.path(),
+        "t-partial",
+        3,
+        Some("failed"),
+        Some(&old),
+        true,
+    );
     let attempt_one = runs.path().join("t-partial").join("attempt-1");
     let _locked = fs::OpenOptions::new()
         .read(true)
@@ -3257,7 +3363,12 @@ fn prune_status_partial_failure_is_reported_as_partial() {
             "confirm": true
         }),
     );
-    assert_eq!(response["result"]["isError"], true, "case 20：{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "case 20：{}",
+        tool_text(&response)
+    );
     let payload = tool_payload(&response);
     assert_eq!(payload["status"], "partial", "case 20");
     assert_eq!(payload["deleted_total"], 1, "case 20：其余白名单候选仍删");
@@ -3276,7 +3387,11 @@ fn prune_status_partial_failure_is_reported_as_partial() {
         "case 20：未移动过的失败项 trash_path 必须为 null"
     );
     assert_eq!(failed["rule"]["older_than_days"], 30, "case 20");
-    assert_eq!(failed["rule"]["status_filter"], json!(["failed"]), "case 20");
+    assert_eq!(
+        failed["rule"]["status_filter"],
+        json!(["failed"]),
+        "case 20"
+    );
     assert_eq!(failed["rule"]["batch_id"], payload["batch_id"], "case 20");
     assert!(
         failed["fingerprint"]["handback_sha256"].as_str().is_some(),
@@ -3304,7 +3419,10 @@ fn prune_status_partial_failure_is_reported_as_partial() {
         .iter()
         .chain(payload["trashed"].as_array().expect("trashed").iter())
     {
-        assert_ne!(item["state"], "deleted", "case 20：failed/trashed 不得自称已删除");
+        assert_ne!(
+            item["state"], "deleted",
+            "case 20：failed/trashed 不得自称已删除"
+        );
         assert!(
             !item.to_string().to_lowercase().contains("\"deleted\""),
             "case 20：failed/trashed 条目不得出现 deleted 字样：{item}"
@@ -3329,10 +3447,7 @@ fn prune_status_capability_gate_and_no_server_side_tier() {
     );
     println!("[case 22] schema 含 status=能力位；不含时 PM 必须禁止携带并真删 PASS");
 
-    let tier = prune_dry(
-        &server,
-        json!({ "older_than_days": 30, "tier": "failed" }),
-    );
+    let tier = prune_dry(&server, json!({ "older_than_days": 30, "tier": "failed" }));
     assert_eq!(tier["status_filter"], Value::Null, "case 22");
     assert_eq!(
         tier["candidates_total"], 2,
@@ -3409,10 +3524,7 @@ fn prune_defaults_to_dry_run_and_lists_candidates_without_writing() {
         "dry-run 不得删目录"
     );
     assert!(runs.path().join("t-old").join("attempt-2").is_dir());
-    assert!(
-        runs.path().join("_session").is_dir(),
-        "不得动 _ 前缀目录"
-    );
+    assert!(runs.path().join("_session").is_dir(), "不得动 _ 前缀目录");
     assert_eq!(
         fs::read_dir(runs.path()).expect("读 runs").count(),
         entries_before,
@@ -3469,9 +3581,11 @@ fn prune_keeps_latest_attempt_and_single_attempt_tasks_and_records_audit() {
     );
     assert!(runs.path().join("_session").is_dir());
 
-    let audit = fs::read_to_string(runs.path().join("prune.jsonl"))
-        .expect("真实删除必须写审计");
-    let lines: Vec<&str> = audit.lines().filter(|line| !line.trim().is_empty()).collect();
+    let audit = fs::read_to_string(runs.path().join("prune.jsonl")).expect("真实删除必须写审计");
+    let lines: Vec<&str> = audit
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
     assert_eq!(lines.len(), 2, "每批必须 plan + result 两行：{audit}");
     let plan: Value = serde_json::from_str(lines[0]).expect("plan 行必须是 JSON");
     let result: Value = serde_json::from_str(lines[1]).expect("result 行必须是 JSON");
@@ -3479,7 +3593,10 @@ fn prune_keeps_latest_attempt_and_single_attempt_tasks_and_records_audit() {
     assert_eq!(plan["older_than_days"], 30);
     assert_eq!(plan["candidate_count"], 1);
     assert_eq!(plan["candidates"][0]["finishedAt"], old);
-    assert_eq!(plan["candidates"][0]["dispatchedAt"], "2026-01-01T00:00:00Z");
+    assert_eq!(
+        plan["candidates"][0]["dispatchedAt"],
+        "2026-01-01T00:00:00Z"
+    );
     assert_eq!(result["phase"], "result");
     assert_eq!(result["batch_id"], plan["batch_id"], "两行必须同批次");
     assert_eq!(result["deleted_total"], 1);
@@ -3582,7 +3699,11 @@ fn prune_skips_age_unknown_unfinished_future_and_missing_dispatch() {
     prune_attempt(runs.path(), "t-young", 1, true, Some(&young), true);
     prune_attempt(runs.path(), "t-young", 2, true, Some(&old), true);
 
-    let payload = tool_payload(&call_tool(&server, "runs.prune", json!({ "older_than_days": 10 })));
+    let payload = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 10 }),
+    ));
     assert_eq!(payload["dry_run"], true);
     assert_eq!(
         payload["candidates_total"], 0,
@@ -3600,7 +3721,10 @@ fn prune_skips_age_unknown_unfinished_future_and_missing_dispatch() {
             .to_string()
     };
     assert_eq!(reason_of("t-legacy", 1), "age_unknown");
-    assert_eq!(reason_of("t-unfinished", 1), "unfinished_or_missing_handback");
+    assert_eq!(
+        reason_of("t-unfinished", 1),
+        "unfinished_or_missing_handback"
+    );
     assert_eq!(reason_of("t-future", 1), "future_timestamp");
     assert_eq!(reason_of("t-nodispatch", 1), "missing_dispatch");
     assert_eq!(reason_of("t-young", 1), "not_old_enough");
@@ -3695,7 +3819,10 @@ fn prune_rerun_after_delete_has_no_phantom_candidates_or_skips() {
         "已删 attempt 不得再次成为候选：{again}"
     );
     assert!(
-        again["candidates"].as_array().expect("candidates").is_empty(),
+        again["candidates"]
+            .as_array()
+            .expect("candidates")
+            .is_empty(),
         "重跑候选必须为空：{again}"
     );
     assert_eq!(
@@ -3721,8 +3848,16 @@ fn prune_receipt_deleted_entries_carry_fingerprint_and_rule() {
     prune_attempt_status(runs.path(), "t-fp", 1, Some("failed"), Some(&old), true);
     prune_attempt_status(runs.path(), "t-fp", 2, Some("ok"), Some(&old), true);
 
-    let handback = runs.path().join("t-fp").join("attempt-1").join("handback.json");
-    let dispatch = runs.path().join("t-fp").join("attempt-1").join("dispatch.json");
+    let handback = runs
+        .path()
+        .join("t-fp")
+        .join("attempt-1")
+        .join("handback.json");
+    let dispatch = runs
+        .path()
+        .join("t-fp")
+        .join("attempt-1")
+        .join("dispatch.json");
     let handback_bytes = fs::read(&handback).expect("读 handback");
     let dispatch_bytes = fs::read(&dispatch).expect("读 dispatch");
     let handback_sha = hex::encode(Sha256::digest(&handback_bytes));
@@ -3760,7 +3895,10 @@ fn prune_receipt_deleted_entries_carry_fingerprint_and_rule() {
         item["trash_path"].as_str(),
         Some(format!("runs/.prune-trash/{batch}/t-fp-attempt-1").as_str())
     );
-    assert!(item["deleted_at"].as_str().is_some(), "deleted_at 必须逐条给出");
+    assert!(
+        item["deleted_at"].as_str().is_some(),
+        "deleted_at 必须逐条给出"
+    );
     assert_eq!(item["rule"]["older_than_days"], 365);
     assert_eq!(item["rule"]["status_filter"], json!(["failed"]));
     assert_eq!(item["rule"]["limit"], 100);
@@ -3873,7 +4011,10 @@ fn prune_partial_failure_is_reported_as_partial_without_retry() {
     assert_eq!(payload["failed_total"], 1);
     assert_eq!(payload["failed"][0]["attempt"], 1);
     assert!(
-        !payload["failed"][0]["error"].as_str().unwrap_or("").is_empty(),
+        !payload["failed"][0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
         "失败必须带原因：{payload}"
     );
     assert!(
@@ -4021,10 +4162,7 @@ fn description_gate_behavior_status_capability_and_filtering() {
     assert_eq!(truncated["candidates"].as_array().unwrap().len(), 1);
     assert_eq!(truncated["truncated"], true);
 
-    let ok_only = prune_dry(
-        &server,
-        json!({ "older_than_days": 365, "status": ["ok"] }),
-    );
+    let ok_only = prune_dry(&server, json!({ "older_than_days": 365, "status": ["ok"] }));
     assert_eq!(ok_only["candidates_total"], 0, "{}", ok_only);
     assert!(
         ok_only["skipped"]
@@ -4101,8 +4239,11 @@ fn description_gate_behavior_connection_counters_real_stdio() {
         )
         .expect("写入 initialize");
         let mut line = String::new();
-        stdout.read_line(&mut line).expect("读取 initialize 响应失败");
-        let response: Value = serde_json::from_str(line.trim()).expect("initialize 响应必须是 JSON");
+        stdout
+            .read_line(&mut line)
+            .expect("读取 initialize 响应失败");
+        let response: Value =
+            serde_json::from_str(line.trim()).expect("initialize 响应必须是 JSON");
         assert_eq!(
             response["result"]["protocolVersion"], "2025-06-18",
             "同一连接必须能重复 initialize：{response}"
@@ -4208,7 +4349,8 @@ fn temp_git_dir() -> TempDir {
 }
 
 fn read_json_at(path: &Path) -> Value {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
+    let text =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
     serde_json::from_str(&text).expect("必须是 JSON")
 }
 
@@ -4243,7 +4385,8 @@ fn standalone_passes_and_persists_verdict_with_observations() {
         }),
     );
     assert_eq!(
-        response["result"]["isError"], false,
+        response["result"]["isError"],
+        false,
         "standalone 执行本身不应是工具错误：{}",
         tool_text(&response)
     );
@@ -4254,8 +4397,7 @@ fn standalone_passes_and_persists_verdict_with_observations() {
     assert_eq!(payload["attempts_total"], 1);
     assert_eq!(payload["changed_files"], json!(["out.txt"]));
     assert_eq!(
-        payload["verdict_locator"],
-        "runs/sa-ok/attempt-1/verdict.json",
+        payload["verdict_locator"], "runs/sa-ok/attempt-1/verdict.json",
         "判定必须落在 AW 自己的 attempt 目录内：{payload}"
     );
 
@@ -4327,7 +4469,8 @@ fn standalone_failure_retries_without_overwriting_records() {
         }),
     );
     assert_eq!(
-        response["result"]["isError"], false,
+        response["result"]["isError"],
+        false,
         "验收不通过是任务结论不是工具错误：{}",
         tool_text(&response)
     );
@@ -4335,7 +4478,10 @@ fn standalone_failure_retries_without_overwriting_records() {
     assert_eq!(payload["status"], "failed", "{payload}");
     assert_eq!(payload["verdict_conclusion"], "failed");
     assert_eq!(payload["attempt"], 2);
-    assert_eq!(payload["attempts_total"], 2, "重试上限 2，耗尽即终止：{payload}");
+    assert_eq!(
+        payload["attempts_total"], 2,
+        "重试上限 2，耗尽即终止：{payload}"
+    );
 
     let first = read_json_at(&attempt_dir(&runs, "sa-fail", 1).join("verdict.json"));
     assert_eq!(first["attempt"], 1);
@@ -4391,7 +4537,12 @@ fn standalone_undetermined_is_never_reported_as_pass() {
             "max_attempts": 1
         }),
     );
-    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&response)
+    );
     let payload = tool_payload(&response);
     assert_eq!(
         payload["status"], "blocked",
@@ -4607,10 +4758,7 @@ fn standalone_replay_returns_final_result_without_new_attempts() {
     let first = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
     assert_eq!(first["attempts_total"], 1);
     assert_eq!(first["verdict_conclusion"], "passed");
-    assert_eq!(
-        first["replayed"], false,
-        "首次执行必须标称非回放：{first}"
-    );
+    assert_eq!(first["replayed"], false, "首次执行必须标称非回放：{first}");
 
     let replay = call_tool(&server, "task.execute", arguments);
     assert_eq!(replay["result"]["isError"], false, "{}", tool_text(&replay));
@@ -4704,7 +4852,10 @@ fn standalone_duplicate_execute_is_serialized_across_servers() {
         .iter()
         .filter(|payload| payload["replayed"] == true)
         .count();
-    assert_eq!(executed, 1, "同一 task_id 只能有一个调用方真正执行：{payloads:?}");
+    assert_eq!(
+        executed, 1,
+        "同一 task_id 只能有一个调用方真正执行：{payloads:?}"
+    );
     assert_eq!(replayed, 1, "另一个调用方必须明确标记为回放：{payloads:?}");
 
     let waiter = payloads
@@ -4715,8 +4866,14 @@ fn standalone_duplicate_execute_is_serialized_across_servers() {
     assert_eq!(waiter["status"], "ok", "{waiter}");
     assert_eq!(waiter["attempt"], 1, "{waiter}");
     for payload in &payloads {
-        assert_eq!(payload["finishedAt"], payloads[0]["finishedAt"], "回放必须返回胜者的同一份回执：{payloads:?}");
-        assert_eq!(payload["stdout_digest"], payloads[0]["stdout_digest"], "{payloads:?}");
+        assert_eq!(
+            payload["finishedAt"], payloads[0]["finishedAt"],
+            "回放必须返回胜者的同一份回执：{payloads:?}"
+        );
+        assert_eq!(
+            payload["stdout_digest"], payloads[0]["stdout_digest"],
+            "{payloads:?}"
+        );
     }
 
     assert!(attempt_dir(&runs, "sa-concurrent", 1).exists());
@@ -4729,14 +4886,19 @@ fn standalone_duplicate_execute_is_serialized_across_servers() {
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy() == "verdict.json")
         .count();
-    assert_eq!(verdicts, 1, "verdict.json 只能有一份，不能被两个调用方互相覆盖");
+    assert_eq!(
+        verdicts, 1,
+        "verdict.json 只能有一份，不能被两个调用方互相覆盖"
+    );
 }
 
 /// 4 条不同 task_id 并发，其中 1 条超时：其余任务不受影响，各自证据独立
 #[test]
 fn standalone_concurrent_tasks_are_isolated_from_one_timeout() {
     let runs = TempDir::new().expect("创建共享运行目录");
-    let settings: Vec<TempDir> = (0..4).map(|_| TempDir::new().expect("创建设置目录")).collect();
+    let settings: Vec<TempDir> = (0..4)
+        .map(|_| TempDir::new().expect("创建设置目录"))
+        .collect();
     let servers: Vec<Arc<Server>> = settings
         .iter()
         .map(|dir| {
@@ -4750,12 +4912,7 @@ fn standalone_concurrent_tasks_are_isolated_from_one_timeout() {
     let barrier = Arc::new(Barrier::new(4));
 
     let fast_cases: Vec<(String, String)> = (1..=3)
-        .map(|index| {
-            (
-                format!("sa-iso-{index}"),
-                format!("out-{index}.txt"),
-            )
-        })
+        .map(|index| (format!("sa-iso-{index}"), format!("out-{index}.txt")))
         .collect();
     let mut handles = Vec::new();
     for (index, (task_id, file)) in fast_cases.clone().into_iter().enumerate() {
@@ -4808,15 +4965,24 @@ fn standalone_concurrent_tasks_are_isolated_from_one_timeout() {
         .collect();
     for (task_id, payload) in &results {
         if task_id == "sa-iso-timeout" {
-            assert_eq!(payload["status"], "blocked", "超时任务必须明确阻塞：{payload}");
+            assert_eq!(
+                payload["status"], "blocked",
+                "超时任务必须明确阻塞：{payload}"
+            );
             assert_eq!(payload["verdict_conclusion"], "undetermined", "{payload}");
             assert_eq!(payload["exit_code"], Value::Null, "{payload}");
             assert_eq!(payload["attempt"], 1, "{payload}");
             let reason = blocked_reason(payload);
             assert!(reason.contains("timeout"), "超时必须给出原因：{reason}");
-            assert!(reason.contains("已清理受控集合"), "清理必须可核对：{reason}");
+            assert!(
+                reason.contains("已清理受控集合"),
+                "清理必须可核对：{reason}"
+            );
         } else {
-            assert_eq!(payload["status"], "ok", "{task_id} 不得被其它任务的超时清理误伤：{payload}");
+            assert_eq!(
+                payload["status"], "ok",
+                "{task_id} 不得被其它任务的超时清理误伤：{payload}"
+            );
             assert_eq!(payload["replayed"], false, "{payload}");
             assert_eq!(payload["attempts_total"], 1, "{payload}");
             let file = fast_cases
@@ -4824,7 +4990,10 @@ fn standalone_concurrent_tasks_are_isolated_from_one_timeout() {
                 .find(|(id, _)| id == task_id)
                 .map(|(_, file)| file.clone())
                 .expect("正例文件");
-            assert!(cwd.path().join(&file).exists(), "{task_id} 的产出文件必须落盘");
+            assert!(
+                cwd.path().join(&file).exists(),
+                "{task_id} 的产出文件必须落盘"
+            );
         }
     }
     for (task_id, _) in &fast_cases {
@@ -4915,7 +5084,8 @@ fn standalone_and_dispatched_cannot_share_one_task_id() {
         json!({ "task_id": "sa-mixed", "cmd": "echo hi" }),
     );
     assert_eq!(
-        dispatched["result"]["isError"], false,
+        dispatched["result"]["isError"],
+        false,
         "{}",
         tool_text(&dispatched)
     );
@@ -4931,7 +5101,8 @@ fn standalone_and_dispatched_cannot_share_one_task_id() {
         }),
     );
     assert_eq!(
-        standalone["result"]["isError"], true,
+        standalone["result"]["isError"],
+        true,
         "同一目录不得既被 PM 当权威又被 AW 自判：{}",
         tool_text(&standalone)
     );
@@ -4964,7 +5135,12 @@ fn standalone_and_dispatched_cannot_share_one_task_id() {
         "task.execute",
         json!({ "task_id": "sa-mixed-rev", "cmd": "echo hi" }),
     );
-    assert_eq!(reverse["result"]["isError"], true, "{}", tool_text(&reverse));
+    assert_eq!(
+        reverse["result"]["isError"],
+        true,
+        "{}",
+        tool_text(&reverse)
+    );
     assert!(
         tool_text(&reverse).contains("mode_conflict"),
         "{}",
@@ -4980,7 +5156,12 @@ fn dispatched_handback_stays_free_of_verdict_fields() {
         "task.execute",
         json!({ "task_id": "disp-regress", "cmd": "echo ok" }),
     );
-    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&response)
+    );
     let payload = tool_payload(&response);
     assert_eq!(payload["status"], "ok");
 
@@ -5003,7 +5184,11 @@ fn dispatched_handback_stays_free_of_verdict_fields() {
         !dir.join("verdict.json").exists(),
         "dispatched 不得写 verdict.json"
     );
-    assert!(!runs.path().join("disp-regress").join("standalone-result.json").exists());
+    assert!(!runs
+        .path()
+        .join("disp-regress")
+        .join("standalone-result.json")
+        .exists());
     let dispatch = read_json_at(&dir.join("dispatch.json"));
     assert!(
         dispatch.get("mode").is_none(),
@@ -5068,9 +5253,7 @@ fn prune_exclude_schema_declares_capability_and_constraints() {
     assert_eq!(exclude["items"]["properties"]["attempt"]["type"], "integer");
     assert_eq!(exclude["items"]["properties"]["attempt"]["minimum"], 1);
 
-    let description = exclude["description"]
-        .as_str()
-        .expect("exclude 必须有描述");
+    let description = exclude["description"].as_str().expect("exclude 必须有描述");
     for phrase in [
         "按条目精确排除",
         "task_id",
@@ -5163,15 +5346,20 @@ fn prune_exclude_one_candidate_diverts_it_and_keeps_bytes() {
             + payload["failed_total"].as_u64().unwrap_or(0)
             + payload["trashed_total"].as_u64().unwrap_or(0)
             + payload["excluded_total"].as_u64().unwrap_or(0),
-        payload["batch_candidates_total"].as_u64().unwrap_or(u64::MAX),
+        payload["batch_candidates_total"]
+            .as_u64()
+            .unwrap_or(u64::MAX),
         "计数不变式必须成立：删除+失败+暂存+排除 == 本批候选总数：{payload}"
     );
     assert!(kept.is_dir(), "被排除条目不得被删除：{payload}");
-    assert_eq!(snapshot_dir_bytes(&kept), before, "被排除条目必须逐字节未变");
+    assert_eq!(
+        snapshot_dir_bytes(&kept),
+        before,
+        "被排除条目必须逐字节未变"
+    );
     let audit = fs::read_to_string(runs.path().join("prune.jsonl")).expect("读审计");
-    let result_line: Value =
-        serde_json::from_str(audit.lines().last().expect("必须有 result 行"))
-            .expect("审计行必须是 JSON");
+    let result_line: Value = serde_json::from_str(audit.lines().last().expect("必须有 result 行"))
+        .expect("审计行必须是 JSON");
     assert_eq!(
         result_line["excluded_total"], 1,
         "审计 result 行必须记录排除数：{result_line}"
@@ -5289,7 +5477,10 @@ fn prune_exclude_reports_not_in_candidates_and_keeps_processing() {
     assert_eq!(excluded[1]["task_id"], "t-p");
     assert_eq!(excluded[1]["attempt"], 2, "最新 attempt 本就不在候选集");
     assert_eq!(excluded[2]["attempt"], 9, "不存在的 attempt 也不在候选集");
-    assert_eq!(payload["deleted_total"], 2, "不在候选集的排除请求不得干扰正常删除");
+    assert_eq!(
+        payload["deleted_total"], 2,
+        "不在候选集的排除请求不得干扰正常删除"
+    );
     assert!(!runs.path().join("t-p").join("attempt-1").exists());
     assert!(!runs.path().join("t-q").join("attempt-1").exists());
     assert!(
@@ -5322,8 +5513,14 @@ fn prune_exclude_rejects_unsafe_or_ambiguous_entries_without_writes() {
         ("非对象条目", json!(["t-a"])),
         ("缺 task_id", json!([{ "attempt": 1 }])),
         ("attempt=0", json!([{ "task_id": "t-a", "attempt": 0 }])),
-        ("attempt 为字符串", json!([{ "task_id": "t-a", "attempt": "1" }])),
-        ("重复整任务", json!([{ "task_id": "t-a" }, { "task_id": "t-a" }])),
+        (
+            "attempt 为字符串",
+            json!([{ "task_id": "t-a", "attempt": "1" }]),
+        ),
+        (
+            "重复整任务",
+            json!([{ "task_id": "t-a" }, { "task_id": "t-a" }]),
+        ),
         (
             "重复 attempt",
             json!([
@@ -5674,9 +5871,8 @@ fn standalone_inflight_marker_is_visible_then_removed() {
         "max_attempts": 1
     });
     let worker = Arc::clone(&server);
-    let handle = std::thread::spawn(move || {
-        tool_payload(&call_tool(&worker, "task.execute", arguments))
-    });
+    let handle =
+        std::thread::spawn(move || tool_payload(&call_tool(&worker, "task.execute", arguments)));
 
     let marker = inflight_marker(runs.path(), "sa-inflight");
     let mut seen = false;
@@ -5728,7 +5924,14 @@ fn standalone_inflight_marker_is_visible_then_removed() {
 #[test]
 fn prune_skips_task_with_live_inflight_marker() {
     let (server, _settings, runs) = server_with_runs();
-    prune_attempt(runs.path(), "sa-prune-inflight", 1, true, Some(&days_ago_stamp(30)), true);
+    prune_attempt(
+        runs.path(),
+        "sa-prune-inflight",
+        1,
+        true,
+        Some(&days_ago_stamp(30)),
+        true,
+    );
     prune_attempt(runs.path(), "sa-prune-inflight", 2, false, None, true);
     let marker = inflight_marker(runs.path(), "sa-prune-inflight");
     fs::create_dir_all(marker.parent().expect("标记目录")).expect("创建标记目录");
@@ -5767,7 +5970,10 @@ fn prune_skips_task_with_live_inflight_marker() {
         json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
     ));
     assert_eq!(payload["deleted_total"], 0, "活跃任务不得被删：{payload}");
-    assert_eq!(payload["candidates_total"], 0, "活跃任务不得进入候选：{payload}");
+    assert_eq!(
+        payload["candidates_total"], 0,
+        "活跃任务不得进入候选：{payload}"
+    );
     assert!(
         attempt_dir(&runs, "sa-prune-inflight", 1).exists(),
         "active 标记存在时 attempt-1 必须原样保留"
@@ -5788,9 +5994,7 @@ fn standalone_active_attempt_deleted_is_reported_not_silent_ok() {
         "acceptance": [{ "type": "exit_code", "expected": 0 }],
         "max_attempts": 1
     });
-    let handle = std::thread::spawn(move || {
-        call_tool(&server, "task.execute", arguments)
-    });
+    let handle = std::thread::spawn(move || call_tool(&server, "task.execute", arguments));
 
     let dir = attempt_dir(&runs, "sa-vanish", 1);
     for _ in 0..200 {
@@ -5813,7 +6017,8 @@ fn standalone_active_attempt_deleted_is_reported_not_silent_ok() {
 
     let response = handle.join().expect("执行线程不应 panic");
     assert_eq!(
-        response["result"]["isError"], true,
+        response["result"]["isError"],
+        true,
         "目录消失后不得报告成功：{}",
         tool_text(&response)
     );
@@ -5838,7 +6043,10 @@ fn standalone_rerun_after_records_removed_is_marked() {
         "max_attempts": 1
     });
     let first = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
-    assert_eq!(first["replay_basis"], "fresh", "首次执行必须是 fresh：{first}");
+    assert_eq!(
+        first["replay_basis"], "fresh",
+        "首次执行必须是 fresh：{first}"
+    );
 
     fs::remove_dir_all(runs.path().join("sa-pruned-rerun")).expect("删除全部记录");
     let rerun = tool_payload(&call_tool(&server, "task.execute", arguments.clone()));
@@ -5960,7 +6168,13 @@ fn strict_arguments_meta_allows_declared_and_omitted_optionals() {
 /// 真实不存在的 pid：POSIX `kill(pid,0)` 与 Windows `OpenProcess` 都必须判为已消失
 const DEAD_PID: u64 = 999_999_999;
 
-fn write_inflight_marker(runs: &Path, task_id: &str, pid: u64, started_at: &str, deadline_at: &str) {
+fn write_inflight_marker(
+    runs: &Path,
+    task_id: &str,
+    pid: u64,
+    started_at: &str,
+    deadline_at: &str,
+) {
     let dir = runs.join(".inflight");
     fs::create_dir_all(&dir).expect("创建 .inflight 目录");
     fs::write(
@@ -5994,7 +6208,8 @@ fn capabilities_declares_machine_readable_boundaries() {
     let (server, _settings, _runs) = server_with_runs();
     let response = call_tool(&server, "capabilities", json!({}));
     assert_eq!(
-        response["result"]["isError"], false,
+        response["result"]["isError"],
+        false,
         "能力声明必须可读取：{}",
         tool_text(&response)
     );
@@ -6025,8 +6240,8 @@ fn capabilities_declares_machine_readable_boundaries() {
     let statuses = payload["status_enum"]
         .as_array()
         .unwrap_or_else(|| panic!("status_enum 必须是数组：{payload}"));
-    let allowed_status: Vec<&str> = ["proven", "not_proven", "partial", "unverified", "supported"]
-        .to_vec();
+    let allowed_status: Vec<&str> =
+        ["proven", "not_proven", "partial", "unverified", "supported"].to_vec();
     let declared: Vec<&str> = statuses
         .iter()
         .map(|value| value.as_str().expect("status_enum 元素必须是字符串"))
@@ -6042,15 +6257,33 @@ fn capabilities_declares_machine_readable_boundaries() {
         assert!(!ids.iter().any(|seen| seen == id), "声明 id 不得重复：{id}");
         ids.push(id.to_string());
         assert!(
-            entry["scope"].as_str().map(|scope| !scope.is_empty()).unwrap_or(false),
+            entry["scope"]
+                .as_str()
+                .map(|scope| !scope.is_empty())
+                .unwrap_or(false),
             "{id} 必须有明确的适用范围 scope"
         );
-        assert!(entry["holds"].is_boolean() || entry["holds"].is_null(), "{id} holds 必须是 true/false/null：{entry}");
-        assert!(entry["automatic"].is_boolean(), "{id} automatic 必须是布尔：{entry}");
-        assert!(entry["platforms_verified"].is_array(), "{id} platforms_verified 必须是数组：{entry}");
-        assert!(entry["platforms_unverified"].is_array(), "{id} platforms_unverified 必须是数组：{entry}");
+        assert!(
+            entry["holds"].is_boolean() || entry["holds"].is_null(),
+            "{id} holds 必须是 true/false/null：{entry}"
+        );
+        assert!(
+            entry["automatic"].is_boolean(),
+            "{id} automatic 必须是布尔：{entry}"
+        );
+        assert!(
+            entry["platforms_verified"].is_array(),
+            "{id} platforms_verified 必须是数组：{entry}"
+        );
+        assert!(
+            entry["platforms_unverified"].is_array(),
+            "{id} platforms_unverified 必须是数组：{entry}"
+        );
         let status = entry["status"].as_str().expect("status 必须是字符串");
-        assert!(declared.contains(&status), "{id} status={status} 不在枚举内");
+        assert!(
+            declared.contains(&status),
+            "{id} status={status} 不在枚举内"
+        );
         let holds = entry["holds"].as_bool();
         if holds == Some(false) {
             not_proven += 1;
@@ -6061,7 +6294,11 @@ fn capabilities_declares_machine_readable_boundaries() {
             );
         }
         if matches!(status, "proven" | "supported") {
-            assert_eq!(holds, Some(true), "{id} status={status} 必须 holds=true：{entry}");
+            assert_eq!(
+                holds,
+                Some(true),
+                "{id} status={status} 必须 holds=true：{entry}"
+            );
         }
         if status == "unverified" {
             assert!(holds.is_none(), "{id} 未验证必须 holds=null：{entry}");
@@ -6076,12 +6313,15 @@ fn capabilities_declares_machine_readable_boundaries() {
     let rule = &payload["decision_rule"]["holds"];
     for key in ["true", "false", "null"] {
         assert!(
-            rule[key].as_str().map(|text| !text.is_empty()).unwrap_or(false),
+            rule[key]
+                .as_str()
+                .map(|text| !text.is_empty())
+                .unwrap_or(false),
             "decision_rule.holds.{key} 必须有语义说明：{payload}"
         );
     }
 
-    // #3 判据按平台分裂：Windows 已证明整树，POSIX 仍缺"换父后被收养"这一段
+    // #3 判据按平台分裂：Windows 已证明整树，POSIX 已能观测逃逸但终止仍只打进程组
     let controlled = claim(&payload, "timeout.terminates_controlled_set");
     assert_eq!(controlled["holds"], true, "{controlled}");
     assert_eq!(controlled["status"], "proven", "{controlled}");
@@ -6089,15 +6329,26 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(whole_tree["holds"], false, "{whole_tree}");
     assert_eq!(whole_tree["status"], "partial", "{whole_tree}");
     assert_eq!(
-        whole_tree["reason_code"], "posix_escaped_after_reparent_unobservable",
+        whole_tree["reason_code"], "posix_escaped_descendant_observable_not_terminated",
         "{whole_tree}"
     );
     let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
     assert_eq!(escaped["holds"], false, "{escaped}");
     assert_eq!(escaped["status"], "partial", "{escaped}");
     assert_eq!(
-        escaped["reason_code"], "posix_escaped_after_reparent_unobservable",
+        escaped["reason_code"], "posix_escaped_scope_requires_writable_cgroup_v2",
         "{escaped}"
+    );
+    // cgroup v2 观测点本身必须可证，且明确只在 linux 上验证过
+    let cgroup = claim(&payload, "timeout.cgroup_v2_scope_observation");
+    assert_eq!(cgroup["holds"], true, "{cgroup}");
+    assert_eq!(cgroup["status"], "proven", "{cgroup}");
+    assert!(cgroup["reason_code"].is_null(), "{cgroup}");
+    assert_eq!(cgroup["platforms_verified"], json!(["linux"]), "{cgroup}");
+    assert_eq!(
+        cgroup["platforms_unverified"],
+        json!(["windows", "macos"]),
+        "{cgroup}"
     );
     // 新增观测点本身必须可证：枚举到的后代与受控集合成员可交叉核对
     let snapshot = claim(&payload, "timeout.descendant_snapshot_cross_check");
@@ -6129,7 +6380,10 @@ fn capabilities_declares_machine_readable_boundaries() {
     let toctou = claim(&payload, "concurrency.check_then_delete_atomic");
     assert_eq!(toctou["holds"], false, "{toctou}");
     assert_eq!(toctou["status"], "not_proven", "{toctou}");
-    assert_eq!(toctou["reason_code"], "check_then_delete_not_atomic", "{toctou}");
+    assert_eq!(
+        toctou["reason_code"], "check_then_delete_not_atomic",
+        "{toctou}"
+    );
 
     // 残留标记：可观察、可清理，但不自动清扫
     let observable = claim(&payload, "inflight.stale_marker_observable");
@@ -6138,7 +6392,10 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(observable["automatic"], true, "{observable}");
     let cleanable = claim(&payload, "inflight.stale_marker_cleanable");
     assert_eq!(cleanable["holds"], true, "{cleanable}");
-    assert_eq!(cleanable["automatic"], false, "清理需要调用方显式执行：{cleanable}");
+    assert_eq!(
+        cleanable["automatic"], false,
+        "清理需要调用方显式执行：{cleanable}"
+    );
     let auto = claim(&payload, "inflight.stale_markers_auto_swept");
     assert_eq!(auto["holds"], false, "{auto}");
     assert_eq!(auto["status"], "partial", "只做到特定路径顺带清扫：{auto}");
@@ -6236,7 +6493,12 @@ fn runs_inflight_list_exposes_pm_liveness_contract() {
         rule["fallback"]["allowed"], false,
         "AW 提供 runs.inflight 时不得回退 attempt 文件启发式：{rule}"
     );
-    for key in ["task_live", "task_not_live", "not_live_does_not_prove", "result_authority"] {
+    for key in [
+        "task_live",
+        "task_not_live",
+        "not_live_does_not_prove",
+        "result_authority",
+    ] {
         assert!(
             rule["decision"][key]
                 .as_str()
@@ -6309,8 +6571,14 @@ fn runs_inflight_lists_and_cleans_only_stale_markers() {
     assert_eq!(dry["dry_run"], true, "{dry}");
     assert_eq!(dry["would_remove_total"], 1, "{dry}");
     assert_eq!(dry["removed_total"], 0, "{dry}");
-    assert!(inflight_marker(runs.path(), "stale-task").exists(), "dry-run 不得删文件");
-    assert!(inflight_marker(runs.path(), "active-task").exists(), "dry-run 不得删文件");
+    assert!(
+        inflight_marker(runs.path(), "stale-task").exists(),
+        "dry-run 不得删文件"
+    );
+    assert!(
+        inflight_marker(runs.path(), "active-task").exists(),
+        "dry-run 不得删文件"
+    );
 
     // 真清：只删 stale；活跃标记必须保留
     let cleaned = tool_payload(&call_tool(
@@ -6333,8 +6601,8 @@ fn runs_inflight_lists_and_cleans_only_stale_markers() {
     );
     let kept = cleaned["kept"].as_array().expect("kept 必须是数组");
     assert!(
-        kept.iter().any(|entry| entry["task_id"] == "active-task"
-            && entry["reason"] == "not_stale"),
+        kept.iter()
+            .any(|entry| entry["task_id"] == "active-task" && entry["reason"] == "not_stale"),
         "保留项必须给出原因：{cleaned}"
     );
 
@@ -6353,7 +6621,12 @@ fn runs_inflight_lists_and_cleans_only_stale_markers() {
         "task.execute",
         json!({ "task_id": "no-residue", "cmd": "echo done", "timeout_secs": 30 }),
     );
-    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&response)
+    );
     assert!(
         !inflight_marker(runs.path(), "no-residue").exists(),
         "正常结束后必须无残留标记"
@@ -6382,7 +6655,12 @@ fn runs_inflight_clean_requires_explicit_confirmation() {
         "runs.inflight",
         json!({ "action": "clean", "dry_run": false }),
     );
-    assert_eq!(response["result"]["isError"], true, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        true,
+        "{}",
+        tool_text(&response)
+    );
     let payload = tool_payload(&response);
     let error = payload["error"].as_str().expect("必须回传具名错误");
     assert!(
@@ -6395,7 +6673,12 @@ fn runs_inflight_clean_requires_explicit_confirmation() {
     );
 
     let invalid = call_tool(&server, "runs.inflight", json!({ "action": "purge" }));
-    assert_eq!(invalid["result"]["isError"], true, "{}", tool_text(&invalid));
+    assert_eq!(
+        invalid["result"]["isError"],
+        true,
+        "{}",
+        tool_text(&invalid)
+    );
     let payload = tool_payload(&invalid);
     assert!(
         payload["error"]
@@ -6421,7 +6704,9 @@ fn runs_inflight_keeps_unreadable_marker() {
     ));
     assert_eq!(listed["total"], 0, "{listed}");
     assert_eq!(listed["unreadable_total"], 1, "{listed}");
-    let unreadable = listed["unreadable"].as_array().expect("unreadable 必须是数组");
+    let unreadable = listed["unreadable"]
+        .as_array()
+        .expect("unreadable 必须是数组");
     assert_eq!(unreadable[0]["file"], "bad.json", "{listed}");
     assert_eq!(unreadable[0]["stale_reason"], "unreadable", "{listed}");
     assert_eq!(unreadable[0]["removable"], false, "{listed}");
@@ -6452,7 +6737,10 @@ fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
     use std::io::{BufRead, BufReader, Write};
 
     let exe = env!("CARGO_BIN_EXE_aw-mcp-bridge");
-    let runs = Path::new(exe).parent().expect("可执行文件目录").join("runs");
+    let runs = Path::new(exe)
+        .parent()
+        .expect("可执行文件目录")
+        .join("runs");
     let task_id = format!("inflight-real-{}", std::process::id());
     let stale_id = format!("{task_id}-stale");
     let stale_marker = runs.join(".inflight").join(format!("{stale_id}.json"));
@@ -6492,20 +6780,35 @@ fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
     };
 
     exchange(1, "initialize", json!({}));
-    let capabilities = text_payload(&exchange(2, "tools/call", json!({
-        "name": "capabilities", "arguments": {}
-    })));
+    let capabilities = text_payload(&exchange(
+        2,
+        "tools/call",
+        json!({
+            "name": "capabilities", "arguments": {}
+        }),
+    ));
     assert_eq!(capabilities["version"], "capabilities/1", "{capabilities}");
 
-    let executed = text_payload(&exchange(3, "tools/call", json!({
-        "name": "task.execute",
-        "arguments": { "task_id": task_id, "cmd": "echo done", "timeout_secs": 30 }
-    })));
+    let executed = text_payload(&exchange(
+        3,
+        "tools/call",
+        json!({
+            "name": "task.execute",
+            "arguments": { "task_id": task_id, "cmd": "echo done", "timeout_secs": 30 }
+        }),
+    ));
     assert_eq!(executed["status"], "ok", "{executed}");
-    let after_run = text_payload(&exchange(4, "tools/call", json!({
-        "name": "runs.inflight", "arguments": { "action": "list" }
-    })));
-    assert_eq!(after_run["total"], 0, "正常结束后不得有残留标记：{after_run}");
+    let after_run = text_payload(&exchange(
+        4,
+        "tools/call",
+        json!({
+            "name": "runs.inflight", "arguments": { "action": "list" }
+        }),
+    ));
+    assert_eq!(
+        after_run["total"], 0,
+        "正常结束后不得有残留标记：{after_run}"
+    );
 
     // 外部构造：pid 已消失 + deadline 已过
     fs::create_dir_all(runs.join(".inflight")).expect("创建 .inflight");
@@ -6524,18 +6827,26 @@ fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
     )
     .expect("写入残留标记");
 
-    let listed = text_payload(&exchange(5, "tools/call", json!({
-        "name": "runs.inflight", "arguments": { "action": "list" }
-    })));
+    let listed = text_payload(&exchange(
+        5,
+        "tools/call",
+        json!({
+            "name": "runs.inflight", "arguments": { "action": "list" }
+        }),
+    ));
     assert_eq!(listed["stale_total"], 1, "{listed}");
     let marker = &listed["markers"][0];
     assert_eq!(marker["task_id"], stale_id, "{listed}");
     assert_eq!(marker["stale_reason"], "pid_missing", "{listed}");
 
-    let cleaned = text_payload(&exchange(6, "tools/call", json!({
-        "name": "runs.inflight",
-        "arguments": { "action": "clean", "dry_run": false, "confirm": true }
-    })));
+    let cleaned = text_payload(&exchange(
+        6,
+        "tools/call",
+        json!({
+            "name": "runs.inflight",
+            "arguments": { "action": "clean", "dry_run": false, "confirm": true }
+        }),
+    ));
     assert_eq!(cleaned["removed_total"], 1, "{cleaned}");
     assert!(!stale_marker.exists(), "残留标记必须被真实清理");
 
@@ -6583,7 +6894,12 @@ fn inflight_sweep_on_task_start_removes_only_target_stale_marker() {
         "task.execute",
         json!({ "task_id": "sweep-start", "cmd": "echo done", "timeout_secs": 30 }),
     );
-    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&response)
+    );
     assert!(
         !inflight_marker(runs.path(), "sweep-start").exists(),
         "重启前必须清掉同一 task_id 的残标"
@@ -6604,7 +6920,10 @@ fn inflight_sweep_on_task_start_removes_only_target_stale_marker() {
         .unwrap_or_else(|| panic!("必须写清扫结果行：{audit:?}"));
     assert_eq!(result["removed_total"], 1, "{result}");
     assert_eq!(result["removed"][0]["task_id"], "sweep-start", "{result}");
-    assert_eq!(result["removed"][0]["stale_reason"], "pid_missing", "{result}");
+    assert_eq!(
+        result["removed"][0]["stale_reason"], "pid_missing",
+        "{result}"
+    );
     assert!(
         result["removed"][0]["path"]
             .as_str()
@@ -6661,7 +6980,10 @@ fn inflight_sweep_on_prune_removes_stale_marker_and_unblocks_candidate() {
         .find(|line| line["phase"] == "result" && line["trigger"] == "prune")
         .unwrap_or_else(|| panic!("必须写 prune 清扫结果行：{audit:?}"));
     assert_eq!(result["removed_total"], 1, "{result}");
-    assert_eq!(result["removed"][0]["stale_reason"], "pid_missing", "{result}");
+    assert_eq!(
+        result["removed"][0]["stale_reason"], "pid_missing",
+        "{result}"
+    );
 }
 
 /// 显式 clean 也写审计；坏标记保留并报 unreadable；重复 clean 幂等且不再追加审计
@@ -6695,7 +7017,10 @@ fn inflight_clean_writes_audit_and_is_idempotent() {
         inflight_marker(runs.path(), "audit-active").exists(),
         "活跃标记不得被误删：{cleaned}"
     );
-    assert!(dir.join("audit-bad.json").exists(), "不可读标记不得被删除：{cleaned}");
+    assert!(
+        dir.join("audit-bad.json").exists(),
+        "不可读标记不得被删除：{cleaned}"
+    );
 
     let audit = read_inflight_sweep_audit(runs.path());
     assert_eq!(audit.len(), 2, "一次真清必须写 plan+result 两行：{audit:?}");
@@ -6706,7 +7031,10 @@ fn inflight_clean_writes_audit_and_is_idempotent() {
     assert_eq!(result["trigger"], "clean", "{result}");
     assert_eq!(result["removed_total"], 1, "{result}");
     assert_eq!(result["removed"][0]["task_id"], "audit-stale", "{result}");
-    assert_eq!(result["removed"][0]["stale_reason"], "pid_missing", "{result}");
+    assert_eq!(
+        result["removed"][0]["stale_reason"], "pid_missing",
+        "{result}"
+    );
     assert_eq!(result["unreadable_total"], 1, "{result}");
 
     let again = tool_payload(&call_tool(
@@ -6735,7 +7063,12 @@ fn inflight_sweep_on_task_start_preserves_unreadable_marker() {
         "task.execute",
         json!({ "task_id": "bad-start", "cmd": "echo done", "timeout_secs": 30 }),
     );
-    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert_eq!(
+        response["result"]["isError"],
+        false,
+        "{}",
+        tool_text(&response)
+    );
     assert!(
         dir.join("bad-start.json").exists(),
         "不可读标记必须保留，不能当作残标删除"
@@ -6761,9 +7094,14 @@ fn runs_inflight_list_exposes_sweep_contract() {
     assert_eq!(rule["idempotent"], true, "{rule}");
     let triggers = rule["triggers"].as_array().expect("triggers 必须是数组");
     for trigger in ["task_start", "runs.prune", "runs.inflight.clean"] {
-        assert!(triggers.contains(&json!(trigger)), "{trigger} 必须写明：{rule}");
+        assert!(
+            triggers.contains(&json!(trigger)),
+            "{trigger} 必须写明：{rule}"
+        );
     }
-    let never = rule["never_removed"].as_array().expect("never_removed 必须是数组");
+    let never = rule["never_removed"]
+        .as_array()
+        .expect("never_removed 必须是数组");
     for item in ["active_pid_alive", "unreadable"] {
         assert!(never.contains(&json!(item)), "{item} 必须写明：{rule}");
     }
@@ -6776,4 +7114,3 @@ fn runs_inflight_list_exposes_sweep_contract() {
         assert!(limits.contains(&json!(item)), "{item} 必须写明：{rule}");
     }
 }
-

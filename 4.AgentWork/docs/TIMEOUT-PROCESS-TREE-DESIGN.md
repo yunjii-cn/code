@@ -436,16 +436,17 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 3. **三态可分**：观测点必须能区分"确实不存在"与"不可观测"；查询失败只能记 `Unavailable`，不得当 0（现有 C1/C2 已遵守）。
 4. **平台闭合**：POSIX 需要 cgroup v2 委派且进程不能被移出，或 `PR_SET_CHILD_SUBREAPER` + 带启动时间的全量 `/proc` 扫描；Windows 需要作业覆盖全部后代、禁止 `BREAKAWAY`/嵌套逃逸，并能枚举"作业外候选"。
 
-现状逐条核对（v1.34 新增观测点后；实测见 §6.10）：
+现状逐条核对（v1.35 补 cgroup v2 观测后；实测见 §6.10 / §6.11）：
 
 | 平台 | 1 完整枚举 | 2 全时段 | 3 三态可分 | 4 平台闭合 | 结论 |
 |---|---|---|---|---|---|
-| POSIX | 否（`/proc` 父链在孤儿被收养时断开；subreaper 只覆盖孤儿，macOS 无） | 否（换父后无法追；根退出后快照必为空，属于假空） | 是（`ESRCH`/`EPERM` 可分；`unobservable` 与空快照分离） | 否（cgroup v2 未验证，进程可被移出） | 继续 `partial / NOT_PROVEN`（PD-3 剩余） |
+| POSIX（cgroup v2 可写） | 是（`cgroup.procs` 成员集合与父链无关，收养后仍在；exec 前写入，无先派生窗口） | 是（终止后读成员集合即可回答"作用域内是否还有存活进程"） | 是（`ESRCH`/`EPERM` 可分；`unobservable` 与空快照分离） | **否**（成员可被外部移出 cgroup；`cgroup.kill` 未启用，终止仍只打进程组） | 观测已闭合、终止未闭合 → 整树仍 `partial` |
+| POSIX（cgroup 不可用） | 否（`/proc` 父链在孤儿被收养时断开；macOS 无 `/proc`） | 否（换父后无法追；根退出后快照必为空，属于假空） | 是 | 否 | `partial`，且 `escaped_scope_unobservable` 必须带原因 |
 | Windows | 是（Toolhelp 父链快照；`ParentProcessID` 不因父进程退出而改写，PID 复用只会多报不会漏报） | 是（终止后快照为空即不存在可继续派生的存活后代） | 是（快照/作业列表查询失败一律 `Unavailable`） | 是（`CREATE_SUSPENDED` + 恢复前入作业；本作业未设 `BREAKAWAY_OK`，嵌套作业仍在外层作业内） | 整树清理可在 Windows 证明 |
 
 v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不提供逃逸观测点**，因此不改变上表任何一格，也不改变 `#3 = NOT_PROVEN`。四条中任何一条不满足，"逃逸未验证"就必须保留。
 
-v1.34 补上了观测点后，Windows 四格全部满足：`timeout.descendant_snapshot_cross_check` 为 `proven`，`timeout.cleans_entire_process_tree` 在 Windows 侧成立；POSIX 仍卡在"换父被收养"这一格，因此整条 claim 只能写 `holds=false / partial / posix_escaped_after_reparent_unobservable`，**不是**放宽判据换来的绿。
+v1.34 补上了父链/作业观测点后，Windows 四格全部满足；POSIX 卡在"换父被收养"这一格。v1.35 在 Linux 上用 cgroup v2 把第 1、2 格补成"是"（实测见 §6.11），但**第 4 格仍为否**：终止动作仍只有 `kill(-pgid)`，cgroup 只用来观测，因此 `timeout.cleans_entire_process_tree` 仍为 `holds=false / partial / posix_escaped_descendant_observable_not_terminated`——现在能看见逃逸者，但看不见 ≠ 杀得掉。
 
 ### 6.9 单次终止尝试是否足够（v1.24 实测；结论：一次即足够，不加重试）
 
@@ -544,6 +545,56 @@ v1.34 补上了观测点后，Windows 四格全部满足：`timeout.descendant_s
 2. macOS 无 `/proc`，快照恒为 `unobservable`；
 3. Windows 的 PID 复用可能让快照多报"后代"——方向保守（会报 `StillAlive`，不会报假 `Cleaned`）；
 4. 观测是终止后的采样，不是内核级订阅；平台若允许后代脱离父链并继续存活（POSIX 换父正是此类），采样无法证明"不存在"。
+
+### 6.11 cgroup v2 作用域观测（v1.35 实测：被收养的逃逸后代在 Linux 上终于可见）
+
+第 6.10 节第 1 条边界（孤儿被收养后父链断开）在 Linux 上可以用 cgroup v2 绕开：**cgroup 成员关系不随父进程退出而消失**。本机探测先确认前提：
+
+```
+$ stat -fc %T /sys/fs/cgroup
+cgroup2fs
+$ id -u
+0
+$ mkdir /sys/fs/cgroup/aw-probe && sleep 5 & echo $! > /sys/fs/cgroup/aw-probe/cgroup.procs
+$ cat /sys/fs/cgroup/aw-probe/cgroup.procs
+<写入的 pid>
+```
+
+即：WSL Ubuntu 24.04 内核默认 cgroup v2 单挂载，root 可直接建子 cgroup 并迁移进程。
+
+设计（仍是只读观测，不新增终止逻辑）：
+
+- `configure` 阶段建 `aw-mcp-bridge-<pid>-<seq>`，打开 `cgroup.procs` 写端；
+- `pre_exec`（fork 之后、exec 之前）把**自身** `getpid()` 写进 `cgroup.procs`——此刻尚未执行任何用户代码，因此不存在"先派生后代再入组"的窗口；只调用 `write(2)`，不分配内存、不加锁；
+- `attach` 用 `cgroup.contains(child_pid)` 核对；核对失败补写一次，仍失败则 `CgroupStatus::Degraded("cgroup_membership_not_established")`；
+- `snapshot_descendants` 的后代集合 = `父链闭包 ∪ cgroup 成员 − 根`；`controlled_pids` 仍是**终止作用域**（`pgrp`），所以 `in_controlled_set=false` 精确表示"看得见但 `kill(-pgid)` 打不到"；
+- 建立失败（cgroup v1 / 容器 / 非 root / 只读挂载）不阻断执行，`escaped_scope_unobservable` 记 `cgroup_v2_unavailable` / `cgroup_create_failed:*` / `cgroup_procs_unwritable:*`，观测退回进程组；`is_empty()` 不得读成"没有逃逸后代"。
+
+实测（WSL Ubuntu 24.04，真实进程）：
+
+```
+[evidence] cgroup_scope opened root=936 scope=CgroupV2 escaped_scope_unobservable=None controlled=Some([936])
+[evidence] cgroup_scope before escaped=945 scope=CgroupV2 descendants=[DescendantProcess { pid: 945, in_controlled_set: false }] outside=[945]
+[evidence] cgroup_scope after outcome=StillAlive escaped_alive=true escaped_ppid=Some(740) root=936 descendants=[DescendantProcess { pid: 945, in_controlled_set: false }] controlled=Some([]) scope=CgroupV2
+[evidence] cgroup_unavailable reason=Some("cgroup_v2_unavailable")
+[evidence] cgroup_degraded scope=ProcessGroup escaped_scope_unobservable=Some("cgroup_v2_unavailable") unobservable=None
+```
+
+读法：根退出后逃逸进程 945 已被收养（`ppid=740 ≠ root=936`），父链快照看不见它，但 cgroup 成员集合仍列出它；因此终止结果从 v1.34 的 `Cleaned`（假通过）修正为 `StillAlive`。第二、三行是降级路径的实测：`reason` 如实记录，整份快照仍可用，但 `covers_escaped_descendants=false`。
+
+红→绿：
+
+- 红（临时让 `prepare()` 恒返回 `cgroup_v2_unavailable` 模拟"建不起来"，运行后已逐字还原）：`cgroup_scope_enumerates_adopted_escapee` 失败，原文 `assertion left: ProcessGroup / right: CgroupV2`，并打印 `本机未能建立 cgroup v2 观测作用域：Some("cgroup_v2_unavailable")`。
+- 绿：Windows `12 lib + 122 integration`、WSL Ubuntu 24.04 `13 lib + 120 integration` 全绿；WSL 跑完 `ls -d /sys/fs/cgroup/aw-mcp-bridge-*` 为 0 条（Drop 重试 3×20ms 后可删）。
+
+仍然不覆盖的边界：
+
+1. **终止未闭合**：cgroup 只用来看，`kill(-pgid)` 打不到 `setsid` 逃逸者。要闭合需 `cgroup.kill`（内核 ≥5.14）或对成员逐个 SIGKILL，本版未做——因此整树 claim 仍 `partial`；
+2. 外部进程可把成员移出 cgroup（无委派锁），移出后不可见；
+3. cgroup 建不起来时（容器常见）观测退回进程组，逃逸仍不可枚举，只能靠 `escaped_scope_unobservable` 如实告警；
+4. 目录在 Drop 时若仍有存活成员则删不掉（不杀进程），会留下空目录，属已知残留；
+5. macOS 无 cgroup、无 `/proc`，恒不可观测。
+
 
 ---
 
