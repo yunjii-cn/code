@@ -4005,3 +4005,67 @@ test result: FAILED. 0 passed; 1 failed
 - `unreadable` 标记仍不会自愈，只会被保留并报告。
 - 自动清扫只发生在 bridge 进程存活时；进程退出后不再有周期触发。`off` 是显式退出开关，不属于默认行为。
 - 回归：Windows `17 lib + 125 integration` 全绿；WSL `21 lib + 123 integration` 全绿（差异为两个 Linux 独有 cgroup 用例）。
+
+## §46 v1.43：`check_then_delete_atomic` 做成真原子（rename 认领 + 重跑 stale_rule）（2026-11-08）
+
+目标：把 `concurrency.check_then_delete_atomic=false/not_proven` 从「先判断再删除、中间有窗口」改成真原子语义，并证明两件事：并发清扫同一残标只有一方成功；正在被刷新的标记零误删。
+
+### 46.1 实现口径
+
+- 删除判定不再看「认领副本与扫描快照的 `task_id`+`pid`+`startedAt` 三元组是否一致」，而是**对认领副本重读并重跑同一份 `stale_rule`**（`assess_inflight_marker`）：
+  - 仍 `stale` → `remove_file` → `outcome=deleted`；
+  - 已不 `stale` → `restore_without_clobber`（`create_new`/O_EXCL，绝不覆盖）→ `outcome=not_mine`，子原因 `marker_changed` / `marker_superseded`；
+  - 读不出内容 → 按 unreadable 处理，同样还原保留 → `outcome=not_mine` / `recheck_unreadable`；
+  - 认领副本已不存在 → `outcome=lost_race`，不算错误。
+- 判据只有一套：清扫入口仍先按 `marker.assessment["stale"]` 过滤；认领后的复核调用同一个 `assess_inflight_marker`，没有第二份「身份规则」。
+- 审计沿用 `runs/inflight-sweep.jsonl`：`removed[]` / `kept[]` 逐条带 `outcome`，result 增加 `deleted_total` / `lost_race_total` / `not_mine_total`（保留 `removed_total` 兼容）；plan 行写不进去仍零删除。
+- 认领临时名增加进程内序号（`INFLIGHT_CLAIM_SEQ`），避免同进程多清扫线程在纳秒时钟上撞名。
+
+### 46.2 Windows 实测：`rename` 返回 Ok 不等于「这份归我」
+
+在同一个卷上并发对同一源文件执行 4 次 `fs::rename`，实测 4 个调用**都返回 Ok**，但目录里只有一个目的文件。因此实现里「认领成功」的判定不是 `rename` 的返回值，而是认领副本是否真的可读：读不到就是输掉认领（`lost_race`）。这一点若不按平台实测，会把失败归错类，并可能在 `restore_without_clobber` 阶段报出 `marker_changed_restore_failed`。
+
+### 46.3 先红：旧实现下两条并发用例的原文
+
+红测试（新增于 `mod inflight_sweep_race_tests`）：
+
+- `sweep_concurrent_claimers_delete_once_others_lost_race`：4 个线程各自 `Server::with_runs_dir`（同一 `runs`），用测试观测点 `SWEEP_BEFORE_CLAIM_HOOK` + `Barrier` 在「扫描判定之后、rename 认领之前」对齐；断言 `deleted_total=1`、`lost_race_total=3`、标记消失、无 `.tmp`、审计同时含 `"outcome":"deleted"` 与 `"outcome":"lost_race"`。
+- `sweep_concurrent_refresher_never_deletes_fresh_marker`：3 个清扫线程 + 1 个刷新线程；刷新线程在两个 Barrier 之间用「同目录临时文件 + rename」原子替换成非残标（`task_id/pid/startedAt` 不变，只把 `deadlineAt` 从 2000 延到 2099）；断言 `deleted_total=0`、`not_mine_total>=1`、原位仍是刷新后的 `deadlineAt`、无 `.tmp`、审计含 `"outcome":"not_mine"`。
+
+把实现临时回退到 v1.42（身份三元组复核）后原文：
+
+```
+thread 'server::inflight_sweep_race_tests::sweep_concurrent_claimers_delete_once_others_lost_race' panicked at apps\mcp-bridge\src\server.rs:8083:9:
+assertion `left == right` failed: 同一个残标只允许一方真正删除，实际 0：[Object {..., "deleted_total": Null, "failed": Array [Object {"error": String("marker_changed_restore_failed: 系统找不到指定的文件。 (os error 2)"), ...}], "failed_total": Number(1), "kept": Array [], "kept_total": Number(0), "lost_race_total": Null, "not_mine_total": Null, "removed": Array [], "removed_total": Number(0), ...}, ... Object {..., "removed": Array [Object {..., "path": String("runs/.inflight/race.json"), ...}], "removed_total": Number(1), ...}]
+  left: 0
+ right: 1
+thread 'server::inflight_sweep_race_tests::sweep_concurrent_refresher_never_deletes_fresh_marker' panicked at apps\mcp-bridge\src\server.rs:8167:9:
+认领后必须能识别出「已不是我的」，实际 0：[Object {..., "failed_total": Number(1), "kept": Array [], "lost_race_total": Null, "not_mine_total": Null, "removed": Array [], "removed_total": Number(0), ...}, ... Object {..., "removed": Array [Object {..., "path": String("runs/.inflight/race.json"), ...}], "removed_total": Number(1), ...}]
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.08s
+```
+
+红证据说明两件事：(a) 旧实现没有 `deleted_total` / `lost_race_total` / `not_mine_total`，输掉认领的 3 个清扫者落到 `marker_changed_restore_failed: ... (os error 2)`，把「输掉竞态」误报成失败；(b) 刷新场景里刷新后的标记被**真的删掉**（某一线程 `removed_total=1`，`path=runs/.inflight/race.json`），且 `not_mine_total=Null`——这正是要消灭的误删。
+
+### 46.4 绿：并发语义
+
+恢复实现后两条用例连续 20 轮全绿（`--test-threads=1`）：
+
+- 抢同一残标：`deleted_total=1`、`lost_race_total=3`（4 清扫者），标记不存在，`.tmp` 残留 0，审计里 `outcome=deleted` 与 `outcome=lost_race` 同时出现。
+- 并发清扫 + 刷新：`deleted_total=0`、`not_mine_total>=1`，原位 `deadlineAt=2099-01-01T01:00:00+00:00`、`startedAt` 未变，`.tmp` 残留 0，审计里 `outcome=not_mine`。
+
+正向用例也仍绿：`sweep_restore_never_clobbers_concurrent_new_marker`（复核期间原名位置已被新标记占住 → `Restored/Superseded` 都不覆盖、`removed_total=0`）。
+
+### 46.5 能力位与描述
+
+- `concurrency.check_then_delete_atomic`：`false/not_proven/check_then_delete_not_atomic` → **`true/proven/reason_code=null/automatic=true`**；evidence 为上述两条并发用例 + `sweep_restore_never_clobbers_concurrent_new_marker`。`not_proven_total` 3→2。
+- `concurrency.sweep_restore_never_clobbers` 保持 `true/proven`；`inflight.clean_preserves_active_markers` 的 detail 同步为「认领后重跑 stale_rule」。
+- `runs.inflight` 的 `sweep_rule` 同步：`atomic_delete` 改写、新增 `outcome_totals`、`limits` 换为 `same_volume_rename_required` / `transient_name_absence_during_claim` / `audit_append_not_transactional` / `unreadable_not_self_healing`。
+- 未改 `tools/list` 的工具描述与 schema，`tools_sha256` 不变（仍 `915974d2…`）；描述门禁 G18 不需调整。
+
+### 46.6 残余边界（如实保留）
+
+- **同卷前提**：`rename` 跨卷返回 `EXDEV`，认领失败 → 该条记 `failed`，零删除；不把跨卷伪装成成功。
+- **原名短暂空缺**：认领与还原之间，`runs/.inflight/<task>.json` 这个文件名短暂不存在；第三方读者（不读审计、不持标记）可能看到这个瞬间。
+- **审计非事务**：`plan` 先写、删除后写 `result`；进程在两次 append 之间崩溃会缺 `result` 行，但不会出现「没 plan 就删」。
+- **坏标记不自愈**：`unreadable` 永不删除，只能人工处理。
+- 回归：Windows `19 lib + 125 integration` 全绿；WSL Ubuntu 24.04 `23 lib + 123 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-025030.log`）。

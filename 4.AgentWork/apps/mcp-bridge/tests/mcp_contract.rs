@@ -6616,15 +6616,22 @@ fn capabilities_declares_machine_readable_boundaries() {
         "{posix}"
     );
 
-    // TOCTOU：检查与删除不是原子操作
+    // TOCTOU：rename 认领 + 认领后重跑 stale_rule 已被并发用例证成
     let toctou = claim(&payload, "concurrency.check_then_delete_atomic");
-    assert_eq!(toctou["holds"], false, "{toctou}");
-    assert_eq!(toctou["status"], "not_proven", "{toctou}");
-    assert_eq!(
-        toctou["reason_code"], "check_then_delete_not_atomic",
-        "{toctou}"
-    );
-    // 窄结论：还原只做 create-if-absent，不覆盖并发写入的新标记（不放宽上一条）
+    assert_eq!(toctou["holds"], true, "{toctou}");
+    assert_eq!(toctou["status"], "proven", "{toctou}");
+    assert_eq!(toctou["reason_code"], json!(null), "{toctou}");
+    let toctou_evidence = toctou["evidence"].as_array().expect("evidence 必须是数组");
+    for item in [
+        "sweep_concurrent_claimers_delete_once_others_lost_race",
+        "sweep_concurrent_refresher_never_deletes_fresh_marker",
+    ] {
+        assert!(
+            toctou_evidence.contains(&json!(item)),
+            "{item} 必须列为证据：{toctou}"
+        );
+    }
+    // 窄结论：还原只做 create-if-absent，不覆盖并发写入的新标记
     let restore = claim(&payload, "concurrency.sweep_restore_never_clobbers");
     assert_eq!(restore["holds"], true, "{restore}");
     assert_eq!(restore["status"], "proven", "{restore}");
@@ -6634,7 +6641,11 @@ fn capabilities_declares_machine_readable_boundaries() {
         json!(["windows", "linux"]),
         "{restore}"
     );
-    assert_eq!(restore["platforms_unverified"], json!(["macos"]), "{restore}");
+    assert_eq!(
+        restore["platforms_unverified"],
+        json!(["macos"]),
+        "{restore}"
+    );
     assert_eq!(
         restore["evidence"],
         json!(["sweep_restore_never_clobbers_concurrent_new_marker"]),
@@ -7597,10 +7608,24 @@ fn runs_inflight_list_exposes_sweep_contract() {
     }
     let limits = rule["limits"].as_array().expect("limits 必须是数组");
     for item in [
-        "cross_process_no_transaction",
-        "new_process_may_join_between_check_and_delete",
+        "same_volume_rename_required",
+        "transient_name_absence_during_claim",
+        "audit_append_not_transactional",
         "unreadable_not_self_healing",
     ] {
         assert!(limits.contains(&json!(item)), "{item} 必须写明：{rule}");
     }
+    let outcomes = rule["outcome_totals"]
+        .as_array()
+        .expect("outcome_totals 必须是数组");
+    for item in ["deleted_total", "lost_race_total", "not_mine_total"] {
+        assert!(outcomes.contains(&json!(item)), "{item} 必须写明：{rule}");
+    }
+    assert!(
+        rule["atomic_delete"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("stale_rule"),
+        "atomic_delete 必须写明认领后重跑 stale_rule：{rule}"
+    );
 }

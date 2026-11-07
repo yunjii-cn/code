@@ -24,6 +24,8 @@ const INFLIGHT_REPORT_VERSION: &str = "inflight-report/1";
 const INFLIGHT_SWEEP_VERSION: &str = "inflight-sweep/1";
 /// 顺带清扫的 append-only 审计：谁触发、清了哪些 task_id、依据哪个 stale_reason
 const INFLIGHT_SWEEP_AUDIT: &str = "inflight-sweep.jsonl";
+/// 认领临时名序号：同一进程内多个清扫线程并发 rename 时保证 .tmp 名唯一
+static INFLIGHT_CLAIM_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 自动清扫周期来源：未设置默认每小时；`0` 仅启动时一次；`off` 完全关闭；正整数按秒
 pub const INFLIGHT_AUTO_SWEEP_ENV: &str = "AW_INFLIGHT_SWEEP_SECS";
 /// 默认周期：每小时一次。选默认开启是因为一次清扫只是只读扫描目录，成本低，
@@ -1248,10 +1250,11 @@ impl Server {
         }))
     }
 
-    /// 顺带清扫：只在既有动作路径上触发（同 task_id 重启 / prune 真删前 / clean），
-    /// 不新起后台线程。判据沿用 assess_inflight_marker：pid 存活优先于 deadline；
-    /// unreadable 一律保留。真删前先写 plan，逐条 rename 到 .tmp 并复核
-    /// task_id+pid+startedAt，变化则还原并记 marker_changed。
+    /// 顺带清扫：三个显式路径（同 task_id 重启 / prune 真删前 / clean）+ 启动/周期自动触发，
+    /// 全部走这一个实现。判据沿用 assess_inflight_marker：pid 存活优先于 deadline；
+    /// unreadable 一律保留。真删前先写 plan，逐条 rename 到 .tmp 认领，
+    /// 再对认领副本重跑同一份 stale_rule：仍 stale 才删，已不 stale 就地还原并记 not_mine，
+    /// 认领副本已不存在记 lost_race。
     fn sweep_inflight_markers(
         &self,
         trigger: &str,
@@ -1322,6 +1325,9 @@ impl Server {
                 "unreadable_total": unreadable_total,
                 "would_remove_total": would_remove.len() as u64,
                 "removed_total": 0,
+                "deleted_total": 0,
+                "lost_race_total": 0,
+                "not_mine_total": 0,
                 "kept_total": kept.len() as u64,
                 "failed_total": 0,
                 "would_remove": would_remove,
@@ -1347,104 +1353,91 @@ impl Server {
 
         let mut removed: Vec<Value> = Vec::new();
         let mut failed: Vec<Value> = Vec::new();
+        let now = chrono::Utc::now();
         for marker in &markers {
             if marker.assessment["stale"] != json!(true) {
                 continue;
             }
-            // 先原子改名为 .tmp：真正被判定删除的就是 rename 到的这一份文件；
-            // 若期间被并发清理者替换成新标记，读到的 pid/startedAt 不同，必须还原而不是删。
+            // 先原子改名为 .tmp 认领这一份文件；认领成功后再重读并重跑 stale_rule。
+            // 若期间被刷新成非残标，读到的内容已不 stale，必须还原而不是删。
             let tmp = self.runs_dir.join(INFLIGHT_DIR).join(format!(
-                "{}.clean-{}-{}.tmp",
+                "{}.clean-{}-{}-{}.tmp",
                 marker.task_id,
                 std::process::id(),
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                INFLIGHT_CLAIM_SEQ.fetch_add(1, Ordering::Relaxed)
             ));
-            let moved = match fs::rename(&marker.path, &tmp) {
-                Ok(()) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    kept.push(json!({
-                        "task_id": marker.task_id,
-                        "file": marker.file,
-                        "pid": marker.assessment["pid"],
-                        "stale_reason": marker.assessment["stale_reason"],
-                        "reason": "marker_disappeared"
-                    }));
-                    false
+            #[cfg(test)]
+            run_sweep_before_claim_hook(&marker.path);
+            if let Err(error) = fs::rename(&marker.path, &tmp) {
+                // 认领失败：源已不在 → 别人先认领（lost_race，不算错误）；
+                // 源还在但已不 stale → 别人就地刷新（not_mine，绝不删除）；其余才是真失败。
+                match reread_marker(&marker.path, now) {
+                    MarkerReread::Gone => {
+                        kept.push(inflight_sweep_entry(marker, "lost_race", "lost_race"))
+                    }
+                    MarkerReread::NotStale => {
+                        kept.push(inflight_sweep_entry(marker, "not_mine", "marker_changed"))
+                    }
+                    MarkerReread::Stale | MarkerReread::Unreadable => {
+                        failed.push(inflight_sweep_failure(marker, error.to_string()))
+                    }
                 }
-                Err(error) => {
-                    failed.push(json!({
-                        "task_id": marker.task_id,
-                        "file": marker.file,
-                        "pid": marker.assessment["pid"],
-                        "stale_reason": marker.assessment["stale_reason"],
-                        "error": error.to_string()
-                    }));
-                    false
-                }
-            };
-            if !moved {
                 continue;
             }
             #[cfg(test)]
             run_sweep_after_claim_hook(&marker.path, &tmp);
-            let unchanged = read_json(&tmp)
-                .ok()
-                .map(|after| {
-                    after.get("task_id") == marker.record.get("task_id")
-                        && after.get("pid") == marker.record.get("pid")
-                        && after.get("startedAt") == marker.record.get("startedAt")
-                })
-                .unwrap_or(false);
-            if unchanged {
-                match fs::remove_file(&tmp) {
-                    Ok(()) => removed.push(json!({
-                        "task_id": marker.task_id,
-                        "file": marker.file,
-                        "pid": marker.assessment["pid"],
-                        "stale_reason": marker.assessment["stale_reason"],
-                        "path": format!("runs/.inflight/{}", marker.file)
-                    })),
+            // 认领成功后重读并重跑同一份 stale_rule：拿到的这份若已不是残标（别人刚刷新过），
+            // 就地还原并记 not_mine，绝不删除。判据只认 stale，不另立身份规则。
+            //
+            // 注意：Windows 上多个并发 rename 可能都返回成功，但只有一个目的地真的产生文件。
+            // 因此「rename 返回 Ok」不等于「这份归我」——认领副本读不到（NotFound）就是
+            // 输掉了认领，按 lost_race 记账，既不算错误也不还原任何东西。
+            match reread_marker(&tmp, now) {
+                MarkerReread::Gone => {
+                    kept.push(inflight_sweep_entry(marker, "lost_race", "lost_race"));
+                }
+                MarkerReread::Stale => match fs::remove_file(&tmp) {
+                    Ok(()) => removed.push(inflight_sweep_entry(marker, "deleted", "stale")),
                     Err(error) => {
                         let _ = fs::rename(&tmp, &marker.path);
-                        failed.push(json!({
-                            "task_id": marker.task_id,
-                            "file": marker.file,
-                            "pid": marker.assessment["pid"],
-                            "stale_reason": marker.assessment["stale_reason"],
-                            "error": error.to_string()
-                        }));
+                        failed.push(inflight_sweep_failure(marker, error.to_string()));
                     }
-                }
-            } else {
-                // 被认领的副本已不是被判定的那份：此刻原名位置可能已被更新者占住。
-                // 还原只能是 create-if-absent（create_new 的 O_EXCL 语义），rename 会覆盖新标记。
-                match restore_without_clobber(&tmp, &marker.path) {
-                    Ok(RestoreOutcome::Restored) => kept.push(json!({
-                        "task_id": marker.task_id,
-                        "file": marker.file,
-                        "pid": marker.assessment["pid"],
-                        "stale_reason": marker.assessment["stale_reason"],
-                        "reason": "marker_changed"
-                    })),
-                    Ok(RestoreOutcome::Superseded) => kept.push(json!({
-                        "task_id": marker.task_id,
-                        "file": marker.file,
-                        "pid": marker.assessment["pid"],
-                        "stale_reason": marker.assessment["stale_reason"],
-                        "reason": "marker_superseded"
-                    })),
-                    Err(error) => failed.push(json!({
-                        "task_id": marker.task_id,
-                        "file": marker.file,
-                        "pid": marker.assessment["pid"],
-                        "stale_reason": marker.assessment["stale_reason"],
-                        "error": format!("marker_changed_restore_failed: {error}")
-                    })),
+                },
+                reread @ (MarkerReread::NotStale | MarkerReread::Unreadable) => {
+                    // 复核后已不是残标（内容已变 / 不再 stale / 读不出来）：一律保留。
+                    // 还原只能是 create-if-absent（create_new 的 O_EXCL 语义），rename 会覆盖新标记。
+                    let sub_reason = match reread {
+                        MarkerReread::NotStale => "marker_changed",
+                        _ => "recheck_unreadable",
+                    };
+                    match restore_without_clobber(&tmp, &marker.path) {
+                        Ok(RestoreOutcome::Restored) => {
+                            kept.push(inflight_sweep_entry(marker, "not_mine", sub_reason))
+                        }
+                        Ok(RestoreOutcome::Superseded) => kept.push(inflight_sweep_entry(
+                            marker,
+                            "not_mine",
+                            "marker_superseded",
+                        )),
+                        Err(error) => failed.push(inflight_sweep_failure(
+                            marker,
+                            format!("marker_changed_restore_failed: {error}"),
+                        )),
+                    }
                 }
             }
         }
 
         let removed_total = removed.len() as u64;
+        let lost_race_total = kept
+            .iter()
+            .filter(|entry| entry["outcome"] == json!("lost_race"))
+            .count() as u64;
+        let not_mine_total = kept
+            .iter()
+            .filter(|entry| entry["outcome"] == json!("not_mine"))
+            .count() as u64;
         let result = json!({
             "version": INFLIGHT_SWEEP_VERSION,
             "phase": "result",
@@ -1452,6 +1445,9 @@ impl Server {
             "trigger": trigger,
             "task_id_filter": filter,
             "removed_total": removed_total,
+            "deleted_total": removed_total,
+            "lost_race_total": lost_race_total,
+            "not_mine_total": not_mine_total,
             "kept_total": kept.len() as u64,
             "failed_total": failed.len() as u64,
             "unreadable_total": unreadable_total,
@@ -1478,6 +1474,9 @@ impl Server {
             "unreadable_total": unreadable_total,
             "would_remove_total": stale_total,
             "removed_total": result["removed_total"],
+            "deleted_total": result["deleted_total"],
+            "lost_race_total": result["lost_race_total"],
+            "not_mine_total": result["not_mine_total"],
             "kept_total": result["kept_total"],
             "failed_total": result["failed_total"],
             "would_remove": result["removed"],
@@ -1573,7 +1572,6 @@ impl Server {
                         task_id,
                         file,
                         path: entry.path(),
-                        record,
                         assessment,
                     });
                 }
@@ -6211,7 +6209,6 @@ struct InflightMarker {
     task_id: String,
     file: String,
     path: PathBuf,
-    record: Value,
     assessment: Value,
 }
 
@@ -6220,6 +6217,58 @@ enum RestoreOutcome {
     Restored,
     /// 原名位置已被更新者占住：保留新标记，丢弃手上的副本
     Superseded,
+}
+
+/// 认领/复核时刻对某路径重跑 stale_rule 的结论
+#[derive(Clone, Copy)]
+enum MarkerReread {
+    /// 文件已不存在：认领权在别人手上
+    Gone,
+    /// 仍满足 stale_rule
+    Stale,
+    /// 已不满足 stale_rule：别人刚刷新过
+    NotStale,
+    /// 读不出内容：按 unreadable 处理，绝不删除
+    Unreadable,
+}
+
+fn reread_marker(path: &Path, now: chrono::DateTime<chrono::Utc>) -> MarkerReread {
+    match fs::read_to_string(path) {
+        Ok(raw) => match serde_json::from_str::<Value>(&raw) {
+            Ok(record) => {
+                if assess_inflight_marker(&record, now)["stale"] == json!(true) {
+                    MarkerReread::Stale
+                } else {
+                    MarkerReread::NotStale
+                }
+            }
+            Err(_) => MarkerReread::Unreadable,
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => MarkerReread::Gone,
+        Err(_) => MarkerReread::Unreadable,
+    }
+}
+
+fn inflight_sweep_entry(marker: &InflightMarker, outcome: &str, reason: &str) -> Value {
+    json!({
+        "task_id": marker.task_id,
+        "file": marker.file,
+        "pid": marker.assessment["pid"],
+        "stale_reason": marker.assessment["stale_reason"],
+        "outcome": outcome,
+        "reason": reason,
+        "path": format!("runs/.inflight/{}", marker.file)
+    })
+}
+
+fn inflight_sweep_failure(marker: &InflightMarker, error: String) -> Value {
+    json!({
+        "task_id": marker.task_id,
+        "file": marker.file,
+        "pid": marker.assessment["pid"],
+        "stale_reason": marker.assessment["stale_reason"],
+        "error": error
+    })
 }
 
 /// 还原「被认领但内容已变」的标记：只做 create-if-absent，绝不覆盖此刻已存在的新标记。
@@ -6248,25 +6297,80 @@ fn restore_without_clobber(source: &Path, target: &Path) -> std::io::Result<Rest
     Ok(RestoreOutcome::Restored)
 }
 
+/// 并发观测点（仅测试编译）：在「扫描判定」与「rename 认领」之间执行，
+/// 用于让「检查之后、认领之前被刷新」的窗口可稳定复现（多线程用 Barrier 对齐）。
+/// 观测点按目标路径武装：只有正在清扫该路径的线程才会触发，避免并行测试互相串扰。
+#[cfg(test)]
+struct SweepBeforeClaimHook {
+    target: PathBuf,
+    hook: fn(&Path),
+}
+
+#[cfg(test)]
+static SWEEP_BEFORE_CLAIM_HOOK: std::sync::Mutex<Option<SweepBeforeClaimHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_sweep_before_claim_hook(target: &Path, hook: Option<fn(&Path)>) {
+    *SWEEP_BEFORE_CLAIM_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook.map(|hook| SweepBeforeClaimHook {
+        target: target.to_path_buf(),
+        hook,
+    });
+}
+
+#[cfg(test)]
+fn run_sweep_before_claim_hook(path: &Path) {
+    // 只取函数指针，不持锁执行回调：并发用例会在回调用 Barrier 对齐
+    let hook = {
+        let armed = SWEEP_BEFORE_CLAIM_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        armed
+            .as_ref()
+            .filter(|armed| armed.target == path)
+            .map(|armed| armed.hook)
+    };
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
 /// 并发观测点（仅测试编译）：在「rename 认领」与「内容复核」之间注入一次确定性写入，
 /// 让「检查 → 认领 → 复核」窗口可被稳定复现，而不是靠竞态碰运气。
 /// 参数为（原名位置, 被认领的副本），测试据此构造复核时刻的真实文件状态。
 #[cfg(test)]
-static SWEEP_AFTER_CLAIM_HOOK: std::sync::Mutex<Option<fn(&Path, &Path)>> =
+struct SweepAfterClaimHook {
+    target: PathBuf,
+    hook: fn(&Path, &Path),
+}
+
+#[cfg(test)]
+static SWEEP_AFTER_CLAIM_HOOK: std::sync::Mutex<Option<SweepAfterClaimHook>> =
     std::sync::Mutex::new(None);
 
 #[cfg(test)]
-fn set_sweep_after_claim_hook(hook: Option<fn(&Path, &Path)>) {
+fn set_sweep_after_claim_hook(target: &Path, hook: Option<fn(&Path, &Path)>) {
     *SWEEP_AFTER_CLAIM_HOOK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook.map(|hook| SweepAfterClaimHook {
+        target: target.to_path_buf(),
+        hook,
+    });
 }
 
 #[cfg(test)]
 fn run_sweep_after_claim_hook(path: &Path, claimed: &Path) {
-    let hook = *SWEEP_AFTER_CLAIM_HOOK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let hook = {
+        let armed = SWEEP_AFTER_CLAIM_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        armed
+            .as_ref()
+            .filter(|armed| armed.target == path)
+            .map(|armed| armed.hook)
+    };
     if let Some(hook) = hook {
         hook(path, claimed);
     }
@@ -6390,13 +6494,14 @@ fn inflight_sweep_rule() -> Value {
         "audit_gate": "plan 行写不进去则本轮零删除；自动触发与显式触发写同一审计，仅 trigger 不同",
         "criteria": "markers[].stale（pid 存活优先于 deadlineAt）；自动路径不另写判据",
         "never_removed": ["active_pid_alive", "unreadable"],
-        "atomic_delete": "rename to .tmp + recheck task_id+pid+startedAt; 不一致时只做 create-if-absent 还原（绝不覆盖更新者已占住的原名），记 marker_changed / marker_superseded",
+        "atomic_delete": "rename to .tmp 原子认领；认领后重读并重跑同一份 stale_rule：仍 stale 才删（outcome=deleted），已不 stale 就地 create-if-absent 还原（outcome=not_mine，reason=marker_changed/marker_superseded/recheck_unreadable），认领副本已不存在记 outcome=lost_race（不算错误）",
         "idempotent": true,
         "idempotent_semantics": "无可清残标时不删除、不追加审计；重复触发返回 removed_total=0",
+        "outcome_totals": ["deleted_total", "lost_race_total", "not_mine_total"],
         "limits": [
-            "cross_process_no_transaction",
-            "no_compare_and_rename_primitive",
-            "new_process_may_join_between_check_and_delete",
+            "same_volume_rename_required",
+            "transient_name_absence_during_claim",
+            "audit_append_not_transactional",
             "unreadable_not_self_healing"
         ]
     })
@@ -7323,15 +7428,19 @@ fn capabilities_payload() -> Value {
         ),
         capability_entry(
             "concurrency.check_then_delete_atomic",
-            Some(false),
-            "not_proven",
-            "inflight_snapshot 与 rename-to-trash 之间的 TOCTOU 窗口",
-            Some("check_then_delete_not_atomic"),
-            false,
+            Some(true),
+            "proven",
+            "rename 认领 + 认领后重跑 stale_rule：并发清扫同一残标只有一方 deleted、其余 lost_race；被刷新的标记零误删（not_mine）",
+            None,
+            true,
             &both,
             &[],
-            &["prune_skips_task_with_live_inflight_marker"],
-            "PM 删除先 rename 再删；并发 acquire 可落在检查之后，检查与删除不是单个原子操作。文件系统没有 compare-and-rename，扫描与 rename 认领之间仍有窗口；本条不因「还原不覆盖」那条窄结论而上调。",
+            &[
+                "sweep_concurrent_claimers_delete_once_others_lost_race",
+                "sweep_concurrent_refresher_never_deletes_fresh_marker",
+                "sweep_restore_never_clobbers_concurrent_new_marker",
+            ],
+            "依据：先同卷 rename 把目标改名为 .tmp 认领，再重读认领副本并重跑同一份 stale_rule；仍 stale 才删除，已不 stale 就地 create-if-absent 还原并记 not_mine，认领副本已不存在记 lost_race。红测试证实旧代码在「刷新者只延长 deadlineAt、身份三元组不变」时会误删，现由重跑 stale_rule 拦住。残余边界：rename 必须同卷（跨卷 EXDEV 则认领失败、零删除）；认领与还原之间原名短暂空缺；审计 append 非事务（plan 先写，崩溃时可能缺 result 行）；Windows 上并发 rename 可能都返回成功，故以认领副本是否存在判定归属。",
         ),
         capability_entry(
             "concurrency.sweep_restore_never_clobbers",
@@ -7343,7 +7452,7 @@ fn capabilities_payload() -> Value {
             &both,
             &["macos"],
             &["sweep_restore_never_clobbers_concurrent_new_marker"],
-            "只保证「不删、不覆盖与判定快照不同的标记」：复核不一致时原位已被占住则保留新标记并记 marker_superseded，原位为空才放回并记 marker_changed。不保证认领窗口内不出现短暂文件名空缺，也不保证窗口内不会有第三方同时开跑。",
+            "只保证「不删、不覆盖复核后已不 stale 的那份标记」：认领副本重跑 stale_rule 后已不 stale 时，原位已被占住则保留新标记并记 marker_superseded + outcome=not_mine，原位为空才放回并记 marker_changed + outcome=not_mine。不保证认领窗口内不出现短暂文件名空缺，也不保证窗口内不会有第三方同时开跑。",
         ),
         capability_entry(
             "inflight.marker_cross_process_visible",
@@ -7410,7 +7519,7 @@ fn capabilities_payload() -> Value {
             &both,
             &["macos"],
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
-            "删除前把标记原子改名为临时文件并复核 pid+startedAt；变化则还原保留。",
+            "删除前把标记原子改名为临时文件，认领后重跑 stale_rule 复核；已不 stale 或读不出来则 create-if-absent 还原保留，只删复核仍 stale 的那一份。",
         ),
     ];
     let not_proven_total = entries
@@ -7712,9 +7821,49 @@ mod receipt_tests {
 
 /// v1.36 并发观测点：清扫者「rename 认领」之后若发现内容已变，
 /// 还原路径不得覆盖此刻已存在的新标记（创建者已合法占住该文件名）。
+///
+/// v1.43 并发观测点：多个清扫者抢同一个残标只允许一方真正删除，其余记 lost_race；
+/// 「正在被刷新」的标记在并发清扫下必须零误删（认领后重跑 stale_rule）。
 #[cfg(test)]
 mod inflight_sweep_race_tests {
     use super::*;
+    use std::sync::{Arc, Barrier, Mutex};
+
+    /// rename 认领前的观测点是进程级全局状态：所有会武装它的用例必须串行。
+    static RACE_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 多清扫者对齐点（扫描判定之后、rename 认领之前）
+    static CLAIM_BARRIER: Mutex<Option<Arc<Barrier>>> = Mutex::new(None);
+    /// 「刷新已落盘」对齐点：确保所有清扫者都在刷新之后才 rename
+    static REFRESH_BARRIER: Mutex<Option<Arc<Barrier>>> = Mutex::new(None);
+
+    fn wait_on(slot: &Mutex<Option<Arc<Barrier>>>) {
+        let barrier = slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
+    fn align_claimers(_path: &Path) {
+        wait_on(&CLAIM_BARRIER);
+    }
+
+    fn wait_refresh_then_claim(_path: &Path) {
+        wait_on(&CLAIM_BARRIER);
+        wait_on(&REFRESH_BARRIER);
+    }
+
+    fn reset_race_barriers() {
+        *CLAIM_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *REFRESH_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
 
     fn marker_record(started_at: &str) -> Value {
         json!({
@@ -7724,6 +7873,31 @@ mod inflight_sweep_race_tests {
             "mode": "dispatched",
             "state": "active",
             "startedAt": started_at,
+            "deadlineAt": "2099-01-01T01:00:00+00:00"
+        })
+    }
+
+    /// 无 pid、deadline 早已过期：按 stale_rule 必然 stale（与平台无关）
+    fn stale_record() -> Value {
+        json!({
+            "version": "inflight-marker/1",
+            "task_id": "race",
+            "mode": "dispatched",
+            "state": "active",
+            "startedAt": "2000-01-01T00:00:00+00:00",
+            "deadlineAt": "2000-01-01T01:00:00+00:00"
+        })
+    }
+
+    /// 刷新者写入的新标记：task_id / pid / startedAt 与残标完全一致，只延长 deadlineAt。
+    /// 这正是「按身份三元组复核」看不出来、而重跑 stale_rule 才能识别的窗口。
+    fn refreshed_record() -> Value {
+        json!({
+            "version": "inflight-marker/1",
+            "task_id": "race",
+            "mode": "dispatched",
+            "state": "active",
+            "startedAt": "2000-01-01T00:00:00+00:00",
             "deadlineAt": "2099-01-01T01:00:00+00:00"
         })
     }
@@ -7744,36 +7918,89 @@ mod inflight_sweep_race_tests {
         .expect("并发写入者必须能在空出的文件名上创建 W2");
     }
 
+    struct RaceFixture {
+        root: PathBuf,
+        runs: PathBuf,
+        dir: PathBuf,
+        marker: PathBuf,
+    }
+
+    impl RaceFixture {
+        fn new(tag: &str) -> Self {
+            let unique = format!(
+                "aw-sweep-race-{tag}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            );
+            let root = std::env::temp_dir().join(unique);
+            let runs = root.join("runs");
+            let dir = runs.join(INFLIGHT_DIR);
+            fs::create_dir_all(&dir).expect("创建 .inflight");
+            Self {
+                root,
+                runs,
+                marker: dir.join("race.json"),
+                dir,
+            }
+        }
+
+        fn write_marker(&self, record: &Value) {
+            write_json_file(&self.marker, record).expect("写入标记");
+        }
+
+        fn server(&self) -> Server {
+            Server::with_runs_dir(self.root.join("settings.json"), self.runs.clone())
+        }
+
+        fn tmp_files(&self) -> usize {
+            fs::read_dir(&self.dir)
+                .expect("读取 .inflight")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count()
+        }
+
+        fn audit_text(&self) -> String {
+            fs::read_to_string(self.runs.join(INFLIGHT_SWEEP_AUDIT)).unwrap_or_default()
+        }
+
+        fn cleanup(self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn sweep_concurrently(fixture: &RaceFixture, sweepers: usize) -> Vec<Value> {
+        let handles: Vec<_> = (0..sweepers)
+            .map(|_| {
+                let server = fixture.server();
+                std::thread::spawn(move || server.sweep_inflight_markers("clean", None, false))
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("清扫线程不得 panic")
+                    .expect("清扫必须返回结果")
+            })
+            .collect()
+    }
+
     #[test]
     fn sweep_restore_never_clobbers_concurrent_new_marker() {
-        let unique = format!(
-            "aw-sweep-race-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        );
-        let root = std::env::temp_dir().join(unique);
-        let runs = root.join("runs");
-        let dir = runs.join(INFLIGHT_DIR);
-        fs::create_dir_all(&dir).expect("创建 .inflight");
-        let marker = dir.join("race.json");
-        // 不给 pid、只给远期过期的 deadline：判据与平台无关，必然 stale
-        write_json_file(
-            &marker,
-            &json!({
-                "version": "inflight-marker/1",
-                "task_id": "race",
-                "mode": "dispatched",
-                "state": "active",
-                "startedAt": "2000-01-01T00:00:00+00:00",
-                "deadlineAt": "2000-01-01T01:00:00+00:00"
-            }),
-        )
-        .expect("写入残标");
+        let _serial = RACE_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = RaceFixture::new("restore");
+        fixture.write_marker(&stale_record());
+        let marker = fixture.marker.clone();
+        let dir = fixture.dir.clone();
 
-        let server = Server::with_runs_dir(root.join("settings.json"), runs.clone());
-        set_sweep_after_claim_hook(Some(two_writers_interleaved));
+        let server = fixture.server();
+        set_sweep_after_claim_hook(&marker, Some(two_writers_interleaved));
         let sweep = server.sweep_inflight_markers("clean", None, false);
-        set_sweep_after_claim_hook(None);
+        set_sweep_after_claim_hook(&marker, None);
         let sweep = sweep.expect("清扫必须返回结果");
 
         let after = read_json(&marker).expect("并发写入者的 W2 必须仍在原位");
@@ -7807,7 +8034,146 @@ mod inflight_sweep_race_tests {
             "不得留下 .tmp 认领副本"
         );
 
-        let _ = fs::remove_dir_all(&root);
+        fixture.cleanup();
+    }
+
+    /// 红→绿：N 个清扫者同时抢同一个残标。原子 rename 只有一个赢家，
+    /// 其余必须记 lost_race（而不是错误，也不是「消失」含混过关）。
+    #[test]
+    fn sweep_concurrent_claimers_delete_once_others_lost_race() {
+        let _serial = RACE_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const SWEEPERS: usize = 4;
+        let fixture = RaceFixture::new("claim");
+        fixture.write_marker(&stale_record());
+
+        *CLAIM_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(Barrier::new(SWEEPERS)));
+        set_sweep_before_claim_hook(&fixture.marker, Some(align_claimers));
+        let results = sweep_concurrently(&fixture, SWEEPERS);
+        set_sweep_before_claim_hook(&fixture.marker, None);
+        reset_race_barriers();
+
+        let deleted: u64 = results
+            .iter()
+            .map(|result| result["deleted_total"].as_u64().unwrap_or(0))
+            .sum();
+        let lost_race: u64 = results
+            .iter()
+            .map(|result| result["lost_race_total"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            deleted, 1,
+            "同一个残标只允许一方真正删除，实际 {deleted}：{results:?}"
+        );
+        assert_eq!(
+            lost_race,
+            (SWEEPERS - 1) as u64,
+            "其余清扫者必须记 lost_race，实际 {lost_race}：{results:?}"
+        );
+        assert!(
+            !fixture.marker.exists(),
+            "赢家必须已经把残标删掉，而不是留在原位"
+        );
+        assert_eq!(fixture.tmp_files(), 0, "不得留下 .tmp 认领副本");
+
+        let audit = fixture.audit_text();
+        assert!(
+            audit.contains("\"outcome\":\"deleted\""),
+            "审计必须能区分 deleted：{audit}"
+        );
+        assert!(
+            audit.contains("\"outcome\":\"lost_race\""),
+            "审计必须能区分 lost_race：{audit}"
+        );
+
+        fixture.cleanup();
+    }
+
+    /// 红→绿：残标在「扫描判定」之后被别的进程刷新（身份三元组不变，只延长 deadline），
+    /// 并发清扫者必须零误删：认领后重跑 stale_rule 发现已不 stale，就地还原并记 not_mine。
+    #[test]
+    fn sweep_concurrent_refresher_never_deletes_fresh_marker() {
+        let _serial = RACE_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        const SWEEPERS: usize = 3;
+        let fixture = RaceFixture::new("refresh");
+        fixture.write_marker(&stale_record());
+
+        let claim_barrier = Arc::new(Barrier::new(SWEEPERS + 1));
+        let refresh_barrier = Arc::new(Barrier::new(SWEEPERS + 1));
+        *CLAIM_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(claim_barrier.clone());
+        *REFRESH_BARRIER
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(refresh_barrier.clone());
+        set_sweep_before_claim_hook(&fixture.marker, Some(wait_refresh_then_claim));
+
+        let refresher = {
+            let marker = fixture.marker.clone();
+            let dir = fixture.dir.clone();
+            let claim_barrier = claim_barrier.clone();
+            let refresh_barrier = refresh_barrier.clone();
+            std::thread::spawn(move || {
+                claim_barrier.wait();
+                // 刷新者用「同目录临时文件 + rename」原子替换，绝不部分写入
+                let staging = dir.join("refresher-staging.tmp");
+                fs::write(
+                    &staging,
+                    serde_json::to_string(&refreshed_record()).expect("序列化刷新记录"),
+                )
+                .expect("写入刷新副本");
+                fs::rename(&staging, &marker).expect("刷新者必须能原子替换标记");
+                refresh_barrier.wait();
+            })
+        };
+        let results = sweep_concurrently(&fixture, SWEEPERS);
+        refresher.join().expect("刷新线程不得 panic");
+        set_sweep_before_claim_hook(&fixture.marker, None);
+        reset_race_barriers();
+
+        let deleted: u64 = results
+            .iter()
+            .map(|result| result["deleted_total"].as_u64().unwrap_or(0))
+            .sum();
+        let not_mine: u64 = results
+            .iter()
+            .map(|result| result["not_mine_total"].as_u64().unwrap_or(0))
+            .sum();
+        assert_eq!(
+            deleted, 0,
+            "正在被刷新的标记不得被任何清扫者删除，实际删了 {deleted}：{results:?}"
+        );
+        assert!(
+            not_mine >= 1,
+            "认领后必须能识别出「已不是我的」，实际 {not_mine}：{results:?}"
+        );
+
+        let after = read_json(&fixture.marker).expect("刷新后的标记必须仍在原位");
+        assert_eq!(
+            after["deadlineAt"],
+            json!("2099-01-01T01:00:00+00:00"),
+            "原位必须是刷新后的内容，不能被残标副本覆盖：{after}"
+        );
+        assert_eq!(
+            after["startedAt"],
+            json!("2000-01-01T00:00:00+00:00"),
+            "刷新未改身份字段：{after}"
+        );
+        assert_eq!(fixture.tmp_files(), 0, "不得留下 .tmp 认领副本");
+
+        let audit = fixture.audit_text();
+        assert!(
+            audit.contains("\"outcome\":\"not_mine\""),
+            "审计必须能区分 not_mine：{audit}"
+        );
+
+        fixture.cleanup();
     }
 }
 
