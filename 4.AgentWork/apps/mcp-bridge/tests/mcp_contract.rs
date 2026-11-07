@@ -4522,15 +4522,15 @@ fn description_gate_behavior_connection_counters_real_stdio() {
     use std::io::{BufRead, BufReader, Write};
 
     let home = tempfile::tempdir().expect("tempdir");
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_aw-mcp-bridge"))
+    let mut bridge_command = std::process::Command::new(env!("CARGO_BIN_EXE_aw-mcp-bridge"));
+    bridge_command
         .env("APPDATA", home.path())
         // 本用例与其它真实进程用例共用 target/debug/runs，关闭自动清扫避免互相干扰
         .env("AW_INFLIGHT_SWEEP_SECS", "off")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("启动真实 bridge 进程");
+        .stderr(std::process::Stdio::piped());
+    let mut child = spawn_bridge(&mut bridge_command);
     let mut stdin = child.stdin.take().expect("stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
 
@@ -7186,15 +7186,15 @@ fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
     let _ = fs::remove_dir_all(&task_dir);
 
     let home = tempfile::tempdir().expect("tempdir");
-    let mut child = std::process::Command::new(exe)
+    let mut bridge_command = std::process::Command::new(exe);
+    bridge_command
         .env("APPDATA", home.path())
         // 该用例自己造残标再显式清理；关闭自动清扫，避免与并发用例的 runs 目录互相影响
         .env("AW_INFLIGHT_SWEEP_SECS", "off")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("启动真实 bridge 进程");
+        .stderr(std::process::Stdio::null());
+    let mut child = spawn_bridge(&mut bridge_command);
     let mut stdin = child.stdin.take().expect("stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
 
@@ -7493,6 +7493,40 @@ fn inflight_clean_writes_audit_and_is_idempotent() {
 /// 另一个测试 exec 自己的副本会偶发 ETXTBSY（Text file busy），故用同一把锁隔开
 static BRIDGE_BINARY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// POSIX 下 `fs::copy` 的写 fd 在 fork 时会被其它测试线程的子进程短暂继承，
+/// 即便加了复制锁，本进程 exec 副本仍可能在那个窗口里拿到 ETXTBSY。
+/// 这是测试进程内 fork/exec 的固有竞态，不是产品行为：有界重试，重试成功时打印证据行。
+fn spawn_bridge(command: &mut Command) -> std::process::Child {
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match command.spawn() {
+            Ok(child) => {
+                if attempts > 1 {
+                    println!("[evidence] spawn_retry attempts={attempts} reason=ETXTBSY");
+                }
+                return child;
+            }
+            Err(error) if attempts < 100 && is_text_file_busy(&error) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("启动真实 bridge 进程: {error}"),
+        }
+    }
+}
+
+fn is_text_file_busy(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 /// 把 bridge 可执行文件复制到独立目录，让 current_exe 旁的 runs/ 与其它用例隔离
 fn copy_bridge_binary(dir: &Path) -> PathBuf {
     let source = Path::new(env!("CARGO_BIN_EXE_aw-mcp-bridge"));
@@ -7527,13 +7561,13 @@ fn inflight_startup_sweep_removes_stale_and_keeps_active() {
         &days_ago_stamp(0),
     );
 
-    let mut child = Command::new(&exe)
+    let mut bridge_command = Command::new(&exe);
+    bridge_command
         .env("APPDATA", home.path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("启动真实 bridge 进程");
+        .stderr(std::process::Stdio::null());
+    let mut child = spawn_bridge(&mut bridge_command);
     drop(guard);
     let mut stdin = child.stdin.take().expect("stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
@@ -7595,14 +7629,14 @@ fn inflight_periodic_sweep_removes_stale_marker() {
     let guard = BRIDGE_BINARY_LOCK.lock().expect("bridge 复制锁");
     let exe = copy_bridge_binary(home.path());
     let runs = home.path().join("runs");
-    let mut child = Command::new(&exe)
+    let mut bridge_command = Command::new(&exe);
+    bridge_command
         .env("APPDATA", home.path())
         .env("AW_INFLIGHT_SWEEP_SECS", "1")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("启动真实 bridge 进程");
+        .stderr(std::process::Stdio::null());
+    let mut child = spawn_bridge(&mut bridge_command);
     drop(guard);
     let mut stdin = child.stdin.take().expect("stdin");
     let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));

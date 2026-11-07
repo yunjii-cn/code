@@ -4253,3 +4253,128 @@ test result: ok. 27 passed; 0 failed
 - 条目 17→19，`not_proven_total` 仍 2（均为 Windows 结构性条目）。
 - `mcp_contract` 平台断言同步：Linux 两条 `holds=true/proven/reason_code=null`，Windows 两条 `false/not_proven` + 上述 reason。
 - 未改 `tools/list` 描述，`tools_sha256` 不变（`85da030305024ac405c9fdecb6cfc0e9d4c46fdc7f2dd4aa000314d346e6a3bc`），门禁通过。
+
+## 50. v1.46 真实链路端到端（MCP stdio，不使用夹具）
+
+### 50.1 方法与不可伪造边界
+
+驱动脚本 `scripts/real-chain-verify/verify.py`（仅标准库）：把 `aw-mcp-bridge` 可执行文件复制到独立 sandbox 的 `bin/`，`cwd` 指向 sandbox 的 `work/`，`APPDATA=/HOME` 指向 sandbox，`AW_INFLIGHT_SWEEP_SECS=0`（只保留 startup 档清扫，去掉时序不确定）；然后以 stdio 逐行 JSON-RPC 调用，请求/响应原文落 `wire.jsonl`。所有断言都同时比对「响应字段」与「磁盘事实」（`runs/` 树、`dispatch.json`、`handback.json`、`inflight-sweep.jsonl`、产物文件与 sha256）。
+
+不可伪造、只能如实标注的部分：
+
+- **没有 cancel 工具**：真实 `tools/list` 返回 `['capabilities', 'health', 'receipt.get', 'runs.inflight', 'runs.list', 'runs.prune', 'status', 'task.execute']`，无 cancel。所以「执行中取消」在产品语义里不存在，唯一真实入口是**杀死 bridge 进程**（客户端断连/崩溃）。本文的“取消”一律指后者。
+- **`Supervisor::terminate`、`assess_inflight_marker` 等内部函数不可从 MCP 直达**；它们的效果只能通过 `task.execute` 的 `status`/`blocked_reason`、`runs.inflight`、重启后的审计行观察。内部状态的最终判定仍由 §49 的夹具单测覆盖。
+- **`_session/` 与目录布局**：脚本读盘核对，不调用内部函数；`runs.list` 只用于交叉验证（契约明说它不是执行状态权威）。
+
+环境：Windows `10.0.26100`（24H2）、`cargo 1.97.0`、Python 3.12.10；WSL `Ubuntu 24.04 LTS`、内核 `6.18.33.2-microsoft-standard-WSL2`、Python 3.12.3。
+
+### 50.2 场景 A：真实小任务全链路（两平台都过）
+
+请求原文（Windows，`wire.jsonl`）：
+
+```json
+{"dir": "send", "payload": {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "task.execute", "arguments": {"task_id": "real-a-normal", "cmd": "echo hello-real-chain-A>artifact-a.txt", "cwd": "D:\\Temp\\aw-real-windows-a-ren4bazr\\work", "timeout_secs": 30}}}}
+```
+
+响应原文（节选）：`{\"attempt\":1,\"cwd\":\"\\\\\\\\?\\\\D:...\",\"duration_ms\":343,\"exit_code\":0,\"finishedAt\":\"2026-11-07T19:43:12Z\",\"status\":\"ok\",\"stdout_digest\":\"sha256:e3b0c442...b855\",...}`。`stdout/stderr` 均为空（命令把内容写进产物），故摘要等于空文件 sha256。
+
+盘上事实（Windows）：
+
+```text
+runs\real-a-normal\attempt-1\dispatch.json
+runs\real-a-normal\attempt-1\handback.json
+runs\real-a-normal\attempt-1\stderr.txt
+runs\real-a-normal\attempt-1\stdout.txt
+runs\.inflight            (空)
+runs\_session\initialize-100300-1794080591426-0.json
+```
+
+`dispatch.json` 与请求逐字段一致（`task_id`、`cmd`、`cwd`、`timeout_secs=30`、`dispatchedAt`）；`handback.json` 的 `artifacts[].hash` 与盘上 `sha256` 相同、`locator=runs/real-a-normal/attempt-1/stdout.txt` 从 `runs/` 父目录可解析；`receipt.get` 返回同一个 `finishedAt`/`status`；`runs.inflight` `total=0`；`*.tmp` 0 个。两平台都给出 `[evidence] A label=... status=ok attempt=1 inflight_total=0 tmp_files=0 artifacts_match=true`。
+
+### 50.3 场景 B1：执行中超时（两平台都过）
+
+命令先写心跳再持续运行，`timeout_secs=2`。Windows 回执原文：
+
+```json
+"blocked_reason": "timeout：超过 2s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证；Windows 下子进程以挂起态创建并先加入作业再恢复执行（恢复前不会派生子进程）；BREAKAWAY 或加入作业失败的作业外进程仍不可观测",
+"duration_ms": 2090, "exit_code": null, "status": "blocked"
+```
+
+Linux 同义但无 Windows 子句：`"timeout：超过 2s 未结束，已清理受控集合；逃逸进程是否仍在运行未验证"`，`duration_ms=2509`。超时返回后连续 3 秒心跳文件大小不变（两平台 `controlled_set_silent=true`），`inflight` 无残留、`*.tmp` 0。即：超时不是“只发个信号”，受控集合内确实静默了；但回执措辞没有把它夸成“整棵树已死”。
+
+### 50.4 场景 B2/B3：执行中取消 + 重启 startup 清扫（两平台都过）
+
+执行到 ~3s 直接杀 bridge。杀之前 `runs/.inflight/real-b-cancel.json` 存在（`pid` 是 **bridge 自己的 pid**）。重启（`AW_INFLIGHT_SWEEP_SECS=0`）后审计原文（Windows，Linux 同构，仅 pid 不同）：
+
+```json
+{"at":"2026-11-07T19:43:25Z","candidates":[{"file":"real-b-cancel.json","path":"runs/.inflight/real-b-cancel.json","pid":43212,"stale_reason":"pid_missing","task_id":"real-b-cancel"}],"phase":"plan","stale_total":1,"task_id_filter":null,"trigger":"startup","unreadable_total":0,"version":"inflight-sweep/1"}
+{"at":"2026-11-07T19:43:25Z","deleted_total":1,"failed":[],"failed_total":0,"kept":[],"kept_total":0,"lost_race_total":0,"not_mine_total":0,"phase":"result","removed":[{"file":"real-b-cancel.json","outcome":"deleted","path":"runs/.inflight/real-b-cancel.json","pid":43212,"reason":"stale","stale_reason":"pid_missing","task_id":"real-b-cancel"}],"removed_total":1,"task_id_filter":null,"trigger":"startup","unreadable_total":0,"version":"inflight-sweep/1"}
+```
+
+attempt 目录去向：`runs/real-b-cancel/attempt-1/` 仍在原位，只有 `dispatch.json`、`stdout.txt`、`stderr.txt`，**没有 `handback.json`**；`receipt.get` 明确回“回执不存在”。所以不会出现“status 说 completed 但产物不在”——没有回执就没有完成声明，attempt 目录是“开工了但没交卷”的可解释形态。`inflight-sweep` 只删标记，不动 attempt、不进 `.prune-trash`（`trash` 只属于 `runs.prune`）。
+
+B3 是同一路径上的时间边界：杀进程后**立刻**重启（距 `startedAt` <5s），标记被保留、`stale=false`、`stale_reason=pid_missing_grace`，且 startup 清扫**不追加审计行**（契约 §2.9：无可清残标不写）；等过 5s 再重启，`removed_total=1`、标记消失。日志：`[evidence] B3 label=linux early_restart kept=true stale=False reason=pid_missing_grace pid_alive=False`、`[evidence] B3 label=linux late_restart removed_total=1 marker_gone=true`。
+
+### 50.5 场景 C：并发（两平台都过）
+
+- **C1 同 id 顺序连派**：第二次响应与第一次**逐字段相同**（dispatched 契约是回放既有回执，不引入 standalone 的 `replayed`/`replay_kind` 字段），`once-c1.txt` 只有 1 行，只有 `attempt-1`。随后用同 id + 不同 `cmd` 再派：工具错误里具名 `task_id_conflict`，不新增 attempt，被拒请求零产物。`[evidence] C1 replay_identical=true replayed_field_absent=true attempts=1 conflict_named=true conflict_new_attempt=false`
+- **C2 同 id 两进程同时派**：两个 bridge 共用一个 `runs/`，同时发 `task.execute`。两方都拿到 `status=ok` 且回执**逐字段相同**，只有 `attempt-1`，`once-c2.txt` 只有 1 行——没有两个进程写同一 attempt，也没有重复执行。`[evidence] C2 identical_receipt=true attempts=1 once_lines=1 same_finishedAt=true`
+- **C3 两个不同 id 并行**：第三个 bridge 在运行中观察 `runs.inflight` 看到 2 条互不相同的标记 `['real-c-par-x','real-c-par-y']`；结束后盘上是两个独立任务目录，各自 `attempt-1/{dispatch,handback,stdout,stderr}`，产物 `out-x.txt` / `out-y.txt` 各 5 字节；x 的回执不含 y 的痕迹。`[evidence] C3 observed_markers=['real-c-par-x', 'real-c-par-y'] ... final_inflight=0`
+
+### 50.6 Windows 与 Linux 的真实差异（单列）
+
+| 观察点 | Windows 24H2 | Ubuntu 24.04 (WSL2) | 说明 |
+| --- | --- | --- | --- |
+| bridge 被杀后子进程 | `child_survived=False`（心跳停在 20 字节） | `child_survived=True`（心跳 20→35 字节） | Windows 作业对象 `KILL_ON_JOB_CLOSE` 在进程死亡时连带杀作业内进程；Linux 没有等价兜底，子进程成孤儿继续跑（用例命令自封顶 40s，未长期残留）。这是**未承诺路径**：产品没有 cancel，契约不承诺 bridge 死后的清场，故不算回归；若要补，需要 `PR_SET_PDEATHSIG` 或常驻守护。 |
+| `cwd` 形态 | `\\?\D:\...\work`（canonicalize verbatim 前缀） | `/root/.../work` | 同一段规范化逻辑，Windows 多 `\\?\` 前缀；比对时必须按路径语义归一。 |
+| 超时文案 | 额外附挂起态创建 + BREAKAWAY 子句 | 只到“逃逸进程未验证” | 平台能力不同，如实写在 `blocked_reason`。 |
+| 2s 预算实测耗时 | 2090ms | 2509ms | 定时轮询粒度与清理开销差异，未放宽判据。 |
+| shell 语义 | `cmd /C`，`echo` 写 CRLF | `sh -c`，`printf` 写 LF | 产物字节不同属预期，摘要按各自盘上文件核算。 |
+
+### 50.7 本轮发现项
+
+1. **已修：测试基建的 `ETXTBSY` 竞态（真红）**。WSL 全量跑出现 2 个失败，原文：
+
+```text
+thread 'inflight_periodic_sweep_removes_stale_marker' panicked at apps/mcp-bridge/tests/mcp_contract.rs:7605:10:
+启动真实 bridge 进程: Os { code: 26, kind: ExecutableFileBusy, message: "Text file busy" }
+thread 'inflight_startup_sweep_removes_stale_and_keeps_active' panicked at apps/mcp-bridge/tests/mcp_contract.rs:7510:43:
+bridge 复制锁: PoisonError { .. }
+test result: FAILED. 121 passed; 2 failed
+```
+
+根因：`fs::copy` 复制可执行文件时写 fd 未关，其它测试线程并发 `fork` 会把该 fd 带进子进程，本进程随后 `exec` 自己的副本就撞上 `ETXTBSY`（`Text file busy`）；复制锁只串行化了“复制+spawn”，锁不住别的用例的 fork。修复：新增 `spawn_bridge()`，仅对 `ETXTBSY` 做有界重试（100 × 20ms），重试成功时打印 `[evidence] spawn_retry attempts=... reason=ETXTBSY`，其它错误照旧 panic（不吞错）。WSL 连跑两轮 `123 passed; 0 failed`。这不是产品行为，是测试进程内 fork/exec 的固有竞态。
+
+2. **未修，待决策：`_session/` 不进入回收**。每次 `initialize` 落一个 `runs/_session/initialize-<pid>-<ts>-0.json`；`runs.prune` 只枚举任务目录（`_session` 等 `_`/`.` 前缀一律跳过），因此这些连接审计文件**永不回收**。取消现场重启后仍能看到被杀进程的 session 文件。它是连接审计、不是 inflight 残标，本轮不擅自改保留策略；若要与 `runs/` 同寿命管理，需要单独定义保留口径。
+
+3. **已知差异（未承诺）：Linux bridge 死亡遗留子进程**，见 §50.6。契约没有 cancel，也没有“supervisor 死亡后清场”的承诺；此处只记录事实，不当作缺陷修补。
+
+### 50.8 真实链路 vs 夹具覆盖
+
+| 链路 | 真实链路（MCP stdio） | 夹具/契约测试 | 覆盖结论 |
+| --- | --- | --- | --- |
+| 正常派单 → 回执 → 产物 → 审计自洽 | A（win+linux） | `execute_returns_auditable_handback` | 双证 |
+| 超时 `blocked` + 受控集合静默 | B1（win+linux） | `execute_timeout_is_blocked_with_reason`、`timeout_cleans_controlled_set_including_grandchild` | 双证 |
+| 执行中取消 | B2（win+linux，唯一真实入口是杀进程） | 无（产品无 cancel） | **仅真实链路** |
+| 重启 startup 清扫（`trigger=startup`） | B2（win+linux） | `inflight_startup_sweep_removes_stale_and_keeps_active` | 双证 |
+| 5s 容差不误删 / 过容差才删 | B3 | 同上、`runs_inflight_lists_and_cleans_only_stale_markers` | 双证 |
+| 周期清扫 | 未跑（脚本固定 `AW_INFLIGHT_SWEEP_SECS=0`） | `inflight_periodic_sweep_removes_stale_marker` | 仅夹具 |
+| 同 id 顺序重投（回放） | C1 | 无同名 dispatched 用例（契约 §3.1 口径） | **仅真实链路** |
+| 同 id 异参拒绝 | C1 | `same_task_id_with_different_params_is_rejected` | 双证 |
+| 同 id 两进程并发（dispatched） | C2 | `standalone_duplicate_execute_is_serialized_across_servers`（standalone） | 真实链路新增 dispatched 证据 |
+| 不同 id 并行（dispatched） | C3 | `standalone_concurrent_tasks_are_isolated_from_one_timeout`（standalone） | 真实链路新增 dispatched 证据 |
+| 逃逸进程整树清理（cgroup v2 + `cgroup.kill`） | 未跑（本轮无逃逸构造） | v1.45 `cgroup_kill_terminates_escapee_that_left_cgroup_procs` | 仅夹具（WSL 实跑，属单测而非 MCP 链路） |
+| 无 `cgroup.kill` / `cgroup.procs` 读不出 | 未跑 | `cgroup_without_kill_reports_still_alive`、`cgroup_members_unreadable_is_not_empty` | 仅夹具 |
+| `runs.prune` dry-run / trash / 竞态 | 未跑（不在本轮场景） | `prune_status_whitelist_selection` 等 | 仅夹具 |
+| standalone 模式全链 | 未跑（本轮只 dispatched） | `standalone_*` 共 20+ 条 | 仅夹具 |
+| `_session/` 回收 | 观测到不回收（§50.7） | 无 | 真实链路发现 |
+
+复现命令（两平台同一脚本）：
+
+```powershell
+python scripts/real-chain-verify/verify.py --binary target/debug/aw-mcp-bridge.exe --label windows
+```
+
+```bash
+python3 scripts/real-chain-verify/verify.py --binary /root/.aw-posix-verify/target/debug/aw-mcp-bridge --label linux
+```
