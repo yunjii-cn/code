@@ -4032,7 +4032,7 @@ test result: FAILED. 0 passed; 1 failed
 - `sweep_concurrent_claimers_delete_once_others_lost_race`：4 个线程各自 `Server::with_runs_dir`（同一 `runs`），用测试观测点 `SWEEP_BEFORE_CLAIM_HOOK` + `Barrier` 在「扫描判定之后、rename 认领之前」对齐；断言 `deleted_total=1`、`lost_race_total=3`、标记消失、无 `.tmp`、审计同时含 `"outcome":"deleted"` 与 `"outcome":"lost_race"`。
 - `sweep_concurrent_refresher_never_deletes_fresh_marker`：3 个清扫线程 + 1 个刷新线程；刷新线程在两个 Barrier 之间用「同目录临时文件 + rename」原子替换成非残标（`task_id/pid/startedAt` 不变，只把 `deadlineAt` 从 2000 延到 2099）；断言 `deleted_total=0`、`not_mine_total>=1`、原位仍是刷新后的 `deadlineAt`、无 `.tmp`、审计含 `"outcome":"not_mine"`。
 
-把实现临时回退到 v1.42（身份三元组复核）后原文：
+把实现临时回退到 v1.42（身份三元组复核）后原文（断言与失败文本逐字保留；`[]` 内结果 JSON 过长，仅省略重复字段）：
 
 ```
 thread 'server::inflight_sweep_race_tests::sweep_concurrent_claimers_delete_once_others_lost_race' panicked at apps\mcp-bridge\src\server.rs:8083:9:
