@@ -1246,7 +1246,7 @@ cargo test -p aw-mcp-bridge description_gate
 | G15 | `runs.prune` | `inputSchema.properties.exclude.description` | 按条目精确排除；task_id；attempt；不得重复；命名校验；invalid_exclusion；not_in_candidates；枚举入口生效 | 默认排除；自动排除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 | G16 | `task.execute` | `inputSchema.properties.argv.description` | argv[1..]；携带路径；按规范化后的真实位置校验；standalone_argv_path_escape；standalone_argv_path_unknown；argv_path_scan；不按路径校验；占号前 | 不做作用域校验；忽略参数中的路径 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 | G17 | `capabilities` | `description` | 机器可读；holds（true/false/null）；status；scope；reason_code；platforms_verified；platforms_unverified；automatic；不依赖描述散文 | 仅见文档；无法机器判定 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`capabilities_declares_machine_readable_boundaries` |
-| G18 | `runs.inflight` | `description` | runs/.inflight/<task_id>.json；action=list；stale_reason；pid_alive；pid_missing_grace；deadline_expired；unreadable；dry_run=true；confirm=true；活跃标记永不删除；pid+startedAt；would_remove；不进入 runs.prune 候选 | 自动清扫；自动删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`runs_inflight_lists_and_cleans_only_stale_markers` |
+| G18 | `runs.inflight` | `description` | runs/.inflight/<task_id>.json；action=list；stale_reason；pid_alive；pid_missing_grace；deadline_expired；unreadable；dry_run=true；confirm=true；活跃标记永不删除；pid+startedAt；would_remove；不进入 runs.prune 候选；服务启动时一次；默认每 3600 秒一次；AW_INFLIGHT_SWEEP_SECS；trigger=startup\|periodic；审计 plan 行写不进去则本轮零删除 | 自动删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`runs_inflight_lists_and_cleans_only_stale_markers` |
 | G19 | `runs.inflight` | `inputSchema.properties.action.description` | list；clean；stale=true | 默认 clean；隐式删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
@@ -1255,7 +1255,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "36dbcfc9c9ac83eede1a4ef581801b0b4dcb9b955761d5e3fcb085ea093af993",
+  "tools_sha256": "915974d2663fa2289c9747e2a048d59784e93c397c643784643f9d57d2221937",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1381,8 +1381,8 @@ cargo test -p aw-mcp-bridge description_gate
       "id": "G18",
       "tool": "runs.inflight",
       "path": "description",
-      "contains": ["runs/.inflight/<task_id>.json", "action=list", "stale_reason", "pid_alive", "pid_missing_grace", "deadline_expired", "unreadable", "dry_run=true", "confirm=true", "活跃标记永不删除", "pid+startedAt", "would_remove", "不进入 runs.prune 候选"],
-      "not_contains": ["自动清扫", "自动删除"]
+      "contains": ["runs/.inflight/<task_id>.json", "action=list", "stale_reason", "pid_alive", "pid_missing_grace", "deadline_expired", "unreadable", "dry_run=true", "confirm=true", "活跃标记永不删除", "pid+startedAt", "would_remove", "不进入 runs.prune 候选", "服务启动时一次", "默认每 3600 秒一次", "AW_INFLIGHT_SWEEP_SECS", "trigger=startup|periodic", "审计 plan 行写不进去则本轮零删除"],
+      "not_contains": ["自动删除"]
     },
     {
       "id": "G19",
@@ -3929,3 +3929,79 @@ test result: FAILED. 0 passed; 1 failed
 - 其他能力位（`timeout.cgroup_kill_terminates_scope`、`timeout.enumerates_escaped_descendants`、`timeout.descendant_snapshot_cross_check` 等）的 `holds`/`status`/`reason`/`evidence` 均未改。
 - `tools/list` 描述未改，`tools_sha256` 不变。
 - macOS 仍未验证；Linux 的结论只在「cgroup v2 可写 + 内核提供 `cgroup.kill`」分支成立，不外推到容器/非 root/cgroup v1。
+
+## §45 v1.42：inflight 残标的自动清扫（2026-11-08）
+
+目标：把「被遗弃的标记只要没人复用 task_id、没人 prune 就一直躺着」补成真正的自动清扫，同时守住「判据只此一套、审计写不进去就零删除」。
+
+### 45.1 触发时机与默认开关
+
+| 触发 | 行为 | 默认 |
+| --- | --- | --- |
+| `startup` | `main` 创建 `Server` 后、进入 stdio 循环前调用 `run_startup_sweep()` | **开启**（`AW_INFLIGHT_SWEEP_SECS=off` 时整体关闭） |
+| `periodic` | `start_periodic_sweep()` 起后台线程，每 N 秒调用同一清扫函数 | **开启，N=3600 秒**；`0`=仅启动、`off`=关闭、正整数=周期秒数 |
+
+周期默认开启的理由：一次清扫只是只读扫描 `runs/.inflight`，无可清残标时**连审计都不写**，成本近似零；而只在启动时清扫会让长驻 bridge 进程里的残标一直躺着，正是本条目要修的洞。`off` 保留给需要完全手动的部署；测试里两个共用 `target/debug/runs` 的真实 stdio 用例显式设 `off`，避免互相清扫。
+
+### 45.2 实现与审计口径
+
+- 自动路径**只调用** `sweep_inflight_markers(trigger, None, false)`，与 `task_start` / `runs.prune` / `runs.inflight.clean` 是同一个函数、同一套 `stale_rule`（`pid` 存活优先于 `deadline`，`unreadable` 永不删除），没有第二份判断。
+- 审计仍是 `runs/inflight-sweep.jsonl`，`plan` 行先写、删除后写 `result` 行；`trigger` 变为 `startup|periodic|task_start|prune|clean`，自动与显式可区分。
+- 审计闸门不变并覆盖自动路径：`plan` 行打不开/写不进 → 本轮**零删除**，错误只写 stderr，不阻断服务启动。
+- `list` 的 `sweep_rule` 新增机器可读的 `automatic`（启动/周期、环境变量语义、opt-out）与 `audit_gate`。
+
+### 45.3 真实进程证据（非进程内桩）
+
+把 bridge 可执行文件复制到独立临时目录（`current_exe` 旁的 `runs/` 因此与其它用例隔离），造两个标记后**重启服务**：
+
+```
+[evidence] inflight_startup trigger="startup" removed_total=1 kept_total=1 removed_task="startup-stale-179632" active_task="startup-active-179632" active_marker_kept=true
+```
+
+- 残标：`pid=999999999`，`startedAt/deadlineAt` 都在过去 → `stale_reason=pid_missing`，启动后被清掉。
+- 活跃标记：`pid` 为当前测试进程（存活）→ 即使 `deadlineAt` 已过，`stale=false`，**启动清扫后文件仍在**，并出现在 `kept` 里（`kept_total=1`）。
+- 审计行：`trigger="startup"`、`phase="result"`、`removed_total=1`、`removed[0].task_id="startup-stale-…"`。
+
+周期触发单独验证：子进程设 `AW_INFLIGHT_SWEEP_SECS=1`，等 `initialize` 返回（此时启动清扫已结束）**之后**才造残标，只有后台周期能清它：
+
+```
+[evidence] inflight_periodic trigger="periodic" removed_total=1 removed_task="periodic-stale-179632"
+```
+
+审计里该 task 只出现在 `trigger="periodic"` 的 result 行，`trigger="startup"` 的 result 行没有它。
+
+审计失败闸门在自动路径上的实测（用目录占住 `runs/inflight-sweep.jsonl`，让 append 必定失败）：
+
+```
+[inflight-sweep] trigger=startup error=inflight_sweep_audit_failed: 打开 runs/inflight-sweep.jsonl 失败：拒绝访问。 (os error 5)；本轮未删除任何标记
+[evidence] inflight_auto_audit_failure marker_exists=true audit_path_is_dir=true
+```
+
+Linux（WSL）同样通过：`audit_path` 占位导致 `Is a directory (os error 21)`，`marker_exists=true`；启动证据 `removed_task="startup-stale-1320" kept_total=1`，周期证据 `removed_task="periodic-stale-1320"`。
+
+### 45.4 先红：用例能抓住「另写一套判据 / 全删」
+
+在 WSL 副本里把 `sweep_inflight_markers` 中 4 处 `marker.assessment["stale"] == json!(true)` 全部临时改成 `true`（即忽略 `stale_rule`、见标记就删，不碰工作树），启动用例原文变红：
+
+```
+thread 'inflight_startup_sweep_removes_stale_and_keeps_active' panicked at apps/mcp-bridge/tests/mcp_contract.rs:7407:5:
+assertion `left == right` failed: 活跃标记必须出现在 kept：{... "kept":[], "kept_total":0, "removed_total":1, "trigger":"startup" ...}
+  left: Number(0)
+ right: 1
+test result: FAILED. 0 passed; 1 failed
+```
+
+说明用例确实在验证「活跃标记不会被自动清掉」，而不是只看残标消失。恢复副本后 16 条 inflight 用例全绿。
+
+### 45.5 能力位与描述门禁
+
+- `inflight.stale_markers_auto_swept`：`false/partial/path_triggered_only/automatic=false` → **`true/proven/reason_code=null/automatic=true`**；evidence 增加 `inflight_startup_sweep_removes_stale_and_keeps_active`、`inflight_periodic_sweep_removes_stale_marker`、`inflight_auto_sweep_audit_failure_deletes_nothing`。`not_proven_total` 4→3。
+- `inflight.stale_marker_cleanable` 的 `automatic=false` 不变：显式 `clean` 仍需调用方 `dry_run=false+confirm=true`。
+- `runs.inflight` / `runs.prune` 的 tools/list 描述删除「没有启动/定时自动清理」的旧说法，改为写明启动一次 + 默认每小时、`AW_INFLIGHT_SWEEP_SECS` 语义与审计闸门；`tools_sha256` 从 `36dbcfc9…` 更新为 `915974d2…`，描述门禁 G18 同步（`contains` 增加自动清扫字段，删除对「自动清扫」的禁止项）。
+
+### 45.6 未改动的边界
+
+- 跨进程仍无事务：清扫与其它进程的创建/删除之间仍是 check-then-delete，`limits` 里的四条限制不变。
+- `unreadable` 标记仍不会自愈，只会被保留并报告。
+- 自动清扫只发生在 bridge 进程存活时；进程退出后不再有周期触发。`off` 是显式退出开关，不属于默认行为。
+- 回归：Windows `17 lib + 125 integration` 全绿；WSL `21 lib + 123 integration` 全绿（差异为两个 Linux 独有 cgroup 用例）。

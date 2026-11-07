@@ -4409,6 +4409,8 @@ fn description_gate_behavior_connection_counters_real_stdio() {
     let home = tempfile::tempdir().expect("tempdir");
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_aw-mcp-bridge"))
         .env("APPDATA", home.path())
+        // 本用例与其它真实进程用例共用 target/debug/runs，关闭自动清扫避免互相干扰
+        .env("AW_INFLIGHT_SWEEP_SECS", "off")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -6639,7 +6641,7 @@ fn capabilities_declares_machine_readable_boundaries() {
         "{restore}"
     );
 
-    // 残留标记：可观察、可清理，但不自动清扫
+    // 残留标记：可观察、可显式清理，且服务启动/周期自动清扫（v1.42）
     let observable = claim(&payload, "inflight.stale_marker_observable");
     assert_eq!(observable["holds"], true, "{observable}");
     assert_eq!(observable["status"], "supported", "{observable}");
@@ -6648,12 +6650,24 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(cleanable["holds"], true, "{cleanable}");
     assert_eq!(
         cleanable["automatic"], false,
-        "清理需要调用方显式执行：{cleanable}"
+        "显式 clean 仍需调用方执行 dry_run=false+confirm=true：{cleanable}"
     );
     let auto = claim(&payload, "inflight.stale_markers_auto_swept");
-    assert_eq!(auto["holds"], false, "{auto}");
-    assert_eq!(auto["status"], "partial", "只做到特定路径顺带清扫：{auto}");
-    assert_eq!(auto["reason_code"], "path_triggered_only", "{auto}");
+    assert_eq!(auto["holds"], true, "{auto}");
+    assert_eq!(auto["status"], "proven", "{auto}");
+    assert!(auto["reason_code"].is_null(), "{auto}");
+    assert_eq!(auto["automatic"], true, "{auto}");
+    let auto_evidence = auto["evidence"].as_array().expect("evidence 必须是数组");
+    for case in [
+        "inflight_startup_sweep_removes_stale_and_keeps_active",
+        "inflight_periodic_sweep_removes_stale_marker",
+        "inflight_auto_sweep_audit_failure_deletes_nothing",
+    ] {
+        assert!(
+            auto_evidence.iter().any(|item| item == case),
+            "自动清扫能力位必须引用 {case}：{auto}"
+        );
+    }
 }
 
 /// 已在当前平台实跑的能力必须把当前平台写进 platforms_verified，不能只标 Windows
@@ -7005,6 +7019,8 @@ fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
     let home = tempfile::tempdir().expect("tempdir");
     let mut child = std::process::Command::new(exe)
         .env("APPDATA", home.path())
+        // 该用例自己造残标再显式清理；关闭自动清扫，避免与并发用例的 runs 目录互相影响
+        .env("AW_INFLIGHT_SWEEP_SECS", "off")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -7304,6 +7320,208 @@ fn inflight_clean_writes_audit_and_is_idempotent() {
     );
 }
 
+/// 复制可执行文件与 spawn 之间串行化：并发测试在 copy 尚未关闭写句柄时 fork，
+/// 另一个测试 exec 自己的副本会偶发 ETXTBSY（Text file busy），故用同一把锁隔开
+static BRIDGE_BINARY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 把 bridge 可执行文件复制到独立目录，让 current_exe 旁的 runs/ 与其它用例隔离
+fn copy_bridge_binary(dir: &Path) -> PathBuf {
+    let source = Path::new(env!("CARGO_BIN_EXE_aw-mcp-bridge"));
+    let target = dir.join(source.file_name().expect("可执行文件名"));
+    fs::copy(source, &target).expect("复制 bridge 可执行文件");
+    target
+}
+
+/// 自动清扫的启动触发：真实进程重启后清掉真残标、保留活跃标记，审计 trigger=startup
+#[test]
+fn inflight_startup_sweep_removes_stale_and_keeps_active() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let guard = BRIDGE_BINARY_LOCK.lock().expect("bridge 复制锁");
+    let exe = copy_bridge_binary(home.path());
+    let runs = home.path().join("runs");
+    let stale_id = format!("startup-stale-{}", std::process::id());
+    let active_id = format!("startup-active-{}", std::process::id());
+    write_inflight_marker(
+        &runs,
+        &stale_id,
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    write_inflight_marker(
+        &runs,
+        &active_id,
+        std::process::id() as u64,
+        &days_ago_stamp(0),
+        &days_ago_stamp(0),
+    );
+
+    let mut child = Command::new(&exe)
+        .env("APPDATA", home.path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("启动真实 bridge 进程");
+    drop(guard);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    )
+    .expect("写入 initialize");
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("读取 initialize 响应");
+
+    let mut removed = false;
+    for _ in 0..100 {
+        if !inflight_marker(&runs, &stale_id).exists() {
+            removed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(removed, "服务启动时必须清掉真残标");
+    assert!(
+        inflight_marker(&runs, &active_id).exists(),
+        "pid 存活的活跃标记绝不能被启动清扫删除"
+    );
+    let audit = read_inflight_sweep_audit(&runs);
+    let result = audit
+        .iter()
+        .find(|record| {
+            record["trigger"] == "startup"
+                && record["phase"] == "result"
+                && record["removed_total"] == 1
+        })
+        .unwrap_or_else(|| panic!("启动清扫必须写 trigger=startup 的 result 行：{audit:?}"));
+    assert_eq!(result["removed"][0]["task_id"], stale_id, "{result}");
+    assert_eq!(
+        result["removed"][0]["stale_reason"], "pid_missing",
+        "{result}"
+    );
+    assert_eq!(result["kept_total"], 1, "活跃标记必须出现在 kept：{result}");
+    println!(
+        "[evidence] inflight_startup trigger={} removed_total={} kept_total={} removed_task={} active_task={active_id} active_marker_kept=true",
+        result["trigger"],
+        result["removed_total"],
+        result["kept_total"],
+        result["removed"][0]["task_id"]
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// 自动清扫的周期触发：启动清扫之后才造的残标只能由周期清扫清掉，审计 trigger=periodic
+#[test]
+fn inflight_periodic_sweep_removes_stale_marker() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let home = tempfile::tempdir().expect("tempdir");
+    let guard = BRIDGE_BINARY_LOCK.lock().expect("bridge 复制锁");
+    let exe = copy_bridge_binary(home.path());
+    let runs = home.path().join("runs");
+    let mut child = Command::new(&exe)
+        .env("APPDATA", home.path())
+        .env("AW_INFLIGHT_SWEEP_SECS", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("启动真实 bridge 进程");
+    drop(guard);
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    writeln!(
+        stdin,
+        "{}",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    )
+    .expect("写入 initialize");
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("读取 initialize 响应");
+
+    // initialize 返回时启动清扫已结束；此时造的残标只可能被 periodic 清掉
+    let stale_id = format!("periodic-stale-{}", std::process::id());
+    write_inflight_marker(
+        &runs,
+        &stale_id,
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    let mut removed = false;
+    for _ in 0..150 {
+        if !inflight_marker(&runs, &stale_id).exists() {
+            removed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    assert!(removed, "周期清扫必须清掉启动之后出现的残标");
+    let audit = read_inflight_sweep_audit(&runs);
+    let result = audit
+        .iter()
+        .find(|record| {
+            record["trigger"] == "periodic"
+                && record["phase"] == "result"
+                && record["removed_total"] == 1
+        })
+        .unwrap_or_else(|| panic!("周期清扫必须写 trigger=periodic 的 result 行：{audit:?}"));
+    assert_eq!(result["removed"][0]["task_id"], stale_id, "{result}");
+    println!(
+        "[evidence] inflight_periodic trigger={} removed_total={} removed_task={}",
+        result["trigger"], result["removed_total"], result["removed"][0]["task_id"]
+    );
+    assert!(
+        !audit
+            .iter()
+            .any(|record| record["trigger"] == "startup" && record["removed_total"] == 1),
+        "该残标不可能由启动清扫清掉：{audit:?}"
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// 审计写不进去就零删除：自动路径同样受这条约束
+#[test]
+fn inflight_auto_sweep_audit_failure_deletes_nothing() {
+    let (server, _settings, runs) = server_with_runs();
+    let stale_id = "auto-audit-fail";
+    write_inflight_marker(
+        runs.path(),
+        stale_id,
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    // 用目录占住审计文件位置，让 append 必定失败
+    let audit_path = runs.path().join("inflight-sweep.jsonl");
+    fs::create_dir_all(&audit_path).expect("占住审计文件位置");
+
+    server.run_startup_sweep();
+
+    println!(
+        "[evidence] inflight_auto_audit_failure marker_exists={} audit_path_is_dir={}",
+        inflight_marker(runs.path(), stale_id).exists(),
+        audit_path.is_dir()
+    );
+    assert!(
+        inflight_marker(runs.path(), stale_id).exists(),
+        "审计 plan 行写不进去时自动清扫必须零删除"
+    );
+    assert!(
+        audit_path.is_dir(),
+        "审计占位目录必须仍在，说明确实没写成文件"
+    );
+}
+
 /// 启动路径遇到不可读标记：保留原文件、任务照常执行，不得把坏标记当残标删掉
 #[test]
 fn inflight_sweep_on_task_start_preserves_unreadable_marker() {
@@ -7347,12 +7565,30 @@ fn runs_inflight_list_exposes_sweep_contract() {
     assert_eq!(rule["audit"], "runs/inflight-sweep.jsonl", "{rule}");
     assert_eq!(rule["idempotent"], true, "{rule}");
     let triggers = rule["triggers"].as_array().expect("triggers 必须是数组");
-    for trigger in ["task_start", "runs.prune", "runs.inflight.clean"] {
+    for trigger in [
+        "startup",
+        "periodic",
+        "task_start",
+        "runs.prune",
+        "runs.inflight.clean",
+    ] {
         assert!(
             triggers.contains(&json!(trigger)),
             "{trigger} 必须写明：{rule}"
         );
     }
+    assert_eq!(
+        rule["automatic"]["periodic"], "默认每 3600 秒一次，默认开启",
+        "{rule}"
+    );
+    assert_eq!(rule["automatic"]["env"], "AW_INFLIGHT_SWEEP_SECS", "{rule}");
+    assert!(
+        rule["audit_gate"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("零删除"),
+        "审计闸门必须机器可读：{rule}"
+    );
     let never = rule["never_removed"]
         .as_array()
         .expect("never_removed 必须是数组");

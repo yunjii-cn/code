@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -23,6 +24,11 @@ const INFLIGHT_REPORT_VERSION: &str = "inflight-report/1";
 const INFLIGHT_SWEEP_VERSION: &str = "inflight-sweep/1";
 /// 顺带清扫的 append-only 审计：谁触发、清了哪些 task_id、依据哪个 stale_reason
 const INFLIGHT_SWEEP_AUDIT: &str = "inflight-sweep.jsonl";
+/// 自动清扫周期来源：未设置默认每小时；`0` 仅启动时一次；`off` 完全关闭；正整数按秒
+pub const INFLIGHT_AUTO_SWEEP_ENV: &str = "AW_INFLIGHT_SWEEP_SECS";
+/// 默认周期：每小时一次。选默认开启是因为一次清扫只是只读扫描目录，成本低，
+/// 而只在启动时清扫会让长驻进程里的残标一直躺着（本条目要解决的正是这个洞）。
+const INFLIGHT_AUTO_SWEEP_DEFAULT_SECS: u64 = 3600;
 const CAPABILITIES_VERSION: &str = "capabilities/1";
 /// pid 已消失后的残留宽限：给正常退出留出收尾时间，避免把刚结束的守卫误判为残留
 const INFLIGHT_PID_MISSING_GRACE_SECS: i64 = 5;
@@ -57,6 +63,46 @@ impl Server {
 
     pub fn settings_path(&self) -> &Path {
         &self.settings_path
+    }
+
+    /// 服务启动时自动清扫一次：与显式 clean / task_start / prune 共用
+    /// sweep_inflight_markers 与 stale_rule，审计 trigger=startup。
+    /// 清扫失败（含审计写不进去）只记 stderr，不阻断服务启动；审计失败时本轮零删除。
+    pub fn run_startup_sweep(&self) {
+        self.auto_sweep("startup");
+    }
+
+    /// 周期清扫：默认每小时一次（见 auto_sweep_schedule），线程随进程退出。
+    /// 与启动清扫共用同一实现、同一审计，只是 trigger=periodic。
+    pub fn start_periodic_sweep(self: &Arc<Self>, interval: Duration) {
+        let server = Arc::clone(self);
+        if let Err(error) = std::thread::Builder::new()
+            .name("aw-inflight-sweep".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(interval);
+                server.auto_sweep("periodic");
+            })
+        {
+            eprintln!("[inflight-sweep] trigger=periodic 线程启动失败：{error}");
+        }
+    }
+
+    /// 自动清扫只负责调用同一个 sweep_inflight_markers；不在这里重复任何判据
+    fn auto_sweep(&self, trigger: &str) {
+        match self.sweep_inflight_markers(trigger, None, false) {
+            Ok(report) => {
+                let removed = report["removed_total"].as_u64().unwrap_or(0);
+                let failed = report["failed_total"].as_u64().unwrap_or(0);
+                if removed > 0 || failed > 0 {
+                    eprintln!(
+                        "[inflight-sweep] trigger={trigger} removed={removed} failed={failed}"
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("[inflight-sweep] trigger={trigger} error={error}");
+            }
+        }
     }
 
     /// 逐行入口：解析失败也必须返回 -32700，而不是静默丢弃
@@ -6320,19 +6366,29 @@ fn inflight_liveness_rule() -> Value {
     })
 }
 
-/// 顺带清扫自描述：只在这些既有动作路径上触发，没有后台定时器与自动自愈
+/// 清扫自描述：触发点、周期开关与审计口径（自动路径复用同一判据与同一实现）
 fn inflight_sweep_rule() -> Value {
     json!({
         "version": "inflight-sweep/1",
-        "triggers": ["task_start", "runs.prune", "runs.inflight.clean"],
+        "triggers": ["startup", "periodic", "task_start", "runs.prune", "runs.inflight.clean"],
+        "automatic": {
+            "startup": "bridge 进程启动时一次，默认执行",
+            "periodic": "默认每 3600 秒一次，默认开启",
+            "env": INFLIGHT_AUTO_SWEEP_ENV,
+            "env_semantics": "未设置=默认每小时；0=仅启动时一次；off=关闭自动清扫；正整数=周期秒数",
+            "opt_out": "设置 off 后只剩 task_start / runs.prune / runs.inflight.clean 三个显式路径"
+        },
         "trigger_conditions": {
+            "startup": "进程启动、进入 stdio 循环之前执行一次；只按 stale_rule 删除，审计 trigger=startup",
+            "periodic": "按周期在后台线程执行；与 startup 共用 sweep_inflight_markers，审计 trigger=periodic",
             "task_start": "同一 task_id 的标记已存在且按 stale_rule 判定 stale=true 时，先清残标再 create_new",
             "runs.prune": "dry_run=false 且 confirm=true 时，枚举候选前先清全部残标",
             "runs.inflight.clean": "dry_run=false 且 confirm=true 时清全部残标（或 task_id 过滤范围内）"
         },
         "audit": "runs/inflight-sweep.jsonl",
         "audit_version": INFLIGHT_SWEEP_VERSION,
-        "criteria": "markers[].stale（pid 存活优先于 deadlineAt）",
+        "audit_gate": "plan 行写不进去则本轮零删除；自动触发与显式触发写同一审计，仅 trigger 不同",
+        "criteria": "markers[].stale（pid 存活优先于 deadlineAt）；自动路径不另写判据",
         "never_removed": ["active_pid_alive", "unreadable"],
         "atomic_delete": "rename to .tmp + recheck task_id+pid+startedAt; 不一致时只做 create-if-absent 还原（绝不覆盖更新者已占住的原名），记 marker_changed / marker_superseded",
         "idempotent": true,
@@ -6837,6 +6893,46 @@ fn git_paths(cwd: &Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+/// 自动清扫计划：启动时一次总是执行（除非整体关闭），周期由环境变量控制。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoSweepSchedule {
+    /// 关闭自动清扫（仅保留 task_start / prune / clean 三个显式路径）
+    Off,
+    /// 只在服务启动时清扫一次
+    StartupOnly,
+    /// 启动一次 + 每个间隔清扫一次
+    Every(Duration),
+}
+
+/// 解析 `AW_INFLIGHT_SWEEP_SECS`：
+/// - 未设置/空：启动一次 + 默认每 3600 秒一次；
+/// - `off`：关闭自动清扫；
+/// - `0`：仅启动时一次；
+/// - 正整数：启动一次 + 每 N 秒一次；非法值按默认周期处理并写 stderr。
+pub fn auto_sweep_schedule() -> AutoSweepSchedule {
+    let default = AutoSweepSchedule::Every(Duration::from_secs(INFLIGHT_AUTO_SWEEP_DEFAULT_SECS));
+    let Ok(raw) = std::env::var(INFLIGHT_AUTO_SWEEP_ENV) else {
+        return default;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return default;
+    }
+    if raw.eq_ignore_ascii_case("off") {
+        return AutoSweepSchedule::Off;
+    }
+    match raw.parse::<u64>() {
+        Ok(0) => AutoSweepSchedule::StartupOnly,
+        Ok(secs) => AutoSweepSchedule::Every(Duration::from_secs(secs)),
+        Err(_) => {
+            eprintln!(
+                "[inflight-sweep] {INFLIGHT_AUTO_SWEEP_ENV}={raw} 不是合法秒数，按默认 {INFLIGHT_AUTO_SWEEP_DEFAULT_SECS} 秒处理"
+            );
+            default
+        }
+    }
+}
+
 /// 运行目录默认放在可执行文件旁，保证回执里的 locator 始终是相对路径
 fn default_runs_dir() -> PathBuf {
     std::env::current_exe()
@@ -7283,23 +7379,26 @@ fn capabilities_payload() -> Value {
             &both,
             &["macos"],
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
-            "只删 stale=true 的标记；除显式 clean 外，仅在 task 重启与 prune 真删前顺带清扫，均写 runs/inflight-sweep.jsonl。",
+            "只删 stale=true 的标记；除显式 clean 外，服务启动/周期清扫与 task 重启、prune 真删前也按同一 stale_rule 清扫，均写 runs/inflight-sweep.jsonl。",
         ),
         capability_entry(
             "inflight.stale_markers_auto_swept",
-            Some(false),
-            "partial",
-            "在既有动作路径上顺带清扫残标（同 task_id 重启 / prune 真删前 / clean），无后台定时器",
-            Some("path_triggered_only"),
-            false,
+            Some(true),
+            "proven",
+            "服务启动时自动清扫一次；默认每 3600 秒再自动清扫；与显式 clean 共用 sweep_inflight_markers 与 stale_rule，审计 trigger=startup|periodic",
+            None,
+            true,
             &both,
             &["macos"],
             &[
                 "inflight_sweep_on_task_start_removes_only_target_stale_marker",
                 "inflight_sweep_on_prune_removes_stale_marker_and_unblocks_candidate",
                 "inflight_clean_writes_audit_and_is_idempotent",
+                "inflight_startup_sweep_removes_stale_and_keeps_active",
+                "inflight_periodic_sweep_removes_stale_marker",
+                "inflight_auto_sweep_audit_failure_deletes_nothing",
             ],
-            "只有上述三个触发点会清残标并写 runs/inflight-sweep.jsonl；没有调用方操作时残标仍不会自行消失，活跃与 unreadable 标记永不删除，跨进程仍无事务。",
+            "自动路径不另写判据：startup / periodic 都直接调用 sweep_inflight_markers，复用 stale_rule（pid 存活优先于 deadlineAt，unreadable 永不删除）。默认开启每小时周期的理由：一次清扫只是只读扫描 .inflight 目录，成本低；只在启动时清扫会让长驻进程里的残标一直躺着。AW_INFLIGHT_SWEEP_SECS=0 退回仅启动时一次，off 关闭自动清扫，正整数改周期。与显式路径共用 runs/inflight-sweep.jsonl：plan+result 行都带 trigger，可用 startup|periodic|task_start|prune|clean 区分。审计写不进去（plan 行失败）时本轮零删除，自动触发同样适用。跨进程仍无事务，unreadable 标记仍不会自愈。",
         ),
         capability_entry(
             "inflight.clean_preserves_active_markers",
@@ -7453,7 +7552,7 @@ fn tools() -> Value {
         },
         {
             "name": "runs.inflight",
-            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选；并给出 PM 判活约定 liveness_rule：判活只认 markers[].task_id + markers[].stale，pid/age_secs/stale_reason 仅作诊断，attempt 缺 handback/dispatch 启发式与裸看标记文件不得用于判活，fallback.allowed=false；顺带清扫只在既有动作路径触发（同 task_id 重启、prune 真删前、clean），每次写 runs/inflight-sweep.jsonl（plan+result，含 trigger/task_id/stale_reason），无可清残标时不追加审计且重复触发幂等；list 的 sweep_rule 机器可读给出触发条件、永不删除项（活跃/不可读）与跨进程边界",
+            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选；并给出 PM 判活约定 liveness_rule：判活只认 markers[].task_id + markers[].stale，pid/age_secs/stale_reason 仅作诊断，attempt 缺 handback/dispatch 启发式与裸看标记文件不得用于判活，fallback.allowed=false；清扫触发点：服务启动时一次、默认每 3600 秒一次（后台线程，周期默认开启；AW_INFLIGHT_SWEEP_SECS 可调：0=仅启动时一次、off=关闭自动清扫、正整数=周期秒数），以及既有动作路径（同 task_id 重启、prune 真删前、clean）；自动与显式路径共用同一 stale_rule 与 runs/inflight-sweep.jsonl（plan+result，含 trigger=startup|periodic|task_start|prune|clean 与 task_id/stale_reason），审计 plan 行写不进去则本轮零删除，无可清残标时不追加审计且重复触发幂等；list 的 sweep_rule 机器可读给出触发条件、周期开关、永不删除项（活跃/不可读）与跨进程边界",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -7468,7 +7567,7 @@ fn tools() -> Value {
         },
         {
             "name": "runs.prune",
-            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。真删（dry_run=false+confirm=true）时会在枚举候选前先按既有 inflight 判据顺带清残标并写 runs/inflight-sweep.jsonl，dry_run 只报告 would-remove、零删除；清扫审计失败则不删任何目录。系统内没有定时/启动自动清理",
+            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。真删（dry_run=false+confirm=true）时会在枚举候选前先按既有 inflight 判据顺带清残标并写 runs/inflight-sweep.jsonl，dry_run 只报告 would-remove、零删除；清扫审计失败则不删任何目录。服务启动时一次与默认每小时的后台清扫也写同一审计（trigger=startup|periodic），prune 内清扫的 trigger=prune",
             "inputSchema": {
                 "type": "object",
                 "properties": {

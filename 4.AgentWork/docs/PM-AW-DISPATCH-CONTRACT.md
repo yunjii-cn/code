@@ -397,7 +397,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | `automatic` | 是否无需调用方额外操作即自动发生 |
 | `evidence` | 对应的用例名（集成或单元），可复核 |
 
-当前 17 条（`not_proven_total=4`，其中 `holds=false` 共 4 条），关键条目：
+当前 17 条（`not_proven_total=3`，其中 `holds=false` 共 3 条），关键条目：
 
 | id | holds | status | reason_code | 边界 |
 |---|---|---|---|---|
@@ -412,7 +412,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | `concurrency.sweep_restore_never_clobbers` | true | proven | null | 复核不一致时还原只做 create-if-absent，不覆盖更新者已占住的原名；不保证窗口内无短暂文件名空缺 |
 | `inflight.stale_marker_observable` | true | supported | null | `runs.inflight action=list` |
 | `inflight.stale_marker_cleanable` | true | supported | null | `action=clean`，需显式调用（`automatic=false`） |
-| `inflight.stale_markers_auto_swept` | false | partial | `path_triggered_only` | 仅在既有路径顺带清扫（同 `task_id` 重启 / `runs.prune` 真删前 / `clean`），无后台定时器 |
+| `inflight.stale_markers_auto_swept` | true | proven | null | 服务启动时自动清扫一次，默认每 3600 秒再清扫；与显式路径共用 `sweep_inflight_markers` / `stale_rule` / `runs/inflight-sweep.jsonl`（`trigger=startup|periodic`）；`AW_INFLIGHT_SWEEP_SECS` 可调：0=仅启动、off=关闭、正整数=周期；审计写不进去则零删除（v1.42） |
 
 调用方判定规则：`holds=true` 才可依赖；`holds=false` 必须读 `reason_code` 并据此降级；`holds=null` 不得当成已保证。
 
@@ -455,7 +455,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 
 **PM 只需看到什么**：能力边界看 `capabilities.entries[].id/holds/reason_code`；残留看 `runs.inflight` 的 `markers[].stale/stale_reason`，清理调用 `action=clean` + `dry_run=false` + `confirm=true`。不需要读 AW 源码，也不依赖人工删文件。
 
-**仍然存在的限制**：清理不是后台自动清扫（`inflight.stale_markers_auto_swept=false/partial/path_triggered_only`，只在 §2.9 的三个既有路径顺带发生）；外部删除方若不读标记，TOCTOU 窗口仍存在（`concurrency.check_then_delete_atomic=false`）；POSIX 的标记/rename 语义仍为 `partial`。
+**仍然存在的限制**：自动清扫只在「服务进程存活 + 启动/周期触发」时发生（v1.42 起 `inflight.stale_markers_auto_swept=true/proven`；`AW_INFLIGHT_SWEEP_SECS=off` 可退回仅三个显式路径）；外部删除方若不读标记，TOCTOU 窗口仍存在（`concurrency.check_then_delete_atomic=false`）；POSIX 的标记/rename 语义仍为 `partial`。
 
 **并发判据（v1.36）**：跨进程窗口不再用「一次 rename 就是原子」这种说法。可观测量定为：给定被判 `stale` 的记录 R0，若 W1 在「检查→认领」之间替换同名文件、W2 在「认领→复核」之间再次占住原名，则清扫结束后**原位置必须是 W2 的完整记录**（`pid`+`startedAt` 一致），`removed_total=0`，`kept[]` 具名 `marker_changed`/`marker_superseded`，且目录里不留 `.tmp` 副本。实现上还原改用 `create_new`（O_EXCL）而不是 `rename`。这条只证「不删、不覆盖与判定快照不同的标记」（`concurrency.sweep_restore_never_clobbers=true/proven`）；**不证**「检查到认领之间没有窗口」——文件系统没有 compare-and-rename，认领前后仍可能出现短暂的文件名空缺，第三方仍可能在该空缺里开跑。`removed[]` 的 `path` 只表示「本次删掉了这个文件名下的那份标记」，读方不得据此断言该路径当前不存在标记。
 
@@ -477,23 +477,25 @@ AW 提供 `runs.inflight` 后，PM **只允许**用 `action=list` 的以下字�
 - “无标记/残留标记”只证明**当前没有活跃执行者**，不证明任务未执行、未完成或记录不可用；任务结果仍以 `receipt.get` / `verdict.json` / `standalone-result.json` 为准。
 - 仅当 `runs.inflight` 不存在（旧版 AW）时，才允许退回“任一 attempt 缺 handback/dispatch 视为可能活跃”的启发式，且必须在输出里标注为降级判定；新版 AW 禁止该回退。
 
-### 2.9 残留 inflight 标记的顺带清扫（v1.33，无后台线程）
+### 2.9 残留 inflight 标记的清扫（v1.33；v1.42 起含自动触发）
 
-不新增定时器或启动扫线程，只在三条既有动作路径上顺带执行，判据完全复用 `stale_rule`：
+v1.42 起在既有动作路径之外增加自动触发（服务启动一次 + 默认每小时周期，后台线程），五条路径全部复用同一 `sweep_inflight_markers` 与 `stale_rule`：
 
 | 触发点 | 触发条件 | 作用范围 |
 |---|---|---|
+| `startup` | bridge 进程启动、进入 stdio 循环前（`AW_INFLIGHT_SWEEP_SECS=off` 时关闭） | 全部残标 |
+| `periodic` | 默认每 3600 秒（后台线程；`0`=仅启动、`off`=关闭、正整数=周期秒数） | 全部残标 |
 | `task_start` | 同一 `task_id` 的标记已存在且 `stale=true` | 只清扫该 `task_id` 的标记；清掉后重新 `create_new` 占位 |
 | `runs.prune` | `dry_run=false` 且 `confirm=true` | 枚举候选前清扫全部残标，清完后该 task 不再被 `task_inflight_stale` 跳过；`dry_run` 只报 `would_remove`、零删除 |
 | `runs.inflight.clean` | `dry_run=false` 且 `confirm=true` | 全部残标（给了 `task_id` 时只清该条） |
 
-- **判据与永不删除项**：只有 `stale=true` 参与清扫；`pid` 存活（`pid_alive=true`）优先于 `deadline`，永不删除；坏 JSON/读不出的标记保留并在 `unreadable` 报告，不参与清扫。
-- **审计**：每次实际清扫写 `runs/inflight-sweep.jsonl`（append-only，`inflight-sweep/1`），先写 `phase=plan` 再删、删完写 `phase=result`；字段含 `trigger`（`task_start|prune|clean`）、`removed[]` 的 `task_id` / `pid` / `stale_reason` / `path`、`removed_total` / `kept_total` / `failed_total` / `unreadable_total`。审计写不进去时**一条都不删**。
+- **判据与永不删除项**：只有 `stale=true` 参与清扫；`pid` 存活（`pid_alive=true`）优先于 `deadline`，永不删除；坏 JSON/读不出的标记保留并在 `unreadable` 报告，不参与清扫。自动路径不另写判据，直接调用同一 `sweep_inflight_markers`。
+- **审计**：每次实际清扫写 `runs/inflight-sweep.jsonl`（append-only，`inflight-sweep/1`），先写 `phase=plan` 再删、删完写 `phase=result`；字段含 `trigger`（`startup|periodic|task_start|prune|clean`）、`removed[]` 的 `task_id` / `pid` / `stale_reason` / `path`、`removed_total` / `kept_total` / `failed_total` / `unreadable_total`。审计写不进去时**一条都不删**，自动触发同样适用。
 - **幂等**：没有可清残标时零删除、不追加审计；重复触发返回 `removed_total=0`，不报错。
 - **TOCTOU 不退化为盲删**：与 `clean` 同一实现——删除前原子 rename 为 `.tmp`，再复核 `task_id`+`pid`+`startedAt` 一致才删；不一致按 create-if-absent 还原（占住则 `marker_superseded`，为空则 `marker_changed`），文件已消失记 `marker_disappeared`。
 - **仍然存在的边界**：跨进程无事务（`concurrency.check_then_delete_atomic=false`）；判活与删除之间仍可能有新进程加入（以 `create_new` 决出唯一持有者）；坏标记不自愈，只能人工处理。
 
-`list` 的 `sweep_rule` 是本节机器可读副本：`triggers` / `trigger_conditions` / `audit` / `criteria` / `never_removed`（`active_pid_alive`、`unreadable`）/ `atomic_delete` / `idempotent` / `limits`（`cross_process_no_transaction`、`no_compare_and_rename_primitive`、`new_process_may_join_between_check_and_delete`、`unreadable_not_self_healing`）。
+`list` 的 `sweep_rule` 是本节机器可读副本：`triggers` / `trigger_conditions` / `automatic`（启动/周期开关与 `AW_INFLIGHT_SWEEP_SECS` 语义）/ `audit` / `audit_gate` / `criteria` / `never_removed`（`active_pid_alive`、`unreadable`）/ `atomic_delete` / `idempotent` / `limits`（`cross_process_no_transaction`、`no_compare_and_rename_primitive`、`new_process_may_join_between_check_and_delete`、`unreadable_not_self_healing`）。
 
 ## 3. 幂等
 
@@ -642,7 +644,7 @@ AW 提供 `runs.inflight` 后，PM **只允许**用 `action=list` 的以下字�
 | 16 | 默认策略与 schema 声明（§10） | **一致** | `additionalProperties` 仍为声明性忽略（新增用例锁定）；`runs.prune` 推荐 365 天、`limit` 缺省 100，但 `older_than_days` 缺省仍 `invalid_retention`；`clientInfo` 仅审计、不参与准入；`path_prepend` 的 16 项 / 4096 字符已写入 schema 且实现同源 |
 | 17 | `runs.prune.status` 状态过滤（§8.10） | **一致** | v1.21：schema 声明 `array`/`minItems=1`/`uniqueItems`/`enum`；显式才生效、缺省不过滤；与年龄 AND、`limit` 后置；空数组/null/未知值 `invalid_retention` 零删除零审计；`status_unknown`/`status_mismatch` 不删；plan/result 记录 `status_filter`；23 条用例实跑通过（Windows 6 组、POSIX 同套减去 Windows-only 的 case 20） |
 | 18 | 运行模式与独立判定（§2.6） | **一致** | v1.26：`mode` 显式（缺省 dispatched）；standalone 要求 `cwd`/`argv`/`acceptance`、拒绝 `cmd`/`env`/`path_prepend`；四类验收标准；`verdict.json` 三态落盘（`passed`/`failed`/`undetermined`），`undetermined` 绝不默认通过；`max_attempts` 1..5 有界重试、逐 attempt 独立记录；跨模式复用 `mode_conflict`；dispatched 回执零新增字段。用例 8 条先红后绿（Windows 7 条 standalone + 1 条 dispatched 回归锁），integration 91 全绿；真实 stdio 双单证据见审计 §25 |
-| 19 | 能力/限制机器可读（§2.7） | **一致** | v1.32：`capabilities` 逐条给出 `id`/`holds`/`status`/`scope`/`reason_code`/`platforms_verified`/`platforms_unverified`/`automatic`/`evidence`；`holds=false` 必带非空原因码；`#3` 整树/逃逸枚举、POSIX 覆盖、TOCTOU、自动清扫均为具名条目；`not_proven_total=4` 可核对（v1.38 起 POSIX rename 语义闭幕后 5→4） |
+| 19 | 能力/限制机器可读（§2.7） | **一致** | v1.32：`capabilities` 逐条给出 `id`/`holds`/`status`/`scope`/`reason_code`/`platforms_verified`/`platforms_unverified`/`automatic`/`evidence`；`holds=false` 必带非空原因码；`#3` 整树/逃逸枚举、POSIX 覆盖、TOCTOU 均为具名条目；v1.42 起自动清扫 `inflight.stale_markers_auto_swept` 上调为 `true/proven`，`not_proven_total=3` 可核对（v1.38 起 POSIX rename 闭幕后 5→4，v1.42 自动清扫闭幕后 4→3） |
 | 20 | 残留标记可观察可清（§2.7） | **一致** | v1.32：`runs.inflight action=list` 给出 `stale`/`stale_reason`/`pid_alive`/时间窗与 `stale_rule`；`clean` 默认 dry-run、真删需 `confirm`；只删 `stale=true`，pid 存活的活跃标记永不删除；删除前原子改名并复核 `pid+startedAt`；坏 JSON 保留记 `unreadable`；不进入 `runs.list`/`runs.prune` 候选 |
 
 统计：**已一致 19 条、缺 1 条**（第 8 条按分工归 PM 侧，AW 不做；认证不在 v1 范围，默认按 §10 第 1 行处理，准入所需字段见 §2.3）。
@@ -997,4 +999,5 @@ v1.25 在不改变接受/拒绝的前提下把"忽略"变成**可观测**：多�
 | v1.39 | 2026-11-07 | **修 Windows 父链闭包的 PID 复用误连（§2.7，先红后绿、不放宽判据）**：进程表改为可注入的 `ProcEntry{pid, parent_pid, created_at, alive}`，父链闭包加三道过滤：(a) 每条边要求「子进程创建时间 ≥ 父进程创建时间」——旧父进程退出后同号 PID 被新进程持有，旧子进程的 `ParentProcessID` 会把无关树挂到新根上，创建时间顺序能拒绝这类边；(b) 「根 → 直接子进程」再加「子创建时间 ≤ 根退出时间」上界（退出时间从子进程句柄读 `GetProcessTimes`，不经 PID），拒绝根 PID 被后来者复用后产生的子进程；(c) 剔除 `GetExitCodeProcess` 判为已终止、或 `OpenProcess` 返回 `ERROR_INVALID_PARAMETER`（PID 已不存在，Toolhelp 枚举与逐个打开之间的残行）的行。任一时间/存活状态读不到时保留旧行为（保留该行），不因缺证据扩大误判。确定性单测 `pid_reuse_parent_chain_edge_is_rejected`、`terminated_rows_are_not_counted_as_descendants` 覆盖根级复用、中间层复用、根退出后复用、时间不可读、僵尸行、存活状态不可读六类边，不依赖真机碰运气。红（先把 `edge_respects_creation_order` 改成恒 `true`）：`[evidence] pid_reuse rows=6 result=[900, 901, 902, 903, 905, 906]` + `left: [900, 901, 902, 903, 905, 906] / right: [902, 903, 906]`；退出上界失效时红出 `result=[902, 903, 906, 907]`。绿：`15 passed`（含新增两例），后续补 `create_evidence_error` 映射用例后 `17 passed`。24 路负载复跑（原判据不改）：lib 单测最终版连跑 20 轮全绿；全量 4 轮均为 `15 lib` 全绿 + integration `120 passed / 2 failed`，两个失败都与父链快照无关——(1) `timeout_cleans_controlled_set_including_grandchild`：同一负载下实测 PowerShell 从启动到写出 `pids.txt` 需 10.7–16.2 s，超过用例 8 s 窗口，属夹具启动延迟，不放宽；(2) `standalone_active_attempt_deleted_is_reported_not_silent_ok`：目录在创建 `stdout.txt` 前已被删掉，报出裸错误 `创建 stdout 失败：系统找不到指定的路径。 (os error 3)` 而非具名 `attempt_dir_lost`，本轮补 `create_evidence_error`（`NotFound` 且目录不存在 → `attempt_dir_lost`），并加确定性单测。最终回归：Windows `17 lib + 122 integration`、WSL Ubuntu 24.04 `18 lib + 120 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-231315.log`）。能力位不上调：`timeout.cleans_entire_process_tree` 仍 `holds=false/partial`，Windows 侧能证「作业记账归零」+「快照在创建时间/存活状态可读时不再误连 PID 复用树、不把已终止/已不存在的行算作后代」，证不到作业外进程（如由 csrss 创建、不进作业的 `conhost.exe`，其存活时 `StillAlive` 是真实观测）、换父被收养、以及时间/存活状态不可读的后代；`timeout.descendant_snapshot_cross_check` 保持 `proven`，detail 补三道过滤边界。条目仍 17，`not_proven_total` 仍 4。未改 `tools/list` 描述，`tools_sha256` 不变。详见审计 §42 |
 | v1.40 | 2026-11-07 | **Linux 父链闭包补「子进程启动时刻 ≥ 父进程启动时刻」边校验（§2.7，先红后绿、不放宽判据、能力位不变）**：`ProcRow` 增 `start_time`（`/proc/<pid>/stat` 第 22 字段 `starttime`；`comm` 可含空格与括号，以最后一个 `)` 为界），`descendants_of(root, root_start_time, rows)` 对每条边要求子 ≥ 父——PID 复用后旧父链残留的 `ppid` 边（子早于新父）被拒绝，祖先被拒则其后代不可达；`Supervisor::attach` 记录根启动时刻（`proc_start_time(child.id())`）作为根边下界。**逐边放宽**：只有「这条边的父进程启动时刻读不到」时才退回旧行为（接受该边），不因一个未知时刻放开整棵树；时刻读不到的下界与 v1.39 Windows 侧口径一致。确定性单测 `pid_reuse_parent_chain_edge_is_rejected` 用注入 `ProcRow` 表覆盖根级复用、祖先被拒后后代不可达、中间层复用、根时刻不可读四种情形。红（临时停用边校验，WSL）：`[evidence] linux_pid_reuse rows=6 result=[900, 901, 902, 903, 905, 907]` + `left: [900, 901, 902, 903, 905, 907] / right: [902, 903, 907]`，`test result: FAILED. 0 passed; 1 failed`；绿：WSL Ubuntu 24.04 `19 lib + 120 integration`、Windows `17 lib + 122 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-004812.log`）。**Linux 侧能力位没有变化**：`timeout.cleans_entire_process_tree` 仍 `holds=false/partial/posix_escaped_scope_requires_cgroup_v2_and_kill`（边校验只回答「枚举到的 PID 是否属于本任务」，不解决「逃逸成员杀不到」）、`timeout.enumerates_escaped_descendants` 仍 `holds=false/partial`（范围仍受 cgroup 是否可写限制）、`timeout.descendant_snapshot_cross_check` 仍 `proven`，条目仍 17、`not_proven_total` 仍 4（只在 detail 补边校验说明）。另改 Windows `timeout_cleans_controlled_set_including_grandchild` 夹具：去掉 PowerShell 与 `pids.txt`，孙进程改为唯一命名的 `ping.exe` 副本，PID 由测试进程用 Toolhelp 轮询观测——纯夹具改动，不改契约、能力位与执行语义；用例新增 `[verdict] grandchild_case=pass|terminate_defect|premise_not_established|unobservable` 判定行，把「产品没清理干净」与「机器太慢、前提没建立」在日志里分开。**该用例的覆盖边界**：`全量并发 × 24 路 burner` 下「孙进程能否在 8s 窗口内创建」这一前提无法稳定建立（实测当轮单次进程创建 10–15s），故该场景下整树清理能力**未被验证**，该用例不进该负载矩阵；已成立的是「单用例 × 24 路 burner」（9 轮全绿）与「空载全量」（Windows `17 lib + 122 integration` 全绿）两种。窗口、判据、实现均未放宽；24 路负载原始数据与判定依据见审计 §43.4–§43.5。未改 `tools/list` 描述，`tools_sha256` 不变 |
 | v1.41 | 2026-11-08 | **拆清 Linux 整树清理的证成范围与降级路径，换掉笼统 reason（§2.7，先取证后改口径、不上调跨平台能力位）**：在满足条件的环境（cgroup v2 可写 + 内核提供 `cgroup.kill`）里，Linux 侧整作用域终止**能证成**——WSL Ubuntu 24.04（root，cgroup v2，内核 `6.18.33.2-microsoft-standard-WSL2`）用真实 `setsid` 逃逸进程取得证据：逃逸者被收养（`escaped_ppid=Some(432)`）且受控进程组为空（`controlled=Some([])`）时，cgroup 仍枚举到它；写 `cgroup.kill` 后 `cgroup_kill after outcome=Cleaned escaped_alive=false members=Ok([]) populated=Ok(0) descendants=[] unobservable=None`，四项观测量同时成立才报 `Cleaned`。降级路径另用两个确定性用例验证：**无 `cgroup.kill`** → 不写 kill，成员仍在，`outcome=StillAlive`、`escaped_alive=true`、`members=Some(Ok([1175]))`、`populated=Some(Ok(1))`（`cgroup_without_kill_reports_still_alive`），不会谎报 `Cleaned`；**作用域建不起来**（`Degraded`）→ 只按进程组判据，被收养逃逸进程既打不到也枚举不到，`outcome=Cleaned` 但 `escaped_alive=true`、`escaped_scope_unobservable=Some("cgroup_v2_unavailable")`（`cgroup_degraded_terminate_is_group_only`），这是残余缺口，不是静默漏杀：降级原因写入快照与 capabilities，`Cleaned` 回执固定写「逃逸进程是否仍在运行未验证」。能力位：`timeout.cleans_entire_process_tree` 保持 `holds=false/partial`（跨平台单一三态还要覆盖 Windows 作业外进程与未验证的 macOS，且 Linux 侧为条件性），reason 由 `posix_escaped_scope_requires_cgroup_v2_and_kill` 改为点名实际卡点的 `processes_outside_controlled_scope_may_survive`，statement/detail 拆三分支，evidence 增加上述两个降级用例；**其他能力位零改动**，条目仍 17、`not_proven_total` 仍 4。回归：WSL `21 lib + 120 integration`、Windows `17 lib + 122 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-013052.log`）。未改 `tools/list` 描述，`tools_sha256` 不变；详见审计 §44 |
+| v1.42 | 2026-11-08 | **补上 inflight 残标自动清扫（启动一次 + 默认每小时周期），能力位按实际上调（§2.7 / §2.9，先真实进程取证再改口径）**：`main` 在进入 stdio 循环前调用 `run_startup_sweep()`（`trigger=startup`），并按 `auto_sweep_schedule()` 启动后台线程（`trigger=periodic`）；两条自动路径都直接调用既有 `sweep_inflight_markers`，复用同一 `stale_rule`，不另写判据，与 `task_start` / `runs.prune` / `runs.inflight.clean` 写同一 `runs/inflight-sweep.jsonl`（plan+result 均带 `trigger`）。周期默认**开启**、每小时一次：一次清扫只是只读扫描 `.inflight` 目录，成本低；只在启动时清扫会让长驻进程里的残标一直躺着。`AW_INFLIGHT_SWEEP_SECS` 可调：`0`=仅启动、`off`=关闭自动清扫、正整数=周期秒数，非法值按默认并写 stderr。审计 plan 行写不进去则本轮零删除（`inflight_auto_sweep_audit_failure_deletes_nothing`）。真实进程证据：把 bridge 可执行文件复制到独立目录（隔离 `runs/`），造 `pid=999999999` 的真残标与 `pid=当前测试进程` 的活跃标记，重启 bridge 后残标被清、活跃标记保留，审计 `trigger=startup phase=result removed_total=1 stale_reason=pid_missing kept_total=1`；另一用例用 `AW_INFLIGHT_SWEEP_SECS=1`，在 initialize 之后才造残标，确认只有 `trigger=periodic` 的 result 行清掉它（`inflight_startup_sweep_removes_stale_and_keeps_active` / `inflight_periodic_sweep_removes_stale_marker`）。能力位：`inflight.stale_markers_auto_swept` 由 `false/partial/path_triggered_only` 上调为 `true/proven/reason_code=null`，`automatic=true`，evidence 增加上述三个用例；`inflight.stale_marker_cleanable` 的 `automatic=false`（显式 clean 仍需调用方 `dry_run=false+confirm=true`）不变。`runs.inflight` 与 `runs.prune` 的 tools/list 描述同步（不再声称「无启动/定时自动清理」），`tools_sha256` 更新为 `915974d2663fa2289c9747e2a048d59784e93c397c643784643f9d57d2221937`。条目仍 17，`not_proven_total` 4→3。回归：Windows `17 lib + 125 integration`、WSL 全量见审计 §45 |
 
