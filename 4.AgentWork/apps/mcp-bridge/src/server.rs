@@ -1339,6 +1339,8 @@ impl Server {
             if !moved {
                 continue;
             }
+            #[cfg(test)]
+            run_sweep_after_claim_hook(&marker.path, &tmp);
             let unchanged = read_json(&tmp)
                 .ok()
                 .map(|after| {
@@ -1368,13 +1370,22 @@ impl Server {
                     }
                 }
             } else {
-                match fs::rename(&tmp, &marker.path) {
-                    Ok(()) => kept.push(json!({
+                // 被认领的副本已不是被判定的那份：此刻原名位置可能已被更新者占住。
+                // 还原只能是 create-if-absent（create_new 的 O_EXCL 语义），rename 会覆盖新标记。
+                match restore_without_clobber(&tmp, &marker.path) {
+                    Ok(RestoreOutcome::Restored) => kept.push(json!({
                         "task_id": marker.task_id,
                         "file": marker.file,
                         "pid": marker.assessment["pid"],
                         "stale_reason": marker.assessment["stale_reason"],
                         "reason": "marker_changed"
+                    })),
+                    Ok(RestoreOutcome::Superseded) => kept.push(json!({
+                        "task_id": marker.task_id,
+                        "file": marker.file,
+                        "pid": marker.assessment["pid"],
+                        "stale_reason": marker.assessment["stale_reason"],
+                        "reason": "marker_superseded"
                     })),
                     Err(error) => failed.push(json!({
                         "task_id": marker.task_id,
@@ -5187,6 +5198,63 @@ struct InflightMarker {
     assessment: Value,
 }
 
+enum RestoreOutcome {
+    /// 原名位置为空，已把副本放回
+    Restored,
+    /// 原名位置已被更新者占住：保留新标记，丢弃手上的副本
+    Superseded,
+}
+
+/// 还原「被认领但内容已变」的标记：只做 create-if-absent，绝不覆盖此刻已存在的新标记。
+/// 没有 compare-and-rename 语义，这里只能保证「不覆盖」，不能保证检查到认领之间没有窗口。
+fn restore_without_clobber(source: &Path, target: &Path) -> std::io::Result<RestoreOutcome> {
+    use std::io::Write;
+    let bytes = fs::read(source)?;
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = fs::remove_file(source);
+            return Ok(RestoreOutcome::Superseded);
+        }
+        Err(error) => return Err(error),
+    };
+    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(target);
+        return Err(error);
+    }
+    drop(file);
+    fs::remove_file(source)?;
+    Ok(RestoreOutcome::Restored)
+}
+
+/// 并发观测点（仅测试编译）：在「rename 认领」与「内容复核」之间注入一次确定性写入，
+/// 让「检查 → 认领 → 复核」窗口可被稳定复现，而不是靠竞态碰运气。
+/// 参数为（原名位置, 被认领的副本），测试据此构造复核时刻的真实文件状态。
+#[cfg(test)]
+static SWEEP_AFTER_CLAIM_HOOK: std::sync::Mutex<Option<fn(&Path, &Path)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_sweep_after_claim_hook(hook: Option<fn(&Path, &Path)>) {
+    *SWEEP_AFTER_CLAIM_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook;
+}
+
+#[cfg(test)]
+fn run_sweep_after_claim_hook(path: &Path, claimed: &Path) {
+    let hook = *SWEEP_AFTER_CLAIM_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hook) = hook {
+        hook(path, claimed);
+    }
+}
+
 fn marker_report(marker: &InflightMarker) -> Value {
     let mut report = marker.assessment.clone();
     if let Some(object) = report.as_object_mut() {
@@ -5295,11 +5363,12 @@ fn inflight_sweep_rule() -> Value {
         "audit_version": INFLIGHT_SWEEP_VERSION,
         "criteria": "markers[].stale（pid 存活优先于 deadlineAt）",
         "never_removed": ["active_pid_alive", "unreadable"],
-        "atomic_delete": "rename to .tmp + recheck task_id+pid+startedAt; mismatch restore & report marker_changed",
+        "atomic_delete": "rename to .tmp + recheck task_id+pid+startedAt; 不一致时只做 create-if-absent 还原（绝不覆盖更新者已占住的原名），记 marker_changed / marker_superseded",
         "idempotent": true,
         "idempotent_semantics": "无可清残标时不删除、不追加审计；重复触发返回 removed_total=0",
         "limits": [
             "cross_process_no_transaction",
+            "no_compare_and_rename_primitive",
             "new_process_may_join_between_check_and_delete",
             "unreadable_not_self_healing"
         ]
@@ -6138,7 +6207,19 @@ fn capabilities_payload() -> Value {
             &both,
             &[],
             &["prune_skips_task_with_live_inflight_marker"],
-            "PM 删除先 rename 再删；并发 acquire 可落在检查之后，检查与删除不是单个原子操作。",
+            "PM 删除先 rename 再删；并发 acquire 可落在检查之后，检查与删除不是单个原子操作。文件系统没有 compare-and-rename，扫描与 rename 认领之间仍有窗口；本条不因「还原不覆盖」那条窄结论而上调。",
+        ),
+        capability_entry(
+            "concurrency.sweep_restore_never_clobbers",
+            Some(true),
+            "proven",
+            "清扫者 rename 认领后复核内容不一致时，还原只做 create-if-absent（create_new/O_EXCL），不覆盖此刻已被更新者占住的原名",
+            None,
+            true,
+            &both,
+            &["macos"],
+            &["sweep_restore_never_clobbers_concurrent_new_marker"],
+            "只保证「不删、不覆盖与判定快照不同的标记」：复核不一致时原位已被占住则保留新标记并记 marker_superseded，原位为空才放回并记 marker_changed。不保证认领窗口内不出现短暂文件名空缺，也不保证窗口内不会有第三方同时开跑。",
         ),
         capability_entry(
             "inflight.marker_cross_process_visible",
@@ -6499,6 +6580,107 @@ mod receipt_tests {
         let (sha, len) = file_sha256_and_len(&missing);
         assert_eq!(sha, Value::Null);
         assert_eq!(len, None);
+    }
+}
+
+/// v1.36 并发观测点：清扫者「rename 认领」之后若发现内容已变，
+/// 还原路径不得覆盖此刻已存在的新标记（创建者已合法占住该文件名）。
+#[cfg(test)]
+mod inflight_sweep_race_tests {
+    use super::*;
+
+    fn marker_record(started_at: &str) -> Value {
+        json!({
+            "version": "inflight-marker/1",
+            "task_id": "race",
+            "pid": std::process::id(),
+            "mode": "dispatched",
+            "state": "active",
+            "startedAt": started_at,
+            "deadlineAt": "2099-01-01T01:00:00+00:00"
+        })
+    }
+
+    /// 复核时刻的真实文件状态（两侧都由别的进程写入）：
+    /// - 副本里是 W1——在「检查」之后、「认领」之前替换进来的活跃标记（被 rename 带走了）；
+    /// - 原名位置是 W2——在「认领」之后、「复核」之前新建的活跃标记。
+    fn two_writers_interleaved(path: &Path, claimed: &Path) {
+        fs::write(
+            claimed,
+            serde_json::to_string(&marker_record("2098-01-01T00:00:00+00:00")).expect("序列化 W1"),
+        )
+        .expect("构造被认领副本里的 W1");
+        fs::write(
+            path,
+            serde_json::to_string(&marker_record("2099-01-01T00:00:00+00:00")).expect("序列化 W2"),
+        )
+        .expect("并发写入者必须能在空出的文件名上创建 W2");
+    }
+
+    #[test]
+    fn sweep_restore_never_clobbers_concurrent_new_marker() {
+        let unique = format!(
+            "aw-sweep-race-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let runs = root.join("runs");
+        let dir = runs.join(INFLIGHT_DIR);
+        fs::create_dir_all(&dir).expect("创建 .inflight");
+        let marker = dir.join("race.json");
+        // 不给 pid、只给远期过期的 deadline：判据与平台无关，必然 stale
+        write_json_file(
+            &marker,
+            &json!({
+                "version": "inflight-marker/1",
+                "task_id": "race",
+                "mode": "dispatched",
+                "state": "active",
+                "startedAt": "2000-01-01T00:00:00+00:00",
+                "deadlineAt": "2000-01-01T01:00:00+00:00"
+            }),
+        )
+        .expect("写入残标");
+
+        let server = Server::with_runs_dir(root.join("settings.json"), runs.clone());
+        set_sweep_after_claim_hook(Some(two_writers_interleaved));
+        let sweep = server.sweep_inflight_markers("clean", None, false);
+        set_sweep_after_claim_hook(None);
+        let sweep = sweep.expect("清扫必须返回结果");
+
+        let after = read_json(&marker).expect("并发写入者的 W2 必须仍在原位");
+        assert_eq!(
+            after["startedAt"],
+            json!("2099-01-01T00:00:00+00:00"),
+            "还原不得覆盖并发写入的 W2（覆盖后会是 W1 的时间戳）：{after}"
+        );
+        assert_eq!(
+            after["pid"],
+            json!(std::process::id()),
+            "原位必须是 W2 的完整记录：{after}"
+        );
+        assert_eq!(
+            sweep["removed_total"].as_u64(),
+            Some(0),
+            "被并发替换的标记不得计入已删：{sweep}"
+        );
+        assert!(
+            sweep["kept"].to_string().contains("marker_changed")
+                || sweep["kept"].to_string().contains("marker_superseded"),
+            "必须具名记录复核不一致：{sweep}"
+        );
+        assert_eq!(
+            fs::read_dir(&dir)
+                .expect("读取 .inflight")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0,
+            "不得留下 .tmp 认领副本"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }
 

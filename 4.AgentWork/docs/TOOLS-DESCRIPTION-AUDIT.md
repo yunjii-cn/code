@@ -3417,3 +3417,57 @@ test result: FAILED. 0 passed; 1 failed
 - 成员未退出时 Drop 删不掉目录，会留空目录（不杀进程）。
 - macOS 无 `/proc`、无 cgroup，恒不可观测。
 
+## 38. v1.36：inflight 清扫的「检查后删除」并发边界（可观测判据 + 红→绿）
+
+改动位置：`apps/mcp-bridge/src/server.rs` 的 `sweep_inflight_markers` 与新增 `restore_without_clobber`；不新增工具、不改 `tools/list` 描述、`tools_sha256` 不变。
+
+### 38.1 先把可观测量说清（不先动实现）
+
+清扫者对每个被判 `stale` 的标记执行：read（判定）→ `rename` 到 `.tmp`（认领）→ 读回复核 `task_id`+`pid`+`startedAt` → 一致则删、不一致则还原。
+
+窗口内允许发生的两跳并发：
+
+1. **W1** 在「检查」与「认领」之间用 `create_new`（用前一步的守卫删除后腾出的名字）替换同名文件 → 被 `rename` 带走的是 W1，而不是判定时的 R0；
+2. **W2** 在「认领」与「还原」之间再次创建同名标记 → 原名位置被 W2 占住。
+
+可观测量（唯一判据）：清扫结束后，`runs/.inflight/<task>.json` 的内容必须是 **W2 的完整记录**（`pid`+`startedAt` 与 W2 一致），`removed_total=0`，`kept[]` 含 `marker_changed` 或 `marker_superseded`，目录中不留 `.tmp`。
+
+**不可证**：检查到认领之间没有窗口。文件系统没有 compare-and-rename，认领必然短暂空出文件名。故 `concurrency.check_then_delete_atomic` 不改判据，继续 `false/not_proven/check_then_delete_not_atomic`。
+
+### 38.2 红（在改实现之前，HEAD 代码原样失败）
+
+用例 `sweep_restore_never_clobbers_concurrent_new_marker` 通过 `#[cfg(test)]` 的 `SWEEP_AFTER_CLAIM_HOOK` 在认领与复核之间注入真实文件状态（副本=W1 的 `2098-…`、原名=W2 的 `2099-…`），避免靠竞态碰运气：
+
+```
+thread 'server::inflight_sweep_race_tests::sweep_restore_never_clobbers_concurrent_new_marker' panicked at apps\mcp-bridge\src\server.rs:6600:9:
+assertion `left == right` failed: 还原不得覆盖并发写入的 W2（覆盖后会是 W1 的时间戳）：{"deadlineAt":"2099-01-01T01:00:00+00:00","mode":"dispatched","pid":194200,"startedAt":"2098-01-01T00:00:00+00:00","state":"active","task_id":"race","version":"inflight-marker/1"}
+  left: String("2098-01-01T00:00:00+00:00")
+ right: String("2099-01-01T00:00:00+00:00")
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.01s
+```
+
+读法：`fs::rename(tmp, path)` 把 W2 换成了 W1——一条活跃标记被改写成过期记录，等于给后来者发了「可以开跑」的错误信号。
+
+第一次尝试的插入点错误（hook 放在认领之后、只写 W2）不会失败，因为那条路径删的是「判定时那一份」、不触碰新文件；红用例因此改成两跳注入，判据不变。
+
+### 38.3 绿
+
+- Windows：`13 lib + 122 integration` 全绿（含新 lib 用例）。
+- WSL Ubuntu 24.04（`cargo 1.88.0`）：`14 lib + 120 integration` 全绿，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-195601.log`。
+- `description_gate` 3 条全绿；`tools_sha256` 未变（未改 `tools/list`）。
+
+### 38.4 实现口径
+
+- `restore_without_clobber(source=tmp, target=原名)`：`fs::read` 取得被认领内容 → `OpenOptions::create_new(true)` 打开原名（O_EXCL）→ 写入并 `sync_all` → 删除 tmp；`AlreadyExists` 时**保留原名上的新标记**、丢弃手上副本，返回 `Superseded`（记 `marker_superseded`）；其他错误返回 `Err`（记 `marker_changed_restore_failed`），写失败时回滚自己刚创建的原名文件。
+- `marker_changed` 语义收窄为「原名仍为空，已把副本放回」；不再出现「用 rename 覆盖」这一分支。
+- `sweep_rule.atomic_delete` 文案写实；`sweep_rule.limits` 增加 `no_compare_and_rename_primitive`。
+- 能力位：`concurrency.check_then_delete_atomic` 保持 `false/not_proven`；新增 `concurrency.sweep_restore_never_clobbers=true/proven`（`platforms_verified=["windows","linux"]`、`platforms_unverified=["macos"]`、`automatic=true`、`evidence=["sweep_restore_never_clobbers_concurrent_new_marker"]`）；条目 15→16，`not_proven_total` 仍 5。
+
+### 38.5 仍然存在的边界
+
+- **认领窗口**：`rename` 成功到还原/删除之间文件名是空的，第三方 `create_new` 可以成功；本版只能保证不覆盖它，不能保证它不出现。
+- **`removed[]` 的读法**：`removed[].path` 只表示「本次删掉了这个文件名下的那份记录」，同一路径在回执写出时可能已有新标记（此时回调方应以 `runs.inflight action=list` 为准），不能据此断言该 task 当前无标记。
+- **快照字段有限**：复核只比 `task_id`+`pid`+`startedAt`；三个字段全同的另一条记录无法与判定时区分（例如同进程、同时间戳的重复写入），仍按「一致」处理。
+- macOS 未验证（`platforms_unverified=["macos"]`）。
+
+

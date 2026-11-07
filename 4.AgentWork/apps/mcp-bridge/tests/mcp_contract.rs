@@ -6384,6 +6384,22 @@ fn capabilities_declares_machine_readable_boundaries() {
         toctou["reason_code"], "check_then_delete_not_atomic",
         "{toctou}"
     );
+    // 窄结论：还原只做 create-if-absent，不覆盖并发写入的新标记（不放宽上一条）
+    let restore = claim(&payload, "concurrency.sweep_restore_never_clobbers");
+    assert_eq!(restore["holds"], true, "{restore}");
+    assert_eq!(restore["status"], "proven", "{restore}");
+    assert!(restore["reason_code"].is_null(), "{restore}");
+    assert_eq!(
+        restore["platforms_verified"],
+        json!(["windows", "linux"]),
+        "{restore}"
+    );
+    assert_eq!(restore["platforms_unverified"], json!(["macos"]), "{restore}");
+    assert_eq!(
+        restore["evidence"],
+        json!(["sweep_restore_never_clobbers_concurrent_new_marker"]),
+        "{restore}"
+    );
 
     // 残留标记：可观察、可清理，但不自动清扫
     let observable = claim(&payload, "inflight.stale_marker_observable");
