@@ -520,7 +520,7 @@ impl Server {
         let processing_total = candidates.len() as u64;
         let batch: Vec<Value> = candidates.into_iter().take(limit as usize).collect();
         // 两种可直接核对的等式：
-        // 1) deleted + failed + trashed + excluded_total == batch_candidates_total
+        // 1) deleted + failed + trashed + lost_race + excluded_total == batch_candidates_total
         // 2) candidates_total == batch_candidates_total + not_processed_total（limit 截断部分）
         let batch_candidates_total = batch.len() as u64 + excluded_total;
         let not_processed_total = processing_total - batch.len() as u64;
@@ -575,12 +575,14 @@ impl Server {
                 "deleted_total": 0,
                 "failed_total": 0,
                 "trashed_total": 0,
+                "lost_race_total": 0,
                 "exclude_requests_total": exclude_requests_total,
                 "excluded_total": excluded_total,
                 "not_in_candidates_total": not_in_candidates_total,
                 "deleted": [],
                 "failed": [],
                 "trashed": [],
+                "lost_race": [],
                 "excluded": excluded
             }));
         }
@@ -612,6 +614,7 @@ impl Server {
         let mut deleted: Vec<Value> = Vec::new();
         let mut failed: Vec<Value> = Vec::new();
         let mut trashed: Vec<Value> = Vec::new();
+        let mut lost_race: Vec<Value> = Vec::new();
         // 每条条目自包含整批 rule，跨批次核对不必回连顶层
         let rule = json!({
             "older_than_days": older_than_days,
@@ -686,11 +689,20 @@ impl Server {
                         &fingerprint,
                     ))
                 }
+                DeleteOutcome::LostRace { error } => lost_race.push(lost_race_entry(
+                    &task_id,
+                    attempt,
+                    &source_path,
+                    &error,
+                    &rule,
+                    &fingerprint,
+                )),
             }
         }
         let deleted_total = deleted.len() as u64;
         let failed_total = failed.len() as u64;
         let trashed_total = trashed.len() as u64;
+        let lost_race_total = lost_race.len() as u64;
         let status = if failed_total + trashed_total == 0 {
             "ok"
         } else {
@@ -707,9 +719,11 @@ impl Server {
             "deleted": deleted.clone(),
             "failed": failed.clone(),
             "trashed": trashed.clone(),
+            "lost_race": lost_race.clone(),
             "deleted_total": deleted_total,
             "failed_total": failed_total,
             "trashed_total": trashed_total,
+            "lost_race_total": lost_race_total,
             "exclude_requests_total": exclude_requests_total,
             "excluded_total": excluded_total,
             "not_in_candidates_total": not_in_candidates_total,
@@ -718,7 +732,7 @@ impl Server {
         });
         if let Err(error) = self.append_prune_record(&result) {
             return Err(format!(
-                "prune_audit_failed: 已删除 {deleted_total} 个、失败 {failed_total} 个、暂存 {trashed_total} 个；结果行写入 prune.jsonl 失败：{error}"
+                "prune_audit_failed: 已删除 {deleted_total} 个、失败 {failed_total} 个、暂存 {trashed_total} 个、竞态失手 {lost_race_total} 个；结果行写入 prune.jsonl 失败：{error}"
             ));
         }
 
@@ -739,12 +753,14 @@ impl Server {
             "deleted_total": deleted_total,
             "failed_total": failed_total,
             "trashed_total": trashed_total,
+            "lost_race_total": lost_race_total,
             "exclude_requests_total": exclude_requests_total,
             "excluded_total": excluded_total,
             "not_in_candidates_total": not_in_candidates_total,
             "deleted": deleted,
             "failed": failed,
             "trashed": trashed,
+            "lost_race": lost_race,
             "excluded": excluded
         }))
     }
@@ -974,12 +990,53 @@ impl Server {
         }
         let staged = stage_root.join(format!("{task_id}-attempt-{attempt}"));
         let staged_rel = format!("runs/.prune-trash/{batch_id}/{task_id}-attempt-{attempt}");
+        #[cfg(test)]
+        Self::run_prune_before_rename_hook(&source, &staged);
         if let Err(error) = fs::rename(&source, &staged) {
+            let _ = fs::remove_dir(&stage_root);
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return DeleteOutcome::LostRace {
+                    error: format!(
+                        "claim_lost_source_missing: 源目录已被另一认领者改名带走（attempt-{attempt}），本进程零删除：{error}"
+                    ),
+                };
+            }
             return DeleteOutcome::RetainedAtSource {
                 error: format!("整体移动失败（attempt 原样未动）：{error}"),
             };
         }
+        #[cfg(test)]
+        Self::run_prune_after_rename_hook(&source, &staged);
+        // Windows 实测：并发 rename 同一源可能都返回 Ok，但只有一个目的目录产生。
+        // 归属以目的目录是否存在为准，而不是 rename 的返回值。
+        match fs::symlink_metadata(&staged) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let _ = fs::remove_dir(&stage_root);
+                return DeleteOutcome::LostRace {
+                    error: format!(
+                        "claim_lost_after_rename: rename 返回成功但 {staged_rel} 不存在（同源并发改名被另一方认领），本进程零删除"
+                    ),
+                };
+            }
+            Err(error) => {
+                let _ = fs::remove_dir(&stage_root);
+                return DeleteOutcome::LostRace {
+                    error: format!(
+                        "claim_unverified_after_rename: 无法确认 {staged_rel} 是否存在，本进程零删除：{error}"
+                    ),
+                };
+            }
+        }
         if let Err(error) = fs::remove_dir_all(&staged) {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                let _ = fs::remove_dir(&stage_root);
+                return DeleteOutcome::LostRace {
+                    error: format!(
+                        "claim_lost_after_rename: {staged_rel} 在删除前已被另一方清走，本进程零删除：{error}"
+                    ),
+                };
+            }
             let error_text =
                 format!("已整链移至 {staged_rel}，但删除暂存失败（数据未丢）：{error}");
             return DeleteOutcome::RetainedInTrash {
@@ -991,6 +1048,42 @@ impl Server {
         let _ = fs::remove_dir(&stage_root);
         DeleteOutcome::Deleted {
             trash_path: staged_rel,
+        }
+    }
+
+    /// 并发观测点（仅测试编译）：在 attempt 目录 rename 之前对齐两个认领者，
+    /// 让「同一源、同时 rename」的窗口可稳定复现。
+    #[cfg(test)]
+    fn run_prune_before_rename_hook(source: &Path, staged: &Path) {
+        let hook = {
+            let armed = PRUNE_BEFORE_RENAME_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            armed
+                .as_ref()
+                .filter(|armed| armed.target == source)
+                .map(|armed| armed.hook)
+        };
+        if let Some(hook) = hook {
+            hook(source, staged);
+        }
+    }
+
+    /// 并发观测点（仅测试编译）：在 rename 返回 Ok 之后、目的复核之前注入，
+    /// 用于复现 Windows「双方都 Ok、只有一个目的目录」的观测事实。
+    #[cfg(test)]
+    fn run_prune_after_rename_hook(source: &Path, staged: &Path) {
+        let hook = {
+            let armed = PRUNE_AFTER_RENAME_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            armed
+                .as_ref()
+                .filter(|armed| armed.target == source)
+                .map(|armed| armed.hook)
+        };
+        if let Some(hook) = hook {
+            hook(source, staged);
         }
     }
 
@@ -1400,8 +1493,18 @@ impl Server {
                 MarkerReread::Stale => match fs::remove_file(&tmp) {
                     Ok(()) => removed.push(inflight_sweep_entry(marker, "deleted", "stale")),
                     Err(error) => {
-                        let _ = fs::rename(&tmp, &marker.path);
-                        failed.push(inflight_sweep_failure(marker, error.to_string()));
+                        // rename 会覆盖原位的新标记；还原同样只能 create-if-absent。
+                        let restore = match restore_without_clobber(&tmp, &marker.path) {
+                            Ok(RestoreOutcome::Restored) => "标记已还原原位".to_string(),
+                            Ok(RestoreOutcome::Superseded) => {
+                                "原位已有新标记，认领副本未还原".to_string()
+                            }
+                            Err(restore_error) => format!("还原失败：{restore_error}"),
+                        };
+                        failed.push(inflight_sweep_failure(
+                            marker,
+                            format!("{error}；{restore}"),
+                        ));
                     }
                 },
                 reread @ (MarkerReread::NotStale | MarkerReread::Unreadable) => {
@@ -2432,11 +2535,13 @@ fn parse_exclusions(args: &Value) -> Result<Vec<Exclusion>, String> {
     Ok(parsed)
 }
 
-/// 单次删除的终态：只有 `Deleted` 表示"已从 `runs/` 移除"；其余两种都还在盘上。
+/// 单次删除的终态：只有 `Deleted` 表示"已从 `runs/` 移除"；`LostRace` 表示另一方先赢了、
+/// 本进程零删除（源已不存在或目的目录不存在）；其余两种都还在盘上。
 enum DeleteOutcome {
     Deleted { trash_path: String },
     RetainedAtSource { error: String },
     RetainedInTrash { trash_path: String, error: String },
+    LostRace { error: String },
 }
 
 /// 未删除条目的状态：类型层面只可能取这两个值，构造不出 `deleted`
@@ -2473,6 +2578,29 @@ fn retained_entry(
         "source_path": source_path,
         "state": state.as_str(),
         "trash_path": trash_path,
+        "error": error,
+        "rule": rule,
+        "fingerprint": fingerprint
+    })
+}
+
+/// 竞态失手的统一构造入口：本进程零删除，`state` 固定为 `lost_race`，
+/// 不进 `failed[]`、不计入 `failed_total`。
+fn lost_race_entry(
+    task_id: &str,
+    attempt: u64,
+    source_path: &str,
+    error: &str,
+    rule: &Value,
+    fingerprint: &Value,
+) -> Value {
+    json!({
+        "task_id": task_id,
+        "attempt": attempt,
+        "path": source_path,
+        "source_path": source_path,
+        "state": "lost_race",
+        "trash_path": null,
         "error": error,
         "rule": rule,
         "fingerprint": fingerprint
@@ -6376,6 +6504,48 @@ fn run_sweep_after_claim_hook(path: &Path, claimed: &Path) {
     }
 }
 
+#[cfg(test)]
+struct PruneRenameHook {
+    target: PathBuf,
+    hook: fn(&Path, &Path),
+}
+
+#[cfg(test)]
+static PRUNE_BEFORE_RENAME_HOOK: std::sync::Mutex<Option<PruneRenameHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static PRUNE_AFTER_RENAME_HOOK: std::sync::Mutex<Option<PruneRenameHook>> =
+    std::sync::Mutex::new(None);
+
+/// 并发用例的 Barrier：两个认领者各自取克隆后放锁执行，避免持锁等待。
+#[cfg(test)]
+static PRUNE_BEFORE_RENAME_BARRIER: std::sync::Mutex<Option<std::sync::Arc<std::sync::Barrier>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static PRUNE_RACE_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn set_prune_before_rename_hook(target: &Path, hook: Option<fn(&Path, &Path)>) {
+    *PRUNE_BEFORE_RENAME_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook.map(|hook| PruneRenameHook {
+        target: target.to_path_buf(),
+        hook,
+    });
+}
+
+#[cfg(test)]
+fn set_prune_after_rename_hook(target: &Path, hook: Option<fn(&Path, &Path)>) {
+    *PRUNE_AFTER_RENAME_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook.map(|hook| PruneRenameHook {
+        target: target.to_path_buf(),
+        hook,
+    });
+}
+
 fn marker_report(marker: &InflightMarker) -> Value {
     let mut report = marker.assessment.clone();
     if let Some(object) = report.as_object_mut() {
@@ -7314,6 +7484,7 @@ fn capabilities_payload() -> Value {
                 "timeout_cleanup_three_states",
                 "descendant_snapshot_cross_checks_job_accounting",
                 "descendant_snapshot_cross_checks_process_group",
+                "timeout_cleans_controlled_set_including_grandchild",
                 "cgroup_scope_enumerates_adopted_escapee",
                 "cgroup_kill_terminates_adopted_escapee",
                 "cgroup_without_kill_reports_still_alive",
@@ -7676,7 +7847,7 @@ fn tools() -> Value {
         },
         {
             "name": "runs.prune",
-            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。真删（dry_run=false+confirm=true）时会在枚举候选前先按既有 inflight 判据顺带清残标并写 runs/inflight-sweep.jsonl，dry_run 只报告 would-remove、零删除；清扫审计失败则不删任何目录。服务启动时一次与默认每小时的后台清扫也写同一审计（trigger=startup|periodic），prune 内清扫的 trigger=prune",
+            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + lost_race + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。lost_race 表示同一 attempt 已被另一并发清扫者先认领/删除（rename 缺失源或目的目录不存在），单列 lost_race[] 并计入 lost_race_total，不计入 failed_total、不改变 status（仅 lost_race 时仍为 ok）。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。真删（dry_run=false+confirm=true）时会在枚举候选前先按既有 inflight 判据顺带清残标并写 runs/inflight-sweep.jsonl，dry_run 只报告 would-remove、零删除；清扫审计失败则不删任何目录。服务启动时一次与默认每小时的后台清扫也写同一审计（trigger=startup|periodic），prune 内清扫的 trigger=prune",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -8352,5 +8523,184 @@ mod description_gate {
                 );
             }
         }
+    }
+}
+
+/// prune 认领竞态用例：验证「rename 返回 Ok」不被当成归属依据。
+#[cfg(test)]
+mod prune_claim_race_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn outcome_state(outcome: &DeleteOutcome) -> &'static str {
+        match outcome {
+            DeleteOutcome::Deleted { .. } => "deleted",
+            DeleteOutcome::RetainedAtSource { .. } => "retained_at_source",
+            DeleteOutcome::RetainedInTrash { .. } => "trashed_not_deleted",
+            DeleteOutcome::LostRace { .. } => "lost_race",
+        }
+    }
+
+    /// 模拟 Windows 实测：rename 返回 Ok，但目的目录并不存在（被同源的另一方认领）。
+    fn simulate_peer_won(_source: &Path, staged: &Path) {
+        let _ = fs::remove_dir_all(staged);
+    }
+
+    /// 两个认领者在 rename 前对齐，稳定复现「同一源、同时 rename」。
+    fn wait_for_peer(_source: &Path, _staged: &Path) {
+        let barrier = {
+            let armed = PRUNE_BEFORE_RENAME_BARRIER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            armed.clone()
+        };
+        if let Some(barrier) = barrier {
+            barrier.wait();
+        }
+    }
+
+    struct PruneFixture {
+        root: PathBuf,
+        runs: PathBuf,
+        attempt: PathBuf,
+    }
+
+    impl PruneFixture {
+        fn new(tag: &str) -> Self {
+            let unique = format!(
+                "aw-prune-race-{tag}-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+            );
+            let root = std::env::temp_dir().join(unique);
+            let runs = root.join("runs");
+            let attempt = runs.join("t").join("attempt-1");
+            fs::create_dir_all(&attempt).expect("创建 attempt 目录");
+            fs::write(attempt.join("payload.txt"), b"evidence").expect("写入 attempt 内容");
+            Self {
+                root,
+                runs,
+                attempt,
+            }
+        }
+
+        fn server(&self) -> Server {
+            Server::with_runs_dir(self.root.join("settings.json"), self.runs.clone())
+        }
+
+        fn cleanup(self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn prune_claim_lost_is_named_not_trashed() {
+        let _serial = PRUNE_RACE_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = PruneFixture::new("missing-dest");
+        let server = fixture.server();
+        set_prune_after_rename_hook(&fixture.attempt, Some(simulate_peer_won));
+        let outcome = server.delete_attempt_dir("t", 1, "batch-missing");
+        set_prune_after_rename_hook(&fixture.attempt, None);
+
+        let state = outcome_state(&outcome);
+        assert!(
+            !fixture.attempt.exists(),
+            "源目录必须已经被 rename 带走：{state}"
+        );
+        assert_ne!(
+            state, "trashed_not_deleted",
+            "目的目录不存在不是「删除暂存失败」：{state}"
+        );
+        assert_ne!(
+            state, "retained_at_source",
+            "源已被搬走，不能报「原样未动」：{state}"
+        );
+        assert_eq!(
+            state, "lost_race",
+            "目的不存在必须具名记为 lost_race：{state}"
+        );
+        fixture.cleanup();
+    }
+
+    #[test]
+    fn prune_concurrent_claimers_delete_once_others_lost_race() {
+        let _serial = PRUNE_RACE_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let rounds = 20usize;
+        let mut deleted_rounds = 0usize;
+        let mut lost_rounds = 0usize;
+        let mut other_rounds = 0usize;
+
+        for round in 0..rounds {
+            let fixture = PruneFixture::new(&format!("round-{round}"));
+            let barrier = Arc::new(Barrier::new(2));
+            *PRUNE_BEFORE_RENAME_BARRIER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(barrier);
+            set_prune_before_rename_hook(&fixture.attempt, Some(wait_for_peer));
+
+            let handles: Vec<_> = (0..2)
+                .map(|index| {
+                    let server = fixture.server();
+                    let batch = format!("round-{round}-{index}");
+                    std::thread::spawn(move || server.delete_attempt_dir("t", 1, &batch))
+                })
+                .collect();
+            let states: Vec<&'static str> = handles
+                .into_iter()
+                .map(|handle| {
+                    let outcome = handle.join().expect("认领线程不得 panic");
+                    outcome_state(&outcome)
+                })
+                .collect();
+
+            set_prune_before_rename_hook(&fixture.attempt, None);
+            *PRUNE_BEFORE_RENAME_BARRIER
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+
+            let deleted = states.iter().filter(|state| **state == "deleted").count();
+            assert_eq!(deleted, 1, "第 {round} 轮必须恰好一方真删，实际 {states:?}");
+            let loser = states
+                .iter()
+                .find(|state| **state != "deleted")
+                .expect("必须存在未删除的一方");
+            assert_eq!(
+                *loser, "lost_race",
+                "第 {round} 轮败者必须具名记为 lost_race：{states:?}"
+            );
+            assert!(
+                !fixture.attempt.exists(),
+                "第 {round} 轮源目录必须已被搬走：{states:?}"
+            );
+            for index in 0..2 {
+                let stage_root = fixture
+                    .runs
+                    .join(".prune-trash")
+                    .join(format!("round-{round}-{index}"));
+                assert!(
+                    !stage_root.exists(),
+                    "第 {round} 轮不得留下半截暂存目录 {}：{states:?}",
+                    stage_root.display()
+                );
+            }
+
+            match *loser {
+                "lost_race" => lost_rounds += 1,
+                _ => other_rounds += 1,
+            }
+            deleted_rounds += deleted;
+            fixture.cleanup();
+        }
+
+        println!(
+            "[evidence] prune_claim_race rounds={rounds} deleted={deleted_rounds} \
+             lost_race={lost_rounds} other={other_rounds}"
+        );
+        assert_eq!(deleted_rounds, rounds, "每轮都必须有一方真删");
+        assert_eq!(other_rounds, 0, "败者只能是 lost_race");
     }
 }

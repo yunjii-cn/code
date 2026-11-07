@@ -2676,7 +2676,7 @@ fn timeout_cleans_controlled_set_including_grandchild() {
     #[cfg(windows)]
     const SENTINEL: &str = "aw-timeout-grandchild.exe";
     #[cfg(windows)]
-    let cmd = {
+    let (cmd, timeout_secs) = {
         let source = std::env::var_os("SystemRoot")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
@@ -2692,12 +2692,64 @@ fn timeout_cleans_controlled_set_including_grandchild() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-        format!("{SENTINEL} -n 30 127.0.0.1 > NUL")
+        // 握手夹具：子进程写 started → 拉起孙进程 → 写 ready → 保持存活。
+        // 父进程（测试）只有看到 ready 才能确认孙进程已被创建，"窗口内观测"才有前提。
+        fs::write(
+            work.path().join("handshake.cmd"),
+            format!(
+                "@echo off\r\n\
+                 set \"S=%~dp0{SENTINEL}\"\r\n\
+                 echo started>\"%~dp0handshake-started.txt\"\r\n\
+                 start \"\" /b \"%S%\" -n %1 127.0.0.1 > NUL\r\n\
+                 echo ready>\"%~dp0handshake-ready.txt\"\r\n\
+                 ping -n %2 127.0.0.1 > NUL\r\n"
+            ),
+        )
+        .expect("写入握手夹具");
+        // 窗口外握手测量：同形态跑一次短命孙进程，记录 spawn→ready 的真实耗时；
+        // 等探针孙进程完全退出后再进入窗口，避免它被观测成"窗口内的孙进程"。
+        let probe_ready = work.path().join("handshake-ready.txt");
+        let _ = fs::remove_file(&probe_ready);
+        let probe_start = std::time::Instant::now();
+        let mut probe = std::process::Command::new("cmd")
+            .args(["/C", "handshake.cmd 2 3"])
+            .current_dir(work.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("启动握手测量");
+        let deadline = probe_start + Duration::from_secs(60);
+        while !probe_ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let handshake_ms = probe_start.elapsed().as_millis() as u64;
+        assert!(
+            probe_ready.exists(),
+            "握手测量 60s 内没有写出 ready，夹具不可用"
+        );
+        let _ = probe.wait();
+        let purge_deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let empty = process_image_pids(SENTINEL)
+                .map(|(pids, _)| pids.is_empty())
+                .unwrap_or(false);
+            if empty || std::time::Instant::now() >= purge_deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = fs::remove_file(work.path().join("handshake-started.txt"));
+        let _ = fs::remove_file(&probe_ready);
+        // 超时按实际握手耗时给足：握手 + 6s 余量，至少 10s。
+        let timeout_secs = std::cmp::max(10u64, handshake_ms / 1000 + 6);
+        println!(
+            "[evidence] grandchild_handshake warm_ms={handshake_ms} timeout_ms={}",
+            timeout_secs * 1000
+        );
+        ("handshake.cmd 60 120".to_string(), timeout_secs)
     };
     #[cfg(not(windows))]
     let cmd = "echo $$ > pids.txt; sleep 30 & echo $! >> pids.txt; wait";
-    #[cfg(windows)]
-    let timeout_secs = 8;
     #[cfg(not(windows))]
     let timeout_secs = 1;
 
@@ -2781,6 +2833,51 @@ fn timeout_cleans_controlled_set_including_grandchild() {
         })
     };
 
+    // 窗口内：执行放独立线程，主线程按 ready 文件做握手确认（不改变被测命令的超时语义）。
+    #[cfg(windows)]
+    let (payload, ready_seen, ready_delay_ms) = {
+        let call_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = {
+            let server = server;
+            let done = Arc::clone(&call_done);
+            let cwd = work.path().to_path_buf();
+            let cmd = cmd.clone();
+            std::thread::spawn(move || {
+                let result = call_tool(
+                    &server,
+                    "task.execute",
+                    json!({
+                        "task_id": "t-to-grandchild",
+                        "cmd": cmd,
+                        "cwd": cwd,
+                        "timeout_secs": timeout_secs
+                    }),
+                );
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+                result
+            })
+        };
+        let ready_path = work.path().join("handshake-ready.txt");
+        let mut ready_seen = false;
+        let mut ready_delay_ms = 0u64;
+        let deadline = call_start + Duration::from_secs(timeout_secs + 20);
+        loop {
+            if ready_path.exists() {
+                ready_seen = true;
+                ready_delay_ms = call_start.elapsed().as_millis() as u64;
+                break;
+            }
+            if call_done.load(std::sync::atomic::Ordering::SeqCst)
+                || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let payload = tool_payload(&worker.join().expect("执行线程不得 panic"));
+        (payload, ready_seen, ready_delay_ms)
+    };
+    #[cfg(not(windows))]
     let payload = tool_payload(&call_tool(
         &server,
         "task.execute",
@@ -2837,19 +2934,37 @@ snapshot_failures={failures} max_rows={rows} file_exists={} after_cleanup={:?} p
             (Some(_), true) => "premise_not_established",
             (Some(_), false) => "pass",
         };
+        let timeout_ms = timeout_secs * 1000;
+        let handshake = if !ready_seen {
+            "not_completed"
+        } else if ready_delay_ms < timeout_ms {
+            "before_timeout"
+        } else {
+            "after_timeout"
+        };
         println!(
-            "[verdict] grandchild_case={verdict} observed={} survivors={:?} \
-call_ms={} payload_duration_ms={} polls={polls} snapshot_failures={failures} \
-premise=窗口内观测到唯一命名的孙进程",
+            "[verdict] grandchild_case={verdict} ready_seen={ready_seen} \
+ready_delay_ms={ready_delay_ms} timeout_ms={timeout_ms} handshake={handshake} \
+observed={} survivors={:?} call_ms={} payload_duration_ms={} polls={polls} \
+snapshot_failures={failures} premise=窗口内观测到唯一命名的孙进程",
             observed.len(),
             survivors_pids,
             call_start.elapsed().as_millis(),
             payload["duration_ms"],
         );
+        let premise_detail = if !ready_seen {
+            "握手未完成，本条不构成裁决依据（handshake_not_completed）"
+        } else if ready_delay_ms >= timeout_ms {
+            "超时早于 ready（timeout_before_ready），本条不构成裁决依据"
+        } else {
+            "ready 已出现但窗口内未观测到孙进程（ready_seen_but_not_observed）"
+        };
         assert!(
             !observed.is_empty(),
-            "前提未建立（环境判定，不是终止逻辑判据）：超时窗口内没有观测到孙进程 {SENTINEL}，\
-见 [verdict] grandchild_case=premise_not_established；该轮既不能证明也不能否证整树清理能力"
+            "前提未建立（环境判定，不是终止逻辑判据）：{premise_detail}；\
+超时窗口内没有观测到孙进程 {SENTINEL}，见 [verdict] grandchild_case=premise_not_established \
+ready_seen={ready_seen} ready_delay_ms={ready_delay_ms} timeout_ms={timeout_ms}；\
+该轮既不能证明也不能否证整树清理能力"
         );
         assert_eq!(
             survivors_pids,

@@ -1103,7 +1103,7 @@ POSIX（verify.sh run）：3 unit + 71 integration，0 failed，四类证据行�
 }
 ```
 
-顶层：`deleted_total` / `failed_total` / `trashed_total` 三集合计数，且 `deleted_total + failed_total + trashed_total = 本次实际处理的候选数`；`status` 仅在 `failed_total + trashed_total == 0` 时为 `ok`，否则为 `partial`。
+顶层：`deleted_total` / `failed_total` / `trashed_total` / `lost_race_total` 四集合计数，且 `deleted_total + failed_total + trashed_total + lost_race_total = 本次实际处理的候选数`；`status` 仅在 `failed_total + trashed_total == 0` 时为 `ok`，否则为 `partial`（`lost_race_total` 不参与，v1.44）。
 
 `rule` 在**每一条条目里自包含**（`older_than_days`、`status_filter`、`limit`、`batch_id` 四件套），跨批次核对不需要回连顶层或 `prune.jsonl` 的 plan/result 行。
 
@@ -1255,7 +1255,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "915974d2663fa2289c9747e2a048d59784e93c397c643784643f9d57d2221937",
+  "tools_sha256": "85da030305024ac405c9fdecb6cfc0e9d4c46fdc7f2dd4aa000314d346e6a3bc",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -2391,7 +2391,7 @@ r-c/attempt-1 exists: True
 {"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"batch_candidates_total\":3,\"candidates_total\":3,\"deleted\":[{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-a\"...},{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-b\"...},{\"age_days\":40,\"attempt\":1,...\"task_id\":\"r-c\"...}],\"deleted_total\":3,\"dry_run\":false,\"evaluated_at\":\"2026-11-06T18:07:04Z\",\"exclude_filter\":[{\"attempt\":1,\"task_id\":\"r-missing\"}],\"exclude_requests_total\":1,\"excluded\":[{\"attempt\":1,\"path\":null,\"reason\":\"not_in_candidates\",\"task_id\":\"r-missing\"}],\"excluded_total\":0,\"failed\":[],\"failed_total\":0,\"limit\":100,\"not_in_candidates_total\":1,\"not_processed_total\":0,\"older_than_days\":30,\"status\":\"ok\",\"status_filter\":null,\"trashed\":[],\"trashed_total\":0,\"truncated\":false}","type":"text"}],"isError":false}}
 ```
 
-三次都满足：`deleted_total + failed_total + trashed_total + excluded_total == batch_candidates_total`，且 `candidates_total == batch_candidates_total + not_processed_total`。
+三次都满足：`deleted_total + failed_total + trashed_total + lost_race_total + excluded_total == batch_candidates_total`，且 `candidates_total == batch_candidates_total + not_processed_total`（v1.44 起含 `lost_race`）。
 
 ### 26.6 未覆盖与限制（如实标注）
 
@@ -4069,3 +4069,108 @@ test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 16 filtered out;
 - **审计非事务**：`plan` 先写、删除后写 `result`；进程在两次 append 之间崩溃会缺 `result` 行，但不会出现「没 plan 就删」。
 - **坏标记不自愈**：`unreadable` 永不删除，只能人工处理。
 - 回归：Windows `19 lib + 125 integration` 全绿；WSL Ubuntu 24.04 `23 lib + 123 integration` 全绿（WSL 日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-025030.log`）。
+
+## §47 v1.44：`rename` 返回值作为归属/互斥依据的全库核查
+
+### 47.1 判据
+
+只有两种归属判据可以接受：**事后读目的路径**（存在/可读才算拿到），或**独占创建**（`create_new` / O_EXCL）。`rename` 的 `Ok` 只说明"这次调用没报错"，在 Windows 上不说明目的文件归你（§46.2 已实测：4 个并发 rename 同一源全部 `Ok`，只有一个目的文件）。本次据此逐处判定，不按文件名列表交差。
+
+### 47.2 逐处结论
+
+| 位置 | 现状 | 判定 | 处理 |
+|---|---|---|---|
+| `server.rs` session 审计 tmp→正式名 | 目的名含 pid+毫秒+序号，天然唯一；rename 失败只清 tmp | 不靠返回值判归属：没有竞争同一目的名 | 不改 |
+| `server.rs` `delete_attempt_dir` attempt 目录换名 | rename `Ok` 后直接 `remove_dir_all(staged)` | **靠返回值判搬成功**：并发下双方 `Ok`、只有一个目的目录；败者删暂存报 `NotFound`，被归成 `trashed_not_deleted`（Windows）或 `retained_at_source`（POSIX），把竞态报成故障 | **改**：rename `Ok` 后用 `symlink_metadata(staged)` 复核；源 `NotFound` / 目的不存在 / 目的删除前被清走 → `lost_race` |
+| `server.rs` inflight 认领 | rename `Ok` 后重读认领副本，读不到即 `lost_race` | 已按目的可读判归属（v1.43） | 不改 |
+| `server.rs` inflight 删除失败回滚 `rename(tmp → 原名)` | 认领副本删除失败时用 rename 还原 | 不判归属，但 rename 会覆盖原位新标记 | **改**：复用 `restore_without_clobber`（`create_new`），`Restored`/`Superseded` 分别写实 |
+| `server.rs` `posix_rename_active_attempt_semantics` | rename 返回后另断言 `!attempt.exists()` / `staged.exists()` | 已以目的存在为准；返回值只作语义探针 | 不改 |
+| `server.rs` 测试刷新者 `rename(staging → marker)` | 测试夹具的原子替换，不宣称归属 | 非生产归属路径 | 不改 |
+| `updater.rs` `promote_verified_download` | 校验 sha 后 tmp→正式文件 | 不判归属/互斥（单实例发布步骤） | 不改 |
+| `launcher_stub.py` 下载落盘 | 固定 `.tmp` 后 rename 到目标 | 不判归属；只用异常表示是否落盘 | 不改（非派单并发域） |
+| `build-version.py` / `backend.py` / `env_service.py` 的 rename / `shutil.move` | 安装器备份或 venv 迁移 | 不判归属/互斥 | 不改 |
+| inflight / prune 的 `phase="plan"` | JSONL append + fsync | 不是"plan 文件原子替换"，不涉及 rename 归属 | 不改 |
+
+### 47.3 `lost_race` 的语义与计数归属
+
+- prune 结果新增独立 `lost_race[]` / `lost_race_total`，逐条带 `task_id`/`attempt`/`source_path`/`error`/`rule`/`fingerprint`，`state="lost_race"`、`trash_path=null`。
+- **不计入 `failed_total`**；`status` 只在 `failed_total + trashed_total > 0` 时为 `partial`，只有 `lost_race` 时仍 `ok`、`isError=false`。
+- 不变式：`deleted_total + failed_total + trashed_total + lost_race_total + excluded_total == batch_candidates_total`（代码注释、`runs.prune` 描述、契约 §8.11 三处一致）。
+- 与清扫侧同名同义：**另一方先赢、本进程零删除**。区别只在对象与观测点——清扫侧是 `.inflight` 标记的认领副本读不到；prune 侧是 attempt 目录的源已消失或目的目录不存在。
+
+### 47.4 红：旧实现的实测输入/输出
+
+窗口内两条用例（`mod prune_claim_race_tests`）：
+
+- `prune_claim_lost_is_named_not_trashed`：观测点 `PRUNE_AFTER_RENAME_HOOK` 在 rename 后删掉 `staged`，精确模拟 Windows「rename 返回 Ok 但目的目录不存在」。旧实现断言文本与实测值：
+
+```text
+目的目录不存在不是「删除暂存失败」：trashed_not_deleted
+```
+
+- `prune_concurrent_claimers_delete_once_others_lost_race`：两个线程各持同一 `runs` 的 `Server`，`PRUNE_BEFORE_RENAME_HOOK` + `Barrier` 在 rename 前对齐，连跑 20 轮。旧实现第 0 轮失败文本与实测状态：
+
+```text
+第 0 轮败者不得被报成暂存删除失败：[deleted, trashed_not_deleted]        # Windows
+第 0 轮败者不得被报成原样未动：[deleted, retained_at_source]              # WSL Linux
+```
+
+红证据说明：Windows 的败者被误报成"暂存删除失败（数据未丢）"，但它其实是被另一方搬走并删掉了；POSIX 的败者被误报成"原样未动"，源其实已经不在。两者都不是 `deleted`，也都不是可核对的竞态终态。
+
+### 47.5 绿：真并发 20 轮
+
+修后同一用例（断言加强为"败者必须是 `lost_race`"）：
+
+```text
+[evidence] prune_claim_race rounds=20 deleted=20 lost_race=20 other=0
+```
+
+每轮同时满足：恰好一方 `deleted`；另一方 `lost_race`；源目录不存在；两方 `.prune-trash/<batch>` 都不留半截；两条 entry 合计 2、无重复。`prune_claim_lost_is_named_not_trashed` 同样绿（`state="lost_race"`）。
+
+### 47.6 能力位与描述
+
+- 本次不新增/不上调能力位；`concurrency.check_then_delete_atomic` 保持 v1.43 的 `true/proven`。
+- `runs.prune` 工具描述的不变式改为含 `lost_race`，`tools_sha256` 由 `915974d2…` → `85da0303…`，审计门禁块同步；G 行只断言"含计数不变式/四集合字段"，不因新增 `lost_race` 失效。
+
+## §48 v1.44：孙进程握手夹具（Windows）
+
+### 48.1 旧夹具为什么前提不成立
+
+旧夹具直接 `cmd /C "<sentinel> -n 30 127.0.0.1 > NUL"` + `timeout_secs=8`，孙进程是否在窗口内完全取决于冷启动耗时。上一轮实测调用 30.8s、`grandchild_timeline=[]`，裁决只能是"前提不成立"——这不是终止逻辑的判据，而是夹具不可控。
+
+### 48.2 握手夹具
+
+- `handshake.cmd`：`echo started > started.txt` → `start "" /b <sentinel> -n %1` → `echo ready > ready.txt` → `ping -n %2` 保持存活。
+- 窗口外先跑一次 `handshake.cmd 2 3` 测量 `spawn → ready` 的真实耗时 `handshake_ms`；等探针孙进程完全退出（`process_image_pids(SENTINEL)` 为空）后清掉 started/ready，避免污染窗口内观测。
+- 窗口内 `timeout_secs = max(10, handshake_ms/1000 + 6)`，命令 `handshake.cmd 60 120`；`task.execute` 放独立线程，主线程等待 `ready.txt` 并记录 `ready_seen` / `ready_delay_ms`。
+- 判据、三条断言、`blocked_reason` 断言、四态均未放宽。
+
+### 48.3 verdict 增加握手字段
+
+```text
+[verdict] grandchild_case=... ready_seen=<bool> ready_delay_ms=<n> timeout_ms=<n> \
+handshake=<before_timeout|after_timeout|not_completed> observed=<n> survivors=[...] ...
+```
+
+- `ready_seen=false` → 断言文本明确写「**握手未完成，本条不构成裁决依据**」，不把它当成"整树清理不可证"的结论。
+- `ready_seen=true` 且 `ready_delay_ms >= timeout_ms` → `handshake=after_timeout`，同样注明本条不构成裁决依据。
+- `ready_seen=true` 且窗口内未观测到 → `premise_not_established`，子原因 `ready_seen_but_not_observed`。
+- 四态仍为 `pass` / `terminate_defect` / `unobservable` / `premise_not_established`。
+
+### 48.4 实测（Windows）
+
+```text
+[evidence] grandchild_handshake warm_ms=412 timeout_ms=10000
+[evidence] grandchild_first_seen ms=418 pid=...
+[evidence] grandchild_gone after_ms=10215
+[evidence] grandchild_survivors_after_cleanup=[]
+[verdict] grandchild_case=pass ready_seen=true ready_delay_ms=412 timeout_ms=10000 \
+handshake=before_timeout observed=1 survivors=[] ...
+```
+
+`ready_seen=true`、`handshake=before_timeout`，孙进程确实落在观测窗口内，清理后零存活；本条从"前提不成立"推进为可裁决的 `pass`。POSIX 分支判据与断言不变，WSL 实跑通过。
+
+### 48.5 能力位与剩余 `not_proven`
+
+- `timeout.cleans_entire_process_tree` 的 evidence 增加 `timeout_cleans_controlled_set_including_grandchild`，但 **holds 仍 `false/partial`**：本次只证成 Windows 受控集合内的孙进程，证不到作业外进程。
+- 剩余两条 `not_proven` 的可证路径已在契约 §2.7 后逐条写明（`timeout.cleans_entire_process_tree`、`timeout.enumerates_escaped_descendants`）：Linux 分支在本机可证（cgroup v2 + `cgroup.kill`），Windows 的"整树/逃逸后代权威枚举"在本机无 OS 原语，结构性不可证。
