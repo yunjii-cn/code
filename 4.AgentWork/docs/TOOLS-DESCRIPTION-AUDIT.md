@@ -4510,4 +4510,72 @@ v1.47 把 Linux 孙进程残留在「已知限制 + 人工巡检」；本轮把�
 - 跨机器不可见：sidecar、`.cancel` 请求都只在同一 `runs/` 内有效。
 - `pending` 在真实链路两个平台都观测到了（20ms 轮询），但窗口随执行侧调度变化，可能短于观测间隔；`requestedAt`/`acknowledgedAt`/`finishedAt` 三个时间戳始终可区分三阶段，不以「没轮询到 pending」当作未实现。
 
+## 53. v1.49：两条不稳定用例的诊断 / 定性 / quarantine，以及 B7 纯文件跨进程取消
+
+### 53.1 红证据（改动前原文，不是转述）
+
+**用例 B：`server::inflight_sweep_race_tests::sweep_concurrent_claimers_delete_once_others_lost_race`（Windows）**
+
+`cargo test -p aw-mcp-bridge --lib inflight_sweep_race_tests -- --test-threads=8` 连跑 30 轮，第 30 轮红，4 个清扫者里 1 个记 `failed`：
+
+```
+assertion `left == right` failed: 其余清扫者必须记 lost_race，实际 2
+failed[0].error = "系统找不到指定的文件。 (os error 2)；还原失败：系统找不到指定的文件。 (os error 2)"
+failed_total = 1, deleted_total = 1, lost_race_total = 2
+```
+
+即：赢家删除成功（`deleted_total=1`），两个清扫者读到 `Gone` 记 `lost_race`，但有一个清扫者的**认领副本在「复核为 stale」之后、`remove_file` 之前消失**，被记成 `failed`。
+
+**用例 A：`server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group`（POSIX）**
+
+用户全量 POSIX 并行跑（`test-threads>=16`）出现 1 次 `outcome=Unavailable`（终止返回不可观测，断言要求 `Cleaned`）。本地改动后 8 轮全量并行（32 条用例 / `--test-threads=16`，日志 `/root/.aw-posix-verify/logs/v149-stress.txt`）0 失败；改动前没有有效的本地复现样本——早先 16 轮 WSL 循环因 `cargo` 不在 PATH 实际未运行，**不计入观测频率**。
+
+### 53.2 定性（两者分开写，不混）
+
+- **用例 B 是产品在高并发下的缺陷（分类错误），不是测试自身不稳。** 产品注释已写明「Windows 上多个并发 rename 可能都返回成功，但只有一个目的地真的产生文件」，但 `rename Ok` 之后只处理了「副本读不到 → lost_race」和「复核后不是 stale → not_mine」，漏了「复核为 stale、删除/还原时副本已消失」这一窗口，把它记成 `failed` 并写进审计。修法：删除与还原两处遇到 `NotFound` 一律记 `lost_race: claim_copy_gone`（谁先处置谁赢，不产生假失败）；`restore_without_clobber` 写回原位后 `source` 消失也不再算失败。
+- **用例 A 归为「测试自身不稳」（不是产品在高并发下谎报清理）。** `Unavailable` 是安全侧降级（观测不到就不宣称清空），方向正确；不稳的是「高负载下仍要求必然 `Cleaned`」这条断言。同时暴露了观测健壮性缺口：`proc_table()` 原先「任意一条 `/proc/<pid>/stat` 读失败 / 解析失败即放弃整份扫描」过于脆弱。已收紧为：只有确认 `/proc/<pid>` 已不存在（读失败、解析失败、空内容）才跳过；进程仍存在时的读失败/解析失败仍然整份返回不可观测——判据没有放宽。根因未能证实，因此**仍 quarantine**，下次红时由 53.3 的诊断直接给出具体 `unobservable` 原因，再决定是否升级为产品缺陷；不以「重跑全绿」结案。
+
+### 53.3 诊断信息（下次红能直接定位）
+
+- 清扫并发用例：按标记路径隔离的时序记录 `sweep_trace`，每条事件带「相对毫秒 / 线程 id / 动作 / 现场」，动作覆盖 `claim_attempt` / `claim_failed` / `reread_claim_copy`（含 `exists` 与 `len`）/ `claim_copy_removed|vanished|remove_failed`；失败断言一次性附上 `.inflight` 目录清单（名字、长度、mtime）、审计原文、各清扫者结果、CPU 数。
+- 终止/快照用例：线程内时序记录 `terminate 开始 / 终止前名单 / 清扫循环开始 / 每轮 group_exists / 各 Unavailable 的具体原因（cgroup_scope_lost / cgroup_procs_unreadable:<原因> / cgroup_events:<原因> / snapshot:<原因>）/ StillAlive 原因`；`Supervisor::diagnostics` 再 dump `pgid / root_start / cgroup.status / cgroup.procs / cgroup.events / members() / populated() / /proc 行数 / 终止后快照 / 观测并发 active+peak`。实测并行时 `peak=11`，可直接看到失败当时的并发度。
+- 确定性回归：新增 `sweep_claim_copy_vanishing_after_reread_is_lost_race_not_failure`，用 `set_sweep_after_reread_hook` 在「复核后、删除前」删掉认领副本，强制走该窗口，断言 `failed_total=0 / deleted_total=0 / lost_race_total=1 / reason=claim_copy_gone`。
+
+### 53.4 quarantine：默认门禁按 WARN 呈现，不静默通过
+
+- 清单：`scripts/test-gate/quarantine.txt`（测试全名 | 平台 | 负责人 | 自版本 | 触发条件 | 观测频率）。
+- 分类器：`scripts/test-gate/gate.sh`（POSIX）/ `gate.ps1`（Windows）。语义固定：
+  - 清单用例**照常运行**，不 skip、不 `#[ignore]`；
+  - 运行结果一律打印 `[WARN] quarantined <name> result=ok|FAILED|ignored`——**通过也只是 WARN，不记成 PASS**；
+  - 失败不阻断门禁（退出码 0），但汇总行为 `[GATE] warn=N fail=0 — …不代表全绿结论`；非清单用例失败退出码 2；
+  - 清单条目没被观测到（被过滤/改名）也打印 WARN，避免清单悄悄失效；
+  - **没有证据不判绿**：日志不存在/不可读、日志里一条结果行都没有（编译/链接失败、被过滤）、cargo 退出码非 0 且没有任何 FAILED 行，一律打印 `[GATE] fail=1 …` 并以 2 退出。quarantine 只豁免清单内用例的 FAILED，不豁免「跑都没跑起来」。
+  - 实测负向对照：`gate.sh --log /tmp/aw-no-such-log.log` → `[GATE] fail=1 — 日志不存在或不可读`，退出 2；只含编译输出的日志 → `[GATE] fail=1 — 未解析到任何测试结果行`，退出 2；`gate.ps1 -LogFile` 指向不存在文件同样是 2。
+- `scripts/posix-timeout-verify/verify.sh` 已接入：全量测试后用 `gate.sh --log` 分类，裁剪 workspace 时同步复制 `scripts/test-gate/`。
+
+### 53.5 B7：真实派单链路的纯文件跨进程取消（两平台）
+
+| 角色 | 进程 | 做什么 |
+| --- | --- | --- |
+| 派单方 | 验证进程 | 真实 `task.execute`，落盘 `runs/<task>/attempt-1/dispatch.json` + `runs/.inflight/<task>.json` |
+| 执行侧 | bridge 进程 | 200ms 心跳读 `.cancel/<task>.json`，收敛后写 acknowledged / done |
+| 取消方 | **独立 OS 进程，不是 MCP 客户端** | 按 `cancel-request/1` 直接写文件（`O_EXCL` + fsync），自己轮询三态 |
+
+断言：`canceller.pid != executor.pid`；`requested_by=b7-canceller-pid-<canceller.pid>`；`handledBy.pid=executor.pid`；`target{pid,startedAt}` = 活跃标记；`dispatch.json` 属于本次派单；取消进程观测到 `pending→acknowledged→done`；执行侧 `canceled`、`blocked_reason` 前缀 `canceled：`；盘上 handback `canceled`；标记删除；心跳停止。整条取消链路只依赖文件。
+
+红→绿：首跑 B7 红——取消方进程未创建 `.cancel/` 父目录，`O_CREAT` 直接失败（`written=null`，执行侧没收到请求）；补 `os.makedirs(dirname, exist_ok=True)` 后两平台绿。这条红本身证明「取消只走文件」不是靠测试客户端代劳。
+
+### 53.6 回归（本轮实测）
+
+- Windows：`gate.ps1` → lib 24 + integration 129 全绿，`[GATE] warn=0 fail=0`；清扫并发用例改后连跑 40 轮全绿。
+- WSL Ubuntu 24.04（cgroup2fs，root）：`verify.sh run` → lib 34 + integration 127 全绿，四类 POSIX 证据齐全；门禁对 quarantine 用例打印 `[WARN] … result=ok`。
+- 真实链路（MCP stdio + 独立取消进程）：Windows `19 evidence / 0 failures`，Linux `20 evidence / 0 failures`（均含新增 B7；两平台各自实测三进程与三态）。
+- 已知不稳定观测频率：A 1 次（2026-11-08 全量 POSIX）；改后 8 轮全量并行未复现。B 1 次 / 30 轮（改前）；改后 40 轮 0 次。
+
+### 53.7 未证 / 边界
+
+- A 的根因未证实（未能抓到失败瞬间的 `unobservable` 原因）；quarantine 移除条件：连续 30 次默认门禁 + 10 次隔离 soak（`--test-threads=1` 与 16）全绿，并写下根因结论。不满足前它始终以 WARN 呈现。
+- `proc_table` 只在「条目已退出」时跳过；hidepid / 权限导致的读失败仍让整份观测不可用（不放松「没有证据不宣称清空」）。
+- B7 的 `pending` 窗口仍可能短于观测间隔；三阶段区分以盘上 `requestedAt/acknowledgedAt/finishedAt` 为准。
+
 

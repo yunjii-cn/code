@@ -209,6 +209,10 @@ write_trimmed_workspace() {
   mkdir -p "$SRC_DIR/docs"
   cp "$REPO_ROOT/docs/TOOLS-DESCRIPTION-AUDIT.md" "$SRC_DIR/docs/" \
     || fail workspace_prepare_failed "复制描述审计文档失败（门禁用例依赖它）"
+  # 默认门禁的 quarantine 清单与分类器（v1.49）
+  mkdir -p "$SRC_DIR/scripts"
+  cp -a "$REPO_ROOT/scripts/test-gate" "$SRC_DIR/scripts/" \
+    || fail workspace_prepare_failed "复制 scripts/test-gate 失败（门禁分类器依赖它）"
 }
 
 write_vendor_config() {
@@ -279,7 +283,14 @@ run_tests() {
   # 必须在 local 自身的赋值展开里取 PIPESTATUS：单独一行 `local rc` 会先把 PIPESTATUS 重置为 0，
   # 导致测试失败仍打印"全部通过"。
   local rc=${PIPESTATUS[0]}
-  [ "$rc" -eq 0 ] || fail test_failed "cargo test 退出码 ${rc}；见日志 $LOG_FILE"
+  # v1.49：已知不稳定用例按 [WARN] 呈现——不阻断门禁，但绝不记成通过。
+  local gate_rc=0
+  bash "$REPO_ROOT/scripts/test-gate/gate.sh" --log "$LOG_FILE" || gate_rc=$?
+  [ "$gate_rc" -eq 0 ] || fail test_failed "存在非 quarantine 失败；见日志 $LOG_FILE"
+  # 退出码非 0 且没有任何可归类的用例失败 → 编译/链接/环境错误，不能被 quarantine 吞掉。
+  if [ "$rc" -ne 0 ] && ! grep -qE '^test .+ \.\.\. FAILED$' "$LOG_FILE"; then
+    fail test_failed "cargo test 退出码 ${rc} 且无可归类用例失败（可能是编译/链接错误）；见日志 $LOG_FILE"
+  fi
 
   local missing="" token
   for token in \
@@ -312,7 +323,7 @@ run_tests() {
     fail missing_evidence "四类用例证据行未全部命中：$missing"
   fi
 
-  log "四类 POSIX 用例全部通过，证据行齐全"
+  log "四类 POSIX 用例：非 quarantine 全部通过，证据行齐全；已知不稳定按 WARN 呈现"
   log "日志：$LOG_FILE"
 }
 

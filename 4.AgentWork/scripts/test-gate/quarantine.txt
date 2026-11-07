@@ -1,0 +1,9 @@
+# 默认门禁的「已知不稳定」用例清单（单一口径，Windows / POSIX 共用）。
+# 格式：测试全名|平台|负责人|自版本|触发条件|观测频率
+# 命中本清单的用例：
+#   - 仍然每次运行，不 skip、不 #[ignore]；
+#   - 失败时门禁记 [WARN] 而不是 [FAIL]（不阻断），但绝不记成「通过」；
+#   - 通过时同样打印 [WARN]（已知不稳定，不能作为新结论的证据）；
+#   - 未观测到（被过滤/改名）时也打印 [WARN]，防止清单悄悄失效。
+# 移出条件：连续 30 次默认门禁 + 10 次隔离 soak 全绿，且写下当时的根因结论。
+server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group|linux|timeout-scope|v1.49|POSIX 全量用例并行跑（test-threads>=16）时偶发 outcome=Unavailable；高并发 /proc 扫描与 cgroup 读并发|2026-11-08 全量 POSIX 出现 1 次；之后默认门禁连续 8 轮 / 隔离 soak 未见复现

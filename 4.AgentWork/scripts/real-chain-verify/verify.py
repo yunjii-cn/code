@@ -977,6 +977,200 @@ def scenario_b6_cross_process_cancel(exe, root, label):
     return sandbox
 
 
+# ---- 场景 B7：真实派单链路下的「纯文件」跨进程取消 -----------------------
+
+B7_CANCELLER = r'''
+import json, os, sys, time
+from datetime import datetime, timezone
+
+path, task_id, started_at, target_pid = sys.argv[1:5]
+requested_by = "b7-canceller-pid-" + str(os.getpid())
+record = {
+    "version": "cancel-request/1",
+    "task_id": task_id,
+    "requestedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "requested_by": requested_by,
+    "reason": "B7 纯文件跨进程取消",
+    "target": {"pid": int(target_pid), "startedAt": started_at},
+    "status": "pending",
+    "acknowledgedAt": None,
+    "handledBy": None,
+    "handback_status": None,
+    "finishedAt": None,
+}
+try:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+except FileExistsError:
+    print(json.dumps({"event": "exists"}), flush=True)
+    sys.exit(3)
+with os.fdopen(fd, "w", encoding="utf-8") as handle:
+    json.dump(record, handle, ensure_ascii=False, indent=2)
+    handle.flush()
+    os.fsync(handle.fileno())
+print(json.dumps({
+    "event": "written",
+    "pid": os.getpid(),
+    "requested_by": requested_by,
+    "requestedAt": record["requestedAt"],
+}), flush=True)
+
+last = None
+deadline = time.time() + 60
+while time.time() < deadline:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            current = json.load(handle).get("status")
+    except (OSError, ValueError):
+        current = None
+    if current and current != last:
+        print(json.dumps({"event": "state", "status": current}), flush=True)
+        last = current
+    if current == "done":
+        sys.exit(0)
+    time.sleep(0.02)
+print(json.dumps({"event": "timeout", "status": last}), flush=True)
+sys.exit(4)
+'''
+
+
+def scenario_b7_file_only_cancel(exe, root, label):
+    """派单（PM 进程）→ 执行（bridge 进程）→ 取消（独立命令进程写文件）。
+
+    与 B6 的区别：B6 的取消方是另一条 MCP 连接（工具调用写请求）；B7 的取消方
+    根本不是 MCP 客户端，只按 cancel-request/1 的磁盘格式写 `.cancel/<task>.json`，
+    证明多进程部署时「取消」这条链路只依赖文件，不依赖任何进程内状态。
+    """
+    print("\n== 场景 B7：派单/执行/取消三进程，取消只走文件 ==", flush=True)
+    sandbox = make_sandbox(root, label, "B7")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    work = sandbox / "work"
+    task_id = "real-b7-file-only-cancel"
+    beat = work / "b7-beat.txt"
+    bridge = Bridge(binary, sandbox, name="B7-exec", wire_name="wire-exec.jsonl")
+    canceller = None
+    observed = []
+    if IS_WINDOWS:
+        cmd = cmd_heartbeat(beat, 30)
+    else:
+        cmd = (
+            f"trap '' TERM; i=0; while [ $i -lt 30 ]; do "
+            f"echo tick >> {shlex.quote(str(beat))}; sleep 1; i=$((i+1)); done"
+        )
+    try:
+        bridge.initialize()
+        # 派单方（本验证进程）：真实 task.execute，落 dispatch.json + 活跃标记
+        request_id = bridge.send(
+            "tools/call",
+            {
+                "name": "task.execute",
+                "arguments": {
+                    "task_id": task_id,
+                    "cmd": cmd,
+                    "cwd": str(work),
+                    "timeout_secs": 120,
+                },
+            },
+        )
+        marker = runs / ".inflight" / f"{task_id}.json"
+        dispatch = runs / task_id / "attempt-1" / "dispatch.json"
+        request_file = runs / ".cancel" / f"{task_id}.json"
+        check(
+            bool(wait_until(lambda: marker.is_file() and dispatch.is_file(), 15)),
+            "B7 派单链路落盘 dispatch.json + 活跃标记",
+        )
+        marker_record = read_json(marker)
+        dispatch_record = read_json(dispatch)
+        check(dispatch_record.get("task_id") == task_id,
+              f"B7 dispatch.json 属于本次派单：{dispatch_record.get('task_id')}")
+        check(dispatch_record.get("dispatchedAt") is not None, "B7 dispatch.json 记录派单时间")
+        time.sleep(1)
+
+        # 取消方：独立 OS 进程，不连 MCP，只写文件并自己观测三态
+        canceller = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                B7_CANCELLER,
+                str(request_file),
+                task_id,
+                str(marker_record.get("startedAt")),
+                str(marker_record.get("pid")),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        check(canceller.pid != bridge.proc.pid, "B7 取消进程与执行进程不是同一个 OS 进程")
+
+        deadline = time.time() + 45
+        while time.time() < deadline:
+            if request_file.is_file():
+                try:
+                    state = read_json(request_file).get("status")
+                except (json.JSONDecodeError, OSError):
+                    state = None
+                if state and (not observed or observed[-1] != state):
+                    observed.append(state)
+                if state == "done":
+                    break
+            time.sleep(0.02)
+        stdout, stderr = canceller.communicate(timeout=30)
+        lines = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+        written = next((line for line in lines if line.get("event") == "written"), {})
+        canceller_states = [line.get("status") for line in lines if line.get("event") == "state"]
+        check(written.get("pid") == canceller.pid,
+              f"B7 取消请求确实由取消进程写出（pid={written.get('pid')}）")
+        check(written.get("requested_by") == f"b7-canceller-pid-{canceller.pid}",
+              f"B7 requested_by 指向取消进程：{written.get('requested_by')}")
+
+        final = read_json(request_file) if request_file.is_file() else {}
+        check(final.get("status") == "done", f"B7 请求文件终态 done（{final.get('status')}）")
+        check(final.get("requested_by") == f"b7-canceller-pid-{canceller.pid}",
+              "B7 盘上 requested_by 保持取消进程身份")
+        check((final.get("handledBy") or {}).get("pid") == bridge.proc.pid,
+              f"B7 handledBy 指向执行进程（{(final.get('handledBy') or {}).get('pid')} vs {bridge.proc.pid}）")
+        target = final.get("target") or {}
+        check(target.get("pid") == marker_record.get("pid"),
+              "B7 取消目标就是活跃标记里的进程")
+        check(target.get("startedAt") == marker_record.get("startedAt"),
+              "B7 取消目标就是本轮执行（startedAt 一致）")
+        check(bool(final.get("acknowledgedAt")), "B7 执行侧已读时刻留痕（acknowledged）")
+        check(bool(final.get("finishedAt")), "B7 收尾完成时刻留痕（done）")
+        check("done" in observed, f"B7 harness 观测到 done：{observed}")
+        check("pending" in canceller_states or "acknowledged" in canceller_states,
+              f"B7 取消进程观测到落盘后的中间态：{canceller_states}")
+        check(canceller_states[-1:] == ["done"],
+              f"B7 取消进程观测到终态 done：{canceller_states}")
+
+        executed = bridge.await_id(request_id, timeout=60)
+        payload = json.loads(executed["result"]["content"][0]["text"])
+        check(payload.get("status") == "canceled", f"B7 执行侧状态 canceled（{payload.get('status')}）")
+        check((payload.get("blocked_reason") or "").startswith("canceled："),
+              f"B7 回执走取消档：{(payload.get('blocked_reason') or '')[:40]}...")
+        handback = read_json(runs / task_id / "attempt-1" / "handback.json")
+        check(handback.get("status") == "canceled", "B7 盘上 handback.status=canceled")
+        check(not marker.is_file(), "B7 取消完成后活跃标记已删除")
+        size_before = beat.stat().st_size if beat.is_file() else 0
+        time.sleep(2)
+        size_after = beat.stat().st_size if beat.is_file() else 0
+        check(size_after == size_before, f"B7 取消后心跳停止（{size_before} -> {size_after}）")
+
+        ev(
+            f"B7 label={label} states={observed} canceller_pid={canceller.pid} "
+            f"executor_pid={bridge.proc.pid} requested_by={final.get('requested_by')} "
+            f"target_pid={target.get('pid')} dispatch={dispatch.is_file()}"
+        )
+    finally:
+        bridge.close()
+        if canceller is not None and canceller.poll() is None:
+            canceller.kill()
+    return sandbox
+
+
 # ---- 场景 C：并发 ---------------------------------------------------------
 
 def scenario_c_sequential(exe, root, label):
@@ -1415,7 +1609,7 @@ def scenario_d3_session_retention(exe, root, label):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, help="aw-mcp-bridge 可执行文件")
-    parser.add_argument("--only", default="A,B1,B2,B3,B4,B5,B6,C1,C2,C3,D1,D2,D3")
+    parser.add_argument("--only", default="A,B1,B2,B3,B4,B5,B6,B7,C1,C2,C3,D1,D2,D3")
     parser.add_argument("--sandbox-root", default="")
     parser.add_argument("--label", default="windows" if IS_WINDOWS else "linux")
     parser.add_argument("--keep", action="store_true", help="保留 sandbox 便于人工核对")
@@ -1444,6 +1638,8 @@ def main():
             sandboxes.append(("B5", scenario_b5_grandchild_scope(exe, args.sandbox_root, args.label)))
         if "B6" in selected:
             sandboxes.append(("B6", scenario_b6_cross_process_cancel(exe, args.sandbox_root, args.label)))
+        if "B7" in selected:
+            sandboxes.append(("B7", scenario_b7_file_only_cancel(exe, args.sandbox_root, args.label)))
         if "C1" in selected:
             sandboxes.append(("C1", scenario_c_sequential(exe, args.sandbox_root, args.label)))
         if "C2" in selected:

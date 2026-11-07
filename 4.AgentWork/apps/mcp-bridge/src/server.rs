@@ -1678,7 +1678,19 @@ impl Server {
             ));
             #[cfg(test)]
             run_sweep_before_claim_hook(&marker.path);
+            #[cfg(test)]
+            sweep_trace::record(
+                &marker.path,
+                "claim_attempt",
+                format!("file={} tmp={}", marker.file, tmp.display()),
+            );
             if let Err(error) = fs::rename(&marker.path, &tmp) {
+                #[cfg(test)]
+                sweep_trace::record(
+                    &marker.path,
+                    "claim_failed",
+                    format!("kind={:?} error={error}", error.kind()),
+                );
                 // 认领失败：源已不在 → 别人先认领（lost_race，不算错误）；
                 // 源还在但已不 stale → 别人就地刷新（not_mine，绝不删除）；其余才是真失败。
                 match reread_marker(&marker.path, now) {
@@ -1702,13 +1714,48 @@ impl Server {
             // 注意：Windows 上多个并发 rename 可能都返回成功，但只有一个目的地真的产生文件。
             // 因此「rename 返回 Ok」不等于「这份归我」——认领副本读不到（NotFound）就是
             // 输掉了认领，按 lost_race 记账，既不算错误也不还原任何东西。
-            match reread_marker(&tmp, now) {
+            let reread = reread_marker(&tmp, now);
+            #[cfg(test)]
+            sweep_trace::record(
+                &marker.path,
+                "reread_claim_copy",
+                format!(
+                    "result={reread:?} exists={} len={:?}",
+                    tmp.exists(),
+                    fs::metadata(&tmp).ok().map(|meta| meta.len())
+                ),
+            );
+            #[cfg(test)]
+            run_sweep_after_reread_hook(&marker.path, &tmp);
+            match reread {
                 MarkerReread::Gone => {
                     kept.push(inflight_sweep_entry(marker, "lost_race", "lost_race"));
                 }
                 MarkerReread::Stale => match fs::remove_file(&tmp) {
-                    Ok(()) => removed.push(inflight_sweep_entry(marker, "deleted", "stale")),
+                    Ok(()) => {
+                        #[cfg(test)]
+                        sweep_trace::record(&marker.path, "claim_copy_removed", "outcome=deleted");
+                        removed.push(inflight_sweep_entry(marker, "deleted", "stale"))
+                    }
+                    // 复核之后认领副本消失：另一个清扫者已经处置了这份文件，
+                    // 这仍是「别人先认领」的同一种事实，不是错误。v1.49 修复 Windows 并发
+                    // rename 下把这种情况记成 failed（审计里出现假失败）。
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        #[cfg(test)]
+                        sweep_trace::record(
+                            &marker.path,
+                            "claim_copy_vanished",
+                            "outcome=lost_race",
+                        );
+                        kept.push(inflight_sweep_entry(marker, "lost_race", "claim_copy_gone"));
+                    }
                     Err(error) => {
+                        #[cfg(test)]
+                        sweep_trace::record(
+                            &marker.path,
+                            "claim_copy_remove_failed",
+                            format!("error={error}"),
+                        );
                         // rename 会覆盖原位的新标记；还原同样只能 create-if-absent。
                         let restore = match restore_without_clobber(&tmp, &marker.path) {
                             Ok(RestoreOutcome::Restored) => "标记已还原原位".to_string(),
@@ -1739,6 +1786,10 @@ impl Server {
                             "not_mine",
                             "marker_superseded",
                         )),
+                        // 认领副本在还原前消失：同「别人已经处置」，按 lost_race 记账。
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            kept.push(inflight_sweep_entry(marker, "lost_race", "claim_copy_gone"))
+                        }
                         Err(error) => failed.push(inflight_sweep_failure(
                             marker,
                             format!("marker_changed_restore_failed: {error}"),
@@ -4060,6 +4111,61 @@ mod process_scope {
         const TERM_GRACE: Duration = Duration::from_millis(500);
         const CLEANUP_DEADLINE: Duration = Duration::from_secs(3);
 
+        // 观测/终止过程的线程内时序（仅测试编译）。失败时由用例一次性打印，
+        // 回答「谁在什么时候做了什么、当时并发多少、为什么判成 Unavailable」。
+        #[cfg(test)]
+        thread_local! {
+            static OBS_TRACE: std::cell::RefCell<Vec<String>> =
+                std::cell::RefCell::new(Vec::new());
+        }
+
+        #[cfg(test)]
+        fn trace_note(note: impl Into<String>) {
+            let note = note.into();
+            OBS_TRACE.with(|trace| trace.borrow_mut().push(note));
+        }
+
+        #[cfg(test)]
+        fn trace_take() -> Vec<String> {
+            OBS_TRACE.with(|trace| std::mem::take(&mut *trace.borrow_mut()))
+        }
+
+        /// 同一时刻正在做进程观测/终止的实例数（仅测试编译）：回答「失败时并发是多少」。
+        #[cfg(test)]
+        static ACTIVE_OBSERVATIONS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        #[cfg(test)]
+        static PEAK_OBSERVATIONS: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+
+        #[cfg(test)]
+        struct ObservationGuard;
+
+        #[cfg(test)]
+        impl ObservationGuard {
+            fn enter() -> Self {
+                let current =
+                    ACTIVE_OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                PEAK_OBSERVATIONS.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                Self
+            }
+        }
+
+        #[cfg(test)]
+        impl Drop for ObservationGuard {
+            fn drop(&mut self) {
+                ACTIVE_OBSERVATIONS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        #[cfg(test)]
+        fn observation_stats() -> (usize, usize) {
+            (
+                ACTIVE_OBSERVATIONS.load(std::sync::atomic::Ordering::SeqCst),
+                PEAK_OBSERVATIONS.load(std::sync::atomic::Ordering::SeqCst),
+            )
+        }
+
         pub(crate) struct Supervisor {
             pgid: Option<i32>,
             /// 根进程启动时刻（`/proc/<pid>/stat` 的 `starttime`）；父链边校验用，
@@ -4078,6 +4184,7 @@ mod process_scope {
         }
 
         #[cfg(target_os = "linux")]
+        #[derive(Debug)]
         pub(crate) enum CgroupStatus {
             /// 尚未尝试建立（configure 前）
             Pending,
@@ -4195,6 +4302,8 @@ mod process_scope {
             ///   因此换父被收养的后代仍能被枚举，这是 v1.34 最大的观测缺口；
             /// - 任一 `/proc` 条目不可读（非"已退出"）都按不可观测处理，绝不当成"没有后代"。
             pub(crate) fn snapshot_descendants(&self, root: u32) -> DescendantSnapshot {
+                #[cfg(test)]
+                let _observation = ObservationGuard::enter();
                 #[cfg(target_os = "linux")]
                 {
                     let Some(pgid) = self.pgid else {
@@ -4308,8 +4417,19 @@ mod process_scope {
             }
 
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
+                #[cfg(test)]
+                let _observation = ObservationGuard::enter();
+                #[cfg(test)]
+                trace_note(format!(
+                    "terminate 开始 root={} pgid={:?} cgroup={:?}",
+                    child.id(),
+                    self.pgid,
+                    self.cgroup.status
+                ));
                 let Some(pgid) = self.pgid else {
                     let _ = child.kill();
+                    #[cfg(test)]
+                    trace_note("terminate 结果=Unavailable 原因=pgid_unknown");
                     return CleanupOutcome::Unavailable;
                 };
                 // v1.45：动手前先记下「当前仍可归属本任务」的后代（父链闭包 ∪ cgroup 成员），
@@ -4318,6 +4438,8 @@ mod process_scope {
                 // 收养后父链断开，事后无法再枚举，所以名单必须在终止前建立。
                 #[cfg(target_os = "linux")]
                 let mut tracked: Vec<(u32, Option<u64>)> = self.tracked_descendants(child.id());
+                #[cfg(test)]
+                trace_note(format!("终止前名单 tracked={tracked:?}"));
                 // 先礼后兵：SIGTERM 给宽限期，再 SIGKILL
                 unsafe {
                     libc::kill(-pgid, libc::SIGTERM);
@@ -4339,7 +4461,16 @@ mod process_scope {
                 // 判据：进程组为空，且（cgroup 作用域可用时）`cgroup.procs` 为空 + `populated 0`。
                 // `cgroup.kill` 写失败不影响判定口径：成员只要还在，就会落进 StillAlive。
                 let deadline = Instant::now() + CLEANUP_DEADLINE;
+                #[cfg(test)]
+                let mut round = 0usize;
                 loop {
+                    #[cfg(test)]
+                    {
+                        round += 1;
+                        if round == 1 {
+                            trace_note(format!("清扫循环开始 group_exists={}", group_exists(pgid)));
+                        }
+                    }
                     #[cfg(target_os = "linux")]
                     if matches!(self.cgroup.status, CgroupStatus::Active) {
                         if let Some(scope) = self.cgroup.scope.as_ref() {
@@ -4368,14 +4499,26 @@ mod process_scope {
                         {
                             if let CgroupStatus::Active = &self.cgroup.status {
                                 let Some(scope) = self.cgroup.scope.as_ref() else {
+                                    #[cfg(test)]
+                                    trace_note("terminate 结果=Unavailable 原因=cgroup_scope_lost");
                                     return CleanupOutcome::Unavailable;
                                 };
                                 let members = match scope.members() {
                                     Ok(members) => members,
-                                    Err(_) => return CleanupOutcome::Unavailable,
+                                    Err(_reason) => {
+                                        #[cfg(test)]
+                                        trace_note(format!(
+                                            "terminate 结果=Unavailable 原因=cgroup_procs_unreadable:{_reason}"
+                                        ));
+                                        return CleanupOutcome::Unavailable;
+                                    }
                                 };
                                 if !members.is_empty() {
                                     if Instant::now() >= deadline {
+                                        #[cfg(test)]
+                                        trace_note(format!(
+                                            "terminate 结果=StillAlive round={round} members={members:?}"
+                                        ));
                                         return CleanupOutcome::StillAlive;
                                     }
                                     std::thread::sleep(Duration::from_millis(20));
@@ -4383,8 +4526,20 @@ mod process_scope {
                                 }
                                 match scope.populated() {
                                     Ok(0) => {}
-                                    Ok(_) => return CleanupOutcome::StillAlive,
-                                    Err(_) => return CleanupOutcome::Unavailable,
+                                    Ok(_value) => {
+                                        #[cfg(test)]
+                                        trace_note(format!(
+                                            "terminate 结果=StillAlive round={round} populated={_value}"
+                                        ));
+                                        return CleanupOutcome::StillAlive;
+                                    }
+                                    Err(_reason) => {
+                                        #[cfg(test)]
+                                        trace_note(format!(
+                                            "terminate 结果=Unavailable 原因=cgroup_events:{_reason}"
+                                        ));
+                                        return CleanupOutcome::Unavailable;
+                                    }
                                 }
                             }
                             // v1.45：名单里仍有存活的逃逸后代（不在 cgroup / 进程组内）→ 不得宣称清空
@@ -4393,6 +4548,10 @@ mod process_scope {
                                 .any(|(pid, start)| tracked_pid_alive(*pid, *start))
                             {
                                 if Instant::now() >= deadline {
+                                    #[cfg(test)]
+                                    trace_note(format!(
+                                        "terminate 结果=StillAlive round={round} 原因=tracked_alive"
+                                    ));
                                     return CleanupOutcome::StillAlive;
                                 }
                                 std::thread::sleep(Duration::from_millis(20));
@@ -4400,24 +4559,80 @@ mod process_scope {
                             }
                             // 组记账为空后再用独立观测点复核：仍有可枚举后代 → 不宣称清空
                             let snapshot = self.snapshot_descendants(child.id());
-                            if snapshot.unobservable.is_some() {
+                            if let Some(_reason) = snapshot.unobservable.as_ref() {
+                                #[cfg(test)]
+                                trace_note(format!(
+                                    "terminate 结果=Unavailable round={round} 原因=snapshot:{_reason}"
+                                ));
                                 return CleanupOutcome::Unavailable;
                             }
                             if !snapshot.is_empty() {
+                                #[cfg(test)]
+                                trace_note(format!(
+                                    "terminate 结果=StillAlive round={round} 原因=snapshot_not_empty"
+                                ));
                                 return CleanupOutcome::StillAlive;
                             }
                         }
+                        #[cfg(test)]
+                        trace_note(format!("terminate 结果=Cleaned round={round}"));
                         return CleanupOutcome::Cleaned;
                     }
                     if Instant::now() >= deadline {
+                        #[cfg(test)]
+                        trace_note(format!(
+                            "terminate 结果=StillAlive round={round} 原因=deadline"
+                        ));
                         return CleanupOutcome::StillAlive;
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
+
+            /// 失败时的现场快照（仅测试编译）：进程/作用域状态、并发度、观测时序。
+            /// 只读，不改变任何判定；时序取走后清空，避免跨用例串扰。
+            #[cfg(test)]
+            pub(crate) fn diagnostics(&self, root: u32) -> String {
+                let (active, peak) = observation_stats();
+                let mut lines = vec![
+                    format!(
+                        "root={root} pgid={:?} root_start={:?}",
+                        self.pgid, self.root_start
+                    ),
+                    format!(
+                        "观测并发: active={active} peak={peak} cpu={:?}",
+                        std::thread::available_parallelism()
+                            .map(|count| count.get())
+                            .unwrap_or(0)
+                    ),
+                    format!("cgroup.status={:?}", self.cgroup.status),
+                ];
+                if let Some(scope) = self.cgroup.scope.as_ref() {
+                    let procs = std::fs::read_to_string(&scope.procs)
+                        .unwrap_or_else(|error| format!("<读取失败: {error}>"));
+                    let events = std::fs::read_to_string(scope.dir.join("cgroup.events"))
+                        .unwrap_or_else(|error| format!("<读取失败: {error}>"));
+                    lines.push(format!("cgroup.procs={procs:?}"));
+                    lines.push(format!("cgroup.events={events:?}"));
+                    lines.push(format!("members={:?}", scope.members()));
+                    lines.push(format!("populated={:?}", scope.populated()));
+                } else {
+                    lines.push("cgroup.scope=(无)".to_string());
+                }
+                lines.push(format!(
+                    "/proc 行数={:?}",
+                    proc_table().map(|rows| rows.len())
+                ));
+                lines.push(format!("快照={:?}", self.snapshot_descendants(root)));
+                lines.push("时序:".to_string());
+                lines.extend(trace_take());
+                lines.join("\n")
+            }
         }
 
         fn unobservable_snapshot(root: u32, reason: &str) -> DescendantSnapshot {
+            #[cfg(test)]
+            trace_note(format!("snapshot 不可观测 root={root} reason={reason}"));
             DescendantSnapshot {
                 root,
                 descendants: Vec::new(),
@@ -4776,7 +4991,10 @@ mod process_scope {
         }
 
         /// 全量 `/proc` 扫描：读不到 `stat` 且进程仍存在（如 hidepid/权限）都按不可观测处理；
-        /// 只有"进程已退出"（`NotFound`）才跳过。
+        /// 只有"进程已退出"才跳过。退出判定不只看 `NotFound`：进程在 readdir 与 read 之间
+        /// 退出时，内核可能返回 `ESRCH` 或读到空内容（v1.49 高负载下偶发 Unavailable 的
+        /// 嫌疑路径）。因此凡是「读失败/解析失败但 `/proc/<pid>` 已不存在」都跳过，
+        /// 其余仍然严格返回 None——绝不因为一条残项就宣称某个活进程不可见。
         #[cfg(target_os = "linux")]
         fn proc_table() -> Option<Vec<ProcRow>> {
             let entries = std::fs::read_dir("/proc").ok()?;
@@ -4795,15 +5013,42 @@ mod process_scope {
                 let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                     Ok(text) => text,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(_) => return None,
+                    Err(_error) => {
+                        if proc_entry_gone(pid) {
+                            continue;
+                        }
+                        #[cfg(test)]
+                        trace_note(format!(
+                            "proc_table_unreadable pid={pid} kind={:?} error={_error}",
+                            _error.kind()
+                        ));
+                        return None;
+                    }
                 };
-                rows.push(parse_stat(&text, pid)?);
+                let Some(row) = parse_stat(&text, pid) else {
+                    if proc_entry_gone(pid) {
+                        continue;
+                    }
+                    #[cfg(test)]
+                    trace_note(format!(
+                        "proc_table_unparsable pid={pid} len={}",
+                        text.len()
+                    ));
+                    return None;
+                };
+                rows.push(row);
             }
             if rows.is_empty() {
                 None
             } else {
                 Some(rows)
             }
+        }
+
+        /// 进程是否真的已经退出：`/proc/<pid>` 目录不存在。
+        #[cfg(target_os = "linux")]
+        fn proc_entry_gone(pid: u32) -> bool {
+            !std::path::Path::new(&format!("/proc/{pid}")).exists()
         }
 
         /// `/proc/<pid>/stat` 关键字段：`pid (comm) state ppid pgrp ... starttime(22)`。
@@ -5210,7 +5455,16 @@ mod process_scope {
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                let before = observed.expect("必须能观测到进程组内的后代");
+                let before = match observed {
+                    Some(snapshot) => snapshot,
+                    None => {
+                        let last = supervisor.snapshot_descendants(root);
+                        panic!(
+                            "必须能观测到进程组内的后代；最后一次快照={last:?}\n现场诊断：\n{}",
+                            supervisor.diagnostics(root)
+                        );
+                    }
+                };
                 let mut expected: Vec<u32> =
                     before.descendants.iter().map(|entry| entry.pid).collect();
                 expected.push(root);
@@ -5231,15 +5485,28 @@ mod process_scope {
                 );
 
                 let outcome = supervisor.terminate(&mut child);
+                let diag = supervisor.diagnostics(root);
                 let after = supervisor.snapshot_descendants(root);
                 println!(
                     "[evidence] posix_descendant_snapshot after terminate={outcome:?} descendants={:?} controlled={:?} unobservable={:?}",
                     after.descendants, after.controlled_pids, after.unobservable
                 );
-                assert_eq!(outcome, CleanupOutcome::Cleaned);
-                assert!(after.unobservable.is_none(), "终止后快照必须可观测");
-                assert!(after.is_empty(), "终止后不得有存活后代");
-                assert_eq!(after.controlled_pids, Some(Vec::new()));
+                println!("[evidence][diagnostic] posix_descendant_snapshot 现场\n{diag}");
+                assert_eq!(
+                    outcome,
+                    CleanupOutcome::Cleaned,
+                    "终止结果必须为 Cleaned；现场诊断：\n{diag}"
+                );
+                assert!(
+                    after.unobservable.is_none(),
+                    "终止后快照必须可观测；现场诊断：\n{diag}"
+                );
+                assert!(after.is_empty(), "终止后不得有存活后代；现场诊断：\n{diag}");
+                assert_eq!(
+                    after.controlled_pids,
+                    Some(Vec::new()),
+                    "终止后进程组必须为空；现场诊断：\n{diag}"
+                );
             }
 
             // 边界负例：逃逸在根存活时能被快照标出；根退出后被收养，快照就枚举不到它
@@ -8477,7 +8744,7 @@ enum RestoreOutcome {
 }
 
 /// 认领/复核时刻对某路径重跑 stale_rule 的结论
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum MarkerReread {
     /// 文件已不存在：认领权在别人手上
     Gone,
@@ -8550,8 +8817,12 @@ fn restore_without_clobber(source: &Path, target: &Path) -> std::io::Result<Rest
         return Err(error);
     }
     drop(file);
-    fs::remove_file(source)?;
-    Ok(RestoreOutcome::Restored)
+    // 副本在写完原位后消失：原位已经是完整内容，不算失败。
+    match fs::remove_file(source) {
+        Ok(()) => Ok(RestoreOutcome::Restored),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(RestoreOutcome::Restored),
+        Err(error) => Err(error),
+    }
 }
 
 /// 并发观测点（仅测试编译）：在「扫描判定」与「rename 认领」之间执行，
@@ -8630,6 +8901,99 @@ fn run_sweep_after_claim_hook(path: &Path, claimed: &Path) {
     };
     if let Some(hook) = hook {
         hook(path, claimed);
+    }
+}
+
+/// 并发观测点（仅测试编译）：在「认领副本重跑 stale_rule」与「删除/还原」之间执行。
+/// 用于确定性地复现「复核之后认领副本被另一方处置」的窗口（v1.49 诊断）。
+#[cfg(test)]
+struct SweepAfterRereadHook {
+    target: PathBuf,
+    hook: fn(&Path, &Path),
+}
+
+#[cfg(test)]
+static SWEEP_AFTER_REREAD_HOOK: std::sync::Mutex<Option<SweepAfterRereadHook>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn set_sweep_after_reread_hook(target: &Path, hook: Option<fn(&Path, &Path)>) {
+    *SWEEP_AFTER_REREAD_HOOK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = hook.map(|hook| SweepAfterRereadHook {
+        target: target.to_path_buf(),
+        hook,
+    });
+}
+
+#[cfg(test)]
+fn run_sweep_after_reread_hook(path: &Path, claimed: &Path) {
+    let hook = {
+        let armed = SWEEP_AFTER_REREAD_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        armed
+            .as_ref()
+            .filter(|armed| armed.target == path)
+            .map(|armed| armed.hook)
+    };
+    if let Some(hook) = hook {
+        hook(path, claimed);
+    }
+}
+
+/// 清扫并发用例的时序记录（仅测试编译）：谁（线程 id）在什么时候（毫秒）做了什么。
+/// 默认门禁失败时把这份时序直接打进断言消息，避免下次只看到「lost_race 实际 2」。
+#[cfg(test)]
+mod sweep_trace {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    struct TraceState {
+        target: PathBuf,
+        start: Instant,
+        events: Vec<String>,
+    }
+
+    static STATE: Mutex<Option<TraceState>> = Mutex::new(None);
+
+    /// 只记录 target 这条标记的事件：并行测试各自清扫不同文件，避免时序互相串扰。
+    pub(super) fn reset(target: &Path) {
+        *STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(TraceState {
+            target: target.to_path_buf(),
+            start: Instant::now(),
+            events: Vec::new(),
+        });
+    }
+
+    pub(super) fn record(target: &Path, step: &str, detail: impl std::fmt::Display) {
+        let mut state = STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        if state.target != target {
+            return;
+        }
+        state.events.push(format!(
+            "[{:>8.3}ms] thread={:?} {step} {detail}",
+            state.start.elapsed().as_secs_f64() * 1000.0,
+            std::thread::current().id()
+        ));
+    }
+
+    pub(super) fn dump(target: &Path) -> String {
+        let state = STATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match state.as_ref().filter(|state| state.target == target) {
+            Some(state) if !state.events.is_empty() => state.events.join("\n"),
+            _ => "(无时序记录：该标记未被本用例观测，或记录已重置)".to_string(),
+        }
     }
 }
 
@@ -9653,7 +10017,7 @@ fn capabilities_payload() -> Value {
                 "cgroup_without_kill_reports_still_alive",
                 "cgroup_degraded_terminate_is_group_only",
             ],
-            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：退回进程组窄判据，降级原因记 escaped_scope_unobservable。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
+            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。v1.49 起 `descendant_snapshot_cross_checks_process_group` 标记为已知不稳定（POSIX 全量并行时偶发 outcome=Unavailable，默认门禁按 WARN 呈现，见 scripts/test-gate/quarantine.txt）；本条 proven 结论由其余独立用例共同支撑，不单独依赖该条。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：退回进程组窄判据，降级原因记 escaped_scope_unobservable。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
         ),
         capability_entry(
             "timeout.cleans_entire_process_tree_windows",
@@ -10332,6 +10696,11 @@ mod inflight_sweep_race_tests {
         .expect("并发写入者必须能在空出的文件名上创建 W2");
     }
 
+    /// 模拟「复核之后、删除之前」认领副本被另一方处置（Windows 并发 rename 的真实窗口）。
+    fn drop_claim_copy(_path: &Path, claimed: &Path) {
+        fs::remove_file(claimed).expect("模拟另一方在复核后处置认领副本");
+    }
+
     struct RaceFixture {
         root: PathBuf,
         runs: PathBuf,
@@ -10401,6 +10770,50 @@ mod inflight_sweep_race_tests {
             .collect()
     }
 
+    /// 失败时一次性给出「当时的进程/文件状态 + 并发数 + 谁在什么时候做了什么」。
+    /// 只读现场，不改变任何判定。
+    fn sweep_diagnostics(fixture: &RaceFixture, sweepers: usize, results: &[Value]) -> String {
+        let mut dir_entries = Vec::new();
+        if let Ok(entries) = fs::read_dir(&fixture.dir) {
+            for entry in entries.flatten() {
+                let meta = entry.metadata().ok();
+                dir_entries.push(format!(
+                    "{} len={:?} modified={:?}",
+                    entry.file_name().to_string_lossy(),
+                    meta.as_ref().map(|meta| meta.len()),
+                    meta.and_then(|meta| meta.modified().ok())
+                ));
+            }
+        }
+        dir_entries.sort();
+        format!(
+            "并发数: sweepers={sweepers} cpu={:?}\n\
+             标记: exists={} len={:?}\n\
+             .inflight 目录:\n{}\n\
+             各清扫者结果:\n{}\n\
+             审计:\n{}\n\
+             时序（相对毫秒 / 线程 id / 动作）:\n{}",
+            std::thread::available_parallelism()
+                .map(|count| count.get())
+                .unwrap_or(0),
+            fixture.marker.exists(),
+            fs::metadata(&fixture.marker).ok().map(|meta| meta.len()),
+            if dir_entries.is_empty() {
+                "(空)".to_string()
+            } else {
+                dir_entries.join("\n")
+            },
+            results
+                .iter()
+                .enumerate()
+                .map(|(index, result)| format!("#{index}: {result}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            fixture.audit_text(),
+            sweep_trace::dump(&fixture.marker),
+        )
+    }
+
     #[test]
     fn sweep_restore_never_clobbers_concurrent_new_marker() {
         let _serial = RACE_HOOK_LOCK
@@ -10466,10 +10879,14 @@ mod inflight_sweep_race_tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             Some(Arc::new(Barrier::new(SWEEPERS)));
+        sweep_trace::reset(&fixture.marker);
         set_sweep_before_claim_hook(&fixture.marker, Some(align_claimers));
         let results = sweep_concurrently(&fixture, SWEEPERS);
         set_sweep_before_claim_hook(&fixture.marker, None);
         reset_race_barriers();
+
+        let diag = sweep_diagnostics(&fixture, SWEEPERS, &results);
+        println!("[evidence][sweep-race] 现场快照\n{diag}");
 
         let deleted: u64 = results
             .iter()
@@ -10481,28 +10898,78 @@ mod inflight_sweep_race_tests {
             .sum();
         assert_eq!(
             deleted, 1,
-            "同一个残标只允许一方真正删除，实际 {deleted}：{results:?}"
+            "同一个残标只允许一方真正删除，实际 {deleted}：\n{diag}"
         );
         assert_eq!(
             lost_race,
             (SWEEPERS - 1) as u64,
-            "其余清扫者必须记 lost_race，实际 {lost_race}：{results:?}"
+            "其余清扫者必须记 lost_race，实际 {lost_race}：\n{diag}"
         );
         assert!(
             !fixture.marker.exists(),
-            "赢家必须已经把残标删掉，而不是留在原位"
+            "赢家必须已经把残标删掉，而不是留在原位：\n{diag}"
         );
-        assert_eq!(fixture.tmp_files(), 0, "不得留下 .tmp 认领副本");
+        assert_eq!(fixture.tmp_files(), 0, "不得留下 .tmp 认领副本：\n{diag}");
 
         let audit = fixture.audit_text();
         assert!(
             audit.contains("\"outcome\":\"deleted\""),
-            "审计必须能区分 deleted：{audit}"
+            "审计必须能区分 deleted：{audit}\n{diag}"
         );
         assert!(
             audit.contains("\"outcome\":\"lost_race\""),
-            "审计必须能区分 lost_race：{audit}"
+            "审计必须能区分 lost_race：{audit}\n{diag}"
         );
+
+        fixture.cleanup();
+    }
+
+    /// 红→绿（v1.49）：复核之后认领副本消失。Windows 上并发 rename 可能都返回成功，
+    /// 但只有一个目的地真的产生文件；另一个清扫者可能已处置同名副本。这属于「别人先认领」，
+    /// 必须记 lost_race，不得记 failed——否则审计出现假失败，门禁随机红。
+    #[test]
+    fn sweep_claim_copy_vanishing_after_reread_is_lost_race_not_failure() {
+        let _serial = RACE_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let fixture = RaceFixture::new("vanish");
+        fixture.write_marker(&stale_record());
+
+        sweep_trace::reset(&fixture.marker);
+        set_sweep_after_reread_hook(&fixture.marker, Some(drop_claim_copy));
+        let sweep = fixture
+            .server()
+            .sweep_inflight_markers("clean", None, false)
+            .expect("清扫必须返回结果");
+        set_sweep_after_reread_hook(&fixture.marker, None);
+
+        let diag = format!(
+            "{sweep}\n审计:\n{}\n时序:\n{}",
+            fixture.audit_text(),
+            sweep_trace::dump(&fixture.marker)
+        );
+        println!("[evidence][sweep-vanish] {diag}");
+
+        assert_eq!(
+            sweep["failed_total"],
+            json!(0),
+            "认领副本消失不是错误，不得记 failed：\n{diag}"
+        );
+        assert_eq!(
+            sweep["deleted_total"],
+            json!(0),
+            "本清扫者没有真正删除任何东西：\n{diag}"
+        );
+        assert_eq!(
+            sweep["lost_race_total"],
+            json!(1),
+            "必须记 lost_race：\n{diag}"
+        );
+        assert!(
+            sweep["kept"].to_string().contains("claim_copy_gone"),
+            "必须具名记录 claim_copy_gone：\n{diag}"
+        );
+        assert_eq!(fixture.tmp_files(), 0, "不得留下 .tmp 认领副本：\n{diag}");
 
         fixture.cleanup();
     }
