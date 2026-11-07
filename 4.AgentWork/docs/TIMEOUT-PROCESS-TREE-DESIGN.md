@@ -436,17 +436,17 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 3. **三态可分**：观测点必须能区分"确实不存在"与"不可观测"；查询失败只能记 `Unavailable`，不得当 0（现有 C1/C2 已遵守）。
 4. **平台闭合**：POSIX 需要 cgroup v2 委派且进程不能被移出，或 `PR_SET_CHILD_SUBREAPER` + 带启动时间的全量 `/proc` 扫描；Windows 需要作业覆盖全部后代、禁止 `BREAKAWAY`/嵌套逃逸，并能枚举"作业外候选"。
 
-现状逐条核对（v1.35 补 cgroup v2 观测后；实测见 §6.10 / §6.11）：
+现状逐条核对（v1.37 补 `cgroup.kill` 终止后；实测见 §6.10 / §6.11）：
 
 | 平台 | 1 完整枚举 | 2 全时段 | 3 三态可分 | 4 平台闭合 | 结论 |
 |---|---|---|---|---|---|
-| POSIX（cgroup v2 可写） | 是（`cgroup.procs` 成员集合与父链无关，收养后仍在；exec 前写入，无先派生窗口） | 是（终止后读成员集合即可回答"作用域内是否还有存活进程"） | 是（`ESRCH`/`EPERM` 可分；`unobservable` 与空快照分离） | **否**（成员可被外部移出 cgroup；`cgroup.kill` 未启用，终止仍只打进程组） | 观测已闭合、终止未闭合 → 整树仍 `partial` |
-| POSIX（cgroup 不可用） | 否（`/proc` 父链在孤儿被收养时断开；macOS 无 `/proc`） | 否（换父后无法追；根退出后快照必为空，属于假空） | 是 | 否 | `partial`，且 `escaped_scope_unobservable` 必须带原因 |
+| POSIX（cgroup v2 + `cgroup.kill`） | 是（`cgroup.procs` 成员集合与父链无关，收养后仍在；exec 前写入，无先派生窗口） | 是（终止后读成员集合与 `cgroup.events` 即可回答"作用域内是否还有存活进程"） | 是（`ESRCH`/`EPERM` 可分；`unobservable` 与空快照分离） | **部分**（v1.37 起 `cgroup.kill` 终止整个作用域；但有权限的外部进程仍可把成员移出 cgroup） | 观测与终止在 `cgroup.kill` 可用时闭合 → 条件性窄 claim `proven`；无条件整树仍 `partial` |
+| POSIX（cgroup 不可用 / 内核 < 5.14） | 否（`/proc` 父链在孤儿被收养时断开；macOS 无 `/proc`） | 否（换父后无法追；根退出后快照必为空，属于假空） | 是 | 否 | `partial`，且 `escaped_scope_unobservable` 必须带原因 |
 | Windows | 是（Toolhelp 父链快照；`ParentProcessID` 不因父进程退出而改写，PID 复用只会多报不会漏报） | 是（终止后快照为空即不存在可继续派生的存活后代） | 是（快照/作业列表查询失败一律 `Unavailable`） | 是（`CREATE_SUSPENDED` + 恢复前入作业；本作业未设 `BREAKAWAY_OK`，嵌套作业仍在外层作业内） | 整树清理可在 Windows 证明 |
 
 v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不提供逃逸观测点**，因此不改变上表任何一格，也不改变 `#3 = NOT_PROVEN`。四条中任何一条不满足，"逃逸未验证"就必须保留。
 
-v1.34 补上了父链/作业观测点后，Windows 四格全部满足；POSIX 卡在"换父被收养"这一格。v1.35 在 Linux 上用 cgroup v2 把第 1、2 格补成"是"（实测见 §6.11），但**第 4 格仍为否**：终止动作仍只有 `kill(-pgid)`，cgroup 只用来观测，因此 `timeout.cleans_entire_process_tree` 仍为 `holds=false / partial / posix_escaped_descendant_observable_not_terminated`——现在能看见逃逸者，但看不见 ≠ 杀得掉。
+v1.34 补上了父链/作业观测点后，Windows 四格全部满足；POSIX 卡在"换父被收养"这一格。v1.35 在 Linux 上用 cgroup v2 把第 1、2 格补成"是"（实测见 §6.11）；v1.37 再用 `cgroup.kill` 把第 4 格补成"部分"——终止不再只打进程组，而是按三个独立观测量确认作用域清空（`cgroup.procs` 空、`cgroup.events` `populated 0`、逃逸 PID 不存在）。但整树 claim 仍为 `holds=false / partial / posix_escaped_scope_requires_cgroup_v2_and_kill`：`cgroup.kill` 依赖内核 ≥5.14 与非 root 可写作用域，容器/非 root/cgroup v1 下建不起来；macOS 无等价物；有权限的外部进程仍可把成员移出 cgroup。新增的 `timeout.cgroup_kill_terminates_scope=true/proven` 只声明这一条件性窄结论。
 
 ### 6.9 单次终止尝试是否足够（v1.24 实测；结论：一次即足够，不加重试）
 
@@ -587,9 +587,48 @@ $ cat /sys/fs/cgroup/aw-probe/cgroup.procs
 - 红（临时让 `prepare()` 恒返回 `cgroup_v2_unavailable` 模拟"建不起来"，运行后已逐字还原）：`cgroup_scope_enumerates_adopted_escapee` 失败，原文 `assertion left: ProcessGroup / right: CgroupV2`，并打印 `本机未能建立 cgroup v2 观测作用域：Some("cgroup_v2_unavailable")`。
 - 绿：Windows `12 lib + 122 integration`、WSL Ubuntu 24.04 `13 lib + 120 integration` 全绿；WSL 跑完 `ls -d /sys/fs/cgroup/aw-mcp-bridge-*` 为 0 条（Drop 重试 3×20ms 后可删）。
 
+#### 6.11.1 v1.37：`cgroup.kill` 把"终止"也闭合（Linux 条件性）
+
+观测到逃逸者不等于杀得掉。v1.37 的前提探测（同一 WSL Ubuntu 24.04，内核 `6.18.33.2-microsoft-standard-WSL2`）：
+
+```text
+$ ls -l /sys/fs/cgroup/cgroup.kill
+ls: cannot access '/sys/fs/cgroup/cgroup.kill': No such file or directory
+$ mkdir /sys/fs/cgroup/aw-probe-test
+$ ls -l /sys/fs/cgroup/aw-probe-test/cgroup.kill
+--w------- 1 root root 0 ... /sys/fs/cgroup/aw-probe-test/cgroup.kill
+$ cat /sys/fs/cgroup/aw-probe-test/cgroup.events
+populated 0
+frozen 0
+```
+
+即：`cgroup.kill` 只存在于**非 root** cgroup（v5.14+），root 目录没有该文件；子作用域建起来后即可写。功能探针（`setsid sleep 300` 先写进作用域，再写 `cgroup.kill`）原文：
+
+```text
+--- procs before ---
+625
+--- events before ---
+populated 1
+--- procs after ---
+--- events after ---
+populated 0
+escapee_alive=no
+```
+
+fork 压力探针（13 个成员 + `while :; do sleep 60 & done`）：重复写 `cgroup.kill` 返回 0（幂等），写入后 `procs=0`、`populated 0`。注意探针里"迁移前已派生的子进程"不在作用域内——这正是本项目用 `pre_exec` 在 exec 前写 `cgroup.procs`、不留"先派生后入组"窗口的原因。
+
+判据（写进 `terminate`）：进程组 SIGTERM/SIGKILL 之后，cgroup 作用域 `Active` 且 `cgroup.kill` 存在时每轮轮询重试写 `cgroup.kill`；只有**三个独立观测量全部成立**才返回 `Cleaned`——(a) `cgroup.procs` 为空、(b) `cgroup.events` 为 `populated 0`、(c) 快照不再枚举到逃逸 PID。任一不满足 → `StillAlive`；读不出 → `Unavailable`。写失败不吞成"已清理"：成员还在就必然落进 `StillAlive`。
+
+红→绿：
+
+- 红（HEAD 实现，仅观测不终止）：`[evidence] cgroup_kill after outcome=StillAlive escaped_alive=true members=Ok([1135]) populated=Ok(1) descendants=[DescendantProcess { pid: 1135, in_controlled_set: false }] unobservable=None`，断言 `逃逸后代必须在作用域终止后不再存活` 失败，`test result: FAILED. 14 passed; 1 failed`。
+- 绿：`[evidence] cgroup_kill after outcome=Cleaned escaped_alive=false members=Ok([]) populated=Ok(0) descendants=[] unobservable=None`；WSL Ubuntu 24.04 `15 lib + 120 integration` 全绿（日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-204040.log`），Windows `13 lib + 122 integration` 全绿。
+
+残留边界：内核 <5.14 / 容器 / 非 root / cgroup v1 时没有可写 `cgroup.kill`，终止仍只打进程组（如实 `StillAlive`）；有权限的外部进程仍可把成员移出 cgroup；外部迁移与冻结/D 状态见 §6.9（SIGKILL pending 不丢失）。
+
 仍然不覆盖的边界：
 
-1. **终止未闭合**：cgroup 只用来看，`kill(-pgid)` 打不到 `setsid` 逃逸者。要闭合需 `cgroup.kill`（内核 ≥5.14）或对成员逐个 SIGKILL，本版未做——因此整树 claim 仍 `partial`；
+1. **终止已闭合（Linux 条件性）**：v1.37 起 `cgroup.kill` 可用时终止覆盖整个作用域并按三个独立观测量复核；不可用时（内核 <5.14 / 容器 / 非 root）仍退回 `kill(-pgid)`，逃逸者存活且如实报 `StillAlive`；
 2. 外部进程可把成员移出 cgroup（无委派锁），移出后不可见；
 3. cgroup 建不起来时（容器常见）观测退回进程组，逃逸仍不可枚举，只能靠 `escaped_scope_unobservable` 如实告警；
 4. 目录在 Drop 时若仍有存活成员则删不掉（不杀进程），会留下空目录，属已知残留；

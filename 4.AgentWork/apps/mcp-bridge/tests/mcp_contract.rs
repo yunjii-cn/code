@@ -6321,7 +6321,7 @@ fn capabilities_declares_machine_readable_boundaries() {
         );
     }
 
-    // #3 判据按平台分裂：Windows 已证明整树，POSIX 已能观测逃逸但终止仍只打进程组
+    // #3 判据按平台分裂：Windows 已证整树；Linux 仅在 cgroup.kill 可用时证作用域，条件性能力不上调
     let controlled = claim(&payload, "timeout.terminates_controlled_set");
     assert_eq!(controlled["holds"], true, "{controlled}");
     assert_eq!(controlled["status"], "proven", "{controlled}");
@@ -6329,7 +6329,7 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(whole_tree["holds"], false, "{whole_tree}");
     assert_eq!(whole_tree["status"], "partial", "{whole_tree}");
     assert_eq!(
-        whole_tree["reason_code"], "posix_escaped_descendant_observable_not_terminated",
+        whole_tree["reason_code"], "posix_escaped_scope_requires_cgroup_v2_and_kill",
         "{whole_tree}"
     );
     let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
@@ -6349,6 +6349,36 @@ fn capabilities_declares_machine_readable_boundaries() {
         cgroup["platforms_unverified"],
         json!(["windows", "macos"]),
         "{cgroup}"
+    );
+    // cgroup v2 作用域终止必须单独可证：只声明条件性能力，不把整树能力上调
+    let scope_kill = claim(&payload, "timeout.cgroup_kill_terminates_scope");
+    assert_eq!(scope_kill["holds"], true, "{scope_kill}");
+    assert_eq!(scope_kill["status"], "proven", "{scope_kill}");
+    assert!(scope_kill["reason_code"].is_null(), "{scope_kill}");
+    assert_eq!(
+        scope_kill["platforms_verified"],
+        json!(["linux"]),
+        "{scope_kill}"
+    );
+    assert_eq!(
+        scope_kill["platforms_unverified"],
+        json!(["windows", "macos"]),
+        "{scope_kill}"
+    );
+    assert_eq!(
+        scope_kill["evidence"],
+        json!(["cgroup_kill_terminates_adopted_escapee"]),
+        "{scope_kill}"
+    );
+    assert_eq!(
+        whole_tree["evidence"]
+            .as_array()
+            .expect("whole_tree evidence")
+            .iter()
+            .filter(|value| *value == &json!("cgroup_kill_terminates_adopted_escapee"))
+            .count(),
+        1,
+        "整树能力的证据必须包含作用域终止用例：{whole_tree}"
     );
     // 新增观测点本身必须可证：枚举到的后代与受控集合成员可交叉核对
     let snapshot = claim(&payload, "timeout.descendant_snapshot_cross_check");

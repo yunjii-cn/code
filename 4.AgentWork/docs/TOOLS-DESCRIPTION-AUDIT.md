@@ -3471,3 +3471,57 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out;
 - macOS 未验证（`platforms_unverified=["macos"]`）。
 
 
+## 39. v1.37：Linux `cgroup.kill` 闭合「超时终止整棵作用域」（可观测判据 + 红→绿）
+
+改动位置：`apps/mcp-bridge/src/server.rs` 的 `process_scope::CgroupScope`（新增 `kill_supported` / `kill_members` / `populated`）与 `Supervisor::terminate`；不新增工具、不改 `tools/list` 描述、`tools_sha256` 不变。
+
+### 39.1 先把可观测量说清（不先动实现）
+
+v1.35 已能**观测** cgroup v2 作用域内被 init 收养的逃逸后代，但终止仍只发 `kill(-pgid)`，逃逸者存活（`outcome=StillAlive escaped_alive=true`）。v1.37 要回答的是「作用域是否真的空了」，判据定为四个观测量**同时**成立：
+
+1. `cgroup.procs` 读为空；
+2. `cgroup.events` 为 `populated 0`（与 (1) 互为独立观测点）；
+3. 枚举到的逃逸 PID 已不存在（`/proc/<pid>` 消失）；
+4. `DescendantSnapshot` 不再含后代，且 `unobservable=None`。
+
+只有 (1)-(4) 全成立才允许返回 `CleanupOutcome::Cleaned`；成员仍在 → `StillAlive`；`cgroup.procs` / `cgroup.events` 读不出 → `Unavailable`。**降级口径不变**：cgroup 作用域建不起来（容器 / 非 root / cgroup v1）或内核没有 `cgroup.kill`（<5.14）时，退回进程组窄判据，逃逸者存活就必须报 `StillAlive`，绝不因为「看不到」而报已清理。
+
+前提探测（WSL Ubuntu 24.04，内核 `6.18.33.2-microsoft-standard-WSL2`）：root cgroup 没有 `cgroup.kill`（`ls: cannot access ...: No such file or directory`），新建子 cgroup 后出现 `--w------- cgroup.kill`，`cgroup.events` 为 `populated 0 / frozen 0`。功能探针：`setsid sleep 300` 写入子作用域（`populated 1`）后写 `cgroup.kill`，`cgroup.procs` 变空、`populated 0`、`/proc/<pid>` 消失。fork 压力探针（13 个成员 + 持续 `sleep 60 &`）：重复写返回 0（幂等），写入后 `procs=0`、`populated 0`。
+
+### 39.2 红（在改实现之前，HEAD 代码原样失败）
+
+用例 `cgroup_kill_terminates_adopted_escapee` 复用 v1.35 的 `setsid` fixture（`pre_exec` 在 exec 前把自身 PID 写进 `cgroup.procs`，无「先派生后入组」窗口），先断言本机确实建起 `CgroupV2` 且 `cgroup.kill` 存在，再在终止后核对四个观测量：
+
+```
+[evidence] cgroup_kill after outcome=StillAlive escaped_alive=true members=Ok([1135]) populated=Ok(1) descendants=[DescendantProcess { pid: 1135, in_controlled_set: false }] unobservable=None
+thread 'server::process_scope::imp::tests::cgroup_kill_terminates_adopted_escapee' panicked at apps/mcp-bridge/src/server.rs:3658:17:
+逃逸后代必须在作用域终止后不再存活
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+读法：逃逸者仍被 cgroup 枚举（`members=[1135]`、`populated 1`），但旧终止只打进程组，因此「看得见却杀不掉」——红用例把这一点固化成可执行判据。
+
+### 39.3 绿
+
+- WSL Ubuntu 24.04（`cargo 1.88.0`）：`15 lib + 120 integration` 全绿，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-204702.log`；证据行 `[evidence] cgroup_kill after outcome=Cleaned escaped_alive=false members=Ok([]) populated=Ok(0) descendants=[] unobservable=None`。
+- Windows：`13 lib + 122 integration` 全绿。首次全量时 `timeout_cleans_controlled_set_including_grandchild` 在并发负载下因 8s 窗口抖动失败（`StillAlive`），单跑与二次全量均通过；该用例走 Windows Job Object 路径，与本轮 Linux-only 改动无关。
+- `description_gate` 3 条全绿；`tools_sha256` 未变（未改 `tools/list`）。
+
+### 39.4 实现口径
+
+- `CgroupScope::kill_supported()`：判断作用域内是否存在 `cgroup.kill`（root cgroup 永远没有）。
+- `CgroupScope::kill_members()`：写 `1` 到 `cgroup.kill`；只负责发信号，是否清空由 `cgroup.procs` / `cgroup.events` 独立复核。
+- `CgroupScope::populated()`：解析 `cgroup.events` 的 `populated N`；解析失败 / 文件缺失返回 `Err`，调用方转 `Unavailable`。
+- `Supervisor::terminate()`：进程组 SIGTERM → 宽限 → SIGKILL → `child.wait()` 之后，若作用域 `Active` 且 `kill_supported()`，每轮轮询重试写 `cgroup.kill`（fork 压力下首轮可能漏掉正在派生的后代；重复写幂等），直至进程组空 + 作用域空 + `populated 0` + 快照空，才 `Cleaned`。
+- 能力位：新增 `timeout.cgroup_kill_terminates_scope=true/proven`（`platforms_verified=["linux"]`、`platforms_unverified=["windows","macos"]`、`automatic=true`、`evidence=["cgroup_kill_terminates_adopted_escapee"]`）；`timeout.cleans_entire_process_tree` **不上调**，仍 `false/partial`，reason 改为 `posix_escaped_scope_requires_cgroup_v2_and_kill`，并增加 `platforms_unverified=["macos"]`；`timeout.cgroup_v2_scope_observation` 保持 `proven`，detail 改为「只声明观测能力」。条目 16→17，`not_proven_total` 仍 5。
+- 两条 v1.35 旧用例按新事实分支（未放宽）：`cgroup.kill` 可用 → 断言逃逸者已死 + `Cleaned`；不可用 → 断言仍存活 + `StillAlive` 且可枚举。`cgroup_scope_enumerates_adopted_escapee` 先只杀进程组以保留「换父后仍可枚举」的观测证据，再跑完整 `terminate` 验证作用域终止。
+
+### 39.5 仍然存在的边界
+
+- **内核/权限依赖**：`cgroup.kill` 需要内核 ≥5.14 且非 root cgroup 可写；容器内常用只读或未委派，此时终止仍只打进程组，逃逸者存活并如实报 `StillAlive`。
+- **外部迁移**：有权限的外部进程仍可把成员移出 cgroup（无委派锁），移出后不在作用域内。
+- **fork 竞态**：`cgroup.kill` 只杀写入时的当前成员；本版靠轮询重试兜底，但「杀完瞬间再派生」的极端场景仍可能拖到 `StillAlive`，不会误报 `Cleaned`。
+- **Drop 残留**：作用域目录在成员仍存活时删不掉（不杀进程），会留下空目录。
+- macOS 无 cgroup、无 `/proc`，恒不可观测（`platforms_unverified=["macos"]`）。
+
+
