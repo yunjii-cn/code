@@ -3703,4 +3703,134 @@ test result: FAILED. 0 passed; 1 failed
 
 ### 42.5 未改动的边界
 
-Linux `descendants_of` 仍用 `/proc/<pid>/stat` 的 `ppid` 闭环，未加创建时间边校验（本轮用户明确限定 Windows 侧）；macOS 仍未验证。
+Linux `descendants_of` 仍用 `/proc/<pid>/stat` 的 `ppid` 闭环，未加创建时间边校验（本轮用户明确限定 Windows 侧）——**这条已在 v1.40 补上，见 §43**；macOS 仍未验证。
+
+## §43 v1.40：Linux 父链边界校验 + Windows 孙进程超时夹具改造（2026-11-07）
+
+### 43.1 Linux 判据与实现
+
+只回答一件事：`/proc` 枚举出的 PID 是否真的属于本次任务。
+
+1. `ProcRow` 增 `start_time: u64`，取自 `/proc/<pid>/stat` 第 22 字段 `starttime`（单位 clock tick）。`comm` 可含空格与括号，按**最后一个 `)`** 切分后再数字段：`state ppid pgrp ...`，跳过 `session..itrealvalue`（字段 6..=21）后取 `starttime`。
+2. `descendants_of(root, root_start_time, rows)` 对闭包里的**每条边**要求「子进程启动时刻 ≥ 父进程启动时刻」。旧父进程退出后同号 PID 被新进程持有，旧子进程残留的 `ppid` 边（子创建早于新父）被拒绝；祖先一旦被拒，其后代因不可达而不计入。
+3. `Supervisor::attach` 记录 `root_start = proc_start_time(child.id())`，作为「根 → 直接子进程」这条边的下界；调用点把 `self.root_start` 传给 `descendants_of`。
+4. **逐边放宽**：只有「这条边的父进程启动时刻读不到」时才退回旧行为（接受该边）；不因一个未知时刻放开整棵树。与 v1.39 Windows 侧「时间读不到则保守保留该行」同一口径。
+
+确定性单测 `pid_reuse_parent_chain_edge_is_rejected`（Linux，注入 `ProcRow` 表，不依赖真机碰运气）覆盖四类边：
+
+- 根级复用：旧树残留的 `ppid=900` 边早于新根启动时刻 → 拒绝；
+- 祖先被拒后其后代不可达（`904` 未出现在结果里）；
+- 中间层复用：`902→905`（905 早于 902）→ 拒绝，但 `902` 自身合法（根边成立）；
+- 根启动时刻不可读（`None`）：只放宽根出发的边，`902→905` 仍被拒。
+
+```rust
+assert_eq!(descendants_of(root, Some(5000), &rows), vec![902, 903, 907]);
+assert_eq!(descendants_of(root, None, &rows), vec![900, 901, 902, 903, 907]);
+assert!(!edge_respects_start_order(Some(5000), 1000));
+assert!(edge_respects_start_order(Some(5000), 6000));
+assert!(edge_respects_start_order(None, 1));
+```
+
+### 43.2 红→绿原文
+
+红（临时停用 `edge_respects_start_order` 守卫，WSL Ubuntu 24.04）：
+
+```
+[evidence] linux_pid_reuse rows=6 result=[900, 901, 902, 903, 905, 907]
+thread 'server::process_scope::imp::tests::pid_reuse_parent_chain_edge_is_rejected' panicked at
+apps/mcp-bridge/src/server.rs:3205:17:
+assertion `left == right` failed
+  left: [900, 901, 902, 903, 905, 907]
+ right: [902, 903, 907]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out
+```
+
+绿：WSL `19 lib + 120 integration` 全绿（`/root/.aw-posix-verify/logs/posix-verify-20261108-004812.log`），Windows `17 lib + 122 integration` 全绿。
+
+首次绿灯时断言写错（期望 `[900,901,902,903,905,907]`），实际 `[900,901,902,903,907]`。原因是把「根启动时刻读不到」理解成「整棵树退回旧行为」，而实现是逐边放宽——根未知只放宽根出发的边，深层 `902→905` 仍按已知时刻校验。修的是断言与注释，判据与实现未动。
+
+### 43.3 Linux 侧能力位：**没有变化**
+
+- `timeout.cleans_entire_process_tree`：仍 `holds=false` / `partial` / `posix_escaped_scope_requires_cgroup_v2_and_kill`。边校验只回答「枚举到的 PID 是否属于本任务」，不解决「逃逸到本作用域外的成员杀不到」。
+- `timeout.descendant_snapshot_cross_check`：仍 `proven`。
+- `timeout.enumerates_escaped_descendants`：仍 `holds=false` / `partial`，枚举范围仍受 cgroup 是否可写限制。
+- 条目仍 17，`not_proven_total` 仍 4。只在三条的 detail 补边校验说明（§2.7），`holds`/`status`/`reason` 与 `evidence` 字段均未改。
+
+### 43.4 Windows 孙进程超时夹具改造（`timeout_cleans_controlled_set_including_grandchild`）
+
+旧夹具用 PowerShell 起进程并写 `pids.txt` 作为观测前提；24 路负载下「PowerShell 启动 → 写出文件」实测 10.7–16.2 s，与「进程树是否被清理」是两件事，故把观测前提改成不经 PowerShell、不落盘：
+
+1. 把 `System32\PING.EXE` 复制为工作目录内的唯一命名 `aw-timeout-grandchild.exe`（`fs::hard_link` 被安全策略拒绝，改 `fs::copy`），窗口外先按相同形态跑一次短命版本预热。
+2. 被测命令 `aw-timeout-grandchild.exe -n 30 127.0.0.1 > NUL`（`ping -n 30` 实测 29.36 s 不会自行退出）。
+3. 孙进程 PID 由**测试进程自己的 Toolhelp 轮询线程**观测（每 20 ms 一次 `CreateToolhelp32Snapshot`，按镜像名匹配），不写文件、不经解释器；并记录 `first_poll_ms`、`polls`、`snapshot_failures`、`max_rows`、PID 集合变化时间线（`grandchild_timeline`）。
+4. 判据不放宽：`status=="blocked"`、`reason` 含「已清理受控集合」、**必须观测到孙进程**（否则视为空跑失败）、调用返回后孙进程零存活。
+
+24 路 CPU 负载（16 逻辑核，24 个 `while($true){}` 燃烧进程 + 循环跑 `cargo test`）实测：
+
+| 场景 | 结果 | 证据 |
+| --- | --- | --- |
+| 空载 | 绿 | `pids=[181756] first_seen_ms=624 payload_duration_ms=8061 after_cleanup=Some([])`；`grandchild_timeline [(623,"[181756]"),(8397,"[]")]` |
+| 24 路负载，只跑该用例 ×9 轮 | 9 绿 | 窗口内均观测到孙进程，调用返回时 `after_cleanup=Some([])` |
+| 24 路负载，全量 3 轮 | 2 绿 1 红 | 绿轮 `first_seen_ms=14676 / 13740`、`payload_duration_ms=8324 / 8412`、`after_cleanup=Some([])` |
+
+红轮原文（第 3 轮）：
+
+```
+[evidence] grandchild_watch pids=[] first_seen_ms=0 first_poll_ms=32 call_ms=40082
+payload_duration_ms=9292 polls=442 snapshot_failures=0 max_rows=682 file_exists=true
+after_cleanup=Some([]) process_exists=[]
+[evidence] grandchild_timeline []
+thread '...timeout_cleans_controlled_set_including_grandchild' panicked at
+apps/mcp-bridge/tests/mcp_contract.rs:2851:
+超时窗口内必须观测到孙进程 aw-timeout-grandchild.exe 启动，否则用例是空跑
+```
+
+判读（为什么这条红不是终止逻辑）：
+
+- 红轮里**窗口内一个孙进程都没出现**（`timeline` 为空、`first_seen_ms=0`），清理仍然成功：`after_cleanup=Some([])`、零存活、`reason` 含「已清理受控集合」。没有「杀不掉/杀漏」的现象。
+- 同一轮工具自身在窗口外的前/后置工作（两次 `git` 子进程 + 记录写入）合计约 30.8 s（`call_ms=40082 − payload_duration_ms=9292`），即当轮**创建一次进程**就要 ~10–15 s；8 s 窗口装不进「`cmd` → 孙进程」两级创建。
+- 与之对照，24 路负载下单独量测「挂起创建 → 入作业 → 恢复执行」（`spawn_ms=347/444/624`、`attach_ms=404/634/297`，临时探针，已删除）只需 0.3–0.6 s，说明窗口不是被 `attach` 吃掉的常态，而是被整机进程创建延迟吃掉的偶发态。
+
+结论：这条红是「前提（窗口内完成两级进程创建）在极端负载下无法建立」，**不是**夹具的 PowerShell 冷启动（已移除），也**不是**终止逻辑缺陷；未放宽窗口、未改判据、未改实现。
+
+据此选择**方案 A（窗口保持 8s）**，依据就是上面的原始数据：红轮 `grandchild_timeline []` 说明窗口内没有任何孙进程可供观测；`call_ms=40082` 对 `payload_duration_ms=9292` 说明窗口外光前置/后置工作就花了 30.8s，当轮单次进程创建已达 10–15s；而 `spawn+attach` 只要 0.3–0.6s，排除「窗口被挂起创建/恢复吃掉」。三者合起来说明问题在「整机进程创建速度」，不在超时终止本身。
+
+#### 43.4.1 日志里的判定结果（与断言失败区分）
+
+用例在断言前先打印一行 `[verdict]`，把四种结局显式区分开，红了第一眼就能分清是产品坏了还是机器太慢：
+
+| `grandchild_case=` | 含义 | 是否产品判据 |
+| --- | --- | --- |
+| `pass` | 窗口内观测到孙进程，调用返回后零存活 | 通过 |
+| `terminate_defect` | 观测到孙进程，但调用返回后仍有存活 | **是**（产品缺陷） |
+| `premise_not_established` | 窗口内没观测到孙进程，清理本身成功（零存活） | 否（环境/负载，该轮既不能证明也不能否证） |
+| `unobservable` | 连进程表快照都拿不到，无法判断 | 否（观测失败） |
+
+对应的断言文本也分开了：`terminate_defect` 的断言前缀是「终止逻辑缺陷（产品判据）」；`premise_not_established` 的断言前缀是「前提未建立（环境判定，不是终止逻辑判据）」，并指向 `[verdict]` 行。
+
+判决链路做过实测：临时把观测镜像名换成不存在的名字（命令不变，模拟"窗口内没有孙进程"），原文输出
+
+```
+前提未建立（环境判定，不是终止逻辑判据）：超时窗口内没有观测到孙进程 aw-timeout-grandchild.exe，
+见 [verdict] grandchild_case=premise_not_established；该轮既不能证明也不能否证整树清理能力
+[verdict] grandchild_case=premise_not_established observed=0 survivors=Some([]) call_ms=1420 ...
+test result: FAILED. 0 passed; 1 failed
+```
+
+改回后 `[verdict] grandchild_case=pass observed=1 survivors=Some([]) call_ms=8431 payload_duration_ms=8048`。另把窗口临时调到 1s 仍是 `pass`（孙进程 0.5s 内出现），说明判决只看「窗口内有没有孙进程」，与窗口长短无关。
+
+### 43.5 覆盖边界（裁决 A，明确写出）
+
+**未被验证的场景**：`全量并发 × 24 路 burner`。在该场景下「孙进程能否在 8s 超时窗口内创建」这一前提无法稳定建立（实测当轮单次进程创建 10–15s），因此**该场景下「超时终止是否清掉整棵树」的能力未被验证**——红轮既不能证明也不能否证它。这不是「已验证通过」，也不是「产品缺陷」。
+
+**已成立、可作为结论的两条**：
+
+1. `单用例 × 24 路 burner`：9 轮全绿，孙进程 0.6–2.4s 出现在窗口内，调用返回时 `after_cleanup=Some([])`、零存活；
+2. `空载全量`：Windows `17 lib + 122 integration` 全绿，该用例窗口内观测到孙进程并零存活。
+
+该用例**不进**「全量并发 × 24 路 burner」矩阵；窗口、判据、实现均不放宽。能力位口径不变（§43.6）。
+
+### 43.6 未改动的边界
+
+- `tools/list` 描述未改，`tools_sha256` 不变（`docs/TOOLS-DESCRIPTION-AUDIT.md` 的 `include_str!` 门禁通过）。
+- macOS 侧父链边校验仍未验证，能力位不因 Linux 单侧修复上调。

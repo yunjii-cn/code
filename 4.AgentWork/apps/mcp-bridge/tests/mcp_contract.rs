@@ -2659,19 +2659,127 @@ fn timeout_description_matches_controlled_set_semantics() {
     }
 }
 
-// 正向：受控集合内的孙进程必须被清理，并用 OS 观测点复核（不是 stat/写盘代理）
+// 正向：受控集合内的孙进程必须被清理，并用 OS 观测点复核（不是 stat/写盘代理）。
+//
+// Windows 夹具曾经用 `powershell -Command "Start-Process ...; Set-Content pids.txt"` 让被测命令
+// 自己写出孙进程 PID：24 路负载下 PowerShell 冷启动到写出文件要 10.7–16.2 s，8 s 超时先触发、
+// 文件还没生成，用例读到的是夹具启动慢，不是"进程树没清干净"。现在改成：
+//   - 孙进程 = 系统 `ping.exe` 的唯一命名副本 `aw-timeout-grandchild.exe`，由 cmd 直接拉起，
+//     不经解释器；副本第一次执行（安全软件首次扫描）放在窗口外的预热里，窗口内只测超时终止；
+//   - 调用被测命令前先跑一次 cmd 与孙进程做预热，让镜像/控制台走热路径；
+//   - PID 不再由被测命令写盘，而是测试进程在超时窗口内用 Toolhelp 快照轮询观测，
+//     并记录首次看到它的时刻；"窗口内确实看到过"是硬断言，避免孙进程没起来的空跑通过。
 #[test]
 fn timeout_cleans_controlled_set_including_grandchild() {
     let (server, _settings, _runs) = server_with_runs();
     let work = tempfile::tempdir().expect("临时工作目录");
     #[cfg(windows)]
-    let cmd = "powershell -NoProfile -Command $p=Start-Process ping -ArgumentList '-n','30','127.0.0.1' -PassThru -WindowStyle Hidden; Set-Content -Path pids.txt -Value $p.Id; Wait-Process -Id $p.Id";
+    const SENTINEL: &str = "aw-timeout-grandchild.exe";
+    #[cfg(windows)]
+    let cmd = {
+        let source = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+            .join("System32")
+            .join("PING.EXE");
+        let sentinel = work.path().join(SENTINEL);
+        fs::copy(&source, &sentinel).expect("复制 ping.exe 作为唯一命名的孙进程");
+        // 预热：按被测命令完全相同的形态（cmd /C 相对路径 + 重定向）跑一次短命版本，
+        // 让 cmd、副本镜像、控制台与路径解析都走热路径，窗口内只测超时终止。
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", &format!("{SENTINEL} -n 1 127.0.0.1 > NUL")])
+            .current_dir(work.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        format!("{SENTINEL} -n 30 127.0.0.1 > NUL")
+    };
     #[cfg(not(windows))]
     let cmd = "echo $$ > pids.txt; sleep 30 & echo $! >> pids.txt; wait";
     #[cfg(windows)]
     let timeout_secs = 8;
     #[cfg(not(windows))]
     let timeout_secs = 1;
+
+    #[cfg(windows)]
+    let seen: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    #[cfg(windows)]
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // 诊断：轮询次数、快照失败次数、每次快照枚举到的行数、首次看到孙进程的时刻。
+    // Toolhelp 快照在进程表剧烈变动时可能拿不到内容（ERROR_BAD_LENGTH），
+    // 需要区分"孙进程没起来"/"观测本身失败"/"进程起得太慢超过窗口"。
+    #[cfg(windows)]
+    let polls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    #[cfg(windows)]
+    let snapshot_failures = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    #[cfg(windows)]
+    let max_rows = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    #[cfg(windows)]
+    let first_seen_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // 诊断：观测到的孙进程 PID 集合变化时间线，用来区分"窗口内根本没有孙进程"
+    // 与"孙进程被观测到、随后被清理"。
+    #[cfg(windows)]
+    let timeline: Arc<std::sync::Mutex<Vec<(u64, String)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    #[cfg(windows)]
+    let first_poll_ms = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    // 计时基准放在调用线程里：线程被调度延迟时，线程内部的 Instant 会把"起得太慢"记成"很快"
+    #[cfg(windows)]
+    let call_start = std::time::Instant::now();
+    #[cfg(windows)]
+    let watcher = {
+        let seen = Arc::clone(&seen);
+        let stop = Arc::clone(&stop);
+        let polls = Arc::clone(&polls);
+        let snapshot_failures = Arc::clone(&snapshot_failures);
+        let max_rows = Arc::clone(&max_rows);
+        let first_seen_ms = Arc::clone(&first_seen_ms);
+        let timeline = Arc::clone(&timeline);
+        let first_poll_ms = Arc::clone(&first_poll_ms);
+        std::thread::spawn(move || {
+            let mut last_pids: Vec<u32> = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let elapsed = call_start.elapsed().as_millis() as u64;
+                if first_poll_ms.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                    // +1 让"第一次轮询发生在 0ms"也能与"还没有轮询"区分开
+                    first_poll_ms.store(elapsed + 1, std::sync::atomic::Ordering::Relaxed);
+                }
+                match process_rows(&[SENTINEL]) {
+                    Some((matched, rows)) => {
+                        max_rows.fetch_max(rows as u64, std::sync::atomic::Ordering::Relaxed);
+                        let pids: Vec<u32> = matched
+                            .iter()
+                            .filter(|(name, _)| name.eq_ignore_ascii_case(SENTINEL))
+                            .map(|(_, pid)| *pid)
+                            .collect();
+                        if pids != last_pids {
+                            timeline
+                                .lock()
+                                .expect("时间线加锁")
+                                .push((elapsed, format!("{pids:?}")));
+                            last_pids = pids.clone();
+                        }
+                        if !pids.is_empty()
+                            && first_seen_ms.load(std::sync::atomic::Ordering::Relaxed) == 0
+                        {
+                            first_seen_ms.store(elapsed + 1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let mut seen = seen.lock().expect("观测结果加锁");
+                        for pid in pids {
+                            if !seen.contains(&pid) {
+                                seen.push(pid);
+                            }
+                        }
+                    }
+                    None => {
+                        snapshot_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
 
     let payload = tool_payload(&call_tool(
         &server,
@@ -2683,6 +2791,11 @@ fn timeout_cleans_controlled_set_including_grandchild() {
             "timeout_secs": timeout_secs
         }),
     ));
+    #[cfg(windows)]
+    {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().expect("观测线程正常退出");
+    }
     assert_eq!(payload["status"], "blocked");
     let reason = payload["blocked_reason"].as_str().unwrap_or("");
     println!("[evidence] grandchild_reason={reason}");
@@ -2691,27 +2804,62 @@ fn timeout_cleans_controlled_set_including_grandchild() {
         "受控集合内清理应成功：{reason}"
     );
 
-    let pid_text = fs::read_to_string(work.path().join("pids.txt")).expect("命令必须写出 PID");
     #[cfg(windows)]
     {
-        let pid: u32 = pid_text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .trim()
-            .parse()
-            .expect("PowerShell 子进程 PID");
+        let observed = seen.lock().expect("观测结果加锁").clone();
+        let polls = polls.load(std::sync::atomic::Ordering::Relaxed);
+        let failures = snapshot_failures.load(std::sync::atomic::Ordering::Relaxed);
+        let rows = max_rows.load(std::sync::atomic::Ordering::Relaxed);
+        let first = first_seen_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let first_poll = first_poll_ms.load(std::sync::atomic::Ordering::Relaxed);
+        let timeline = timeline.lock().expect("时间线加锁").clone();
+        let survivors = process_image_pids(SENTINEL);
         println!(
-            "[evidence] grandchild pid={pid} process_exists_after={}",
-            process_exists(pid)
+            "[evidence] grandchild_watch pids={observed:?} first_seen_ms={first} \
+first_poll_ms={} call_ms={} payload_duration_ms={} polls={polls} \
+snapshot_failures={failures} max_rows={rows} file_exists={} after_cleanup={:?} process_exists={:?}",
+            first_poll.saturating_sub(1),
+            call_start.elapsed().as_millis(),
+            payload["duration_ms"],
+            work.path().join(SENTINEL).exists(),
+            survivors.as_ref().map(|(pids, _)| pids.clone()),
+            observed
+                .iter()
+                .map(|pid| (*pid, process_exists(*pid)))
+                .collect::<Vec<_>>()
+        );
+        println!("[evidence] grandchild_timeline {:?}", timeline);
+        // 明确的判定结果：红了第一眼先看这里——是"机器太慢、前提没建立"，还是"产品没清理干净"。
+        let survivors_pids = survivors.as_ref().map(|(pids, _)| pids.clone());
+        let verdict = match (&survivors_pids, observed.is_empty()) {
+            (Some(pids), _) if !pids.is_empty() => "terminate_defect",
+            (None, _) => "unobservable",
+            (Some(_), true) => "premise_not_established",
+            (Some(_), false) => "pass",
+        };
+        println!(
+            "[verdict] grandchild_case={verdict} observed={} survivors={:?} \
+call_ms={} payload_duration_ms={} polls={polls} snapshot_failures={failures} \
+premise=窗口内观测到唯一命名的孙进程",
+            observed.len(),
+            survivors_pids,
+            call_start.elapsed().as_millis(),
+            payload["duration_ms"],
         );
         assert!(
-            !process_exists(pid),
-            "作业内的孙进程必须已被清理，PID {pid} 仍存活"
+            !observed.is_empty(),
+            "前提未建立（环境判定，不是终止逻辑判据）：超时窗口内没有观测到孙进程 {SENTINEL}，\
+见 [verdict] grandchild_case=premise_not_established；该轮既不能证明也不能否证整树清理能力"
+        );
+        assert_eq!(
+            survivors_pids,
+            Some(Vec::new()),
+            "终止逻辑缺陷（产品判据）：作业内的孙进程没有被清理干净（观测到的 PID {observed:?}）"
         );
     }
     #[cfg(not(windows))]
     {
+        let pid_text = fs::read_to_string(work.path().join("pids.txt")).expect("命令必须写出 PID");
         let pids: Vec<i32> = pid_text
             .lines()
             .filter_map(|line| line.trim().parse::<i32>().ok())
@@ -2764,6 +2912,49 @@ fn process_exists(pid: u32) -> bool {
     }
     // STILL_ACTIVE = 259
     ok != 0 && code == 259
+}
+
+#[cfg(windows)]
+fn process_rows(images: &[&str]) -> Option<(Vec<(String, u32)>, usize)> {
+    use std::ffi::CStr;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+    };
+    let mut matched = Vec::new();
+    let mut rows = 0usize;
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+        let mut ok = Process32First(snapshot, &mut entry);
+        if ok == 0 {
+            // 首行就失败说明快照内容不可用（进程表在枚举期间发生变动时会出现），
+            // 不能当成"系统里一个进程都没有"这类有效观测。
+            CloseHandle(snapshot);
+            return None;
+        }
+        while ok != 0 {
+            rows += 1;
+            let name = CStr::from_ptr(entry.szExeFile.as_ptr()).to_string_lossy();
+            if images.iter().any(|image| name.eq_ignore_ascii_case(image)) {
+                matched.push((name.into_owned(), entry.th32ProcessID));
+            }
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+            ok = Process32Next(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+    }
+    Some((matched, rows))
+}
+
+#[cfg(windows)]
+fn process_image_pids(image: &str) -> Option<(Vec<u32>, usize)> {
+    process_rows(&[image])
+        .map(|(matched, rows)| (matched.into_iter().map(|row| row.1).collect(), rows))
 }
 
 #[test]

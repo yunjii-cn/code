@@ -2570,6 +2570,10 @@ mod process_scope {
 
         pub(crate) struct Supervisor {
             pgid: Option<i32>,
+            /// 根进程启动时刻（`/proc/<pid>/stat` 的 `starttime`）；父链边校验用，
+            /// 拒绝 PID 复用后挂到新进程上的旧子进程。读不到时边校验退回旧行为。
+            #[cfg(target_os = "linux")]
+            root_start: Option<u64>,
             /// cgroup v2 作用域是可选观测点：建得起来就用，建不起来记原因，绝不当成"没有后代"
             #[cfg(target_os = "linux")]
             cgroup: CgroupState,
@@ -2606,6 +2610,8 @@ mod process_scope {
                 Self {
                     pgid: None,
                     #[cfg(target_os = "linux")]
+                    root_start: None,
+                    #[cfg(target_os = "linux")]
                     cgroup: CgroupState::default(),
                 }
             }
@@ -2640,6 +2646,10 @@ mod process_scope {
 
             pub(crate) fn attach(&mut self, child: &mut Child) {
                 self.pgid = i32::try_from(child.id()).ok().filter(|pgid| *pgid > 0);
+                #[cfg(target_os = "linux")]
+                {
+                    self.root_start = proc_start_time(child.id());
+                }
                 #[cfg(target_os = "linux")]
                 {
                     let Some(scope) = self.cgroup.scope.as_ref() else {
@@ -2700,7 +2710,7 @@ mod process_scope {
                                     );
                                 }
                             };
-                            let mut pids = descendants_of(root, &rows);
+                            let mut pids = descendants_of(root, self.root_start, &rows);
                             for pid in &members {
                                 if *pid != root && !pids.contains(pid) {
                                     pids.push(*pid);
@@ -2724,7 +2734,7 @@ mod process_scope {
                             }
                         }
                         _ => {
-                            let entries = descendants_of(root, &rows)
+                            let entries = descendants_of(root, self.root_start, &rows)
                                 .into_iter()
                                 .map(|pid| DescendantProcess {
                                     pid,
@@ -3011,6 +3021,9 @@ mod process_scope {
             pid: u32,
             ppid: u32,
             pgrp: u32,
+            /// `/proc/<pid>/stat` 第 22 字段 `starttime`：进程启动时刻（自开机起的时钟滴答）。
+            /// 用于父链边校验：PID 被复用后，旧子进程的 `ppid` 会指向新进程。
+            start_time: u64,
         }
 
         /// 全量 `/proc` 扫描：读不到 `stat` 且进程仍存在（如 hidepid/权限）都按不可观测处理；
@@ -3044,7 +3057,7 @@ mod process_scope {
             }
         }
 
-        /// `/proc/<pid>/stat` 关键字段：`pid (comm) state ppid pgrp ...`。
+        /// `/proc/<pid>/stat` 关键字段：`pid (comm) state ppid pgrp ... starttime(22)`。
         /// `comm` 可含空格与括号，因此以最后一个 `)` 为界解析。
         #[cfg(target_os = "linux")]
         fn parse_stat(text: &str, pid: u32) -> Option<ProcRow> {
@@ -3058,7 +3071,21 @@ mod process_scope {
             let _state = fields.next()?;
             let ppid: u32 = fields.next()?.parse().ok()?;
             let pgrp: u32 = fields.next()?.parse().ok()?;
-            Some(ProcRow { pid, ppid, pgrp })
+            // 跳过 session..itrealvalue（字段 6..=21），第 22 个字段是 starttime
+            let start_time: u64 = fields.nth(16)?.parse().ok()?;
+            Some(ProcRow {
+                pid,
+                ppid,
+                pgrp,
+                start_time,
+            })
+        }
+
+        /// 读某进程的启动时刻；读不到返回 `None`（边校验退回旧行为）。
+        #[cfg(target_os = "linux")]
+        fn proc_start_time(pid: u32) -> Option<u64> {
+            let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            parse_stat(&text, pid).map(|row| row.start_time)
         }
 
         /// 读某进程当前父 PID；进程不存在或读不到返回 `None`（测试用于确认"已被收养"）。
@@ -3069,23 +3096,38 @@ mod process_scope {
         }
 
         /// 按父链做传递闭包（含环保护），返回排好序的后代 PID。
+        ///
+        /// 每条边要求「子进程启动时刻 ≥ 父进程启动时刻」。Linux 会复用 PID：旧父进程退出后
+        /// 同号 PID 被新进程持有，旧子进程的 `ppid` 会把无关进程树挂到新根上；`starttime`
+        /// 能识别并拒绝这类边。只有「这条边的父进程启动时刻读不到」时才退回旧行为（接受该边），
+        /// 不因为一个未知时刻把整棵树都放宽。
         #[cfg(target_os = "linux")]
-        fn descendants_of(root: u32, rows: &[ProcRow]) -> Vec<u32> {
+        fn descendants_of(root: u32, root_start_time: Option<u64>, rows: &[ProcRow]) -> Vec<u32> {
             use std::collections::HashSet;
             let mut seen = HashSet::new();
             seen.insert(root);
-            let mut frontier = vec![root];
+            let mut frontier = vec![(root, root_start_time)];
             let mut descendants = Vec::new();
-            while let Some(parent) = frontier.pop() {
+            while let Some((parent, parent_start_time)) = frontier.pop() {
                 for row in rows {
-                    if row.ppid == parent && seen.insert(row.pid) {
-                        descendants.push(row.pid);
-                        frontier.push(row.pid);
+                    if row.ppid != parent || seen.contains(&row.pid) {
+                        continue;
                     }
+                    if !edge_respects_start_order(parent_start_time, row.start_time) {
+                        continue;
+                    }
+                    seen.insert(row.pid);
+                    descendants.push(row.pid);
+                    frontier.push((row.pid, Some(row.start_time)));
                 }
             }
             descendants.sort_unstable();
             descendants
+        }
+
+        #[cfg(target_os = "linux")]
+        fn edge_respects_start_order(parent: Option<u64>, child: u64) -> bool {
+            parent.map_or(true, |parent| child >= parent)
         }
 
         fn group_exists(pgid: i32) -> bool {
@@ -3127,6 +3169,48 @@ mod process_scope {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 false
+            }
+
+            // v1.40 判据：同号 PID 复用后，旧父链留下的子进程启动时刻早于新根，这条边必须
+            // 被拒绝；只有启动时刻不早于父进程的边才允许进入后代集合。启动时刻读不到的边
+            // 退回旧行为（接受），避免因缺证据扩大误判。
+            #[test]
+            fn pid_reuse_parent_chain_edge_is_rejected() {
+                let root = 500;
+                let row = |pid: u32, ppid: u32, start_time: u64| ProcRow {
+                    pid,
+                    ppid,
+                    pgrp: root,
+                    start_time,
+                };
+                let rows = vec![
+                    // 旧父链遗留：早于新根，必须拒绝
+                    row(900, root, 1000),
+                    // 祖先被拒绝，其后代也不可达
+                    row(901, 900, 1100),
+                    // 真正的新后代
+                    row(902, root, 6000),
+                    row(903, 902, 7000),
+                    // 中间层 PID 复用：905 早于父进程 902，必须拒绝
+                    row(905, 902, 4000),
+                    // 晚于根启动时刻的直接子进程
+                    row(907, root, 6500),
+                ];
+                println!(
+                    "[evidence] linux_pid_reuse rows={} result={:?}",
+                    rows.len(),
+                    descendants_of(root, Some(5000), &rows)
+                );
+                assert_eq!(descendants_of(root, Some(5000), &rows), vec![902, 903, 907]);
+                // 根启动时刻读不到：只放宽"根出发的边"，更深层边仍按已知时刻校验，
+                // 所以 902→905（905 早于 902）依然被拒绝
+                assert_eq!(
+                    descendants_of(root, None, &rows),
+                    vec![900, 901, 902, 903, 907]
+                );
+                assert!(!edge_respects_start_order(Some(5000), 1000));
+                assert!(edge_respects_start_order(Some(5000), 6000));
+                assert!(edge_respects_start_order(None, 1));
             }
 
             // 反假通过：活着但被暂停、不写盘的进程，必须仍被判为"存在"
@@ -6878,7 +6962,7 @@ fn capabilities_payload() -> Value {
                 "pid_reuse_parent_chain_edge_is_rejected",
                 "terminated_rows_are_not_counted_as_descendants",
             ],
-            "只回答「枚举到的后代是否都在受控集合内、终止后是否仍可枚举到」；v1.39 起 Windows 父链边带创建时间校验（子 ≥ 父）、根→直接子进程再加「≤ 根退出时间」上界，并剔除 `GetExitCodeProcess` 判为已终止或 `OpenProcess` 返回 `ERROR_INVALID_PARAMETER`（PID 已不存在）的行（`pid_reuse_parent_chain_edge_is_rejected` / `terminated_rows_are_not_counted_as_descendants` 确定性覆盖）；不覆盖换父后被收养、作业外进程（如不进作业的 `conhost.exe`）、以及创建时间/存活状态读不到时的同号 PID 复用，也不覆盖集合未能建立的情形。",
+            "只回答「枚举到的后代是否都在受控集合内、终止后是否仍可枚举到」；v1.39 起 Windows 父链边带创建时间校验（子 ≥ 父）、根→直接子进程再加「≤ 根退出时间」上界，并剔除 `GetExitCodeProcess` 判为已终止或 `OpenProcess` 返回 `ERROR_INVALID_PARAMETER`（PID 已不存在）的行；v1.40 起 Linux 父链边按 `/proc/<pid>/stat` 的 `starttime` 做同一判据（子 ≥ 父），只放宽该边父进程启动时刻读不到的情形（`pid_reuse_parent_chain_edge_is_rejected` / `terminated_rows_are_not_counted_as_descendants` 确定性覆盖）；不覆盖换父后被收养、作业外进程（如不进作业的 `conhost.exe`）、以及创建时间/存活状态读不到时的同号 PID 复用，也不覆盖集合未能建立的情形。",
         ),
         capability_entry(
             "path.argv_scope_enforced",
