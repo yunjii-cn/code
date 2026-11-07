@@ -1255,7 +1255,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "744da2614a3730f08d309033b7ca86c956edfab82d369443f06fd4ceecaba9da",
+  "tools_sha256": "9f1ee7443846d6c0e46e40e7c8f9f0ff206105a13444c1e191dc261b65c0203c",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1395,8 +1395,8 @@ cargo test -p aw-mcp-bridge description_gate
       "id": "G20",
       "tool": "task.cancel",
       "path": "description",
-      "contains": ["按 task_id 显式取消", "canceled", "completed_before_cancel", "cancel_requested", "not_running", "未发送信号", "不得认为已清理", "不会谎报已清理", "跨进程不可见", "受控集合"],
-      "not_contains": ["一定已清理", "保证终止整棵进程树", "跨进程生效"]
+      "contains": ["按 task_id 显式取消", "跨进程可见", "runs/.cancel/<task_id>.json", "canceled", "completed_before_cancel", "cancel_requested", "not_running", "未发送信号", "不会谎报已清理", "request_state", "pending", "acknowledged", "受控集合"],
+      "not_contains": ["一定已清理", "保证终止整棵进程树", "跨进程生效", "跨进程不可见"]
     },
     {
       "id": "G21",
@@ -1404,6 +1404,13 @@ cargo test -p aw-mcp-bridge description_gate
       "path": "inputSchema.properties.task_id.description",
       "contains": ["命名规则", "派单标识"],
       "not_contains": ["任意字符串"]
+    },
+    {
+      "id": "G22",
+      "tool": "task.cancel",
+      "path": "inputSchema.properties.requested_by.description",
+      "contains": ["发起者", "写入取消请求文件", "缺省为 pid:"],
+      "not_contains": ["必填"]
     }
   ]
 }
@@ -4446,8 +4453,61 @@ python3 scripts/real-chain-verify/verify.py --binary /root/.aw-posix-verify/targ
 
 ### 51.6 未证 / 边界（不得被本轮描述掩盖）
 
-- Linux bridge 猝死后的**孙进程**仍存活（`PDEATHSIG` 不遗传）：不是「已解决」，是「直接子进程已收口 + 孙进程给出运维兜底」。
-- `task.cancel` **跨进程不可见**：另一个 bridge 上的同 `task_id` 不能被本工具取消；此时只能 `runs.inflight` 判残标。
+- Linux bridge 猝死后的**孙进程**仍存活（`PDEATHSIG` 不遗传）：不是「已解决」，是「直接子进程已收口 + 孙进程给出运维兜底」。（v1.48 已改为启动自动回收，见 §52；本行保留 v1.47 时的原始结论）
+- `task.cancel` **跨进程不可见**：另一个 bridge 上的同 `task_id` 不能被本工具取消；此时只能 `runs.inflight` 判残标。（v1.48 已修，见 §52）
 - `cancel_requested` 是「已请求、未观测到回执」，**不是**已清理；`not_running` 不发信号、不做清理。
 - Windows 侧整树清理能力位不变（`requires_out_of_job_enumerable_terminable_os_primitive`）。
+
+## 52. v1.48：启动回收遗留 cgroup 作用域 / `task.cancel` 跨进程可见 / B5 自动收敛
+
+v1.47 把 Linux 孙进程残留在「已知限制 + 人工巡检」；本轮把它改成启动时自动收敛，并让取消请求跨进程可见。**红证据先贴，再给绿。**
+
+### 52.1 红证据（改动前，真实链路原文）
+
+| 项 | 红原文 / 事实 | 性质 |
+|---|---|---|
+| B5 Linux 孙进程 | `grandchild_survived=True`，心跳 `10 → 25`；`aw-mcp-bridge-<pid>-0` 作用域残留、无归属记录（sidecar），重启后孙进程仍存活且作用域未被回收 | 只能靠人工 `kill -9` + `rmdir` 巡检 |
+| B6 跨进程取消 | 进程 B 对进程 A 正在执行的同 `task_id` 调 `task.cancel` → `status=not_running`、`inflight_marker` 可见但取消无效、`runs/.cancel` 目录不存在、A 侧继续执行到自然结束 | 多进程部署下取消失效 |
+| 结果 | 两个平台同红；B5 仅在 Linux 触发（Windows 作业对象已在 v1.47 覆盖整树） | — |
+
+### 52.2 实现（判据不放宽）
+
+1. **归属 sidecar + 三条证据**：`process_scope::publish_owner` 在 `attach` 成功（`CgroupStatus::Active`）后写 `runs/.cgroup-scopes/<scope>.json`（`cgroup-scope/1`：`scope`/`cgroup`/`bridge_pid`/`bridge_start`/`task_id`/`attempt`/`root_pid`/`root_start`/`createdAt`）；作用域目录删除成功才删 sidecar。
+2. **启动回收**：`reclaim_stale_cgroup_scopes_at(runs_dir, "startup")` 在 `auto_sweep("startup")` 里执行。清理条件 = sidecar 自洽 + `runs/<task_id>/attempt-<n>/dispatch.json` 存在 + owner bridge 已死（`/proc/<pid>/stat` starttime 与 `bridge_start` 不一致才算死，防 PID 复用误杀）。任一不满足 → `phase=kept` / `outcome=kept` / `action=none` / `reason`，零动作。空作用域只删目录；非空先写 plan 审计再 `cgroup.kill`（无则逐成员 SIGKILL、每轮重读 `cgroup.procs`），3s 内 `procs` 空且 `populated 0` 才删目录与 sidecar。
+3. **审计**：`runs/cgroup-reclaim.jsonl`（`cgroup-reclaim/1`），**每个扫描到的作用域都写一行**（keep 也写），字段含 `trigger`、`scope`、`members_before`、`members_after`（读不出写 `null`）、`action`、`outcome`、`reason`。
+4. **跨进程取消**：`runs/.cancel/<task_id>.json`（`cancel-request/1`，`requested_by`/`requestedAt`/`target{pid,startedAt}`，原子写）；`CancelHeartbeat` 在 spawn 前与执行循环每 200ms 读取，`pending` → 原子改写 `acknowledged`（写成功后才请求取消）→ 收尾写 `done`；target 不符写 `ignored`。`task.cancel` 响应带 `cross_process`/`request_state` 与三个时间戳；无本地 token 时每 100ms 读文件，10s 内等不到终态回 `cancel_requested`（`cleanup_claimed=false`）。
+5. **请求清扫**：`runs/cancel-requests.jsonl`（`cancel-requests/1`），只删「`pending`/`acknowledged` 且 target pid 已死超过 5s」与「`done`/`ignored` 超过 30 天」，先写 plan 行、写不进则零删除。
+
+### 52.3 工具描述与门禁
+
+- `task.cancel` 描述改为跨进程语义（`runs/.cancel/<task_id>.json`、`request_state` 三态、`pending`/`acknowledged` 时不宣称已清理），schema 新增 `requested_by`（`maxLength=128`）。
+- `tools_sha256`：`744da2614a3730f08d309033b7ca86c956edfab82d369443f06fd4ceecaba9da` → `9f1ee7443846d6c0e46e40e7c8f9f0ff206105a13444c1e191dc261b65c0203c`。
+- 门禁 **G20** 更新：`contains` 去掉 `跨进程不可见`，加入 `跨进程可见`、`runs/.cancel/<task_id>.json`、`request_state`、`pending`、`acknowledged`；`not_contains` 保留 `一定已清理`/`保证终止整棵进程树`/`跨进程生效` 并新增 `跨进程不可见`。
+- 门禁 **G22** 新增：`inputSchema.properties.requested_by.description` 必须含 `发起者`、`写入取消请求文件`、`缺省为 pid:`，禁止 `必填`。
+
+### 52.4 绿：真实链路（MCP stdio，两平台）
+
+| 场景 | Windows 24H2 | Ubuntu 24.04 (WSL2) |
+|---|---|---|
+| B5 `kill -9` 后孙进程 | 按能力位 skip（作业对象已覆盖） | 红时 `grandchild_survived=True`；绿 `grandchild_gone=True`、心跳停止、作用域目录与 sidecar 删除、`attempt-1`/`dispatch.json` 保留 |
+| B5 审计 | — | plan/result `trigger=startup`、`members_before` 非空、`members_after` 空、`outcome=reclaimed` |
+| B5 负向 decoy | — | 伪造 `aw-mcp-bridge-decoy-<pid>`（无 sidecar）→ 目录保留、审计 `outcome=kept` / `reason=owner_record_missing` |
+| B6 三态 | `pending → acknowledged → done`，三个时间戳 | `pending → acknowledged → done`，三个时间戳 |
+| B6 取消结果 | `status=canceled`、`cleanup_claimed=true`、target 与 inflight 标记一致、A 侧 `blocked_reason` 前缀 `canceled：`、handback `canceled` | 同左 |
+| B6 再次取消 | `not_running`，已落盘的 `done` 请求保留、不被覆盖 | 同左 |
+
+### 52.5 回归
+
+- Windows：`23 lib + 129 integration` 全绿（新增 `v148_tests` 的 2 条跨进程用例 + 1 条跨实例集成测试）。
+- WSL Ubuntu 24.04：`33 lib + 127 integration` 全绿（`scripts/posix-timeout-verify/verify.sh run`，含 4 条 Linux cgroup 回收单测）。
+- 真实链路：Windows `18 evidence / 0 failures`、WSL `19 evidence / 0 failures`。
+- 两次跨平台红都与本次改动无关：①`descendant_snapshot_cross_checks_process_group` 在并行高负载下出现 `outcome=Unavailable`（隔离连跑 5 轮全绿、整套重跑全绿）；②既有 `sweep_concurrent_claimers_delete_once_others_lost_race` 在并发高负载下偶发 `restore_failed`（重跑全绿，未改该路径代码）。
+
+### 52.6 未证 / 边界（不得被本轮描述掩盖）
+
+- 回收**只在启动时**做，不做周期；bridge 长期运行期间出现的新孤儿要等下一次启动。
+- 无 cgroup v2 / `/sys/fs/cgroup` 只读 → `state=unsupported`，不扫描、不写审计；无 `cgroup.kill` 时逐 pid 终止存在 PID 复用窗口（每轮重读成员表收紧，不承诺零窗口）。
+- 跨机器不可见：sidecar、`.cancel` 请求都只在同一 `runs/` 内有效。
+- `pending` 在真实链路两个平台都观测到了（20ms 轮询），但窗口随执行侧调度变化，可能短于观测间隔；`requestedAt`/`acknowledgedAt`/`finishedAt` 三个时间戳始终可区分三阶段，不以「没轮询到 pending」当作未实现。
+
 

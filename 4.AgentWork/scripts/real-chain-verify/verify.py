@@ -10,7 +10,8 @@
       然后重启服务，验证 startup 档自动清扫残留标记
   B3. bridge 猝死后 5s 容差内立刻重启：不误删活标
   B4. 显式取消：同一连接上 task.execute 执行中调用 task.cancel，状态必须是 canceled
-  B5. PDEATHSIG 作用域边界（仅 Linux）：孙进程不继承，bridge 猝死后成为孤儿（如实记录）
+  B5. bridge 猝死遗留 cgroup 作用域：下一次启动自动回收，孙进程消失（仅 Linux）
+  B6. 跨进程取消：另一个进程写磁盘请求，执行侧心跳读取，三态（pending/acknowledged/done）可区分
   C1/C2/C3. 并发：同 task_id 顺序/两进程、不同 task_id 并行
   D1. 周期清扫：bridge 猝死留下的残标由 period 档（trigger=periodic）清掉
   D2. 逃逸进程整树清理（仅 Linux）：祖父/父/孙 + 孙进程逃出进程组与 cgroup.procs，超时后全灭
@@ -112,13 +113,13 @@ def find_tmp(root):
 class Bridge:
     """一条真实的 stdio 连接；所有交互都落到 wire.jsonl。"""
 
-    def __init__(self, exe, sandbox, name="bridge", sweep="0", extra_env=None):
+    def __init__(self, exe, sandbox, name="bridge", sweep="0", extra_env=None, wire_name="wire.jsonl"):
         self.name = name
         self.exe = Path(exe)
         self.sandbox = Path(sandbox)
         self.work = self.sandbox / "work"
         self.work.mkdir(parents=True, exist_ok=True)
-        self.wire_path = self.sandbox / "wire.jsonl"
+        self.wire_path = self.sandbox / wire_name
         self.pending = {}
         env = dict(os.environ)
         env["APPDATA"] = str(self.sandbox / "appdata")
@@ -695,9 +696,9 @@ def scenario_b4_explicit_cancel(exe, root, label):
 # ---- 场景 B5：PDEATHSIG 的作用域边界（仅 Linux） ---------------------------
 
 def scenario_b5_grandchild_scope(exe, root, label):
-    print("\n== 场景 B5：bridge 猝死时孙进程是否被连带收掉 ==", flush=True)
+    print("\n== 场景 B5：bridge 猝死遗留 cgroup 作用域由下一次启动自动回收 ==", flush=True)
     if IS_WINDOWS:
-        ev("B5 label=windows skipped reason=Windows 作业对象整棵树回收，无此边界")
+        ev("B5 label=windows skipped reason=Windows 作业对象在句柄关闭时整棵树回收，无遗留 cgroup 边界")
         return None
     sandbox = make_sandbox(root, label, "B5")
     binary = install_binary(exe, sandbox)
@@ -707,10 +708,13 @@ def scenario_b5_grandchild_scope(exe, root, label):
     task_id = "real-b5-grandchild"
     beat = work / "grandchild-beat.txt"
     pid_file = work / "grandchild.pid"
+    decoy = Path("/sys/fs/cgroup") / f"aw-mcp-bridge-decoy-{os.getpid()}"
     cmd = (
         f"setsid sh -c 'echo $$ > {shlex.quote(str(pid_file))}; "
         f"while :; do echo tick >> {shlex.quote(str(beat))}; sleep 1; done' & sleep 60"
     )
+    grand_pid = None
+    scope_dir = None
     try:
         bridge.initialize()
         bridge.send(
@@ -731,29 +735,245 @@ def scenario_b5_grandchild_scope(exe, root, label):
             "B5 孙进程已写出 pid",
         )
         time.sleep(1)
+        grand_pid = int(pid_file.read_text(encoding="utf-8").strip())
+        candidates = [
+            p
+            for p in Path("/sys/fs/cgroup").glob(f"aw-mcp-bridge-{bridge.proc.pid}-*")
+            if p.is_dir()
+        ]
+        check(len(candidates) == 1, f"B5 找到本轮作用域目录：{[p.name for p in candidates]}")
+        scope_dir = candidates[0] if candidates else None
+        scope_name = scope_dir.name if scope_dir else ""
+        sidecar = runs / ".cgroup-scopes" / f"{scope_name}.json" if scope_name else None
+        check(bool(sidecar) and sidecar.is_file(), f"B5 作用域归属记录已落盘：{scope_name}")
+        owner = read_json(sidecar) if sidecar and sidecar.is_file() else {}
+        check(scope_dir is not None and scope_dir.is_dir(), f"B5 作用域目录存在：{scope_dir}")
+        check(owner.get("task_id") == task_id, "B5 sidecar 点名本轮 task_id")
+        check(owner.get("attempt") == 1, f"B5 sidecar 点名 attempt（{owner.get('attempt')}）")
+        procs = ""
+        if scope_dir and scope_dir.is_dir():
+            procs = (scope_dir / "cgroup.procs").read_text(encoding="utf-8")
+        check(str(grand_pid) in procs.split(), f"B5 孙进程在作用域成员内：{procs.split()}")
+
+        # 负向对照：没有 sidecar 的作用域看着像孤儿，但判不准，不得清理
+        decoy_created = False
+        try:
+            decoy.mkdir()
+            decoy_created = True
+        except OSError as error:
+            ev(f"B5 label={label} decoy_create_failed={error}")
+
         bridge.kill()
         size_before = beat.stat().st_size if beat.is_file() else 0
         time.sleep(3)
         size_after = beat.stat().st_size if beat.is_file() else 0
-        grand_pid = int(pid_file.read_text(encoding="utf-8").strip())
         survived = size_after > size_before and pid_alive(grand_pid)
-        ev(
-            f"B5 label={label} pdeathsig_scope=direct_child_only grandchild_pid={grand_pid} "
-            f"grandchild_heartbeat_before={size_before} after={size_after} grandchild_survived={survived}"
-        )
-        check(
-            survived,
-            "B5 如实记录边界：PDEATHSIG 不遗传，bridge 猝死时孙进程会成孤儿（预期为 true）",
-        )
-        # 收尾：验证脚本自己清掉这个孤儿，避免污染环境；产品侧兜底见契约 §2.7
+        check(survived, "B5 红证据：bridge 被 kill -9 后孙进程仍存活（PDEATHSIG 不遗传）")
+        check(scope_dir is not None and scope_dir.is_dir(), "B5 红证据：遗留作用域目录仍在")
+        check(bool(sidecar) and sidecar.is_file(), "B5 红证据：遗留 sidecar 仍在")
+
+        restarted = Bridge(binary, sandbox, name="B5-restarted")
         try:
-            os.kill(grand_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        gone = wait_until(lambda: not pid_alive(grand_pid), 5)
-        check(bool(gone), "B5 验证脚本清掉孤儿（产品不做兜底）")
+            restarted.initialize()
+            gone = wait_until(lambda: not pid_alive(grand_pid), 10)
+            check(bool(gone), "B5 启动回收后孙进程消失（自动收敛，不含人工巡检）")
+            size_after_restart = beat.stat().st_size if beat.is_file() else 0
+            time.sleep(2)
+            stable = beat.stat().st_size if beat.is_file() else 0
+            check(stable == size_after_restart, f"B5 回收后心跳停止（{size_after_restart} -> {stable}）")
+            check(not scope_dir.is_dir(), f"B5 作用域目录已删除：{scope_dir}")
+            check(not sidecar.exists() if sidecar else True, "B5 sidecar 已删除")
+            check((runs / task_id / "attempt-1" / "dispatch.json").is_file(), "B5 attempt 目录与 dispatch 保留")
+
+            audit = read_jsonl(runs / "cgroup-reclaim.jsonl")
+            plan = [
+                row
+                for row in audit
+                if row.get("trigger") == "startup"
+                and row.get("phase") == "plan"
+                and row.get("scope") == scope_name
+            ]
+            result = [
+                row
+                for row in audit
+                if row.get("trigger") == "startup"
+                and row.get("phase") == "result"
+                and row.get("scope") == scope_name
+            ]
+            check(bool(plan), "B5 审计有 trigger=startup 的 plan 行")
+            check(bool(result), "B5 审计有 trigger=startup 的 result 行")
+            if plan:
+                check(plan[-1].get("task_id") == task_id and plan[-1].get("attempt") == 1,
+                      "B5 plan 行点名 task_id/attempt")
+                check(len(plan[-1].get("members_before") or []) >= 1,
+                      f"B5 plan 行记录清理前成员：{plan[-1].get('members_before')}")
+            if result:
+                check(result[-1].get("outcome") == "reclaimed",
+                      f"B5 result outcome=reclaimed（{result[-1].get('outcome')}）")
+                check((result[-1].get("members_after") or []) == [],
+                      f"B5 result 记录清理后成员为空：{result[-1].get('members_after')}")
+            ev(
+                f"B5 label={label} scope={scope_name} grandchild_pid={grand_pid} "
+                f"survived_before_restart={survived} gone_after_restart={bool(gone)} "
+                f"audit_plan={len(plan)} audit_result={len(result)}"
+            )
+
+            if decoy_created:
+                kept = [
+                    row
+                    for row in audit
+                    if row.get("trigger") == "startup"
+                    and row.get("phase") == "kept"
+                    and row.get("scope") == decoy.name
+                ]
+                check(decoy.is_dir(), "B5 无 sidecar 的同类目录未被清理（判不准不动）")
+                check(bool(kept), "B5 审计写明为什么不动（outcome=kept）")
+                if kept:
+                    check(kept[-1].get("reason") == "owner_record_missing",
+                          f"B5 kept reason={kept[-1].get('reason')}")
+                ev(f"B5 label={label} decoy_kept={decoy.is_dir()} kept_rows={len(kept)}")
+        finally:
+            restarted.close()
     finally:
+        if grand_pid:
+            try:
+                os.kill(grand_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if decoy.is_dir():
+            try:
+                os.rmdir(str(decoy))
+            except OSError:
+                pass
         bridge.close()
+    return sandbox
+
+
+# ---- 场景 B6：跨进程取消 ---------------------------------------------------
+
+def scenario_b6_cross_process_cancel(exe, root, label):
+    print("\n== 场景 B6：task.cancel 跨进程可见（磁盘请求 + 心跳读取）==", flush=True)
+    sandbox = make_sandbox(root, label, "B6")
+    binary = install_binary(exe, sandbox)
+    runs = runs_dir_of(sandbox)
+    work = sandbox / "work"
+    task_id = "real-b6-cross-cancel"
+    beat = work / "b6-beat.txt"
+    bridge_a = Bridge(binary, sandbox, name="B6-a", wire_name="wire-a.jsonl")
+    bridge_b = Bridge(binary, sandbox, name="B6-b", wire_name="wire-b.jsonl")
+    if IS_WINDOWS:
+        cmd = cmd_heartbeat(beat, 20)
+    else:
+        cmd = f"trap '' TERM; i=0; while [ $i -lt 20 ]; do echo tick >> {shlex.quote(str(beat))}; sleep 1; i=$((i+1)); done"
+    observed = []
+    try:
+        bridge_a.initialize()
+        bridge_b.initialize()
+        request_id = bridge_a.send(
+            "tools/call",
+            {
+                "name": "task.execute",
+                "arguments": {
+                    "task_id": task_id,
+                    "cmd": cmd,
+                    "cwd": str(work),
+                    "timeout_secs": 120,
+                },
+            },
+        )
+        marker = runs / ".inflight" / f"{task_id}.json"
+        check(bool(wait_until(lambda: marker.is_file() and (runs / task_id / "attempt-1" / "dispatch.json").is_file(), 15)),
+              "B6 A 进程任务已开始")
+        marker_record = read_json(marker)
+        request_file = runs / ".cancel" / f"{task_id}.json"
+        time.sleep(1)
+
+        outcome = {}
+
+        def cancel_from_b():
+            payload, is_error, _ = bridge_b.call(
+                "task.cancel",
+                {"task_id": task_id, "reason": "B6 跨进程取消", "requested_by": "real-chain-b6"},
+                timeout=60,
+            )
+            outcome["payload"] = payload
+            outcome["is_error"] = is_error
+
+        worker = threading.Thread(target=cancel_from_b, daemon=True)
+        worker.start()
+        deadline = time.time() + 30
+        while time.time() < deadline and worker.is_alive():
+            if request_file.is_file():
+                try:
+                    state = read_json(request_file).get("status")
+                except (json.JSONDecodeError, OSError):
+                    state = None
+                if state and (not observed or observed[-1] != state):
+                    observed.append(state)
+            time.sleep(0.02)
+        worker.join(timeout=30)
+        check(not worker.is_alive(), "B6 跨进程取消请求在 30s 内返回")
+        check(not outcome.get("is_error"), "B6 跨进程 task.cancel 不是工具错误")
+        payload = outcome.get("payload") or {}
+        check(payload.get("cross_process") is True, f"B6 标明跨进程：{payload.get('cross_process')}")
+        check(payload.get("status") == "canceled", f"B6 跨进程取消最终 canceled（{payload.get('status')}）")
+        check(payload.get("request_state") == "done", f"B6 request_state=done（{payload.get('request_state')}）")
+        check(payload.get("cleanup_claimed") is True, "B6 已落盘 canceled 回执才宣称清理")
+
+        final = read_json(request_file) if request_file.is_file() else {}
+        check(final.get("status") == "done", f"B6 请求文件终态 done（{final.get('status')}）")
+        check(final.get("requested_by") == "real-chain-b6", "B6 请求记录发起者")
+        check(bool(final.get("requestedAt")), "B6 请求记录时间")
+        target = final.get("target") or {}
+        check(target.get("pid") == marker_record.get("pid"), "B6 请求 target 指向 A 的进程")
+        check(target.get("startedAt") == marker_record.get("startedAt"), "B6 请求 target 指向本轮执行")
+        check(bool(final.get("acknowledgedAt")), "B6 记录执行侧已读时刻（acknowledged）")
+        check(bool(final.get("finishedAt")), "B6 记录完成时刻（done）")
+        check(observed[:1] in (["pending"], ["acknowledged"]),
+              f"B6 观测到落盘后未读或已读在清理的中间态：{observed}")
+        check("acknowledged" in observed or bool(final.get("acknowledgedAt")),
+              f"B6 三态可区分：observed={observed}")
+        check("done" in observed or final.get("status") == "done", "B6 三态可区分：done 被观测到")
+        ev(
+            f"B6 label={label} states={observed} cancel_status={payload.get('status')} "
+            f"request_state={payload.get('request_state')} requested_by={final.get('requested_by')} "
+            f"target_pid={target.get('pid')} acknowledgedAt={bool(final.get('acknowledgedAt'))}"
+        )
+
+        executed = bridge_a.await_id(request_id, timeout=60)
+        exec_payload = json.loads(executed["result"]["content"][0]["text"])
+        check(exec_payload.get("status") == "canceled", f"B6 A 侧执行状态 canceled（{exec_payload.get('status')}）")
+        check((exec_payload.get("blocked_reason") or "").startswith("canceled："),
+              f"B6 A 侧回执是取消档：{(exec_payload.get('blocked_reason') or '')[:40]}...")
+        handback = read_json(runs / task_id / "attempt-1" / "handback.json")
+        check(handback.get("status") == "canceled", "B6 盘上 handback.status=canceled")
+        check(not marker.is_file(), "B6 取消完成后活跃标记已删除")
+        size_before = beat.stat().st_size if beat.is_file() else 0
+        time.sleep(2)
+        size_after = beat.stat().st_size if beat.is_file() else 0
+        check(size_after == size_before, f"B6 取消后心跳停止（{size_before} -> {size_after}）")
+
+        again, again_error, _ = bridge_b.call(
+            "task.cancel",
+            {"task_id": task_id, "reason": "B6 再查一次", "requested_by": "real-chain-b6"},
+        )
+        check(not again_error, "B6 第二次跨进程 task.cancel 不是工具错误")
+        check(again.get("status") == "not_running",
+              f"B6 执行已结束、标记已删，第二次调用返回 not_running：{again.get('status')}")
+        kept = read_json(request_file) if request_file.is_file() else {}
+        check(kept.get("status") == "done" and kept.get("requested_by") == "real-chain-b6",
+              f"B6 第二次调用不覆盖已落盘的 done 请求：{kept.get('status')}/{kept.get('requested_by')}")
+
+        ghost, ghost_error, _ = bridge_b.call(
+            "task.cancel", {"task_id": "real-b6-ghost", "requested_by": "real-chain-b6"}
+        )
+        check(not ghost_error and ghost.get("status") == "not_running",
+              f"B6 不存在的 task_id 返回 not_running：{ghost.get('status')}")
+        check(not (runs / ".cancel" / "real-b6-ghost.json").exists(),
+              "B6 not_running 不生成取消请求文件")
+    finally:
+        bridge_a.close()
+        bridge_b.close()
     return sandbox
 
 
@@ -1195,7 +1415,7 @@ def scenario_d3_session_retention(exe, root, label):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True, help="aw-mcp-bridge 可执行文件")
-    parser.add_argument("--only", default="A,B1,B2,B3,B4,B5,C1,C2,C3,D1,D2,D3")
+    parser.add_argument("--only", default="A,B1,B2,B3,B4,B5,B6,C1,C2,C3,D1,D2,D3")
     parser.add_argument("--sandbox-root", default="")
     parser.add_argument("--label", default="windows" if IS_WINDOWS else "linux")
     parser.add_argument("--keep", action="store_true", help="保留 sandbox 便于人工核对")
@@ -1222,6 +1442,8 @@ def main():
             sandboxes.append(("B4", scenario_b4_explicit_cancel(exe, args.sandbox_root, args.label)))
         if "B5" in selected:
             sandboxes.append(("B5", scenario_b5_grandchild_scope(exe, args.sandbox_root, args.label)))
+        if "B6" in selected:
+            sandboxes.append(("B6", scenario_b6_cross_process_cancel(exe, args.sandbox_root, args.label)))
         if "C1" in selected:
             sandboxes.append(("C1", scenario_c_sequential(exe, args.sandbox_root, args.label)))
         if "C2" in selected:

@@ -46,6 +46,29 @@ const SESSION_RETENTION_VERSION: &str = "session-retention/1";
 const SESSION_RETENTION_AUDIT: &str = "session-retention.jsonl";
 /// 取消等待上限：终止本身最多 3s（CLEANUP_DEADLINE），留给回执落盘与调度余量
 const CANCEL_WAIT_SECS: u64 = 10;
+/// 跨进程取消请求落盘目录与格式；请求文件本身就是「已落盘/已读到/已完成」三态的唯一记录。
+const CANCEL_DIR: &str = ".cancel";
+const CANCEL_VERSION: &str = "cancel-request/1";
+const CANCEL_REQUEST_AUDIT: &str = "cancel-requests.jsonl";
+const CANCEL_REQUEST_SWEEP_VERSION: &str = "cancel-requests/1";
+/// 目标进程已死但取消请求仍停留在 pending/acknowledged 时，至少等这么久才清扫，避免与执行侧收尾竞态
+const CANCEL_REQUEST_STALE_GRACE_SECS: i64 = 5;
+/// 终态取消请求（done/ignored）的保留天数：只做磁盘卫生，不参与任何取消判定
+const CANCEL_REQUEST_RETENTION_DAYS: i64 = 30;
+/// cgroup 作用域归属记录：说明某个 `aw-mcp-bridge-*` 作用域属于哪一轮已知 attempt
+#[cfg(target_os = "linux")]
+const SCOPE_OWNER_DIR: &str = ".cgroup-scopes";
+#[cfg(target_os = "linux")]
+const SCOPE_OWNER_VERSION: &str = "cgroup-scope/1";
+#[cfg(target_os = "linux")]
+const CGROUP_RECLAIM_AUDIT: &str = "cgroup-reclaim.jsonl";
+const CGROUP_RECLAIM_VERSION: &str = "cgroup-reclaim/1";
+/// 启动回收判据的作用域名前缀；只有这个名字形状才进入判定，其它目录一律不碰
+#[cfg(target_os = "linux")]
+const CGROUP_SCOPE_PREFIX: &str = "aw-mcp-bridge-";
+/// 回收等待成员退出的上限（与 CLEANUP_DEADLINE 同口径）
+#[cfg(target_os = "linux")]
+const CGROUP_RECLAIM_DEADLINE_SECS: u64 = 3;
 
 // 由 build.rs 注入，缺失时为 "unknown"（不使用当前时间兜底，保证可复现构建）
 pub const BUILD_TIME: &str = env!("AW_BUILD_TIME");
@@ -228,6 +251,26 @@ impl Server {
 
     /// 自动清扫只负责调用同一个 sweep_inflight_markers；不在这里重复任何判据
     fn auto_sweep(&self, trigger: &str) {
+        // 启动回收放在最前：先收掉上一轮 bridge 猝死留下的作用域，再清标记/记录。
+        // 证据不足时只写 kept 审计、不发信号；cgroup 不可用则如实报 unsupported。
+        if trigger == "startup" {
+            match self.reclaim_stale_cgroup_scopes(trigger) {
+                Ok(report) => {
+                    let reclaimed = report["reclaimed_total"].as_u64().unwrap_or(0);
+                    let removed_empty = report["removed_empty_total"].as_u64().unwrap_or(0);
+                    let kept = report["kept_total"].as_u64().unwrap_or(0);
+                    let failed = report["failed_total"].as_u64().unwrap_or(0);
+                    if report["state"].as_str() == Some("ready") {
+                        eprintln!(
+                            "[cgroup-reclaim] trigger={trigger} reclaimed={reclaimed} removed_empty={removed_empty} kept={kept} failed={failed}"
+                        );
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[cgroup-reclaim] trigger={trigger} error={error}");
+                }
+            }
+        }
         match self.sweep_inflight_markers(trigger, None, false) {
             Ok(report) => {
                 let removed = report["removed_total"].as_u64().unwrap_or(0);
@@ -256,6 +299,20 @@ impl Server {
             }
             Err(error) => {
                 eprintln!("[session-retention] trigger={trigger} error={error}");
+            }
+        }
+        // 取消请求目录卫生：只清目标已死且过宽限、或终态超保留期的文件；每次删除先落审计
+        if trigger == "startup" {
+            match self.sweep_cancel_requests(trigger) {
+                Ok(report) => {
+                    let removed = report["removed_total"].as_u64().unwrap_or(0);
+                    if removed > 0 {
+                        eprintln!("[cancel-request-sweep] trigger={trigger} removed={removed}");
+                    }
+                }
+                Err(error) => {
+                    eprintln!("[cancel-request-sweep] trigger={trigger} error={error}");
+                }
             }
         }
     }
@@ -1318,13 +1375,14 @@ impl Server {
         let path = dir.join(format!("{task_id}.json"));
         let deadline = inflight_deadline(args, mode);
         for _ in 0..3 {
+            let started_at = now_stamp();
             let record = json!({
                 "version": INFLIGHT_VERSION,
                 "task_id": task_id,
                 "pid": std::process::id(),
                 "mode": mode,
                 "state": "active",
-                "startedAt": now_stamp(),
+                "startedAt": started_at.clone(),
                 "deadlineAt": deadline
             });
             match fs::OpenOptions::new()
@@ -1345,7 +1403,7 @@ impl Server {
                         let _ = fs::remove_file(&path);
                         return Err(format!("inflight_marker_failed: 写入活跃标记失败：{error}"));
                     }
-                    return Ok(Some(InflightGuard { path }));
+                    return Ok(Some(InflightGuard { path, started_at }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     // 同一 task_id 再次启动：先按既有判据顺带清扫残标并留审计；
@@ -1972,6 +2030,520 @@ impl Server {
         Ok(())
     }
 
+    /// 启动回收上一轮遗留的 cgroup 作用域（Linux）。
+    ///
+    /// 判定只看证据，不看「像不像孤儿」：
+    /// - 作用域归属记录（sidecar）存在且与本目录自洽；
+    /// - 记录点名的 `runs/<task_id>/attempt-<n>/dispatch.json` 存在；
+    /// - 记录的 bridge 进程已死（或 PID 已复用）。
+    /// 任一条不满足 → 只写 `phase=kept/outcome=kept/reason=...` 审计，绝不发信号。
+    /// 满足后才写 plan 行、kill、复检成员为空、删目录、写 result 行。
+    #[cfg(target_os = "linux")]
+    fn reclaim_stale_cgroup_scopes(&self, trigger: &str) -> Result<Value, String> {
+        self.reclaim_stale_cgroup_scopes_at(Path::new("/sys/fs/cgroup"), trigger)
+    }
+
+    /// 可注入 base 的实现，便于用临时目录复现「证据不足只报不删」的判定。
+    #[cfg(target_os = "linux")]
+    fn reclaim_stale_cgroup_scopes_at(&self, base: &Path, trigger: &str) -> Result<Value, String> {
+        if !base.join("cgroup.controllers").is_file() {
+            return Ok(json!({
+                "version": CGROUP_RECLAIM_VERSION,
+                "trigger": trigger,
+                "state": "unsupported",
+                "reason": "cgroup_v2_unavailable",
+                "base": base.to_string_lossy(),
+                "scanned_total": 0,
+                "reclaimed_total": 0,
+                "removed_empty_total": 0,
+                "kept_total": 0,
+                "failed_total": 0,
+                "scopes": []
+            }));
+        }
+        let scopes = process_scope::managed_scope_dirs(base)?;
+        let owner_dir = self.runs_dir.join(SCOPE_OWNER_DIR);
+        let mut entries: Vec<Value> = Vec::new();
+        let mut reclaimed = 0u64;
+        let mut removed_empty = 0u64;
+        let mut failed = 0u64;
+        let mut audit_failed = 0u64;
+
+        for (name, dir) in scopes {
+            let owner_path = owner_dir.join(format!("{name}.json"));
+            let owner = read_json(&owner_path).ok();
+            let mut keep_reason: Option<&str> = None;
+            let mut task_id = String::new();
+            let mut attempt = 0u64;
+            let mut owner_pid = 0u64;
+            let mut root_pid = 0u64;
+            let mut members_before: Option<Vec<u32>> = None;
+            if let Some(owner) = owner.as_ref() {
+                let scope_ok = owner.get("version").and_then(Value::as_str)
+                    == Some(SCOPE_OWNER_VERSION)
+                    && owner.get("scope").and_then(Value::as_str) == Some(name.as_str())
+                    && owner.get("cgroup").and_then(Value::as_str)
+                        == Some(dir.to_string_lossy().as_ref());
+                let task = owner
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let attempt_value = owner.get("attempt").and_then(Value::as_u64);
+                let pid = owner.get("bridge_pid").and_then(Value::as_u64);
+                let start = owner.get("bridge_start").and_then(Value::as_u64);
+                if !scope_ok || !is_valid_task_id(&task) || attempt_value.is_none() {
+                    keep_reason = Some("owner_record_invalid");
+                } else {
+                    task_id = task;
+                    attempt = attempt_value.unwrap_or(0);
+                    owner_pid = pid.unwrap_or(0);
+                    root_pid = owner.get("root_pid").and_then(Value::as_u64).unwrap_or(0);
+                    if !self
+                        .runs_dir
+                        .join(&task_id)
+                        .join(format!("attempt-{attempt}"))
+                        .join("dispatch.json")
+                        .is_file()
+                    {
+                        keep_reason = Some("attempt_evidence_missing");
+                    } else if process_is_alive(owner_pid as u32) {
+                        match (start, process_scope::proc_start(owner_pid as u32)) {
+                            (Some(recorded), Some(current)) if recorded == current => {
+                                keep_reason = Some("owner_alive");
+                            }
+                            (Some(_), Some(_)) => {}
+                            _ => keep_reason = Some("owner_unverifiable"),
+                        }
+                    }
+                }
+            } else {
+                keep_reason = Some("owner_record_missing");
+            }
+
+            let members = process_scope::read_scope_members(&dir);
+            if members.is_ok() {
+                members_before = members.as_ref().ok().cloned();
+            }
+            if keep_reason.is_none() {
+                match members.as_ref() {
+                    Err(_) => keep_reason = Some("members_unreadable"),
+                    Ok(list) if list.contains(&std::process::id()) => {
+                        keep_reason = Some("self_member")
+                    }
+                    _ => {}
+                }
+            }
+            let populated = process_scope::read_scope_populated(&dir);
+            if keep_reason.is_none() && populated.is_err() {
+                keep_reason = Some("populated_unreadable");
+            }
+
+            if let Some(reason) = keep_reason {
+                let record = json!({
+                    "version": CGROUP_RECLAIM_VERSION,
+                    "trigger": trigger,
+                    "phase": "kept",
+                    "scope": name,
+                    "cgroup": dir.to_string_lossy(),
+                    "task_id": if task_id.is_empty() { Value::Null } else { json!(task_id) },
+                    "attempt": if attempt == 0 { Value::Null } else { json!(attempt) },
+                    "owner_pid": if owner_pid == 0 { Value::Null } else { json!(owner_pid) },
+                    "root_pid": if root_pid == 0 { Value::Null } else { json!(root_pid) },
+                    "members_before": members_before.clone(),
+                    "members_after": members_before.clone(),
+                    "outcome": "kept",
+                    "reason": reason,
+                    "action": "none",
+                    "at": now_stamp()
+                });
+                if self.append_cgroup_reclaim_record(&record).is_err() {
+                    audit_failed += 1;
+                }
+                entries.push(record);
+                continue;
+            }
+
+            let members_before = members.unwrap_or_default();
+            let empty_scope = members_before.is_empty();
+            if empty_scope && populated.as_ref().copied().unwrap_or(0) != 0 {
+                let record = json!({
+                    "version": CGROUP_RECLAIM_VERSION,
+                    "trigger": trigger,
+                    "phase": "kept",
+                    "scope": name,
+                    "cgroup": dir.to_string_lossy(),
+                    "task_id": task_id,
+                    "attempt": attempt,
+                    "owner_pid": owner_pid,
+                    "root_pid": root_pid,
+                    "members_before": members_before.clone(),
+                    "members_after": members_before.clone(),
+                    "outcome": "kept",
+                    "reason": "populated_inconsistent",
+                    "action": "none",
+                    "at": now_stamp()
+                });
+                if self.append_cgroup_reclaim_record(&record).is_err() {
+                    audit_failed += 1;
+                }
+                entries.push(record);
+                continue;
+            }
+
+            // 真要动手：plan 行写不进去就不动（审计是动作的前置条件）
+            let plan = json!({
+                "version": CGROUP_RECLAIM_VERSION,
+                "trigger": trigger,
+                "phase": "plan",
+                "scope": name,
+                "cgroup": dir.to_string_lossy(),
+                "task_id": task_id,
+                "attempt": attempt,
+                "owner_pid": owner_pid,
+                "root_pid": root_pid,
+                "members_before": members_before.clone(),
+                "members_after": Value::Null,
+                "outcome": if empty_scope { "remove_empty" } else { "pending" },
+                "reason": if empty_scope { "empty_scope" } else { "abandoned_scope" },
+                "action": if empty_scope { "remove_dir" } else { "kill" },
+                "at": now_stamp()
+            });
+            if let Err(error) = self.append_cgroup_reclaim_record(&plan) {
+                audit_failed += 1;
+                let record = json!({
+                    "version": CGROUP_RECLAIM_VERSION,
+                    "trigger": trigger,
+                    "phase": "kept",
+                    "scope": name,
+                    "cgroup": dir.to_string_lossy(),
+                    "task_id": task_id,
+                    "attempt": attempt,
+                    "owner_pid": owner_pid,
+                    "root_pid": root_pid,
+                    "members_before": members_before.clone(),
+                    "members_after": members_before.clone(),
+                    "outcome": "kept",
+                    "reason": "audit_unwritable",
+                    "action": "none",
+                    "error": error,
+                    "at": now_stamp()
+                });
+                let _ = self.append_cgroup_reclaim_record(&record);
+                entries.push(record);
+                continue;
+            }
+
+            let outcome;
+            if empty_scope {
+                outcome = match process_scope::remove_scope(&dir) {
+                    Ok(()) => {
+                        removed_empty += 1;
+                        let _ = fs::remove_file(&owner_path);
+                        "removed_empty"
+                    }
+                    Err(_) => {
+                        failed += 1;
+                        "remove_failed"
+                    }
+                };
+            } else if process_scope::scope_kill_supported(&dir) {
+                outcome = match process_scope::kill_scope(&dir) {
+                    Ok(()) => self.wait_scope_empty(&dir, &name, trigger),
+                    Err(_) => {
+                        failed += 1;
+                        "kill_failed"
+                    }
+                };
+            } else {
+                // 内核没有 cgroup.kill：逐成员 SIGKILL，每轮重读成员表，只杀当前仍在里面的 pid
+                let deadline = Instant::now() + Duration::from_secs(CGROUP_RECLAIM_DEADLINE_SECS);
+                loop {
+                    let current = process_scope::read_scope_members(&dir).unwrap_or_default();
+                    if current.is_empty() {
+                        break;
+                    }
+                    for pid in current {
+                        // 重新核对仍在成员表里，缩小 PID 复用窗口
+                        if process_scope::read_scope_members(&dir)
+                            .map(|list| list.contains(&pid))
+                            .unwrap_or(false)
+                        {
+                            let _ = process_scope::kill_pid(pid);
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                outcome = self.wait_scope_empty(&dir, &name, trigger);
+            }
+
+            let members_after = process_scope::read_scope_members(&dir).ok();
+            let final_outcome = outcome;
+            if final_outcome == "reclaimed" {
+                reclaimed += 1;
+                let _ = fs::remove_file(&owner_path);
+            }
+            let result = json!({
+                "version": CGROUP_RECLAIM_VERSION,
+                "trigger": trigger,
+                "phase": "result",
+                "scope": name,
+                "cgroup": dir.to_string_lossy(),
+                "task_id": task_id,
+                "attempt": attempt,
+                "owner_pid": owner_pid,
+                "root_pid": root_pid,
+                "members_before": members_before,
+                "members_after": members_after,
+                "outcome": final_outcome,
+                "reason": if final_outcome == "still_alive" { "members_still_present" } else { "scope_reclaimed" },
+                "action": if empty_scope { "remove_dir" } else { "kill" },
+                "at": now_stamp()
+            });
+            if self.append_cgroup_reclaim_record(&result).is_err() {
+                audit_failed += 1;
+            }
+            entries.push(result);
+        }
+
+        let kept_total = entries
+            .iter()
+            .filter(|entry| entry.get("phase").and_then(Value::as_str) == Some("kept"))
+            .count() as u64;
+        Ok(json!({
+            "version": CGROUP_RECLAIM_VERSION,
+            "trigger": trigger,
+            "state": "ready",
+            "base": base.to_string_lossy(),
+            "scanned_total": entries.len() as u64,
+            "reclaimed_total": reclaimed,
+            "removed_empty_total": removed_empty,
+            "kept_total": kept_total,
+            "failed_total": failed,
+            "audit_failed_total": audit_failed,
+            "scopes": entries
+        }))
+    }
+
+    /// 等作用域成员清零并删目录；读不出成员就不宣称清空。
+    #[cfg(target_os = "linux")]
+    fn wait_scope_empty(&self, dir: &Path, _name: &str, _trigger: &str) -> &'static str {
+        let deadline = Instant::now() + Duration::from_secs(CGROUP_RECLAIM_DEADLINE_SECS);
+        loop {
+            let empty = process_scope::read_scope_members(dir)
+                .map(|members| members.is_empty())
+                .unwrap_or(false)
+                && process_scope::read_scope_populated(dir)
+                    .map(|value| value == 0)
+                    .unwrap_or(false);
+            if empty {
+                return match process_scope::remove_scope(dir) {
+                    Ok(()) => "reclaimed",
+                    Err(_) => "remove_failed",
+                };
+            }
+            if Instant::now() >= deadline {
+                return "still_alive";
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn reclaim_stale_cgroup_scopes(&self, trigger: &str) -> Result<Value, String> {
+        Ok(json!({
+            "version": CGROUP_RECLAIM_VERSION,
+            "trigger": trigger,
+            "state": "unsupported",
+            "reason": "platform_has_no_cgroup_v2",
+            "scanned_total": 0,
+            "reclaimed_total": 0,
+            "removed_empty_total": 0,
+            "kept_total": 0,
+            "failed_total": 0,
+            "scopes": []
+        }))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn append_cgroup_reclaim_record(&self, record: &Value) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.runs_dir.join(CGROUP_RECLAIM_AUDIT);
+        let line = serde_json::to_string(record)
+            .map_err(|error| format!("cgroup_reclaim_audit_failed: 序列化失败：{error}"))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                format!("cgroup_reclaim_audit_failed: 打开 {CGROUP_RECLAIM_AUDIT} 失败：{error}")
+            })?;
+        writeln!(file, "{line}")
+            .map_err(|error| format!("cgroup_reclaim_audit_failed: 写入失败：{error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("cgroup_reclaim_audit_failed: 同步失败：{error}"))
+    }
+
+    /// 启动清扫取消请求：只清「目标已死且过了宽限」与「终态超保留期」两类；
+    /// 判不准（不可读、目标不可验证）一律保留。先写 plan 审计，写不进去就零删除。
+    fn sweep_cancel_requests(&self, trigger: &str) -> Result<Value, String> {
+        let dir = self.runs_dir.join(CANCEL_DIR);
+        if !dir.is_dir() {
+            return Ok(json!({
+                "version": CANCEL_REQUEST_SWEEP_VERSION,
+                "trigger": trigger,
+                "state": "ready",
+                "total": 0,
+                "removed_total": 0,
+                "kept_total": 0,
+                "removed": [],
+                "kept": []
+            }));
+        }
+        let now = chrono::Utc::now();
+        let mut removed: Vec<Value> = Vec::new();
+        let mut kept: Vec<Value> = Vec::new();
+        let entries = fs::read_dir(&dir)
+            .map_err(|error| format!("cancel_request_sweep_failed: 读取目录失败：{error}"))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(task_id) = name.strip_suffix(".json").map(str::to_string) else {
+                continue;
+            };
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Ok(record) = read_json(&entry.path()) else {
+                kept.push(json!({ "file": name, "reason": "unreadable" }));
+                continue;
+            };
+            let status = record
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let stale_target = record
+                .get("target")
+                .and_then(|target| target.get("pid"))
+                .and_then(Value::as_u64)
+                .map(|pid| !process_is_alive(pid as u32))
+                .unwrap_or(false);
+            let requested_at = record
+                .get("requestedAt")
+                .and_then(Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok());
+            let age_secs = requested_at
+                .map(|time| (now - time.with_timezone(&chrono::Utc)).num_seconds())
+                .unwrap_or(0);
+            let terminal = status == "done" || status == "ignored";
+            let remove = if terminal {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|meta| meta.modified().ok())
+                    .map(|modified| {
+                        chrono::DateTime::<chrono::Utc>::from(modified)
+                            < now - chrono::Duration::days(CANCEL_REQUEST_RETENTION_DAYS)
+                    })
+                    .unwrap_or(false)
+            } else {
+                stale_target && age_secs >= CANCEL_REQUEST_STALE_GRACE_SECS
+            };
+            if !remove {
+                kept.push(json!({
+                    "file": name,
+                    "task_id": task_id,
+                    "status": status,
+                    "reason": if terminal { "within_retention" } else { "target_alive_or_within_grace" }
+                }));
+                continue;
+            }
+            let plan = json!({
+                "version": CANCEL_REQUEST_SWEEP_VERSION,
+                "trigger": trigger,
+                "phase": "plan",
+                "file": name,
+                "task_id": task_id,
+                "status": status,
+                "target": record.get("target").cloned().unwrap_or(Value::Null),
+                "requested_by": record.get("requested_by").cloned().unwrap_or(Value::Null),
+                "reason": if terminal { "terminal_retention_expired" } else { "target_dead_past_grace" },
+                "at": now_stamp()
+            });
+            if let Err(error) = self.append_cancel_request_record(&plan) {
+                kept.push(json!({
+                    "file": name,
+                    "task_id": task_id,
+                    "status": status,
+                    "reason": "audit_unwritable",
+                    "error": error
+                }));
+                continue;
+            }
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {
+                    let result = json!({
+                        "version": CANCEL_REQUEST_SWEEP_VERSION,
+                        "trigger": trigger,
+                        "phase": "result",
+                        "file": name,
+                        "task_id": task_id,
+                        "status": status,
+                        "target": record.get("target").cloned().unwrap_or(Value::Null),
+                        "outcome": "removed",
+                        "at": now_stamp()
+                    });
+                    let _ = self.append_cancel_request_record(&result);
+                    removed.push(result);
+                }
+                Err(error) => {
+                    kept.push(json!({
+                        "file": name,
+                        "task_id": task_id,
+                        "status": status,
+                        "reason": "remove_failed",
+                        "error": error.to_string()
+                    }));
+                }
+            }
+        }
+        Ok(json!({
+            "version": CANCEL_REQUEST_SWEEP_VERSION,
+            "trigger": trigger,
+            "state": "ready",
+            "total": removed.len() as u64 + kept.len() as u64,
+            "removed_total": removed.len() as u64,
+            "kept_total": kept.len() as u64,
+            "removed": removed,
+            "kept": kept
+        }))
+    }
+
+    fn append_cancel_request_record(&self, record: &Value) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.runs_dir.join(CANCEL_REQUEST_AUDIT);
+        let line = serde_json::to_string(record)
+            .map_err(|error| format!("cancel_request_audit_failed: 序列化失败：{error}"))?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                format!("cancel_request_audit_failed: 打开 {CANCEL_REQUEST_AUDIT} 失败：{error}")
+            })?;
+        writeln!(file, "{line}")
+            .map_err(|error| format!("cancel_request_audit_failed: 写入失败：{error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("cancel_request_audit_failed: 同步失败：{error}"))
+    }
+
     /// 只读扫描 `.inflight/*.json`；非 .json 的临时文件不参与枚举，符号链接不跟随
     fn scan_inflight_markers(
         &self,
@@ -2106,6 +2678,7 @@ impl Server {
         };
         // 活跃标记覆盖整个调用生命周期：正常返回、提前报错、被阻断都会在 Drop 时删除
         let _inflight = self.acquire_inflight_marker(task_id, mode, args)?;
+        let started_at = _inflight.as_ref().map(|guard| guard.started_at.clone());
         // 取消登记同样覆盖整个调用；重投方复用胜者句柄，不抢所有权
         let (cancel, cancel_owner) = self.register_cancel(task_id);
         let _cancel_guard = CancelRegistration {
@@ -2114,20 +2687,41 @@ impl Server {
             token: Arc::clone(&cancel),
             owner: cancel_owner,
         };
-        match standalone {
-            false => self.execute_dispatched(args, task_id, &cancel),
-            true => self.execute_standalone(args, task_id, &cancel),
+        // 跨进程取消：启动前先读一次请求；执行循环里每 200ms 再读（同一线程，不另起线程）
+        let mut heartbeat = started_at
+            .as_deref()
+            .map(|started| CancelHeartbeat::new(&self.runs_dir, task_id, started));
+        if let Some(heartbeat) = heartbeat.as_mut() {
+            heartbeat.poll(&cancel);
         }
+        let result = match standalone {
+            false => self.execute_dispatched(args, task_id, &cancel, heartbeat.as_mut()),
+            true => self.execute_standalone(args, task_id, &cancel, heartbeat.as_mut()),
+        };
+        // 收尾：有请求文件就推进到 done；handback 读不到时也写 done，调用方按保守口径解释
+        let handback_status = latest_attempt_dir(&self.runs_dir.join(task_id))
+            .and_then(|(_, dir)| read_json(&dir.join("handback.json")).ok())
+            .and_then(|value| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+        if let Some(heartbeat) = heartbeat.as_mut() {
+            heartbeat.finish(handback_status.as_deref());
+        }
+        result
     }
 
-    /// 显式取消：只对本进程正在执行的 task_id 生效。
+    /// 显式取消：本进程或另一个进程都可发起。
     ///
     /// 语义边界（写死，避免谎报）：
-    /// - 找不到执行句柄 → `status=not_running`，不发送任何信号、不宣称已清理；
-    /// - 找到 → 置位取消标记，由持有子进程的执行线程完成终止与回执落盘；
-    ///   本工具只等回执，不跨线程直接杀进程；
+    /// - 请求先落盘 `runs/.cancel/<task_id>.json`，带发起者、时间、target(pid+startedAt)；
+    ///   执行侧在心跳检查点读取，三态可区分：`pending`（已落盘未读）→ `acknowledged`
+    ///   （已读、正在清理）→ `done`（收尾完成）；
+    /// - 找不到本进程句柄、且磁盘上没有仍有效的活跃标记 → `not_running`，不写请求、不发信号；
     /// - 回执状态必须是 `canceled`；若执行在取消生效前已正常结束，如实返回 `completed_before_cancel`；
-    /// - 等不到回执 → `cancel_requested`，明写「尚未观测到清理结果」。
+    /// - 等不到 `done` → `cancel_requested`，用 `request_state` 区分「未读」和「已读在清理」。
     fn task_cancel(&self, args: &Value) -> Result<Value, String> {
         let task_id = required_str(args, "task_id")?;
         if !is_valid_task_id(task_id) {
@@ -2145,6 +2739,22 @@ impl Server {
                 return Err("reason 超过 1024 字符：invalid_reason".to_string());
             }
         }
+        let requested_by = match args.get("requested_by") {
+            None | Some(Value::Null) => format!("pid:{}", std::process::id()),
+            Some(value) => {
+                let raw = value
+                    .as_str()
+                    .ok_or_else(|| "invalid_requested_by: requested_by 必须是字符串".to_string())?
+                    .trim();
+                if raw.is_empty() {
+                    return Err("invalid_requested_by: requested_by 不能为空".to_string());
+                }
+                if raw.chars().count() > 128 {
+                    return Err("invalid_requested_by: requested_by 超过 128 字符".to_string());
+                }
+                raw.to_string()
+            }
+        };
         let token = {
             let map = self
                 .cancel_tokens
@@ -2152,19 +2762,91 @@ impl Server {
                 .unwrap_or_else(|error| error.into_inner());
             map.get(task_id).cloned()
         };
-        let Some(token) = token else {
-            // 看不到 = 不作任何清理宣称；磁盘上的残标只作为观测事实附回
+        let marker = self.inflight_snapshot(task_id);
+        let marker_live = marker
+            .as_ref()
+            .map(|record| record.get("stale").and_then(Value::as_bool) != Some(true))
+            .unwrap_or(false);
+        if token.is_none() && !marker_live {
+            // 看不到 = 不作任何清理宣称；也不落请求文件，避免污染后续同 task_id 的执行
             return Ok(json!({
                 "task_id": task_id,
                 "status": "not_running",
                 "canceled": false,
                 "cleanup_claimed": false,
-                "inflight_marker": self.inflight_snapshot(task_id),
-                "message": "本进程没有该 task_id 的可取消执行：未向任何进程发送信号，未做任何清理；inflight_marker 只是磁盘观测，不代表进程状态"
+                "cross_process": true,
+                "request_state": Value::Null,
+                "request_file": Value::Null,
+                "requested_by": requested_by,
+                "inflight_marker": marker,
+                "message": "没有该 task_id 的活跃执行：未写取消请求、未向任何进程发送信号、未做任何清理；inflight_marker 只是磁盘观测，不代表进程状态"
             }));
+        }
+        let target = match marker.as_ref() {
+            Some(record) => {
+                let pid = record.get("pid").and_then(Value::as_u64);
+                let started = record.get("startedAt").and_then(Value::as_str);
+                match (pid, started) {
+                    (Some(pid), Some(started)) => json!({ "pid": pid, "startedAt": started }),
+                    // 标记不完整：无法证明请求指向哪一轮执行，拒绝落盘（判不准就不动）
+                    _ => {
+                        return Ok(json!({
+                            "task_id": task_id,
+                            "status": "not_running",
+                            "canceled": false,
+                            "cleanup_claimed": false,
+                            "cross_process": token.is_none(),
+                            "request_state": Value::Null,
+                            "request_file": Value::Null,
+                            "requested_by": requested_by,
+                            "inflight_marker": marker,
+                            "message": "活跃标记缺少 pid/startedAt，无法证明取消目标；未写请求、未发信号"
+                        }))
+                    }
+                }
+            }
+            None => json!({ "pid": std::process::id(), "startedAt": Value::Null }),
         };
-        token.request(reason.clone());
-        let finished = token.wait_finished(Duration::from_secs(CANCEL_WAIT_SECS));
+        let (mut request, path) =
+            self.ensure_cancel_request(task_id, &requested_by, reason.as_deref(), target)?;
+        if let Some(token) = token.as_ref() {
+            token.request(reason.clone());
+        }
+        let mut finished = false;
+        let deadline = Instant::now() + Duration::from_secs(CANCEL_WAIT_SECS);
+        loop {
+            let state = read_json(&path).ok().and_then(|record| {
+                record
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            if let Some(state) = state.as_deref() {
+                if state == "done" || state == "ignored" {
+                    finished = true;
+                    break;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            if let Some(token) = token.as_ref() {
+                // 本地句柄用条件变量等，跨进程请求只能轮询磁盘
+                if token.wait_finished(Duration::from_millis(100)) {
+                    finished = true;
+                    break;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if let Ok(record) = read_json(&path) {
+            request = record;
+        }
+        let request_state = request
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let handback = latest_attempt_dir(&self.runs_dir.join(task_id))
             .and_then(|(_, dir)| read_json(&dir.join("handback.json")).ok());
         let handback_status = handback
@@ -2177,13 +2859,25 @@ impl Server {
             .and_then(|value| value.get("blocked_reason"))
             .and_then(Value::as_str)
             .map(str::to_string);
-        let status = if !finished {
-            "cancel_requested"
-        } else {
-            match handback_status.as_deref() {
+        let status = match request_state.as_deref() {
+            Some("ignored") => "not_running",
+            Some("done") => match handback_status.as_deref() {
                 Some("canceled") => "canceled",
                 Some("ok") | Some("failed") | Some("blocked") => "completed_before_cancel",
+                // 执行侧已收尾但回执不可判定：不宣称清理
                 _ => "cancel_requested",
+            },
+            Some("pending") | Some("acknowledged") => "cancel_requested",
+            _ => {
+                if finished {
+                    match handback_status.as_deref() {
+                        Some("canceled") => "canceled",
+                        Some("ok") | Some("failed") | Some("blocked") => "completed_before_cancel",
+                        _ => "cancel_requested",
+                    }
+                } else {
+                    "cancel_requested"
+                }
             }
         };
         Ok(json!({
@@ -2193,6 +2887,14 @@ impl Server {
             // 只有回执明确写了 canceled 才允许把清理措辞当成本次取消的结果
             "cleanup_claimed": status == "canceled",
             "finished_observed": finished,
+            "cross_process": token.is_none(),
+            // 三态：pending=已落盘未读，acknowledged=已读在清理，done=收尾完成
+            "request_state": request_state,
+            "request_file": format!("runs/{CANCEL_DIR}/{task_id}.json"),
+            "requested_by": request.get("requested_by").cloned().unwrap_or(json!(requested_by)),
+            "requested_at": request.get("requestedAt").cloned().unwrap_or(Value::Null),
+            "acknowledged_at": request.get("acknowledgedAt").cloned().unwrap_or(Value::Null),
+            "finished_at": request.get("finishedAt").cloned().unwrap_or(Value::Null),
             "handback_status": handback_status,
             "handback": handback,
             "cleanup_detail": blocked_reason,
@@ -2200,10 +2902,84 @@ impl Server {
             "message": match status {
                 "canceled" => "取消已生效：执行线程完成终止并落盘 canceled 回执",
                 "completed_before_cancel" => "取消请求到达前执行已结束；未终止任何仍在运行的进程",
-                "cancel_requested" => "已发出取消请求，但尚未观测到 canceled 回执；不得据此认为进程已清理",
+                "not_running" => "取消请求的目标已不是当前执行（上一轮残留或目标已变）；未向任何进程发送信号",
+                "cancel_requested" => "已落盘取消请求，但尚未观测到 done；request_state=pending 表示执行侧未读到，acknowledged 表示已在清理",
                 _ => ""
             }
         }))
+    }
+
+    /// 落盘取消请求：`create_new` 保证同一轮只有一个请求；同 target 复用，上一轮残留先移除再重建。
+    fn ensure_cancel_request(
+        &self,
+        task_id: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        target: Value,
+    ) -> Result<(Value, PathBuf), String> {
+        use std::io::Write;
+        let dir = self.runs_dir.join(CANCEL_DIR);
+        fs::create_dir_all(&dir)
+            .map_err(|error| format!("cancel_request_failed: 创建取消请求目录失败：{error}"))?;
+        let path = dir.join(format!("{task_id}.json"));
+        for _ in 0..3 {
+            let record = json!({
+                "version": CANCEL_VERSION,
+                "task_id": task_id,
+                "requestedAt": now_stamp(),
+                "requested_by": requested_by,
+                "reason": reason,
+                "target": target,
+                "status": "pending",
+                "acknowledgedAt": Value::Null,
+                "handledBy": Value::Null,
+                "handback_status": Value::Null,
+                "finishedAt": Value::Null
+            });
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let text = serde_json::to_string_pretty(&record)
+                        .map_err(|error| format!("cancel_request_failed: 序列化失败：{error}"))?;
+                    if let Err(error) = file
+                        .write_all(text.as_bytes())
+                        .and_then(|_| file.sync_all())
+                    {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("cancel_request_failed: 写入请求失败：{error}"));
+                    }
+                    return Ok((record, path));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let existing = read_json(&path).map_err(|error| {
+                        format!(
+                            "cancel_request_unreadable: 已存在但无法解析的取消请求 {}：{error}",
+                            path.display()
+                        )
+                    })?;
+                    if existing.get("version").and_then(Value::as_str) != Some(CANCEL_VERSION)
+                        || existing.get("task_id").and_then(Value::as_str) != Some(task_id)
+                    {
+                        return Err(format!(
+                            "cancel_request_unreadable: {} 不是本工具写出的取消请求（version/task_id 不符），未覆盖",
+                            path.display()
+                        ));
+                    }
+                    if existing.get("target") == Some(&target) {
+                        return Ok((existing, path));
+                    }
+                    // 上一轮残留请求：目标已不是本次执行，移除后重建
+                    fs::remove_file(&path).map_err(|error| {
+                        format!("cancel_request_failed: 清理上一轮请求失败：{error}")
+                    })?;
+                }
+                Err(error) => return Err(format!("cancel_request_failed: 创建请求失败：{error}")),
+            }
+        }
+        Err("cancel_request_failed: 并发写入冲突，未能建立取消请求".to_string())
     }
 
     /// dispatched（缺省）：外部（PM）派单。AW 只执行、交回执、不验收、不判停（既有契约逐字不变）
@@ -2212,6 +2988,7 @@ impl Server {
         args: &Value,
         task_id: &str,
         cancel: &CancelToken,
+        heartbeat: Option<&mut CancelHeartbeat>,
     ) -> Result<Value, String> {
         // standalone-only 字段在 dispatched 下必须显式拒绝：不许让调用方误以为 AW 会按这些字段验收
         for field in ["argv", "acceptance", "max_attempts"] {
@@ -2345,12 +3122,21 @@ impl Server {
         let mut spawn_error: Option<String> = None;
         let mut supervisor = process_scope::Supervisor::new();
         supervisor.configure(&mut command);
+        let mut heartbeat = heartbeat;
         let exit_status = if canceled {
             None
         } else {
             match command.spawn() {
                 Ok(mut child) => {
                     supervisor.attach(&mut child);
+                    if let Err(error) =
+                        supervisor.publish_scope_owner(&child, &self.runs_dir, task_id, attempt)
+                    {
+                        // 归属记录写不进去只会让下一次启动「判不准不动」，不影响本次执行
+                        eprintln!(
+                            "[cgroup-scope] 归属记录写入失败 task_id={task_id} attempt={attempt}: {error}"
+                        );
+                    }
                     if let Some(error) = supervisor.attach_error().map(str::to_string) {
                         // 恢复执行失败：子进程已被终止，不能把"从未执行"记成命令结果
                         let _ = child.wait();
@@ -2358,6 +3144,10 @@ impl Server {
                         None
                     } else {
                         loop {
+                            // 跨进程取消的心跳检查点：与本地取消共用同一四态路径
+                            if let Some(heartbeat) = heartbeat.as_deref_mut() {
+                                heartbeat.poll(cancel);
+                            }
                             match child.try_wait() {
                                 Ok(Some(status)) => break Some(status),
                                 Ok(None) => {
@@ -2519,6 +3309,7 @@ impl Server {
         args: &Value,
         task_id: &str,
         cancel: &CancelToken,
+        heartbeat: Option<&mut CancelHeartbeat>,
     ) -> Result<Value, String> {
         let spec = match StandaloneSpec::parse(args) {
             Ok(spec) => spec,
@@ -2548,6 +3339,7 @@ impl Server {
         } else {
             "fresh"
         };
+        let mut heartbeat = heartbeat;
 
         for attempt in 1..=spec.max_attempts {
             let run_dir = task_root.join(format!("attempt-{attempt}"));
@@ -2571,7 +3363,15 @@ impl Server {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
             let before = git_paths(&spec.cwd);
-            let run = run_standalone_command(&spec, &run_dir, cancel)?;
+            let run = run_standalone_command(
+                &spec,
+                &run_dir,
+                &self.runs_dir,
+                task_id,
+                attempt,
+                cancel,
+                heartbeat.as_deref_mut(),
+            )?;
             let after = git_paths(&spec.cwd);
             let (changed_files, changed_files_truncated) = changed_between(&before, &after);
 
@@ -3368,6 +4168,25 @@ mod process_scope {
                 None
             }
 
+            /// 仅当 cgroup 作用域真正建立（Active）时写归属记录；Degraded 时不写，避免伪造证据。
+            pub(crate) fn publish_scope_owner(
+                &mut self,
+                child: &Child,
+                runs_dir: &std::path::Path,
+                task_id: &str,
+                attempt: u64,
+            ) -> Result<(), String> {
+                if !matches!(self.cgroup.status, CgroupStatus::Active) {
+                    return Ok(());
+                }
+                let root_pid = child.id();
+                let root_start = self.root_start;
+                let Some(scope) = self.cgroup.scope.as_mut() else {
+                    return Ok(());
+                };
+                scope.publish_owner(runs_dir, task_id, attempt, root_pid, root_start)
+            }
+
             /// 观测点：`/proc` 父链快照 × 终止作用域成员交叉核对。
             ///
             /// - 父链快照：遍历 `/proc/<pid>/stat` 的 `PPid` 做传递闭包；
@@ -3618,6 +4437,9 @@ mod process_scope {
             dir: std::path::PathBuf,
             procs: std::path::PathBuf,
             writer: std::cell::RefCell<Option<std::fs::File>>,
+            /// 归属记录路径：写明本作用域属于哪一轮已知 attempt。
+            /// 正常收尾且目录删除成功时一并删除；bridge 猝死时留在盘上，供下一次启动判定。
+            owner_record: Option<std::path::PathBuf>,
         }
 
         #[cfg(target_os = "linux")]
@@ -3644,7 +4466,43 @@ mod process_scope {
                     procs: dir.join("cgroup.procs"),
                     dir,
                     writer: std::cell::RefCell::new(None),
+                    owner_record: None,
                 })
+            }
+
+            /// 把作用域与「本轮已知 attempt」绑定：这是下一次启动唯一可以据以动手的证据。
+            fn publish_owner(
+                &mut self,
+                runs_dir: &std::path::Path,
+                task_id: &str,
+                attempt: u64,
+                root_pid: u32,
+                root_start: Option<u64>,
+            ) -> Result<(), String> {
+                let owner_dir = runs_dir.join(crate::server::SCOPE_OWNER_DIR);
+                std::fs::create_dir_all(&owner_dir)
+                    .map_err(|error| format!("scope_owner_dir_failed:{error}"))?;
+                let name = self
+                    .dir
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .ok_or_else(|| "scope_name_unreadable".to_string())?;
+                let record = serde_json::json!({
+                    "version": crate::server::SCOPE_OWNER_VERSION,
+                    "scope": name,
+                    "cgroup": self.dir.to_string_lossy(),
+                    "bridge_pid": std::process::id(),
+                    "bridge_start": proc_start_time(std::process::id()),
+                    "task_id": task_id,
+                    "attempt": attempt,
+                    "root_pid": root_pid,
+                    "root_start": root_start,
+                    "createdAt": crate::server::now_stamp(),
+                });
+                let path = owner_dir.join(format!("{name}.json"));
+                crate::server::write_json_atomic(&path, &record)?;
+                self.owner_record = Some(path);
+                Ok(())
             }
 
             /// 打开写端并取出 fd，供 `pre_exec` 在子进程内写自身 PID。
@@ -3717,6 +4575,10 @@ mod process_scope {
                 // 不在这里杀进程——观测点不做终止动作。
                 for _ in 0..3 {
                     if std::fs::remove_dir(&self.dir).is_ok() {
+                        // 目录真的删掉了才删归属记录：成员仍在时保留证据，供启动回收判定
+                        if let Some(path) = self.owner_record.take() {
+                            let _ = std::fs::remove_file(path);
+                        }
                         return;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3726,6 +4588,108 @@ mod process_scope {
 
         #[cfg(target_os = "linux")]
         static SCOPE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        /// 启动回收用观测：只枚举名字形状为 `aw-mcp-bridge-*` 的目录，其它目录一律不碰。
+        #[cfg(target_os = "linux")]
+        pub(crate) fn managed_scope_dirs(
+            base: &std::path::Path,
+        ) -> Result<Vec<(String, std::path::PathBuf)>, String> {
+            let entries = std::fs::read_dir(base)
+                .map_err(|error| format!("cgroup_base_unreadable:{error}"))?;
+            let mut scopes = Vec::new();
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !name.starts_with(crate::server::CGROUP_SCOPE_PREFIX) {
+                    continue;
+                }
+                // 只接受 [a-z0-9-]，防止用奇怪目录名做路径拼接
+                if !name.chars().all(|value| {
+                    value.is_ascii_lowercase() || value.is_ascii_digit() || value == '-'
+                }) {
+                    continue;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    scopes.push((name, path));
+                }
+            }
+            scopes.sort_by(|left, right| left.0.cmp(&right.0));
+            Ok(scopes)
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn read_scope_members(dir: &std::path::Path) -> Result<Vec<u32>, String> {
+            let text = std::fs::read_to_string(dir.join("cgroup.procs"))
+                .map_err(|error| format!("cgroup_procs_unreadable:{error}"))?;
+            let mut members: Vec<u32> = text
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect();
+            members.sort_unstable();
+            Ok(members)
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn read_scope_populated(dir: &std::path::Path) -> Result<u32, String> {
+            let text = std::fs::read_to_string(dir.join("cgroup.events"))
+                .map_err(|error| format!("cgroup_events_unreadable:{error}"))?;
+            for line in text.lines() {
+                if let Some(value) = line.trim().strip_prefix("populated ") {
+                    return value
+                        .trim()
+                        .parse::<u32>()
+                        .map_err(|error| format!("cgroup_events_unparsable:{error}"));
+                }
+            }
+            Err("cgroup_events_missing_populated".to_string())
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn scope_kill_supported(dir: &std::path::Path) -> bool {
+            dir.join("cgroup.kill").exists()
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn kill_scope(dir: &std::path::Path) -> Result<(), String> {
+            std::fs::write(dir.join("cgroup.kill"), "1")
+                .map_err(|error| format!("cgroup_kill_failed:{error}"))
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn remove_scope(dir: &std::path::Path) -> Result<(), String> {
+            match std::fs::remove_dir(dir) {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    // 真实 cgroupfs 上 rmdir 会连同控制文件一起删掉；非 cgroupfs 的目录
+                    // （测试夹具 / 份外残留文件）会返回 ENOTEMPTY。先清掉已知控制文件再重试一次：
+                    // 真实 cgroupfs 上这些 unlink 会被内核拒绝，最终仍按原始失败上报。
+                    for name in ["cgroup.procs", "cgroup.events", "cgroup.kill"] {
+                        let _ = std::fs::remove_file(dir.join(name));
+                    }
+                    std::fs::remove_dir(dir)
+                        .map_err(|error| format!("cgroup_remove_failed:{error}"))
+                }
+            }
+        }
+
+        /// `/proc/<pid>/stat` 的 starttime；读不到返回 None（调用方按不可验证处理）。
+        #[cfg(target_os = "linux")]
+        pub(crate) fn proc_start(pid: u32) -> Option<u64> {
+            proc_start_time(pid)
+        }
+
+        #[cfg(target_os = "linux")]
+        pub(crate) fn kill_pid(pid: u32) -> Result<(), String> {
+            let rc = unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "kill_failed:{pid}:{}",
+                    std::io::Error::last_os_error()
+                ))
+            }
+        }
 
         /// bridge 猝死时连带收掉直接子进程（Linux 缺口兜底）。
         ///
@@ -5026,6 +5990,7 @@ mod process_scope {
                     procs: dir.join("missing-cgroup.procs"),
                     dir: dir.clone(),
                     writer: std::cell::RefCell::new(None),
+                    owner_record: None,
                 };
                 let me = std::process::id();
                 let mut supervisor = Supervisor::new();
@@ -5087,6 +6052,7 @@ mod process_scope {
                     procs: dir.join("cgroup.procs"),
                     dir: dir.clone(),
                     writer: std::cell::RefCell::new(None),
+                    owner_record: None,
                 };
 
                 let mut command = Command::new("sleep");
@@ -5473,6 +6439,17 @@ mod process_scope {
 
             pub(crate) fn attach_error(&self) -> Option<&str> {
                 self.attach_error.as_deref()
+            }
+
+            /// Windows 无 cgroup v2：启动回收不适用，归属记录也不写。
+            pub(crate) fn publish_scope_owner(
+                &mut self,
+                _child: &Child,
+                _runs_dir: &std::path::Path,
+                _task_id: &str,
+                _attempt: u64,
+            ) -> Result<(), String> {
+                Ok(())
             }
 
             /// 观测点：Toolhelp 进程树快照 × 作业 PID 列表交叉核对。
@@ -6313,6 +7290,15 @@ mod process_scope {
             pub(crate) fn attach_error(&self) -> Option<&str> {
                 None
             }
+            pub(crate) fn publish_scope_owner(
+                &mut self,
+                _child: &Child,
+                _runs_dir: &std::path::Path,
+                _task_id: &str,
+                _attempt: u64,
+            ) -> Result<(), String> {
+                Ok(())
+            }
             pub(crate) fn snapshot_descendants(&self, root: u32) -> DescendantSnapshot {
                 DescendantSnapshot {
                     root,
@@ -6333,6 +7319,11 @@ mod process_scope {
     }
 
     pub(crate) use imp::Supervisor;
+    #[cfg(target_os = "linux")]
+    pub(crate) use imp::{
+        kill_pid, kill_scope, managed_scope_dirs, proc_start, read_scope_members,
+        read_scope_populated, remove_scope, scope_kill_supported,
+    };
 }
 
 /// 超时回执措辞按清理结果分流：只有 `Cleaned` 才能说"已清理受控集合"。
@@ -6561,6 +7552,37 @@ fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
     fs::write(path, text).map_err(|e| format!("写入 {} 失败：{e}", path.display()))
 }
+
+/// 同目录临时文件 + rename：跨进程读取方永远不会看到半份 JSON。
+/// 取消请求、作用域归属记录都要被另一个进程读到，必须用这个而不是 `write_json_file`。
+fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
+    use std::io::Write;
+    let text = serde_json::to_string_pretty(value).map_err(|e| format!("序列化 JSON 失败：{e}"))?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("record.json");
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        FILE_WRITE_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| -> Result<(), String> {
+        let mut file =
+            fs::File::create(&tmp).map_err(|e| format!("创建 {} 失败：{e}", tmp.display()))?;
+        file.write_all(text.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|e| format!("写入 {} 失败：{e}", tmp.display()))?;
+        fs::rename(&tmp, path).map_err(|e| format!("替换 {} 失败：{e}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+static FILE_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// standalone 的最终结果标记：重投按它回放，不把中间失败尝试当成最终结论
 const STANDALONE_RESULT: &str = "standalone-result.json";
@@ -7283,14 +8305,139 @@ fn component_key(component: Component<'_>) -> String {
     }
 }
 
-/// 活跃标记的 RAII 守卫：任何正常返回、提前报错、阻断都会在 Drop 时删除标记
+/// 活跃标记的 RAII 守卫：任何正常返回、提前报错、阻断都会在 Drop 时删除标记。
+/// `started_at` 同时是跨进程取消请求的绑定凭据：请求必须点名本轮执行，不能误伤后续同 task_id。
 struct InflightGuard {
     path: PathBuf,
+    started_at: String,
 }
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// 取消请求文件路径：`runs/.cancel/<task_id>.json`
+fn cancel_request_path(runs_dir: &Path, task_id: &str) -> PathBuf {
+    runs_dir.join(CANCEL_DIR).join(format!("{task_id}.json"))
+}
+
+/// 请求是否点名「本进程的本次执行」：pid + startedAt 双条件，缺一不认。
+fn cancel_request_targets(record: &Value, started_at: &str) -> bool {
+    record
+        .get("target")
+        .and_then(|target| target.get("pid"))
+        .and_then(Value::as_u64)
+        == Some(u64::from(std::process::id()))
+        && record
+            .get("target")
+            .and_then(|target| target.get("startedAt"))
+            .and_then(Value::as_str)
+            == Some(started_at)
+}
+
+/// 执行侧心跳检查点：每 200ms 读一次 `runs/.cancel/<task_id>.json`。
+///
+/// 三态由请求文件本身承载，执行侧只推进、不臆测：
+/// `pending`（已落盘未读）→ `acknowledged`（已读、正在清理）→ `done`（收尾完成）。
+/// 目标不符（上一轮残留请求）一律不改写，交给启动清扫按「目标已死 + 宽限」处理。
+struct CancelHeartbeat {
+    path: PathBuf,
+    started_at: String,
+    next_check: Instant,
+    acknowledged: bool,
+}
+
+impl CancelHeartbeat {
+    fn new(runs_dir: &Path, task_id: &str, started_at: &str) -> Self {
+        Self {
+            path: cancel_request_path(runs_dir, task_id),
+            started_at: started_at.to_string(),
+            next_check: Instant::now(),
+            acknowledged: false,
+        }
+    }
+
+    fn poll(&mut self, cancel: &CancelToken) {
+        let now = Instant::now();
+        if now < self.next_check {
+            return;
+        }
+        self.next_check = now + Duration::from_millis(200);
+        let Ok(mut record) = read_json(&self.path) else {
+            return;
+        };
+        if record.get("version").and_then(Value::as_str) != Some(CANCEL_VERSION)
+            || !cancel_request_targets(&record, &self.started_at)
+        {
+            return;
+        }
+        let status = record
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let reason = record
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        match status {
+            "pending" => {
+                if let Some(object) = record.as_object_mut() {
+                    object.insert("status".to_string(), json!("acknowledged"));
+                    object.insert("acknowledgedAt".to_string(), json!(now_stamp()));
+                    object.insert(
+                        "handledBy".to_string(),
+                        json!({
+                            "pid": std::process::id(),
+                            "startedAt": self.started_at.clone(),
+                        }),
+                    );
+                }
+                if write_json_atomic(&self.path, &record).is_ok() {
+                    // 只有 acknowledged 落盘成功才置位取消：调用方看到的三态与真实终态一致
+                    cancel.request(reason);
+                    self.acknowledged = true;
+                }
+            }
+            "acknowledged" if !self.acknowledged => {
+                cancel.request(reason);
+                self.acknowledged = true;
+            }
+            _ => {}
+        }
+    }
+
+    /// 执行线程返回前收尾：把请求推进到 `done` 并记录盘上回执状态。
+    /// 目标不符 / 请求已被清走时什么都不做。
+    fn finish(&mut self, handback_status: Option<&str>) {
+        let Ok(record) = read_json(&self.path) else {
+            return;
+        };
+        if !cancel_request_targets(&record, &self.started_at) {
+            return;
+        }
+        let status = record
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if status == "done" || status == "ignored" {
+            return;
+        }
+        let mut record = record;
+        if let Some(object) = record.as_object_mut() {
+            object.insert("status".to_string(), json!("done"));
+            object.insert("handback_status".to_string(), json!(handback_status));
+            object.insert("finishedAt".to_string(), json!(now_stamp()));
+            object.insert(
+                "handledBy".to_string(),
+                json!({
+                    "pid": std::process::id(),
+                    "startedAt": self.started_at.clone(),
+                }),
+            );
+        }
+        let _ = write_json_atomic(&self.path, &record);
     }
 }
 
@@ -7827,7 +8974,11 @@ struct StandaloneRun {
 fn run_standalone_command(
     spec: &StandaloneSpec,
     run_dir: &Path,
+    runs_dir: &Path,
+    task_id: &str,
+    attempt: u64,
     cancel: &CancelToken,
+    heartbeat: Option<&mut CancelHeartbeat>,
 ) -> Result<StandaloneRun, String> {
     let stdout_path = run_dir.join("stdout.txt");
     let stderr_path = run_dir.join("stderr.txt");
@@ -7851,18 +9002,30 @@ fn run_standalone_command(
     let mut spawn_error: Option<String> = None;
     let mut supervisor = process_scope::Supervisor::new();
     supervisor.configure(&mut command);
+    let mut heartbeat = heartbeat;
     let exit_status = if canceled {
         None
     } else {
         match command.spawn() {
             Ok(mut child) => {
                 supervisor.attach(&mut child);
+                if let Err(error) =
+                    supervisor.publish_scope_owner(&child, runs_dir, task_id, attempt)
+                {
+                    eprintln!(
+                        "[cgroup-scope] 归属记录写入失败 task_id={task_id} attempt={attempt}: {error}"
+                    );
+                }
                 if let Some(error) = supervisor.attach_error().map(str::to_string) {
                     let _ = child.wait();
                     spawn_error = Some(error);
                     None
                 } else {
                     loop {
+                        // 跨进程取消的心跳检查点（standalone 与 dispatched 同一路径）
+                        if let Some(heartbeat) = heartbeat.as_deref_mut() {
+                            heartbeat.poll(cancel);
+                        }
                         match child.try_wait() {
                             Ok(Some(status)) => break Some(status),
                             Ok(None) => {
@@ -8726,6 +9889,38 @@ fn capabilities_payload() -> Value {
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
             "删除前把标记原子改名为临时文件，认领后重跑 stale_rule 复核；已不 stale 或读不出来则 create-if-absent 还原保留，只删复核仍 stale 的那一份。",
         ),
+        capability_entry(
+            "lifecycle.startup_reclaims_abandoned_cgroup_scopes",
+            Some(true),
+            "proven",
+            "仅 Linux：bridge 启动时回收上一轮猝死遗留的 cgroup 作用域。动手前必须同时满足三条证据：runs/.cgroup-scopes/<scope>.json 与本目录自洽、sidecar 点名的 runs/<task_id>/attempt-<n>/dispatch.json 存在、记录的 bridge 进程已死（starttime 不复用）。任一不满足只写 outcome=kept + reason 审计，不发任何信号",
+            None,
+            true,
+            &["linux"],
+            &["windows", "macos"],
+            &[
+                "cgroup_reclaim_keeps_scope_without_owner_record",
+                "cgroup_reclaim_keeps_scope_when_owner_alive",
+                "cgroup_reclaim_keeps_scope_without_attempt_evidence",
+            ],
+            "实跑：real-chain B5（bridge kill -9 → 孙进程留存 → 下一次启动后消失），审计 runs/cgroup-reclaim.jsonl 带 trigger=startup、scope、members_before/members_after。无 sidecar 的同类目录只报不删。边界：仅在启动时执行（AW_INFLIGHT_SWEEP_SECS=off 时关闭）；cgroup v2 不可用/只读时 state=unsupported，不宣称收敛；内核无 cgroup.kill 时逐成员 SIGKILL 并每轮重读 cgroup.procs，仍有 PID 复用窗口。Windows 无 cgroup v2，由 Job Object 在桥句柄关闭时整树回收；macOS 未验证。",
+        ),
+        capability_entry(
+            "cancel.cross_process_request_visible",
+            Some(true),
+            "proven",
+            "task.cancel 跨进程可见：请求落盘 runs/.cancel/<task_id>.json，带 requested_by/requestedAt/target(pid+startedAt)；执行侧在心跳检查点读取，pending（已落盘未读）→ acknowledged（已读在清理）→ done（收尾完成）三态可区分。target 不符的上一轮残留请求不会误杀；没有有效活跃标记时不写请求、不发信号",
+            None,
+            true,
+            &both,
+            &["macos"],
+            &[
+                "cancel_request_three_states_are_distinguishable",
+                "cancel_request_target_mismatch_is_not_applied",
+                "cancel_request_cross_process_is_visible",
+            ],
+            "实跑：real-chain B6（两个 bridge 共用 runs，A 执行、B 取消），另一个进程的 task.cancel 不再返回 not_running，最终 status=canceled、request_state=done、cleanup_claimed=true；请求文件保留 requestedAt/acknowledgedAt/finishedAt 供判定中间态。等待上限 CANCEL_WAIT_SECS=10；超时仍 pending/acknowledged 时返回 cancel_requested 而不是 canceled。目标已死且过宽限的请求由启动清扫删除（先写 runs/cancel-requests.jsonl plan 行）。跨机器不可见，仅同卷多进程；macOS 未验证。",
+        ),
     ];
     let not_proven_total = entries
         .iter()
@@ -8841,12 +10036,13 @@ fn tools() -> Value {
         },
         {
             "name": "task.cancel",
-            "description": "按 task_id 显式取消本进程正在执行的任务（只读查询没有意义，找不到执行就什么都不做）。只影响由当前 bridge 进程持有子进程的那次执行：置位取消标记后由执行线程对受控集合（POSIX 进程组 / Windows Job Object）执行与超时相同的终止流程，并等 canceled 回执落盘。返回 status：canceled（回执已落盘且确为 canceled）、completed_before_cancel（取消到达前已结束，未终止任何进程）、cancel_requested（已请求但未观测到回执，不得认为已清理）、not_running（本进程看不到该 task_id：未发送信号、未做清理，inflight_marker 仅为磁盘观测）。取消的观测口径与超时一致：只有观测到受控集合内无存活进程才写「已清理受控集合」，逃逸进程是否仍在运行未验证；看不到的进程不会谎报已清理。跨进程不可见：另一个 bridge 上的执行无法被本工具取消，需由持有子进程的进程取消，或用 runs.inflight 判定残标",
+            "description": "按 task_id 显式取消正在执行的任务，跨进程可见：请求先落盘 runs/.cancel/<task_id>.json（含发起者、时间、target=pid+startedAt），执行侧在心跳检查点读取后走与本地取消相同的终止流程。只影响 target 点名的本轮执行；target 不符的上一轮残留请求不会误杀。返回 status：canceled（回执已落盘且确为 canceled）、completed_before_cancel（取消到达前已结束，未终止任何进程）、cancel_requested（已落盘但尚未观测到 done；用 request_state 区分 pending=执行侧未读到 与 acknowledged=已读到正在清理）、not_running（没有仍有效的活跃标记：未写请求、未发送信号、未做清理）。只有 canceled 才允许 cleanup_claimed=true。取消的观测口径与超时一致：只有观测到受控集合内无存活进程才写「已清理受控集合」，逃逸进程是否仍在运行未验证；看不到的进程不会谎报已清理",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string", "description": "要取消的派单标识（与 task.execute 同一命名规则：字母或数字开头，仅含字母数字 . _ -，≤64）" },
-                    "reason": { "type": "string", "maxLength": 1024, "description": "可选：取消理由，写入回执 blocked_reason 的「请求方理由」并保留在取消响应里；不做任何推断" }
+                    "reason": { "type": "string", "maxLength": 1024, "description": "可选：取消理由，写入回执 blocked_reason 的「请求方理由」并保留在取消请求与响应里；不做任何推断" },
+                    "requested_by": { "type": "string", "maxLength": 128, "description": "可选：发起者标识，写入取消请求文件供审计；缺省为 pid:<当前进程>" }
                 },
                 "required": ["task_id"],
                 "additionalProperties": false
@@ -9749,5 +10945,273 @@ mod prune_claim_race_tests {
         );
         assert_eq!(deleted_rounds, rounds, "每轮都必须有一方真删");
         assert_eq!(other_rounds, 0, "败者只能是 lost_race");
+    }
+}
+
+#[cfg(test)]
+mod v148_tests {
+    use super::*;
+
+    fn test_server() -> (Server, tempfile::TempDir, tempfile::TempDir) {
+        let settings = tempfile::TempDir::new().expect("settings");
+        let runs = tempfile::TempDir::new().expect("runs");
+        let server = Server::with_runs_dir(
+            settings.path().join("settings.json"),
+            runs.path().to_path_buf(),
+        );
+        (server, settings, runs)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_jsonl(path: &Path) -> Vec<Value> {
+        fs::read_to_string(path)
+            .map(|text| {
+                text.lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 三态必须是三个可判定的磁盘状态，而不是一个 cancel_requested 糊过去。
+    #[test]
+    fn cancel_request_three_states_are_distinguishable() {
+        let (_server, _settings, runs) = test_server();
+        let task_id = "v148-three-states";
+        let path = runs.path().join(CANCEL_DIR).join(format!("{task_id}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let started_at = "start-token-1";
+        write_json_atomic(
+            &path,
+            &json!({
+                "version": CANCEL_VERSION,
+                "task_id": task_id,
+                "requestedAt": now_stamp(),
+                "requested_by": "test",
+                "reason": "三态",
+                "target": { "pid": std::process::id(), "startedAt": started_at },
+                "status": "pending",
+                "acknowledgedAt": Value::Null,
+                "handledBy": Value::Null,
+                "handback_status": Value::Null,
+                "finishedAt": Value::Null
+            }),
+        )
+        .unwrap();
+        let pending = read_json(&path).unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert!(pending["acknowledgedAt"].is_null());
+
+        let cancel = CancelToken::new();
+        let mut heartbeat = CancelHeartbeat::new(runs.path(), task_id, started_at);
+        heartbeat.poll(&cancel);
+        let acknowledged = read_json(&path).unwrap();
+        assert_eq!(acknowledged["status"], "acknowledged");
+        assert!(acknowledged["acknowledgedAt"].is_string());
+        assert_eq!(acknowledged["handledBy"]["pid"], json!(std::process::id()));
+        assert!(cancel.is_canceled(), "acknowledged 后必须置位取消");
+
+        heartbeat.finish(Some("canceled"));
+        let done = read_json(&path).unwrap();
+        assert_eq!(done["status"], "done");
+        assert_eq!(done["handback_status"], "canceled");
+        assert!(done["finishedAt"].is_string());
+        let parse = |value: &Value| {
+            chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        assert!(parse(&done["requestedAt"]) <= parse(&done["acknowledgedAt"]));
+        assert!(parse(&done["acknowledgedAt"]) <= parse(&done["finishedAt"]));
+    }
+
+    /// target 不符的请求（上一轮残留）不得被本轮执行误认成取消。
+    #[test]
+    fn cancel_request_target_mismatch_is_not_applied() {
+        let (_server, _settings, runs) = test_server();
+        let task_id = "v148-target-mismatch";
+        let path = runs.path().join(CANCEL_DIR).join(format!("{task_id}.json"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_json_atomic(
+            &path,
+            &json!({
+                "version": CANCEL_VERSION,
+                "task_id": task_id,
+                "requestedAt": now_stamp(),
+                "requested_by": "old-run",
+                "reason": "旧请求",
+                "target": { "pid": std::process::id(), "startedAt": "start-token-old" },
+                "status": "pending"
+            }),
+        )
+        .unwrap();
+        let cancel = CancelToken::new();
+        let mut heartbeat = CancelHeartbeat::new(runs.path(), task_id, "start-token-new");
+        heartbeat.poll(&cancel);
+        assert!(!cancel.is_canceled(), "target 不符不得触发取消");
+        let record = read_json(&path).unwrap();
+        assert_eq!(record["status"], "pending", "非目标进程不得改写请求状态");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn fake_scope(base: &Path, name: &str) -> PathBuf {
+        let dir = base.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("cgroup.procs"), "").unwrap();
+        fs::write(dir.join("cgroup.events"), "populated 0\n").unwrap();
+        dir
+    }
+
+    #[cfg(target_os = "linux")]
+    fn owner_record(
+        runs: &Path,
+        scope: &str,
+        task_id: &str,
+        bridge_pid: u32,
+        bridge_start: Option<u64>,
+    ) -> PathBuf {
+        let dir = runs.join(SCOPE_OWNER_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{scope}.json"));
+        let base = Path::new("/definitely-not-used");
+        write_json_atomic(
+            &path,
+            &json!({
+                "version": SCOPE_OWNER_VERSION,
+                "scope": scope,
+                "cgroup": base.join(scope).to_string_lossy(),
+                "bridge_pid": bridge_pid,
+                "bridge_start": bridge_start,
+                "task_id": task_id,
+                "attempt": 1,
+                "root_pid": 1,
+                "root_start": null,
+                "createdAt": now_stamp()
+            }),
+        )
+        .unwrap();
+        path
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_reclaim_keeps_scope_without_owner_record() {
+        let (server, _settings, runs) = test_server();
+        let base = tempfile::TempDir::new().unwrap();
+        fs::write(base.path().join("cgroup.controllers"), "cpu\n").unwrap();
+        let scope = "aw-mcp-bridge-424242-0";
+        let dir = fake_scope(base.path(), scope);
+        let report = server
+            .reclaim_stale_cgroup_scopes_at(base.path(), "startup")
+            .unwrap();
+        assert_eq!(report["kept_total"].as_u64(), Some(1));
+        assert_eq!(report["reclaimed_total"].as_u64(), Some(0));
+        assert!(dir.is_dir(), "证据不足不得删目录");
+        let rows = read_jsonl(&runs.path().join(CGROUP_RECLAIM_AUDIT));
+        assert!(
+            rows.iter().any(|row| row["scope"] == scope
+                && row["outcome"] == "kept"
+                && row["reason"] == "owner_record_missing"),
+            "必须写明为什么不动：{rows:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_reclaim_keeps_scope_when_owner_alive() {
+        let (server, _settings, runs) = test_server();
+        let base = tempfile::TempDir::new().unwrap();
+        fs::write(base.path().join("cgroup.controllers"), "cpu\n").unwrap();
+        let scope = "aw-mcp-bridge-424243-0";
+        let dir = fake_scope(base.path(), scope);
+        let task_id = "v148-owner-alive";
+        fs::create_dir_all(runs.path().join(task_id).join("attempt-1")).unwrap();
+        fs::write(
+            runs.path()
+                .join(task_id)
+                .join("attempt-1")
+                .join("dispatch.json"),
+            "{}",
+        )
+        .unwrap();
+        let path = owner_record(
+            runs.path(),
+            scope,
+            task_id,
+            std::process::id(),
+            process_scope::proc_start(std::process::id()),
+        );
+        // 修正 cgroup 字段与临时 base 自洽
+        let mut record = read_json(&path).unwrap();
+        record["cgroup"] = json!(dir.to_string_lossy());
+        write_json_atomic(&path, &record).unwrap();
+        let report = server
+            .reclaim_stale_cgroup_scopes_at(base.path(), "startup")
+            .unwrap();
+        assert_eq!(report["kept_total"].as_u64(), Some(1));
+        assert!(dir.is_dir(), "仍在运行的 bridge 的作用域绝不动");
+        let rows = read_jsonl(&runs.path().join(CGROUP_RECLAIM_AUDIT));
+        assert!(rows
+            .iter()
+            .any(|row| row["scope"] == scope && row["reason"] == "owner_alive"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_reclaim_keeps_scope_without_attempt_evidence() {
+        let (server, _settings, runs) = test_server();
+        let base = tempfile::TempDir::new().unwrap();
+        fs::write(base.path().join("cgroup.controllers"), "cpu\n").unwrap();
+        let scope = "aw-mcp-bridge-424244-0";
+        let dir = fake_scope(base.path(), scope);
+        let path = owner_record(runs.path(), scope, "v148-missing-attempt", 424244, None);
+        let mut record = read_json(&path).unwrap();
+        record["cgroup"] = json!(dir.to_string_lossy());
+        write_json_atomic(&path, &record).unwrap();
+        let report = server
+            .reclaim_stale_cgroup_scopes_at(base.path(), "startup")
+            .unwrap();
+        assert_eq!(report["kept_total"].as_u64(), Some(1));
+        assert!(dir.is_dir(), "没有 attempt 目录证据不得删");
+        let rows = read_jsonl(&runs.path().join(CGROUP_RECLAIM_AUDIT));
+        assert!(rows
+            .iter()
+            .any(|row| row["scope"] == scope && row["reason"] == "attempt_evidence_missing"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cgroup_reclaim_removes_empty_scope_with_evidence() {
+        let (server, _settings, runs) = test_server();
+        let base = tempfile::TempDir::new().unwrap();
+        fs::write(base.path().join("cgroup.controllers"), "cpu\n").unwrap();
+        let scope = "aw-mcp-bridge-424245-0";
+        let dir = fake_scope(base.path(), scope);
+        let task_id = "v148-empty-scope";
+        fs::create_dir_all(runs.path().join(task_id).join("attempt-1")).unwrap();
+        fs::write(
+            runs.path()
+                .join(task_id)
+                .join("attempt-1")
+                .join("dispatch.json"),
+            "{}",
+        )
+        .unwrap();
+        let path = owner_record(runs.path(), scope, task_id, 424245, None);
+        let mut record = read_json(&path).unwrap();
+        record["cgroup"] = json!(dir.to_string_lossy());
+        write_json_atomic(&path, &record).unwrap();
+        let report = server
+            .reclaim_stale_cgroup_scopes_at(base.path(), "startup")
+            .unwrap();
+        assert_eq!(report["removed_empty_total"].as_u64(), Some(1));
+        assert!(!dir.exists(), "空作用域且证据齐全才允许删目录");
+        assert!(!path.exists(), "目录删掉后 sidecar 一并删除");
+        let rows = read_jsonl(&runs.path().join(CGROUP_RECLAIM_AUDIT));
+        assert!(rows.iter().any(|row| row["scope"] == scope
+            && row["phase"] == "result"
+            && row["outcome"] == "removed_empty"
+            && row["members_before"] == json!([])));
     }
 }

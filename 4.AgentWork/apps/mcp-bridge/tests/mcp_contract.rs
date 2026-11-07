@@ -7896,6 +7896,116 @@ fn task_cancel_terminates_running_execution_and_reports_canceled() {
 }
 
 #[test]
+fn task_cancel_is_visible_across_server_instances() {
+    let settings_a = TempDir::new().expect("设置目录 A");
+    let settings_b = TempDir::new().expect("设置目录 B");
+    let runs = TempDir::new().expect("共享运行目录");
+    let server_a = Arc::new(Server::with_runs_dir(
+        settings_a.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    ));
+    let server_b = Arc::new(Server::with_runs_dir(
+        settings_b.path().join("settings.json"),
+        runs.path().to_path_buf(),
+    ));
+    #[cfg(windows)]
+    let slow = "ping -n 30 127.0.0.1 > NUL";
+    #[cfg(not(windows))]
+    let slow = "sleep 30";
+    let worker = {
+        let server = Arc::clone(&server_a);
+        std::thread::spawn(move || {
+            call_tool(
+                &server,
+                "task.execute",
+                json!({ "task_id": "t-cross-cancel", "cmd": slow, "timeout_secs": 60 }),
+            )
+        })
+    };
+    let dispatch = runs
+        .path()
+        .join("t-cross-cancel")
+        .join("attempt-1")
+        .join("dispatch.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !dispatch.exists() {
+        assert!(Instant::now() < deadline, "dispatch.json 未在 15s 内落盘");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let marker: Value = serde_json::from_str(
+        &fs::read_to_string(runs.path().join(".inflight").join("t-cross-cancel.json"))
+            .expect("读取活跃标记"),
+    )
+    .expect("标记必须是 JSON");
+    std::thread::sleep(Duration::from_millis(300));
+
+    // B 进程没有本地取消句柄：必须靠磁盘请求生效，而不是返回 not_running
+    let canceled = tool_payload(&call_tool(
+        &server_b,
+        "task.cancel",
+        json!({
+            "task_id": "t-cross-cancel",
+            "reason": "跨进程验收",
+            "requested_by": "test-b"
+        }),
+    ));
+    assert_eq!(canceled["status"], "canceled", "{canceled}");
+    assert_eq!(canceled["cross_process"], true, "{canceled}");
+    assert_eq!(canceled["cleanup_claimed"], true, "{canceled}");
+    assert_eq!(canceled["request_state"], "done", "{canceled}");
+    assert_eq!(canceled["handback_status"], "canceled", "{canceled}");
+    assert!(canceled["requested_at"].is_string(), "{canceled}");
+    assert!(canceled["acknowledged_at"].is_string(), "{canceled}");
+    assert!(canceled["finished_at"].is_string(), "{canceled}");
+
+    let request: Value = serde_json::from_str(
+        &fs::read_to_string(runs.path().join(".cancel").join("t-cross-cancel.json"))
+            .expect("取消请求文件必须保留"),
+    )
+    .expect("请求必须是 JSON");
+    assert_eq!(request["status"], "done", "{request}");
+    assert_eq!(request["requested_by"], "test-b", "{request}");
+    assert_eq!(request["handback_status"], "canceled", "{request}");
+    assert_eq!(request["target"]["pid"], marker["pid"], "{request}");
+    assert_eq!(
+        request["target"]["startedAt"], marker["startedAt"],
+        "取消只能点名本轮执行：{request}"
+    );
+
+    let executed = tool_payload(&worker.join().expect("执行线程不得 panic"));
+    assert_eq!(executed["status"], "canceled", "{executed}");
+    // 执行结束后标记已删：再次取消只能是 not_running，且不得覆盖已落盘的 done 请求
+    let again = tool_payload(&call_tool(
+        &server_b,
+        "task.cancel",
+        json!({ "task_id": "t-cross-cancel", "requested_by": "test-b" }),
+    ));
+    assert_eq!(again["status"], "not_running", "{again}");
+    let request_after: Value = serde_json::from_str(
+        &fs::read_to_string(runs.path().join(".cancel").join("t-cross-cancel.json"))
+            .expect("已完成请求文件必须保留"),
+    )
+    .expect("请求必须是 JSON");
+    assert_eq!(request_after["status"], "done", "{request_after}");
+    assert_eq!(request_after["requested_by"], "test-b", "{request_after}");
+
+    let ghost = tool_payload(&call_tool(
+        &server_b,
+        "task.cancel",
+        json!({ "task_id": "t-cross-ghost", "requested_by": "test-b" }),
+    ));
+    assert_eq!(ghost["status"], "not_running", "{ghost}");
+    assert!(
+        !runs
+            .path()
+            .join(".cancel")
+            .join("t-cross-ghost.json")
+            .exists(),
+        "not_running 不得留下取消请求，避免污染后续同 task_id 执行"
+    );
+}
+
+#[test]
 fn task_cancel_without_visible_execution_never_claims_cleanup() {
     let (server, _settings, runs) = server_with_runs();
     let inflight = runs.path().join(".inflight");
