@@ -4980,6 +4980,43 @@ mod process_scope {
             }
         }
 
+        /// 测试注入（v1.50）：模拟「某个 pid 的 `/proc/<pid>/stat` 读取失败」。
+        /// 用来确定性地区分两种侧别——已退出进程的读失败必须被跳过（不再让整表 Unavailable），
+        /// 存活进程的读失败必须仍然判为不可观测。只编译进测试，不进入生产二进制。
+        #[cfg(all(test, target_os = "linux"))]
+        mod proc_fault {
+            use std::cell::RefCell;
+
+            struct Fault {
+                pid: u32,
+                gone: bool,
+            }
+
+            // 线程内注入：proc_table 与断言在同一线程，避免并行用例互相消费对方的注入。
+            thread_local! {
+                static FAULT: RefCell<Option<Fault>> = const { RefCell::new(None) };
+            }
+
+            pub(super) fn set(pid: u32, gone: bool) {
+                FAULT.with(|slot| *slot.borrow_mut() = Some(Fault { pid, gone }));
+            }
+
+            /// 命中一次即消费，避免影响后续扫描。
+            pub(super) fn take_for(pid: u32) -> Option<bool> {
+                FAULT.with(|slot| {
+                    let mut guard = slot.borrow_mut();
+                    match guard.as_ref() {
+                        Some(fault) if fault.pid == pid => {
+                            let gone = fault.gone;
+                            *guard = None;
+                            Some(gone)
+                        }
+                        _ => None,
+                    }
+                })
+            }
+        }
+
         #[cfg(target_os = "linux")]
         struct ProcRow {
             pid: u32,
@@ -5010,6 +5047,15 @@ mod process_scope {
                 let Ok(pid) = name.parse::<u32>() else {
                     continue;
                 };
+                #[cfg(test)]
+                if let Some(gone) = proc_fault::take_for(pid) {
+                    if gone {
+                        trace_note(format!("proc_stat_read_injected pid={pid} gone=true"));
+                        continue;
+                    }
+                    trace_note(format!("proc_table_unreadable pid={pid} injected=true"));
+                    return None;
+                }
                 let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
                     Ok(text) => text,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -5507,6 +5553,306 @@ mod process_scope {
                     Some(Vec::new()),
                     "终止后进程组必须为空；现场诊断：\n{diag}"
                 );
+            }
+
+            // 复现驱动（v1.50）：受控负载下循环「建作用域 → 观测 → 终止」，统计
+            // `Unavailable` 的出现频率、原因与当时的观测并发峰值。默认不跑（#[ignore]），
+            // 由 scripts/posix-timeout-verify/unavailable-repro.sh 多组负载驱动。
+            //
+            // 环境变量：
+            //   AW_REPRO_ROUNDS       每个 observation worker 的轮数（默认 50）
+            //   AW_REPRO_WORKERS      并发观测线程数（默认 1；>1 时多个线程同时 snapshot+terminate，
+            //                         复现原失败所需的并发观测峰值）
+            //   AW_REPRO_LOAD_THREADS 额外负载线程数（默认 0；一半持续 spawn/退出短命进程，一半狂扫 /proc）
+            //   AW_REPRO_CHILDREN     每个根进程派生的 sleep 后代数（默认 2）
+            //
+            // 判定：本用例只测量、不在出现 Unavailable 时失败；它回答的是「能不能复现、哪一侧」。
+            // 并发观测峰值来自生产同一套统计（ObservationGuard），与门禁用例口径一致。
+            #[cfg(target_os = "linux")]
+            #[test]
+            #[ignore = "复现驱动：需手动触发，不属于默认门禁"]
+            fn unavailable_frequency_under_controlled_load() {
+                use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+                fn env_usize(name: &str, default: usize) -> usize {
+                    std::env::var(name)
+                        .ok()
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                        .unwrap_or(default)
+                }
+
+                fn loadavg() -> f64 {
+                    std::fs::read_to_string("/proc/loadavg")
+                        .ok()
+                        .and_then(|text| text.split_whitespace().next()?.parse().ok())
+                        .unwrap_or(0.0)
+                }
+
+                fn container_kind() -> &'static str {
+                    if std::path::Path::new("/.dockerenv").exists() {
+                        return "docker";
+                    }
+                    let cgroup = std::fs::read_to_string("/proc/1/cgroup").unwrap_or_default();
+                    for hint in ["kubepods", "docker", "lxc", "containerd"] {
+                        if cgroup.contains(hint) {
+                            return "container";
+                        }
+                    }
+                    "bare-metal/vm"
+                }
+
+                let rounds = env_usize("AW_REPRO_ROUNDS", 50).max(1);
+                let workers = env_usize("AW_REPRO_WORKERS", 1).max(1);
+                let load_threads = env_usize("AW_REPRO_LOAD_THREADS", 0);
+                let children = env_usize("AW_REPRO_CHILDREN", 2).clamp(1, 16);
+                let cpus = std::thread::available_parallelism()
+                    .map(|count| count.get())
+                    .unwrap_or(0);
+
+                // 负载线程：一半 fork/exit 制造 /proc 目录 churn，一半直接狂扫 /proc，
+                // 模拟「另一批用例同时在观测」的高并发现场。
+                let stop = std::sync::Arc::new(AtomicBool::new(false));
+                let spawns = std::sync::Arc::new(AtomicU64::new(0));
+                let scans = std::sync::Arc::new(AtomicU64::new(0));
+                let mut loaders = Vec::new();
+                for index in 0..load_threads {
+                    let stop = std::sync::Arc::clone(&stop);
+                    let spawns = std::sync::Arc::clone(&spawns);
+                    let scans = std::sync::Arc::clone(&scans);
+                    loaders.push(std::thread::spawn(move || {
+                        let scanner = index % 2 == 1;
+                        while !stop.load(Ordering::Relaxed) {
+                            if scanner {
+                                let _ = proc_table();
+                                scans.fetch_add(1, Ordering::Relaxed);
+                            } else {
+                                let _ = Command::new("sh")
+                                    .arg("-c")
+                                    .arg("exit 0")
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status();
+                                spawns.fetch_add(1, Ordering::Relaxed);
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    }));
+                }
+
+                let cleaned = std::sync::Arc::new(AtomicU64::new(0));
+                let unavailable = std::sync::Arc::new(AtomicU64::new(0));
+                let still_alive = std::sync::Arc::new(AtomicU64::new(0));
+                let observe_fail = std::sync::Arc::new(AtomicU64::new(0));
+                let reasons: std::sync::Arc<
+                    std::sync::Mutex<std::collections::BTreeMap<String, usize>>,
+                > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+                let max_peak = std::sync::Arc::new(AtomicU64::new(0));
+                let max_loadavg = std::sync::Arc::new(std::sync::Mutex::new(0.0f64));
+                let cgroup_status = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+
+                let mut script = String::new();
+                for _ in 0..children {
+                    script.push_str("sleep 30 & ");
+                }
+                script.push_str("wait");
+
+                // 并发观测线程：每个线程独立建作用域/观测/终止，复现原失败时的高并发观测峰值。
+                let mut observers = Vec::new();
+                for _ in 0..workers {
+                    let script = script.clone();
+                    let cleaned = std::sync::Arc::clone(&cleaned);
+                    let unavailable = std::sync::Arc::clone(&unavailable);
+                    let still_alive = std::sync::Arc::clone(&still_alive);
+                    let observe_fail = std::sync::Arc::clone(&observe_fail);
+                    let reasons = std::sync::Arc::clone(&reasons);
+                    let max_peak = std::sync::Arc::clone(&max_peak);
+                    let max_loadavg = std::sync::Arc::clone(&max_loadavg);
+                    let cgroup_status = std::sync::Arc::clone(&cgroup_status);
+                    observers.push(std::thread::spawn(move || {
+                        for _ in 0..rounds {
+                            let mut supervisor = Supervisor::new();
+                            let mut command = Command::new("sh");
+                            command
+                                .arg("-c")
+                                .arg(&script)
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null());
+                            supervisor.configure(&mut command);
+                            let mut child = command.spawn().expect("spawn sh");
+                            supervisor.attach(&mut child);
+                            let root = child.id();
+                            *cgroup_status.lock().unwrap() =
+                                format!("{:?}", supervisor.cgroup.status);
+
+                            let deadline = Instant::now() + Duration::from_secs(2);
+                            let mut observed = false;
+                            while Instant::now() < deadline {
+                                let snapshot = supervisor.snapshot_descendants(root);
+                                if snapshot.unobservable.is_none()
+                                    && snapshot.descendants.len() >= children
+                                {
+                                    observed = true;
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            if !observed {
+                                observe_fail.fetch_add(1, Ordering::Relaxed);
+                            }
+                            // 清掉本轮的观测时序，只保留 terminate 阶段的判定行（TLS 按线程隔离）。
+                            let _ = trace_take();
+                            let outcome = supervisor.terminate(&mut child);
+                            let trace = trace_take();
+                            let (active, peak) = observation_stats();
+                            max_peak.fetch_max(peak.max(active) as u64, Ordering::Relaxed);
+                            let sample = loadavg();
+                            let mut max = max_loadavg.lock().unwrap();
+                            if sample > *max {
+                                *max = sample;
+                            }
+                            drop(max);
+                            match outcome {
+                                CleanupOutcome::Cleaned => {
+                                    cleaned.fetch_add(1, Ordering::Relaxed);
+                                }
+                                CleanupOutcome::StillAlive => {
+                                    still_alive.fetch_add(1, Ordering::Relaxed);
+                                }
+                                CleanupOutcome::Unavailable => {
+                                    unavailable.fetch_add(1, Ordering::Relaxed);
+                                    let reason = trace
+                                        .iter()
+                                        .find_map(|line| line.split("原因=").nth(1))
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    let side = if reason.contains("procfs_unavailable") {
+                                        "procfs"
+                                    } else if reason.contains("cgroup_procs_unreadable")
+                                        || reason.contains("cgroup_events")
+                                    {
+                                        "cgroup"
+                                    } else if reason.contains("cgroup_scope_lost") {
+                                        "scope_lost"
+                                    } else {
+                                        "other"
+                                    };
+                                    *reasons
+                                        .lock()
+                                        .unwrap()
+                                        .entry(format!("{side}:{reason}"))
+                                        .or_insert(0) += 1;
+                                }
+                            }
+                        }
+                    }));
+                }
+                for observer in observers {
+                    let _ = observer.join();
+                }
+
+                stop.store(true, Ordering::Relaxed);
+                for loader in loaders {
+                    let _ = loader.join();
+                }
+
+                let cleaned = cleaned.load(Ordering::Relaxed) as usize;
+                let unavailable = unavailable.load(Ordering::Relaxed) as usize;
+                let still_alive = still_alive.load(Ordering::Relaxed) as usize;
+                let observe_fail = observe_fail.load(Ordering::Relaxed) as usize;
+                let reasons = reasons.lock().unwrap().clone();
+                let max_peak = max_peak.load(Ordering::Relaxed) as usize;
+                let max_loadavg = *max_loadavg.lock().unwrap();
+                let cgroup_status = cgroup_status.lock().unwrap().clone();
+                let total_rounds = rounds * workers;
+
+                let rate = unavailable as f64 / total_rounds as f64;
+                println!(
+                    "[repro][env] cpus={cpus} workers={workers} rounds_per_worker={rounds} total_rounds={total_rounds} load_threads={load_threads} children={children} cgroup={cgroup_status} container={} spawns={} scans={}",
+                    container_kind(),
+                    spawns.load(Ordering::Relaxed),
+                    scans.load(Ordering::Relaxed)
+                );
+                println!(
+                    "[repro][row] workers={workers} load_threads={load_threads} rounds={total_rounds} cleaned={cleaned} unavailable={unavailable} still_alive={still_alive} observe_fail={observe_fail} peak_obs={max_peak} max_loadavg={max_loadavg:.2} rate={rate:.4}"
+                );
+                if reasons.is_empty() {
+                    println!("[repro][reasons] (无)");
+                } else {
+                    for (reason, count) in &reasons {
+                        println!("[repro][reasons] {reason} x{count}");
+                    }
+                }
+                let procfs: usize = reasons
+                    .iter()
+                    .filter(|(key, _)| key.starts_with("procfs:"))
+                    .map(|(_, count)| count)
+                    .sum();
+                let cgroup: usize = reasons
+                    .iter()
+                    .filter(|(key, _)| key.starts_with("cgroup:"))
+                    .map(|(_, count)| count)
+                    .sum();
+                println!(
+                    "[repro][side] procfs={procfs} cgroup={cgroup} unavailable_total={unavailable}"
+                );
+                println!(
+                    "[repro][verdict] {}",
+                    if unavailable == 0 {
+                        "本轮未复现 Unavailable"
+                    } else if cgroup > procfs {
+                        "复现样本偏向 cgroup 观测侧"
+                    } else if procfs > cgroup {
+                        "复现样本偏向 /proc 侧"
+                    } else {
+                        "复现样本两侧都有，需看 reasons 明细"
+                    }
+                );
+            }
+
+            // v1.50 根因定向：用确定性注入把「/proc 侧退出竞态」与「cgroup 侧观测失败」分开。
+            // 读失败且进程已退出（等价于 readdir 与 read 之间进程消失）→ 跳过，不让整表不可用。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn proc_read_failure_after_process_exit_is_skipped_not_unavailable() {
+                let pid = std::process::id();
+                let mut last_trace = Vec::new();
+                for _ in 0..3 {
+                    proc_fault::set(pid, true);
+                    let _ = trace_take();
+                    let table = proc_table();
+                    let trace = trace_take();
+                    if table.is_some()
+                        && trace
+                            .iter()
+                            .any(|line| line.contains("proc_stat_read_injected"))
+                    {
+                        return;
+                    }
+                    last_trace = trace;
+                }
+                panic!("读失败且进程已退出时必须跳过、整表仍可用；trace={last_trace:?}");
+            }
+
+            // 存活进程的读失败 → 整表不可观测：安全侧不变量，绝不为降抖动而放宽。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn proc_read_failure_for_live_process_is_unavailable() {
+                let pid = std::process::id();
+                let mut last_trace = Vec::new();
+                for _ in 0..3 {
+                    proc_fault::set(pid, false);
+                    let _ = trace_take();
+                    let table = proc_table();
+                    let trace = trace_take();
+                    if trace.iter().any(|line| {
+                        line.contains("proc_table_unreadable") && line.contains("injected=true")
+                    }) {
+                        assert!(table.is_none(), "存活进程读失败必须判为不可观测");
+                        return;
+                    }
+                    last_trace = trace;
+                }
+                panic!("注入未生效，无法证明安全侧不变量：{last_trace:?}");
             }
 
             // 边界负例：逃逸在根存活时能被快照标出；根退出后被收养，快照就枚举不到它

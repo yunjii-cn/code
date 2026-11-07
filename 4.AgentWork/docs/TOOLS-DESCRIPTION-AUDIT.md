@@ -4578,4 +4578,72 @@ failed_total = 1, deleted_total = 1, lost_race_total = 2
 - `proc_table` 只在「条目已退出」时跳过；hidepid / 权限导致的读失败仍让整份观测不可用（不放松「没有证据不宣称清空」）。
 - B7 的 `pending` 窗口仍可能短于观测间隔；三阶段区分以盘上 `requestedAt/acknowledgedAt/finishedAt` 为准。
 
+## 54. v1.50：A 的复现驱动 / 根因定向 / quarantine 临时化，门禁负向对照常驻，PM 接入须知
+
+### 54.1 复现驱动与频率表（实跑）
+
+驱动：`unavailable_frequency_under_controlled_load`（`#[ignore]`，Linux）+ `scripts/posix-timeout-verify/unavailable-repro.sh`。
+每个 observation worker 独立「建作用域 → spawn sh + N 个 sleep 后代 → 等快照可观测 → terminate」，同时可挂 fork/exit churn 与 `/proc` 狂扫负载线程。
+记录：CPU 核数、worker 数、负载线程数、观测并发峰值（生产同款 `ObservationGuard` 计数）、系统 loadavg、容器/裸机、Unavailable 次数与 `原因=` 原文。
+
+WSL Ubuntu 24.04 / 16 核 / bare-metal(VM) / cgroup=Active，每 worker 100 轮：
+
+| workers | load_threads | 总轮数 | cleaned | unavailable | still_alive | observe_fail | rate | peak_obs | max_loadavg |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 0 | 100 | 100 | 0 | 0 | 0 | 0.0000 | 2 | 1.73 |
+| 4 | 0 | 400 | 400 | 0 | 0 | 0 | 0.0000 | 8 | 0.77 |
+| 8 | 16 | 800 | 800 | 0 | 0 | 0 | 0.0000 | 14 | 8.40 |
+| 16 | 64 | 1600 | 1600 | 0 | 0 | 0 | 0.0000 | 21 | 41.19 |
+
+合计 2900 轮，`Unavailable=0`，`observe_fail=0`；峰值 21 已高于原失败现场的 11。
+另做全量 POSIX lib 用例 `--test-threads=16` 重复 12 轮，全部通过（加上 v1.49 的 8 轮，改后累计 20 轮全量并行 0 失败）。
+
+### 54.2 判定：哪一侧
+
+**结论：A 属于「观测器把单个进程退出的 `/proc` 读竞态升级为整表不可用」的健壮性缺口，是测试/观测侧问题，不是产品在高并发下真有问题。**
+
+- **历史样本不能直接归因**：那次失败发生在诊断字段上线前，没有留下 `原因=`，所以不能从旧日志读出侧别。
+- **按代码路径排除 cgroup 侧**：`terminate` 在作用域仍 Active 且由本线程持有时才会读到 `cgroup.procs` / `cgroup.events`；同一线程内作用域不可能在终止前被 Drop，`cgroup_scope_lost` 也不是负载相关路径。原症状只可能来自 `procfs_unavailable`。
+- **确定性注入把两个分支钉死**（`proc_fault`，仅测试编译）：
+  - `proc_read_failure_after_process_exit_is_skipped_not_unavailable`：读失败 + 进程已退出 → 跳过该条目，整表仍可用；
+  - `proc_read_failure_for_live_process_is_unavailable`：读失败 + 进程仍存活 → 整表判 `Unavailable`（安全侧不变量不放宽）。
+- **为什么改后抓不到**：v1.49 的 `proc_entry_gone` 跳过恰好移除了「进程在 readdir 与 read 之间退出」这条最常见的触发路径，失败率从偶发降到本轮 0/2900。因此 quarantine 保留，但性质从「原因不明」变为「机制已定向、样本不再出现」。
+
+### 54.3 quarantine 仍是临时状态
+
+- 清单条目不变（仍以 WARN 呈现，不记 PASS）。
+- **解除判据**（与 §53.7 一致，写死在这里）：连续 30 次默认门禁 + 10 次隔离 soak（`--test-threads=1` 与 16 各半）全绿，且本文的根因结论未被新证据推翻。
+- **当前进度**：全量并行 20/20 绿；受控负载 2900/2900 绿；机制已由两个注入用例覆盖。下一次红时必须先看诊断里的 `原因=`：若为 `procfs_unavailable` → /proc 侧；若为 `cgroup_*` → 侧别判断需重开，不能沿用本节结论。
+
+### 54.4 门禁负向对照：从「验过一次」变成常驻用例
+
+- `scripts/test-gate/selftest.sh` / `selftest.ps1`：7 条固定对照——
+  1. 日志不存在 → exit 2；
+  2. 编译失败（零结果行）→ exit 2；
+  3. 非 quarantine FAILED → exit 2 且打印 `[FAIL]`；
+  4. quarantine FAILED → exit 0 且 `[WARN] quarantined … result=FAILED`；
+  5. quarantine ok → exit 0 且 `[WARN] … result=ok`；
+  6. cargo 非零且无 FAILED 行（有结果行也不能判绿）→ exit 2；
+  7. 干净日志 → exit 0 `[GATE] warn=0 fail=0`。
+- 接线：`verify.sh run` 在跑测试前先执行 `selftest.sh`，失败即 `reason=gate_selftest_failed` 终止；`gate.ps1` 默认先跑 `selftest.ps1`（`selftest.ps1` 内部用 `-SkipSelfTest` 防止递归）。两平台各 7/7 通过。
+- 第 6 条用 PATH 前缀注入假 `cargo`（打印一行 ok 后退出 1）验证，不需要真的制造编译失败。
+
+### 54.5 PM 接入须知与自测入口
+
+- 文档：`docs/PM-INTEGRATION-GUIDE.md`。只依赖公开 MCP 接口与 `runs/` 目录约定，覆盖：初始化、派单参数/幂等、超时的三档清理措辞、MCP 取消与纯文件取消、`pending/acknowledged/done` 三态、「已清理」必须同时满足 `status=canceled && cleanup_claimed=true && handback_status=canceled`、回执字段与产物哈希、错误矩阵、多进程部署、验收清单。
+- 自测：`scripts/pm-integration-selftest/pm_selftest.py`（仅标准库）。同一连接上模拟三种 PM 行为：正常派单（含产物哈希与 `receipt.get` 回读）、超时（`timeout：` 前缀与 `duration_ms`）、取消（长任务执行中发 `task.cancel`，校验三态与执行侧回执）。
+- 实测：Windows `pass=32 fail=0`，Linux `pass=32 fail=0`。首跑红一次：断言把 `artifacts[].locator` 当成了相对 `runs/`，实际相对可执行文件目录且含 `runs/` 前缀；修正后全绿，文档同步改正。
+
+### 54.6 回归（本轮实测）
+
+- Windows：`gate.ps1`（含自测）→ selftest 7/7；lib 24 + integration 129；`[GATE] warn=0 fail=0`。
+- WSL：`verify.sh run` → selftest 7/7；lib 36（新增 2 条注入用例，另有 1 条复现驱动 marked ignored）+ integration 127；quarantine 用例 `[WARN] … result=ok`。
+- 复现驱动：2900 轮 0 Unavailable；全量并行 12 轮 0 失败。
+- PM 自测：两平台各 32/32。
+
+### 54.7 未证 / 边界
+
+- 未拿到改前同款失败在新诊断下的样本：根因是「代码路径排除 + 注入机制」定向，不是从旧日志直接读出。
+- 注入只证明分类分支（跳过 vs 不可观测），不证明内核在那一刻一定返回该错误；真实 `hidepid`/权限导致的读失败仍走 `Unavailable`。
+- 复现驱动的负载是合成负载；容器（docker/k8s）与裸机对比只在当前 WSL VM 上做过，容器内结果未采集。
 

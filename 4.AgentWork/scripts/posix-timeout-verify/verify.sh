@@ -273,6 +273,11 @@ run_tests() {
   vendor_complete \
     || fail vendor_missing "vendor 缺失/不完整：$VENDOR_DIR；联网执行 prepare，或离线预置（见 --help）"
 
+  # v1.50 常驻负向对照：门禁自身必须先证明「日志缺失 / 零结果行 / 编译失败 / 非 quarantine 失败」
+  # 都会判死，quarantine 命中只出 WARN。自测不过说明门禁不可信，直接不跑测试。
+  bash "$REPO_ROOT/scripts/test-gate/selftest.sh" \
+    || fail gate_selftest_failed "门禁分类器负向对照未通过；先修 scripts/test-gate/gate.sh，不要相信本次测试结论"
+
   LOG_FILE="$LOG_DIR/posix-verify-$(date +%Y%m%d-%H%M%S).log"
   log "运行 POSIX 四类用例（离线，日志 $LOG_FILE）"
   (

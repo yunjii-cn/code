@@ -602,6 +602,12 @@ bridge 被 `kill -9` 后，它创建的 `aw-mcp-bridge-<bridge_pid>-<seq>` 作�
 
 真实证据（B7，v1.49，更接近真实派单链路）：派单方（验证进程）走真实 `task.execute` 落盘 `runs/<task>/attempt-1/dispatch.json` + `runs/.inflight/<task>.json`；取消方是**独立 OS 进程且不是 MCP 客户端**，只按 `cancel-request/1` 格式直接写 `.cancel/<task>.json`，`requested_by=b7-canceller-pid-<其 pid>`；执行侧 bridge 在自己的 200ms 心跳里读到并收敛。两个平台都验证：`handledBy.pid` = 执行进程 pid、`target{pid,startedAt}` = 活跃标记、`requested_by` 保持取消进程身份、harness 与取消进程各自观测到 `pending/acknowledged/done`（harness 的 pending 窗口随调度可能短于 20ms 轮询）、执行侧 `canceled`、盘上 handback `canceled`、标记删除、心跳停止。整条取消链路只依赖文件，不依赖任何进程内状态或第二条 MCP 连接。
 
+### 2.13 PM 侧接入须知与自测入口（v1.50）
+
+- 面向 PM 的独立接入文档：`docs/PM-INTEGRATION-GUIDE.md`（只依赖公开 MCP 接口与 `runs/` 目录约定，不需要读源码）。
+- 「已清理」的唯一判据：`task.cancel` 返回 `status=canceled` **且** `cleanup_claimed=true` **且** `handback_status=canceled`；`request_state=pending/acknowledged` 只能表述为「请求已送达/正在清理」。
+- 自测：`python scripts/pm-integration-selftest/pm_selftest.py --binary <aw-mcp-bridge>`，在同一连接上模拟正常派单 / 超时 / 取消三种 PM 行为（两平台各 32 项断言，全绿退出 0）。
+
 ## 3. 幂等
 
 ### 3.1 规则

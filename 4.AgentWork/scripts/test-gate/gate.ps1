@@ -7,16 +7,27 @@
 #   powershell -File scripts/test-gate/gate.ps1
 #   powershell -File scripts/test-gate/gate.ps1 -TestThreads 8
 #   powershell -File scripts/test-gate/gate.ps1 -LogFile <file>
+#   powershell -File scripts/test-gate/gate.ps1 -SkipSelfTest   # 仅供 selftest.ps1 内部调用
 param(
     [string]$LogFile = "",
     [int]$TestThreads = 0,
-    [string]$Package = "aw-mcp-bridge"
+    [string]$Package = "aw-mcp-bridge",
+    [switch]$SkipSelfTest
 )
 
 $ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "../..")).Path
 $QuarantineFile = Join-Path $ScriptDir "quarantine.txt"
+
+# v1.50 常驻负向对照：门禁自己先过一遍「无证据不判绿」的用例，否则本次结果不可信。
+if (-not $SkipSelfTest) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $ScriptDir "selftest.ps1") -Gate $PSCommandPath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[GATE] fail=1 — 门禁分类器负向对照未通过；先修 gate.ps1 / selftest.ps1，本次测试结论不可信" -ForegroundColor Red
+        exit 2
+    }
+}
 
 $cargoRc = 0
 if (-not $LogFile) {
