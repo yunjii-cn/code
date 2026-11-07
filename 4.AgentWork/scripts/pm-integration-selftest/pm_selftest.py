@@ -232,13 +232,20 @@ def scenario_timeout(bridge: Bridge, work_dir: str) -> None:
 
 def scenario_cancel(bridge: Bridge, runs_dir: str, work_dir: str) -> None:
     task_id = "pm-selftest-cancel-" + uuid.uuid4().hex[:8]
+    # 先写标记再长跑：等到标记文件出现才取消，确保取消打在「已在执行」上，
+    # 而不是 spawn 前（后者会返回 cleanup_status=not_started，属另一条分支）。
+    started_name = f"{task_id}-started.txt"
+    if IS_WINDOWS:
+        cancel_cmd = f'echo started> {started_name} && ping -n 30 127.0.0.1 >nul'
+    else:
+        cancel_cmd = f"printf started > {started_name} && sleep 30"
     execute_id = bridge.send(
         "tools/call",
         {
             "name": "task.execute",
             "arguments": {
                 "task_id": task_id,
-                "cmd": long_command(),
+                "cmd": cancel_cmd,
                 "cwd": work_dir,
                 "timeout_secs": 60,
             },
@@ -246,6 +253,11 @@ def scenario_cancel(bridge: Bridge, runs_dir: str, work_dir: str) -> None:
     )
     marker_path = os.path.join(runs_dir, ".inflight", f"{task_id}.json")
     wait_for(lambda: os.path.isfile(marker_path), 15, description="inflight marker")
+    wait_for(
+        lambda: os.path.isfile(os.path.join(work_dir, started_name)),
+        15,
+        description="child started marker",
+    )
     with open(marker_path, "r", encoding="utf-8") as handle:
         marker = json.load(handle)
     check("cancel: 活跃标记含 pid/startedAt", bool(marker.get("pid")) and bool(marker.get("startedAt")), str(marker))
@@ -266,6 +278,16 @@ def scenario_cancel(bridge: Bridge, runs_dir: str, work_dir: str) -> None:
         "cancel: cleanup_claimed=true",
         cancel_payload.get("cleanup_claimed") is True,
         str(cancel_payload.get("cleanup_claimed")),
+    )
+    check(
+        "cancel: cleanup_status=cleaned",
+        cancel_payload.get("cleanup_status") == "cleaned",
+        str(cancel_payload.get("cleanup_status")),
+    )
+    check(
+        "cancel: handback.cleanup_status=cleaned",
+        (cancel_payload.get("handback") or {}).get("cleanup_status") == "cleaned",
+        str((cancel_payload.get("handback") or {}).get("cleanup_status")),
     )
     check(
         "cancel: request_state=done",
@@ -293,6 +315,11 @@ def scenario_cancel(bridge: Bridge, runs_dir: str, work_dir: str) -> None:
     reason = execute_payload.get("blocked_reason") or ""
     check("cancel: 回执 reason 以 canceled： 开头", reason.startswith("canceled："), reason)
     check(
+        "cancel: 回执 cleanup_status=cleaned",
+        execute_payload.get("cleanup_status") == "cleaned",
+        str(execute_payload.get("cleanup_status")),
+    )
+    check(
         "cancel: 保留了请求方理由",
         "pm-selftest 取消" in reason,
         reason,
@@ -304,6 +331,11 @@ def scenario_cancel(bridge: Bridge, runs_dir: str, work_dir: str) -> None:
         (not is_error) and latest.get("status") == "canceled",
         str(latest),
     )
+    check(
+        "cancel: receipt.get cleanup_status=cleaned",
+        latest.get("cleanup_status") == "cleaned",
+        str(latest.get("cleanup_status")),
+    )
     request_file = os.path.join(runs_dir, ".cancel", f"{task_id}.json")
     check("cancel: 取消请求文件落盘", os.path.isfile(request_file), request_file)
     if os.path.isfile(request_file):
@@ -313,6 +345,16 @@ def scenario_cancel(bridge: Bridge, runs_dir: str, work_dir: str) -> None:
             "cancel: 请求文件状态 done",
             request.get("status") == "done",
             str(request.get("status")),
+        )
+        check(
+            "cancel: 请求文件 cleanup_status=cleaned",
+            request.get("cleanup_status") == "cleaned",
+            str(request.get("cleanup_status")),
+        )
+        check(
+            "cancel: 请求文件 cleanup_claimed=true",
+            request.get("cleanup_claimed") is True,
+            str(request.get("cleanup_claimed")),
         )
         target = request.get("target") or {}
         check(
@@ -346,6 +388,13 @@ def main() -> int:
     bridge = None
     try:
         bridge = Bridge(local_exe, work_dir)
+        status_payload, status_error = bridge.call_tool("status", {})
+        check("status: 调用未报错", not status_error, str(status_payload))
+        check(
+            "status: contract_version=1.51",
+            status_payload.get("contract_version") == "1.51",
+            str(status_payload.get("contract_version")),
+        )
         scenario_normal(bridge, runs_dir, work_dir)
         scenario_timeout(bridge, work_dir)
         scenario_cancel(bridge, runs_dir, work_dir)

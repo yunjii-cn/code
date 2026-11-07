@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub const SERVER_NAME: &str = "aw-mcp-bridge";
+/// 契约版本：与 docs/PM-AW-DISPATCH-CONTRACT.md 标题一致，供 PM 在接口上机器校验对接版本。
+pub const CONTRACT_VERSION: &str = "1.51";
 /// 会话审计目录名：以 _ 开头，与合法 task_id（必须字母或数字开头）不可能撞名
 const SESSION_DIR: &str = "_session";
 /// 活跃标记目录：以 . 开头，`is_task_dir_name` 会排除它，runs.list / runs.prune 不会把它当任务
@@ -454,6 +456,7 @@ impl Server {
 
     fn status_payload(&self) -> Value {
         json!({
+            "contract_version": CONTRACT_VERSION,
             "desktop": summarize_settings(&self.settings_path),
             "session": self.session_audit(),
             "connections": self.connections_payload(),
@@ -2750,16 +2753,20 @@ impl Server {
             true => self.execute_standalone(args, task_id, &cancel, heartbeat.as_mut()),
         };
         // 收尾：有请求文件就推进到 done；handback 读不到时也写 done，调用方按保守口径解释
-        let handback_status = latest_attempt_dir(&self.runs_dir.join(task_id))
-            .and_then(|(_, dir)| read_json(&dir.join("handback.json")).ok())
-            .and_then(|value| {
-                value
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            });
+        let handback = latest_attempt_dir(&self.runs_dir.join(task_id))
+            .and_then(|(_, dir)| read_json(&dir.join("handback.json")).ok());
+        let handback_status = handback
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let cleanup_status = handback
+            .as_ref()
+            .and_then(|value| value.get("cleanup_status"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         if let Some(heartbeat) = heartbeat.as_mut() {
-            heartbeat.finish(handback_status.as_deref());
+            heartbeat.finish(handback_status.as_deref(), cleanup_status.as_deref());
         }
         result
     }
@@ -2905,6 +2912,12 @@ impl Server {
             .and_then(|value| value.get("status"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        // 终止结果只从回执的 cleanup_status 取，不从措辞猜；旧回执缺字段时为 null（宁可不宣称）
+        let cleanup_status = handback
+            .as_ref()
+            .and_then(|value| value.get("cleanup_status"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let blocked_reason = handback
             .as_ref()
             .and_then(|value| value.get("blocked_reason"))
@@ -2935,8 +2948,9 @@ impl Server {
             "task_id": task_id,
             "status": status,
             "canceled": status == "canceled",
-            // 只有回执明确写了 canceled 才允许把清理措辞当成本次取消的结果
-            "cleanup_claimed": status == "canceled",
+            // 只有回执明确写了 canceled，且受控集合观测到无存活，才允许宣称已清理
+            "cleanup_claimed": cleanup_claim_allowed(Some(status), cleanup_status.as_deref()),
+            "cleanup_status": cleanup_status,
             "finished_observed": finished,
             "cross_process": token.is_none(),
             // 三态：pending=已落盘未读，acknowledged=已读在清理，done=收尾完成
@@ -3235,6 +3249,7 @@ impl Server {
             })
             .or_else(|| timed_out.then(|| timeout_reason(timeout_secs, cleanup_outcome)));
         let exit_code = exit_status.and_then(|status| status.code());
+        let cleanup_status = cleanup_status_label(canceled, timed_out, cleanup_outcome);
         let status = if canceled {
             "canceled"
         } else if blocked_reason.is_some() {
@@ -3274,6 +3289,8 @@ impl Server {
             "commit": commit,
             "duration_ms": duration_ms,
             "blocked_reason": blocked_reason,
+            // 机器可读的终止结果：cleaned / still_alive / unavailable / not_started / null
+            "cleanup_status": cleanup_status,
             "artifacts": [
                 {
                     "kind": "stdout",
@@ -3531,6 +3548,7 @@ impl Server {
                 "commit": commit,
                 "duration_ms": run.duration_ms,
                 "blocked_reason": blocked_reason,
+                "cleanup_status": if status == "canceled" { run.cleanup_status } else { None },
                 "verdict_conclusion": conclusion,
                 "verdict_locator": format!("runs/{task_id}/attempt-{attempt}/verdict.json"),
                 "artifacts": [
@@ -8003,6 +8021,31 @@ fn cancel_reason(
     }
 }
 
+/// 终止结果的可判定标签，与 `timeout_reason` / `cancel_reason` 的三态同源，不另造判据。
+/// `None` 表示本次没有发生终止动作；`not_started` 表示取消在启动任何进程之前生效。
+fn cleanup_status_label(
+    canceled: bool,
+    timed_out: bool,
+    outcome: Option<process_scope::CleanupOutcome>,
+) -> Option<&'static str> {
+    use process_scope::CleanupOutcome;
+    if !(canceled || timed_out) {
+        return None;
+    }
+    Some(match outcome {
+        None => "not_started",
+        Some(CleanupOutcome::Cleaned) => "cleaned",
+        Some(CleanupOutcome::StillAlive) => "still_alive",
+        Some(CleanupOutcome::Unavailable) => "unavailable",
+    })
+}
+
+/// `cleanup_claimed` 的唯一来源：回执确为 canceled 且观测到受控集合内无存活。
+/// 取消成功不等于已清理：StillAlive / Unavailable / not_started / 缺字段都不得置 true。
+fn cleanup_claim_allowed(handback_status: Option<&str>, cleanup_status: Option<&str>) -> bool {
+    handback_status == Some("canceled") && cleanup_status == Some("cleaned")
+}
+
 fn digest_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
@@ -9023,7 +9066,7 @@ impl CancelHeartbeat {
 
     /// 执行线程返回前收尾：把请求推进到 `done` 并记录盘上回执状态。
     /// 目标不符 / 请求已被清走时什么都不做。
-    fn finish(&mut self, handback_status: Option<&str>) {
+    fn finish(&mut self, handback_status: Option<&str>, cleanup_status: Option<&str>) {
         let Ok(record) = read_json(&self.path) else {
             return;
         };
@@ -9041,6 +9084,12 @@ impl CancelHeartbeat {
         if let Some(object) = record.as_object_mut() {
             object.insert("status".to_string(), json!("done"));
             object.insert("handback_status".to_string(), json!(handback_status));
+            // 文件通道的等效判据：只有 cleaned 才把 cleanup_claimed 置 true
+            object.insert(
+                "cleanup_claimed".to_string(),
+                json!(cleanup_claim_allowed(handback_status, cleanup_status)),
+            );
+            object.insert("cleanup_status".to_string(), json!(cleanup_status));
             object.insert("finishedAt".to_string(), json!(now_stamp()));
             object.insert(
                 "handledBy".to_string(),
@@ -9676,6 +9725,7 @@ struct StandaloneRun {
     duration_ms: u64,
     timed_out: bool,
     canceled: bool,
+    cleanup_status: Option<&'static str>,
     spawn_error: Option<String>,
     blocked_reason: Option<String>,
 }
@@ -9800,6 +9850,7 @@ fn run_standalone_command(
         duration_ms,
         timed_out,
         canceled,
+        cleanup_status: cleanup_status_label(canceled, timed_out, cleanup_outcome),
         spawn_error,
         blocked_reason,
     })
@@ -10673,7 +10724,7 @@ fn tools() -> Value {
         },
         {
             "name": "status",
-            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，初始化审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo；仅审计弱识别，不构成身份），以及连接级计数 connections（unit=connection：进程内无会话概念，stdio 单连接故 active/total/peak 恒为 1，initialize_total 随 initialize 次数累加，多份 initialize 不等于多会话；仅观测，不做准入或上限）；不回显任何配置值",
+            "description": "只读汇总桌面端关键状态：配置文件是否就绪、AI 是否启用、启用模型数量、仓库路径是否配置，初始化审计（记录可能多份，按 receivedAt 聚合，顶层回显最近一条 clientInfo；仅审计弱识别，不构成身份），以及连接级计数 connections（unit=connection：进程内无会话概念，stdio 单连接故 active/total/peak 恒为 1，initialize_total 随 initialize 次数累加，多份 initialize 不等于多会话；仅观测，不做准入或上限）；契约版本 contract_version 为机器可读的对接版本（与文档标题一致），握手 serverInfo.version 只是二进制版本；不回显任何配置值",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         },
         {
@@ -10746,7 +10797,7 @@ fn tools() -> Value {
         },
         {
             "name": "task.cancel",
-            "description": "按 task_id 显式取消正在执行的任务，跨进程可见：请求先落盘 runs/.cancel/<task_id>.json（含发起者、时间、target=pid+startedAt），执行侧在心跳检查点读取后走与本地取消相同的终止流程。只影响 target 点名的本轮执行；target 不符的上一轮残留请求不会误杀。返回 status：canceled（回执已落盘且确为 canceled）、completed_before_cancel（取消到达前已结束，未终止任何进程）、cancel_requested（已落盘但尚未观测到 done；用 request_state 区分 pending=执行侧未读到 与 acknowledged=已读到正在清理）、not_running（没有仍有效的活跃标记：未写请求、未发送信号、未做清理）。只有 canceled 才允许 cleanup_claimed=true。取消的观测口径与超时一致：只有观测到受控集合内无存活进程才写「已清理受控集合」，逃逸进程是否仍在运行未验证；看不到的进程不会谎报已清理",
+            "description": "按 task_id 显式取消正在执行的任务，跨进程可见：请求先落盘 runs/.cancel/<task_id>.json（含发起者、时间、target=pid+startedAt），执行侧在心跳检查点读取后走与本地取消相同的终止流程。只影响 target 点名的本轮执行；target 不符的上一轮残留请求不会误杀。返回 status：canceled（回执已落盘且确为 canceled）、completed_before_cancel（取消到达前已结束，未终止任何进程）、cancel_requested（已落盘但尚未观测到 done；用 request_state 区分 pending=执行侧未读到 与 acknowledged=已读到正在清理）、not_running（没有仍有效的活跃标记：未写请求、未发送信号、未做清理）。只有 canceled 且受控集合观测到无存活（cleanup_status=cleaned）才允许 cleanup_claimed=true；响应另含 cleanup_status（cleaned / still_alive / unavailable / not_started / null）与完整 handback。取消的观测口径与超时一致：只有观测到受控集合内无存活进程才写「已清理受控集合」，逃逸进程是否仍在运行未验证；看不到的进程不会谎报已清理",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -10760,7 +10811,7 @@ fn tools() -> Value {
         },
         {
             "name": "receipt.get",
-            "description": "按 task_id 读回执行回执：默认返回最新一次；include_history=true 时返回 attempts 次数与全部历史（每次 exit_code 与耗时）",
+            "description": "按 task_id 读回执行回执：默认返回最新一次；include_history=true 时返回 attempts 次数与全部历史（每次 exit_code 与耗时）。取消或超时的回执含机器可读的 cleanup_status：cleaned / still_alive / unavailable / not_started / null（未发生终止动作）；只有 cleaned 才允许据此宣布受控集合已清理",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -11404,6 +11455,40 @@ mod inflight_sweep_race_tests {
     }
 }
 
+/// 清理宣称的代码边界：`cleanup_claimed` 只能由 canceled + cleaned 推出。
+#[cfg(test)]
+mod cleanup_claim_tests {
+    use super::*;
+    use process_scope::CleanupOutcome;
+
+    #[test]
+    fn cleanup_status_labels_cover_every_outcome() {
+        assert_eq!(cleanup_status_label(true, false, Some(CleanupOutcome::Cleaned)), Some("cleaned"));
+        assert_eq!(
+            cleanup_status_label(true, false, Some(CleanupOutcome::StillAlive)),
+            Some("still_alive")
+        );
+        assert_eq!(
+            cleanup_status_label(false, true, Some(CleanupOutcome::Unavailable)),
+            Some("unavailable")
+        );
+        assert_eq!(cleanup_status_label(true, false, None), Some("not_started"));
+        assert_eq!(cleanup_status_label(false, false, None), None);
+        assert_eq!(cleanup_status_label(false, false, Some(CleanupOutcome::Cleaned)), None);
+    }
+
+    #[test]
+    fn cleanup_claim_requires_canceled_and_cleaned() {
+        assert!(cleanup_claim_allowed(Some("canceled"), Some("cleaned")));
+        assert!(!cleanup_claim_allowed(Some("canceled"), Some("still_alive")));
+        assert!(!cleanup_claim_allowed(Some("canceled"), Some("unavailable")));
+        assert!(!cleanup_claim_allowed(Some("canceled"), Some("not_started")));
+        assert!(!cleanup_claim_allowed(Some("canceled"), None));
+        assert!(!cleanup_claim_allowed(Some("ok"), Some("cleaned")));
+        assert!(!cleanup_claim_allowed(None, Some("cleaned")));
+    }
+}
+
 /// 描述审计自动门禁：审计文档 §21 的机器可读块是唯一来源。
 /// 描述/schema 改动必须同步该块（含 `tools_sha256`），否则本模块用例失败。
 #[cfg(test)]
@@ -11825,10 +11910,12 @@ mod v148_tests {
         assert_eq!(acknowledged["handledBy"]["pid"], json!(std::process::id()));
         assert!(cancel.is_canceled(), "acknowledged 后必须置位取消");
 
-        heartbeat.finish(Some("canceled"));
+        heartbeat.finish(Some("canceled"), Some("cleaned"));
         let done = read_json(&path).unwrap();
         assert_eq!(done["status"], "done");
         assert_eq!(done["handback_status"], "canceled");
+        assert_eq!(done["cleanup_claimed"], json!(true));
+        assert_eq!(done["cleanup_status"], "cleaned");
         assert!(done["finishedAt"].is_string());
         let parse = |value: &Value| {
             chrono::DateTime::parse_from_rfc3339(value.as_str().unwrap())

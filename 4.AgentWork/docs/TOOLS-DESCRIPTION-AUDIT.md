@@ -1238,7 +1238,7 @@ cargo test -p aw-mcp-bridge description_gate
 | G7 | `runs.list` | `inputSchema.properties.limit.description` | 默认 20 | — | `description_gate_behavior_session_and_limit_defaults` |
 | G8 | `health` | `description` | 只读 | — | `description_gate_behavior_additional_properties_declared_only` |
 | G9 | `status` | `description` | 只读；不回显任何配置值 | — | `description_gate_behavior_additional_properties_declared_only` |
-| G10 | `receipt.get` | `description` | 默认返回最新一次 | — | `description_gate_snapshot_matches_audit` |
+| G10 | `receipt.get` | `description` | 默认返回最新一次；cleanup_status；cleaned；still_alive；unavailable；not_started；只有 cleaned | 一定已清理 | `description_gate_snapshot_matches_audit` |
 | G11 | `status` | `description` | 连接级计数 connections；unit=connection；进程内无会话概念；active/total/peak 恒为 1；initialize_total 随 initialize 次数累加；多份 initialize 不等于多会话；仅观测，不做准入或上限 | 活跃会话数；会话上限；准入拦截 | `description_gate_behavior_connection_counters_real_stdio` |
 | G12 | `task.execute` | `description` | mode=standalone；verdict.json；undetermined；无法判定绝不默认通过；attempt < max_attempts；AW 不定义判据、不做验收 | 自动重试；会终止整棵进程树；已终止进程树；无残留 | `description_gate_standalone_mode_boundary` |
 | G13 | `task.execute` | `inputSchema.properties.mode.description` | 缺省 dispatched；AW 只执行不验收；拒绝 cmd/env/path_prepend；同一 task_id 不得跨模式复用；mode_conflict | 自动推断模式 | `description_gate_standalone_mode_boundary` |
@@ -1248,6 +1248,9 @@ cargo test -p aw-mcp-bridge description_gate
 | G17 | `capabilities` | `description` | 机器可读；holds（true/false/null）；status；scope；reason_code；platforms_verified；platforms_unverified；automatic；不依赖描述散文 | 仅见文档；无法机器判定 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`capabilities_declares_machine_readable_boundaries` |
 | G18 | `runs.inflight` | `description` | runs/.inflight/<task_id>.json；action=list；stale_reason；pid_alive；pid_missing_grace；deadline_expired；unreadable；dry_run=true；confirm=true；活跃标记永不删除；pid+startedAt；would_remove；不进入 runs.prune 候选；服务启动时一次；默认每 3600 秒一次；AW_INFLIGHT_SWEEP_SECS；trigger=startup\|periodic；审计 plan 行写不进去则本轮零删除 | 自动删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools`、`runs_inflight_lists_and_cleans_only_stale_markers` |
 | G19 | `runs.inflight` | `inputSchema.properties.action.description` | list；clean；stale=true | 默认 clean；隐式删除 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
+| G20 | `task.cancel` | `description` | 按 task_id 显式取消；跨进程可见；runs/.cancel/<task_id>.json；canceled；completed_before_cancel；cancel_requested；not_running；未发送信号；不会谎报已清理；request_state；pending；acknowledged；受控集合；cleanup_status；cleanup_claimed；handback | 一定已清理；保证终止整棵进程树；跨进程生效；跨进程不可见 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
+| G21 | `task.cancel` | `inputSchema.properties.task_id.description` | 命名规则；派单标识 | 任意字符串 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
+| G22 | `task.cancel` | `inputSchema.properties.requested_by.description` | 发起者；写入取消请求文件；缺省为 pid: | 必填 | `description_gate_snapshot_matches_audit`、`description_gate_rows_hold_on_tools` |
 
 机器可读块（供用例解析；修改请连同 `tools_sha256` 一起重算，并保留 `description-gate` 标记）：
 
@@ -1255,7 +1258,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "9f1ee7443846d6c0e46e40e7c8f9f0ff206105a13444c1e191dc261b65c0203c",
+  "tools_sha256": "95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1325,8 +1328,8 @@ cargo test -p aw-mcp-bridge description_gate
       "id": "G10",
       "tool": "receipt.get",
       "path": "description",
-      "contains": ["默认返回最新一次"],
-      "not_contains": []
+      "contains": ["默认返回最新一次", "cleanup_status", "cleaned", "still_alive", "unavailable", "not_started", "只有 cleaned"],
+      "not_contains": ["一定已清理"]
     },
     {
       "id": "G11",
@@ -1395,7 +1398,7 @@ cargo test -p aw-mcp-bridge description_gate
       "id": "G20",
       "tool": "task.cancel",
       "path": "description",
-      "contains": ["按 task_id 显式取消", "跨进程可见", "runs/.cancel/<task_id>.json", "canceled", "completed_before_cancel", "cancel_requested", "not_running", "未发送信号", "不会谎报已清理", "request_state", "pending", "acknowledged", "受控集合"],
+      "contains": ["按 task_id 显式取消", "跨进程可见", "runs/.cancel/<task_id>.json", "canceled", "completed_before_cancel", "cancel_requested", "not_running", "未发送信号", "不会谎报已清理", "request_state", "pending", "acknowledged", "受控集合", "cleanup_status", "cleanup_claimed", "handback"],
       "not_contains": ["一定已清理", "保证终止整棵进程树", "跨进程生效", "跨进程不可见"]
     },
     {
@@ -4646,4 +4649,144 @@ WSL Ubuntu 24.04 / 16 核 / bare-metal(VM) / cgroup=Active，每 worker 100 轮�
 - 未拿到改前同款失败在新诊断下的样本：根因是「代码路径排除 + 注入机制」定向，不是从旧日志直接读出。
 - 注入只证明分类分支（跳过 vs 不可观测），不证明内核在那一刻一定返回该错误；真实 `hidepid`/权限导致的读失败仍走 `Unavailable`。
 - 复现驱动的负载是合成负载；容器（docker/k8s）与裸机对比只在当前 WSL VM 上做过，容器内结果未采集。
+
+---
+
+## 55. v1.51：PM 联调缺陷收口（B1 / B2 / A3 + 其余 12 条）
+
+输入：PM 侧 `E:\软件开发\云集项目管家\docs\aw-pm-integration-verification-2026-11-08.md`（只读）。本轮遵循「以实测行为为准，不为迁就文档改行为，除非行为本身会把调用方挂住」。
+
+### 55.1 B1：执行中重复派发（结论：改文档，不改行为）
+
+**选择**：保留「阻塞到原执行结束再回放回执」，文档按实测写清；不改成「立即返回 `task_in_progress`」。**理由**：`task.execute` 本身就阻塞到回执；重复派发绝大多数是传输层重试，立即报错会把合法重试变成假失败；阻塞有明确上限 `timeout_secs + 5s`（`timeout_secs ≤ 600s`，故最长 605s）；等待 `attempt-1/dispatch.json` 最多 5s，仍缺失才 `task_id_conflict:`；N 个并发重投各自阻塞回放，`task.cancel` 仍由主循环处理。
+
+**可复现**（真实 MCP stdio 会话，原执行的命令 `ping -n 20 127.0.0.1`，重复派发后分别在 1.5s / 4s 探测）：
+
+```text
+B1 duplicate @1.5s responded=False
+B1 duplicate @4s responded=False
+B1 duplicate total_elapsed_ms=4322
+B1 duplicate isError= False status= canceled attempt= 1 finishedAt= 2026-11-07T22:36:56Z
+B1 first finishedAt= 2026-11-07T22:36:56Z
+```
+
+原执行被取消收尾后，重复派发才返回，且 `finishedAt`、`attempt` 与首次回执一致（原样回放）。**落点**：`PM-AW-DISPATCH-CONTRACT.md` §2.6.11（新增）、§2.6.4 / §2.6.9（更正）；`PM-INTEGRATION-GUIDE.md` §2.4（重写）。
+
+### 55.2 B2：`task.cancel` 的实测响应（结论：改文档）
+
+**实测**（同一探针，最终代码）：`task.cancel` 阻塞 108ms 返回，直接 `status=canceled`，并带未文档化的 `handback`（18 键完整 canceled 回执）与 `message`：
+
+```text
+B2 cancel elapsed_ms= 108
+B2 cancel keys= ['acknowledged_at', 'canceled', 'cleanup_claimed', 'cleanup_detail', 'cleanup_status',
+ 'cross_process', 'finished_at', 'finished_observed', 'handback', 'handback_status', 'message',
+ 'request_file', 'request_state', 'requested_at', 'requested_by', 'requested_reason', 'status', 'task_id']
+B2 cancel status= canceled cleanup_claimed= True handback_status= canceled request_state= done
+B2 message= 取消已生效：执行线程完成终止并落盘 canceled 回执
+B2 handback keys= ['artifacts', 'attempt', 'blocked_reason', 'changed_files', 'changed_files_truncated',
+ 'cleanup_status', 'commit', 'cwd', 'duration_ms', 'env_keys', 'exit_code', 'finishedAt', 'path_prepend',
+ 'status', 'stderr_digest', 'stdout_digest', 'task_id', 'timeout_secs', 'verify_cmd']
+B2 handback.status= canceled
+```
+
+只有等不到回执（`CANCEL_WAIT_SECS=10s` 超时）才返回 `cancel_requested`；示例里的 `cleanup_claimed=false` 与 `acknowledged` 是误解。**落点**：`PM-INTEGRATION-GUIDE.md` §4.3（用实测返回替换 + 字段说明表）、§5；`PM-AW-DISPATCH-CONTRACT.md` §2.12 / §3.6。
+
+### 55.3 A3：文件通道「已清理」判据（结论：改代码 + 文档）
+
+**问题**：旧 `cleanup_claimed` 在文件通道终态里不存在，且旧判据把「`canceled=true`」当成「已清理」——但 `canceled` 只说明终止动作执行过，受控集合仍可能 `StillAlive` / `Unavailable`，会误报「已清理」。
+
+**改法**：新增机器可读 `cleanup_status`（`cleaned` / `still_alive` / `unavailable` / `not_started` / `null`），写入 handback、`task.cancel` 响应、取消请求 `done` 终态三处；`cleanup_claimed` 收紧为 `handback_status="canceled" && cleanup_status="cleaned"`。文件通道等效判据：`status=done && handback_status=canceled && cleanup_status=cleaned`。`not_started`（取消在 spawn 前到达、从未启动进程）单独说明为「必然无存活、无需清理」，但 `cleanup_claimed=false`。
+
+**修复前**（文件终态键，无 `cleanup_status` / `cleanup_claimed`）：
+
+```text
+A3 terminal keys=['acknowledgedAt','finishedAt','handback_status','handledBy','reason','requestedAt',
+ 'requested_by','status','target','task_id','version']
+```
+
+**修复后**（同一探针，真实取消）：
+
+```text
+A3 states_seen= ['pending', 'acknowledged', 'done']
+A3 terminal= {"status": "done", "handback_status": "canceled", "finishedAt": "2026-11-07T22:36:57Z",
+ "cleanup_claimed": true, "cleanup_status": "cleaned"}
+A3 execute keys= [..., 'cleanup_status', ...]
+```
+
+**PM 不会把「部分条件」误判成已清理**：回归用例 `cancel_request_terminal_state_never_overclaims_cleanup` 先对真实取消记录断言 `claims_cleaned=true` 且机器写入的 `cleanup_claimed=true`，再对同一记录做五种变异——`cleanup_status=still_alive`、`cleanup_status=unavailable`、删除 `cleanup_status`、`status=acknowledged`、`handback_status=ok`——判据全部为 false。另有单测 `cleanup_claim_requires_canceled_and_cleaned` 直接锁 `cleanup_claim_allowed`。
+
+**落点**：`server.rs`（`cleanup_status_label` / `cleanup_claim_allowed` / `CancelHeartbeat::finish`）、`tests/mcp_contract.rs`、契约 §2.12 / §2.13 / §3.6、指南 §0 / §4.2 / §4.4 / §5。
+
+### 55.4 反向验证：防退化断言真的会报红
+
+**门禁（描述指纹 + 行断言）**：临时把 `status` 描述末尾的「；不回显任何配置值」删掉，`cargo test -p aw-mcp-bridge description_gate` 原文：
+
+```text
+test server::description_gate::description_gate_rows_hold_on_tools ... FAILED
+test server::description_gate::description_gate_snapshot_matches_audit ... FAILED
+G9：status 的 description 缺少必需措辞「不回显任何配置值」：...
+assertion `left == right` failed: tools/list 描述或 schema 已改动：请同步 TOOLS-DESCRIPTION-AUDIT.md §21（行断言 + tools_sha256）。
+实际=dc8e141ffa4ac725c6b145b0348db25ae8fe027ceb7b1232c6e37c481c9abb16
+  left: "dc8e141ffa4ac725c6b145b0348db25ae8fe027ceb7b1232c6e37c481c9abb16"
+ right: "95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316"
+test result: FAILED. 1 passed; 2 failed
+```
+
+**自测器（PM 行为断言）**：临时把 `task.cancel` 响应退回旧行为（无 `cleanup_status`、`cleanup_claimed=status==canceled`），`pm_selftest.py` 原文：
+
+```text
+[FAIL] cancel: cleanup_status=cleaned — None
+[SELFTEST] pass=39 fail=1
+```
+
+**单测（清理判据）**：同一临时回退下，`cargo test -p aw-mcp-bridge --lib cleanup_claim_requires_canceled_and_cleaned` 原文：
+
+```text
+thread '...cleanup_claim_requires_canceled_and_cleaned' panicked at apps\mcp-bridge\src\server.rs:11483:9:
+assertion failed: !cleanup_claim_allowed(Some("canceled"), Some("still_alive"))
+test result: FAILED. 0 passed; 1 failed
+```
+
+恢复后全部转绿：`description_gate` 4 passed；`pm_selftest.py` `pass=40 fail=0`；`--lib cleanup_claim` 2 passed。门禁指纹最终为 `95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316`。
+
+### 55.5 两平台实跑（原始输出）
+
+```text
+# Windows 10：cargo test -p aw-mcp-bridge
+lib        26 passed;  0 failed
+integration 130 passed; 0 failed
+cargo check -p aw-mcp-bridge：Finished，无错误
+
+# WSL（POSIX）：AW_VENDOR=/root/vendor bash scripts/posix-timeout-verify/verify.sh run
+lib        38 passed;  0 failed;  1 ignored（既有 quarantine）
+integration 128 passed; 0 failed
+
+# PM 行为自测（同一脚本，两平台各 40 项断言）
+Windows: [SELFTEST] pass=40 fail=0
+WSL:     [SELFTEST] pass=40 fail=0     （含 status.contract_version=1.51 断言）
+```
+
+### 55.6 其余 12 条逐条处理状态
+
+| 编号 | 级别 | 结论 | 落点 | 依据（实测/动作） |
+| --- | --- | --- | --- | --- |
+| A1 | S1 | 改文档 | 指南 §10（9 工具进参/出参/读写性质表） | 以 `tools/list` 实际 schema 抄录，PM 无需再翻源码 |
+| A2 | S1 | 改文档 | 指南 §4.2（`.inflight` 样例 + 出现时机 + 半截读重试 5×20ms） | 实测键 `version/task_id/mode/state/pid/startedAt/deadlineAt`；`File::create+write+sync` 非原子可见 |
+| A4 | S3 | 改文档 | 指南 §1.1 | 实测关 stdin 后 29.1s 等执行收尾才退出、退出码 0、无残留进程；要立刻停必须先 cancel |
+| A5 | S3 | 改文档 | 指南 §5 / §10 | 实测 `isError=true`、`text={"error":"回执不存在：<task_id>"}` |
+| B3 | S2 | 改文档 | 指南 §4.2 / 契约 §2.12 | 一个 200ms 心跳内可直接 `pending→done`，`acknowledgedAt=null`；不能把 ack 当稳定证据 |
+| B4 | S2 | **改代码 + 文档** | `status.contract_version="1.51"`；指南开头版本识别 | 实测 `serverInfo.version=0.1.0` 只是二进制版本；契约版本需要机器可读字段 |
+| C1 | S3 | 改文档 | 指南 §4.3 / §5 | 实测 `cleanup_detail` = 回执 `blocked_reason` 原文，`string|null` |
+| C2 | S3 | 改文档 | 指南 §5 前缀表 | 完整列出 `timeout：` / `canceled：` / `command_not_found:` / `cwd_not_found:` / `standalone_*`，标注全角/半角冒号 |
+| C3 | S3 | 改文档 | 指南 §5 | 任意终态都保证 stdout/stderr 两个产物，spawn 前创建 |
+| C4 | S3 | 改文档 | 指南 §4.3 / §5 | 实测响应含 `handback`（18 键）与 `message`，可直接用 handback 免二次 `receipt.get` |
+| 接入注意 1 | — | 改文档 | 指南 §10 注 | `inputSchema.required` 只有 `task_id`，schema 不能当前置校验器 |
+| 接入注意 2 | — | 改文档 | 指南 §2.1 / §10 注 | `argv`/`acceptance`/`max_attempts` 仅 standalone，dispatched 传入被拒 |
+
+### 55.7 明确不做
+
+- **不改 `task.execute` 的阻塞语义**（B1）：见 55.1 理由。
+- **不把 `task.execute` 的 schema 改成按 mode 动态 required**：JSON Schema 无法表达 dispatched/standalone 互斥，改为代码内校验并以 `blocked` 回执表达，文档已说明。
+- **不实现分档、不重开 W2c、`#3` 维持 `NOT_PROVEN`**：与本次缺陷无关。
+- **不改 PM 侧仓库**：只改 AW 侧文档与代码。
 

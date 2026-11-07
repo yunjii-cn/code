@@ -7831,20 +7831,23 @@ fn task_cancel_terminates_running_execution_and_reports_canceled() {
     let (server, _settings, runs) = server_with_runs();
     let server = Arc::new(server);
     #[cfg(windows)]
-    let slow = "ping -n 30 127.0.0.1 > NUL";
+    let slow = "echo started> t-cancel-started.txt && ping -n 30 127.0.0.1 > NUL";
     #[cfg(not(windows))]
-    let slow = "sleep 30";
+    let slow = "printf started > t-cancel-started.txt && sleep 30";
+    let work = runs.path().to_path_buf();
+    let work_arg = work.to_string_lossy().to_string();
     let worker = {
         let server = Arc::clone(&server);
         std::thread::spawn(move || {
             call_tool(
                 &server,
                 "task.execute",
-                json!({ "task_id": "t-cancel", "cmd": slow, "timeout_secs": 60 }),
+                json!({ "task_id": "t-cancel", "cmd": slow, "cwd": work_arg, "timeout_secs": 60 }),
             )
         })
     };
-    // 等 dispatch.json 落盘：标记比 spawn 更早，单等标记可能撞上"启动前取消"分支
+    // 等子进程真正开始执行（命令先写 started 文件）：dispatch.json 比 spawn 更早，
+    // 单等 dispatch 可能撞上"启动前取消"分支（cleanup_status=not_started）。
     let dispatch = runs
         .path()
         .join("t-cancel")
@@ -7855,7 +7858,12 @@ fn task_cancel_terminates_running_execution_and_reports_canceled() {
         assert!(Instant::now() < deadline, "dispatch.json 未在 15s 内落盘");
         std::thread::sleep(Duration::from_millis(20));
     }
-    std::thread::sleep(Duration::from_millis(300));
+    let started = work.join("t-cancel-started.txt");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "子进程未在 15s 内开始执行");
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let canceled = tool_payload(&call_tool(
         &server,
@@ -7865,6 +7873,8 @@ fn task_cancel_terminates_running_execution_and_reports_canceled() {
     assert_eq!(canceled["status"], "canceled", "{canceled}");
     assert_eq!(canceled["canceled"], true, "{canceled}");
     assert_eq!(canceled["cleanup_claimed"], true, "{canceled}");
+    assert_eq!(canceled["cleanup_status"], "cleaned", "{canceled}");
+    assert_eq!(canceled["handback"]["cleanup_status"], "cleaned", "{canceled}");
     assert_eq!(canceled["handback_status"], "canceled", "{canceled}");
 
     let executed = tool_payload(&worker.join().expect("执行线程不得 panic"));
@@ -7893,6 +7903,97 @@ fn task_cancel_terminates_running_execution_and_reports_canceled() {
     )
     .expect("回执必须是 JSON");
     assert_eq!(handback["status"], "canceled", "{handback}");
+    assert_eq!(handback["cleanup_status"], "cleaned", "{handback}");
+    let request: Value = serde_json::from_str(
+        &fs::read_to_string(runs.path().join(".cancel").join("t-cancel.json"))
+            .expect("取消请求终态必须落盘"),
+    )
+    .expect("取消请求必须是 JSON");
+    assert_eq!(request["status"], "done", "{request}");
+    assert_eq!(request["cleanup_claimed"], true, "{request}");
+    assert_eq!(request["cleanup_status"], "cleaned", "{request}");
+}
+
+/// PM 的文件通道口径：只有 done + canceled + cleanup_status=cleaned 才允许宣布「已清理」。
+/// 这里用真实的取消请求终态做变异，证明缺任一条件都不会被误判成已清理。
+#[test]
+fn cancel_request_terminal_state_never_overclaims_cleanup() {
+    let (server, _settings, runs) = server_with_runs();
+    let server = Arc::new(server);
+    #[cfg(windows)]
+    let slow = "echo started> t-cancel-matrix-started.txt && ping -n 30 127.0.0.1 > NUL";
+    #[cfg(not(windows))]
+    let slow = "printf started > t-cancel-matrix-started.txt && sleep 30";
+    let work = runs.path().to_path_buf();
+    let work_arg = work.to_string_lossy().to_string();
+    let worker = {
+        let server = Arc::clone(&server);
+        std::thread::spawn(move || {
+            call_tool(
+                &server,
+                "task.execute",
+                json!({ "task_id": "t-cancel-matrix", "cmd": slow, "cwd": work_arg, "timeout_secs": 60 }),
+            )
+        })
+    };
+    let dispatch = runs
+        .path()
+        .join("t-cancel-matrix")
+        .join("attempt-1")
+        .join("dispatch.json");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !dispatch.exists() {
+        assert!(Instant::now() < deadline, "dispatch.json 未在 15s 内落盘");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let started = work.join("t-cancel-matrix-started.txt");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "子进程未在 15s 内开始执行");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = tool_payload(&call_tool(
+        &server,
+        "task.cancel",
+        json!({ "task_id": "t-cancel-matrix", "reason": "矩阵" }),
+    ));
+    let _ = worker.join().expect("执行线程不得 panic");
+
+    let request: Value = serde_json::from_str(
+        &fs::read_to_string(runs.path().join(".cancel").join("t-cancel-matrix.json"))
+            .expect("取消请求终态必须落盘"),
+    )
+    .expect("取消请求必须是 JSON");
+    let claims_cleaned = |record: &Value| {
+        record["status"] == "done"
+            && record["handback_status"] == "canceled"
+            && record["cleanup_status"] == "cleaned"
+    };
+    assert!(claims_cleaned(&request), "真实终态必须判为已清理：{request}");
+    assert_eq!(
+        request["cleanup_claimed"], true,
+        "真实终态机器写入的 cleanup_claimed 必须为 true：{request}"
+    );
+
+    let mut still_alive = request.clone();
+    still_alive["cleanup_status"] = json!("still_alive");
+    assert!(!claims_cleaned(&still_alive), "仍有存活不得判为已清理：{still_alive}");
+
+    let mut unavailable = request.clone();
+    unavailable["cleanup_status"] = json!("unavailable");
+    assert!(!claims_cleaned(&unavailable), "机制不可用不得判为已清理：{unavailable}");
+
+    let mut missing = request.clone();
+    missing.as_object_mut().expect("对象").remove("cleanup_status");
+    assert!(!claims_cleaned(&missing), "缺 cleanup_status 不得判为已清理：{missing}");
+
+    let mut acknowledged = request.clone();
+    acknowledged["status"] = json!("acknowledged");
+    assert!(!claims_cleaned(&acknowledged), "未 done 不得判为已清理：{acknowledged}");
+
+    let mut completed = request.clone();
+    completed["handback_status"] = json!("ok");
+    assert!(!claims_cleaned(&completed), "回执非 canceled 不得判为已清理：{completed}");
 }
 
 #[test]
