@@ -2444,9 +2444,61 @@ mod process_scope {
         Unavailable,
     }
 
+    /// 一次"后代快照"：只读观测，不参与终止动作。
+    ///
+    /// - `descendants`：从 `root` 出发、按创建时父链能枚举到的存活进程；
+    /// - `controlled_pids`：受控集合（Windows 作业 / Linux 进程组）当时的成员；
+    ///   `None` 表示该平台或该时刻**无法观测**，绝不能当成"空集合"；
+    /// - `unobservable`：非空时整份快照不可用，调用方不得把 `is_empty()` 当成"没有后代"。
+    ///
+    /// 边界：POSIX 后代一旦 `setsid` / 双 fork 换父并被收养，就不再出现在父链里；
+    /// 快照只能覆盖"仍可枚举"的后代，所以它不是整棵树的证明。
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct DescendantSnapshot {
+        pub(crate) root: u32,
+        pub(crate) descendants: Vec<DescendantProcess>,
+        pub(crate) controlled_pids: Option<Vec<u32>>,
+        pub(crate) unobservable: Option<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct DescendantProcess {
+        pub(crate) pid: u32,
+        pub(crate) in_controlled_set: bool,
+    }
+
+    impl DescendantSnapshot {
+        /// 只有"可观测且确实为空"才算空；不可观测一律不能读成空。
+        pub(crate) fn is_empty(&self) -> bool {
+            self.unobservable.is_none() && self.descendants.is_empty()
+        }
+
+        /// 快照里观测到、但不在受控集合内的后代（即作业/进程组逃逸）。
+        /// 受控集合本身不可观测时返回空表，调用方必须先检查 `unobservable`。
+        #[cfg(test)]
+        pub(crate) fn outside_controlled_set(&self) -> Vec<u32> {
+            if self.unobservable.is_some() {
+                return Vec::new();
+            }
+            self.descendants
+                .iter()
+                .filter(|descendant| !descendant.in_controlled_set)
+                .map(|descendant| descendant.pid)
+                .collect()
+        }
+
+        /// 只表示"枚举到的后代都在受控集合内"，不表示"不存在未枚举到的后代"。
+        #[cfg(test)]
+        pub(crate) fn observed_descendants_are_controlled(&self) -> bool {
+            self.unobservable.is_none()
+                && self.controlled_pids.is_some()
+                && self.descendants.iter().all(|descendant| descendant.in_controlled_set)
+        }
+    }
+
     #[cfg(unix)]
     mod imp {
-        use super::CleanupOutcome;
+        use super::{CleanupOutcome, DescendantProcess, DescendantSnapshot};
         use std::os::unix::process::CommandExt;
         use std::process::{Child, Command};
         use std::time::{Duration, Instant};
@@ -2477,6 +2529,48 @@ mod process_scope {
                 None
             }
 
+            /// 观测点：`/proc` 父链快照 × 进程组成员交叉核对。
+            ///
+            /// - 父链快照：遍历 `/proc/<pid>/stat` 的 `PPid` 做传递闭包；
+            /// - 受控集合：同一份扫描里 `pgrp` 等于本组 pgid 的进程；
+            /// - 任一 `/proc` 条目不可读（非"已退出"）都按不可观测处理，绝不当成"没有后代"。
+            ///
+            /// 边界：Linux 会在父进程退出时把孤儿立即收养给 init/子收割者，父链随即断开；
+            /// 因此本快照只覆盖"仍可通过父链枚举"的后代，不能证明整棵树。
+            pub(crate) fn snapshot_descendants(&self, root: u32) -> DescendantSnapshot {
+                #[cfg(target_os = "linux")]
+                {
+                    let Some(pgid) = self.pgid else {
+                        return unobservable_snapshot(root, "pgid_unknown");
+                    };
+                    let Some(rows) = proc_table() else {
+                        return unobservable_snapshot(root, "procfs_unavailable");
+                    };
+                    let controlled: Vec<u32> = rows
+                        .iter()
+                        .filter(|row| row.pgrp == pgid as u32)
+                        .map(|row| row.pid)
+                        .collect();
+                    let entries = descendants_of(root, &rows)
+                        .into_iter()
+                        .map(|pid| DescendantProcess {
+                            pid,
+                            in_controlled_set: controlled.contains(&pid),
+                        })
+                        .collect();
+                    DescendantSnapshot {
+                        root,
+                        descendants: entries,
+                        controlled_pids: Some(controlled),
+                        unobservable: None,
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    unobservable_snapshot(root, "procfs_unavailable")
+                }
+            }
+
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
                 let Some(pgid) = self.pgid else {
                     let _ = child.kill();
@@ -2501,6 +2595,17 @@ mod process_scope {
                 let deadline = Instant::now() + CLEANUP_DEADLINE;
                 loop {
                     if !group_exists(pgid) {
+                        // 组记账为空后再用独立观测点复核：仍有可枚举后代 → 不宣称清空
+                        #[cfg(target_os = "linux")]
+                        {
+                            let snapshot = self.snapshot_descendants(child.id());
+                            if snapshot.unobservable.is_some() {
+                                return CleanupOutcome::Unavailable;
+                            }
+                            if !snapshot.is_empty() {
+                                return CleanupOutcome::StillAlive;
+                            }
+                        }
                         return CleanupOutcome::Cleaned;
                     }
                     if Instant::now() >= deadline {
@@ -2509,6 +2614,90 @@ mod process_scope {
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
+        }
+
+        fn unobservable_snapshot(root: u32, reason: &str) -> DescendantSnapshot {
+            DescendantSnapshot {
+                root,
+                descendants: Vec::new(),
+                controlled_pids: None,
+                unobservable: Some(reason.to_string()),
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        struct ProcRow {
+            pid: u32,
+            ppid: u32,
+            pgrp: u32,
+        }
+
+        /// 全量 `/proc` 扫描：读不到 `stat` 且进程仍存在（如 hidepid/权限）都按不可观测处理；
+        /// 只有"进程已退出"（`NotFound`）才跳过。
+        #[cfg(target_os = "linux")]
+        fn proc_table() -> Option<Vec<ProcRow>> {
+            let entries = std::fs::read_dir("/proc").ok()?;
+            let mut rows = Vec::new();
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if !name.chars().all(|ch| ch.is_ascii_digit()) {
+                    continue;
+                }
+                let Ok(pid) = name.parse::<u32>() else {
+                    continue;
+                };
+                let text = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(_) => return None,
+                };
+                rows.push(parse_stat(&text, pid)?);
+            }
+            if rows.is_empty() {
+                None
+            } else {
+                Some(rows)
+            }
+        }
+
+        /// `/proc/<pid>/stat` 关键字段：`pid (comm) state ppid pgrp ...`。
+        /// `comm` 可含空格与括号，因此以最后一个 `)` 为界解析。
+        #[cfg(target_os = "linux")]
+        fn parse_stat(text: &str, pid: u32) -> Option<ProcRow> {
+            let close = text.rfind(')')?;
+            let recorded_pid: u32 = text.get(..text.find('(')?)?.trim().parse().ok()?;
+            if recorded_pid != pid {
+                return None;
+            }
+            let rest = text.get(close + 1..)?.trim_start();
+            let mut fields = rest.split_whitespace();
+            let _state = fields.next()?;
+            let ppid: u32 = fields.next()?.parse().ok()?;
+            let pgrp: u32 = fields.next()?.parse().ok()?;
+            Some(ProcRow { pid, ppid, pgrp })
+        }
+
+        /// 按父链做传递闭包（含环保护），返回排好序的后代 PID。
+        #[cfg(target_os = "linux")]
+        fn descendants_of(root: u32, rows: &[ProcRow]) -> Vec<u32> {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            seen.insert(root);
+            let mut frontier = vec![root];
+            let mut descendants = Vec::new();
+            while let Some(parent) = frontier.pop() {
+                for row in rows {
+                    if row.ppid == parent && seen.insert(row.pid) {
+                        descendants.push(row.pid);
+                        frontier.push(row.pid);
+                    }
+                }
+            }
+            descendants.sort_unstable();
+            descendants
         }
 
         fn group_exists(pgid: i32) -> bool {
@@ -2687,26 +2876,191 @@ mod process_scope {
                 }
                 let _ = std::fs::remove_dir_all(&dir);
             }
+
+            // 观测点：/proc 父链快照 × 进程组成员交叉核对（终止前后）
+            #[test]
+            fn descendant_snapshot_cross_checks_process_group() {
+                let mut supervisor = Supervisor::new();
+                let mut command = Command::new("sh");
+                command
+                    .arg("-c")
+                    .arg("sleep 30 & sleep 30 & wait")
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+                let mut child = command.spawn().expect("spawn sh");
+                supervisor.attach(&mut child);
+                let root = child.id();
+
+                let mut observed = None;
+                for _ in 0..150 {
+                    let snapshot = supervisor.snapshot_descendants(root);
+                    if snapshot.unobservable.is_none()
+                        && snapshot.descendants.len() >= 2
+                        && snapshot.observed_descendants_are_controlled()
+                    {
+                        observed = Some(snapshot);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = observed.expect("必须能观测到进程组内的后代");
+                let mut expected: Vec<u32> =
+                    before.descendants.iter().map(|entry| entry.pid).collect();
+                expected.push(root);
+                expected.sort_unstable();
+                let mut actual = before.controlled_pids.clone().expect("进程组成员必须可读");
+                actual.sort_unstable();
+                println!(
+                    "[evidence] posix_descendant_snapshot before root={root} descendants={:?} controlled={:?}",
+                    before.descendants, before.controlled_pids
+                );
+                assert_eq!(
+                    actual, expected,
+                    "两个独立观测点必须一致：进程组成员 = 根进程 + 父链快照后代"
+                );
+                assert!(
+                    before.outside_controlled_set().is_empty(),
+                    "同组后代不应出现逃逸标记"
+                );
+
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] posix_descendant_snapshot after terminate={outcome:?} descendants={:?} controlled={:?} unobservable={:?}",
+                    after.descendants, after.controlled_pids, after.unobservable
+                );
+                assert_eq!(outcome, CleanupOutcome::Cleaned);
+                assert!(after.unobservable.is_none(), "终止后快照必须可观测");
+                assert!(after.is_empty(), "终止后不得有存活后代");
+                assert_eq!(after.controlled_pids, Some(Vec::new()));
+            }
+
+            // 边界负例：逃逸在根存活时能被快照标出；根退出后被收养，快照就枚举不到它
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn setsid_escape_is_flagged_then_unobservable_after_reparent() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-setsid-snapshot-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let pid_file = dir.join("pid.txt");
+                // 根进程 wait 住，保证逃逸后代在被观察时仍有父链
+                let script = format!(
+                    "if command -v setsid >/dev/null 2>&1; then setsid sleep 30 & echo $! > '{}'; wait; else echo skip > '{}'; fi",
+                    pid_file.display(),
+                    pid_file.display()
+                );
+                let mut supervisor = Supervisor::new();
+                let mut command = Command::new("sh");
+                command
+                    .arg("-c")
+                    .arg(script)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+                let mut child = command.spawn().expect("spawn setsid fixture");
+                supervisor.attach(&mut child);
+                let root = child.id();
+
+                let mut content = None;
+                for _ in 0..100 {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        content = Some(text.trim().to_string());
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let Some(content) = content else {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                };
+                if content == "skip" {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                }
+                let escaped: i32 = content.parse().expect("setsid 子进程 PID");
+
+                let mut flagged = None;
+                for _ in 0..150 {
+                    let snapshot = supervisor.snapshot_descendants(root);
+                    if snapshot.unobservable.is_none()
+                        && snapshot
+                            .outside_controlled_set()
+                            .contains(&(escaped as u32))
+                    {
+                        flagged = Some(snapshot);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = flagged.expect("根存活期间，逃逸后代必须能被父链快照标出");
+                println!(
+                    "[evidence] setsid_snapshot before escaped={escaped} descendants={:?} outside={:?}",
+                    before.descendants,
+                    before.outside_controlled_set()
+                );
+                assert!(
+                    before.outside_controlled_set().contains(&(escaped as u32)),
+                    "逃逸后代在父链仍存在时必须被标为受控集合外"
+                );
+
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] setsid_snapshot after outcome={outcome:?} escaped_alive={} descendants={:?} unobservable={:?}",
+                    pid_exists(escaped),
+                    after.descendants,
+                    after.unobservable
+                );
+                assert!(
+                    pid_exists(escaped),
+                    "setsid 逃逸不在进程组内，终止整组后必须仍存活（窄判据）"
+                );
+                assert!(after.unobservable.is_none());
+                assert!(
+                    after.is_empty(),
+                    "根退出后逃逸后代被收养，父链快照不得再枚举到它（边界）"
+                );
+                assert!(
+                    !after.descendants.iter().any(|entry| entry.pid == escaped as u32),
+                    "被收养的后代不得出现在父链快照"
+                );
+                unsafe {
+                    libc::kill(escaped, libc::SIGKILL);
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
         }
     }
 
     #[cfg(windows)]
     mod imp {
-        use super::CleanupOutcome;
+        use super::{CleanupOutcome, DescendantProcess, DescendantSnapshot};
         use std::os::windows::io::AsRawHandle;
         use std::os::windows::process::CommandExt;
         use std::process::{Child, Command};
         use std::time::{Duration, Instant};
         use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
-            THREADENTRY32,
+            CreateToolhelp32Snapshot, Process32First, Process32Next, Thread32First, Thread32Next,
+            PROCESSENTRY32, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
         };
         use windows_sys::Win32::System::JobObjects::{
             AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
-            JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
-            TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation,
+            QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         };
         use windows_sys::Win32::System::Threading::{
             OpenThread, ResumeThread, CREATE_SUSPENDED, THREAD_SUSPEND_RESUME,
@@ -2790,6 +3144,37 @@ mod process_scope {
                 self.attach_error.as_deref()
             }
 
+            /// 观测点：Toolhelp 进程树快照 × 作业 PID 列表交叉核对。
+            ///
+            /// 两个观测点相互独立：进程树按"创建时父链"递归（Windows 不重父化，父进程退出后
+            /// 子进程仍记录原 `ParentProcessID`），作业列表给出受控集合成员。两者求交/求差
+            /// 即可回答"枚举到的后代是否都在作业内"；任一查询失败都记 `unobservable`。
+            pub(crate) fn snapshot_descendants(&self, root: u32) -> DescendantSnapshot {
+                let Some(processes) = process_table() else {
+                    return unobservable_snapshot(root, "process_snapshot_failed");
+                };
+                let descendants = descendants_of(root, &processes);
+                let Some(job) = self.job else {
+                    return unobservable_snapshot(root, "job_unavailable");
+                };
+                let Some(controlled) = job_pid_list(job) else {
+                    return unobservable_snapshot(root, "job_pid_list_unavailable");
+                };
+                let entries = descendants
+                    .into_iter()
+                    .map(|pid| DescendantProcess {
+                        pid,
+                        in_controlled_set: controlled.contains(&pid),
+                    })
+                    .collect();
+                DescendantSnapshot {
+                    root,
+                    descendants: entries,
+                    controlled_pids: Some(controlled),
+                    unobservable: None,
+                }
+            }
+
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
                 let Some(job) = self.job else {
                     let _ = child.kill();
@@ -2803,12 +3188,23 @@ mod process_scope {
                 unsafe {
                     TerminateJobObject(job, 1);
                 }
+                let root = child.id();
                 let _ = child.wait();
 
                 let deadline = Instant::now() + CLEANUP_DEADLINE;
                 loop {
                     match active_processes(job) {
-                        Some(0) => return CleanupOutcome::Cleaned,
+                        Some(0) => {
+                            // 作业记账为 0 后再用独立观测点复核：仍有可枚举后代 → 不宣称清空
+                            let snapshot = self.snapshot_descendants(root);
+                            if snapshot.unobservable.is_some() {
+                                return CleanupOutcome::Unavailable;
+                            }
+                            if !snapshot.is_empty() {
+                                return CleanupOutcome::StillAlive;
+                            }
+                            return CleanupOutcome::Cleaned;
+                        }
                         Some(_) if Instant::now() < deadline => {
                             std::thread::sleep(Duration::from_millis(20));
                         }
@@ -2846,6 +3242,98 @@ mod process_scope {
                     std::ptr::null_mut(),
                 );
                 (ok != 0).then_some(info.ActiveProcesses)
+            }
+        }
+
+        fn unobservable_snapshot(root: u32, reason: &str) -> DescendantSnapshot {
+            DescendantSnapshot {
+                root,
+                descendants: Vec::new(),
+                controlled_pids: None,
+                unobservable: Some(reason.to_string()),
+            }
+        }
+
+        /// 一次 Toolhelp 进程快照读出的 `(pid, parent_pid)` 表。
+        /// 空表或快照句柄失败都按"不可观测"处理，绝不当成"没有后代"。
+        fn process_table() -> Option<Vec<(u32, u32)>> {
+            unsafe {
+                let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                if snapshot == INVALID_HANDLE_VALUE {
+                    return None;
+                }
+                let mut entry: PROCESSENTRY32 = std::mem::zeroed();
+                entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+                let mut rows = Vec::new();
+                let mut ok = Process32First(snapshot, &mut entry);
+                while ok != 0 {
+                    rows.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    entry.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+                    ok = Process32Next(snapshot, &mut entry);
+                }
+                CloseHandle(snapshot);
+                if rows.is_empty() {
+                    None
+                } else {
+                    Some(rows)
+                }
+            }
+        }
+
+        /// 按创建时父链做传递闭包（含环保护），返回排好序的后代 PID。
+        fn descendants_of(root: u32, rows: &[(u32, u32)]) -> Vec<u32> {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            seen.insert(root);
+            let mut frontier = vec![root];
+            let mut descendants = Vec::new();
+            while let Some(parent) = frontier.pop() {
+                for &(pid, parent_pid) in rows {
+                    if parent_pid == parent && seen.insert(pid) {
+                        descendants.push(pid);
+                        frontier.push(pid);
+                    }
+                }
+            }
+            descendants.sort_unstable();
+            descendants
+        }
+
+        /// `JobObjectBasicProcessIdList` 的缓冲区；固定容量，超过容量按截断（不可观测）处理。
+        #[repr(C)]
+        struct JobPidBuffer {
+            assigned: u32,
+            count: u32,
+            pids: [usize; 512],
+        }
+
+        fn job_pid_list(job: HANDLE) -> Option<Vec<u32>> {
+            unsafe {
+                let mut buffer = JobPidBuffer {
+                    assigned: 0,
+                    count: 0,
+                    pids: [0; 512],
+                };
+                let ok = QueryInformationJobObject(
+                    job,
+                    JobObjectBasicProcessIdList,
+                    &mut buffer as *mut _ as *mut core::ffi::c_void,
+                    std::mem::size_of::<JobPidBuffer>() as u32,
+                    std::ptr::null_mut(),
+                );
+                if ok == 0 {
+                    return None;
+                }
+                let count = buffer.count as usize;
+                if count > buffer.pids.len() {
+                    return None;
+                }
+                Some(
+                    buffer.pids[..count]
+                        .iter()
+                        .map(|pid| *pid as u32)
+                        .collect(),
+                )
             }
         }
 
@@ -3085,12 +3573,116 @@ mod process_scope {
                 println!("[evidence] exited_process ActiveProcesses_final={observed:?}");
                 assert_eq!(observed, Some(0), "进程退出后作业内活动进程数应为 0");
             }
+
+            // 观测点：Toolhelp 进程树快照 × 作业 PID 列表交叉核对（终止前后）
+            #[test]
+            fn descendant_snapshot_cross_checks_job_accounting() {
+                let mut supervisor = Supervisor::new();
+                assert!(supervisor.job.is_some(), "作业应创建成功");
+                let mut command = Command::new("cmd");
+                command
+                    .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+                let mut child = command.spawn().expect("spawn cmd");
+                supervisor.attach(&mut child);
+                assert!(supervisor.attached, "cmd 应成功加入作业");
+                let root = child.id();
+
+                let mut observed = None;
+                for _ in 0..150 {
+                    let snapshot = supervisor.snapshot_descendants(root);
+                    if snapshot.unobservable.is_none()
+                        && !snapshot.descendants.is_empty()
+                        && snapshot.observed_descendants_are_controlled()
+                    {
+                        observed = Some(snapshot);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = observed.expect("必须能观测到作业内的后代");
+                let mut expected: Vec<u32> =
+                    before.descendants.iter().map(|entry| entry.pid).collect();
+                expected.push(root);
+                expected.sort_unstable();
+                let mut actual = before.controlled_pids.clone().expect("作业 PID 列表必须可读");
+                actual.sort_unstable();
+                println!(
+                    "[evidence] descendant_snapshot before root={root} descendants={:?} controlled={:?}",
+                    before.descendants, before.controlled_pids
+                );
+                assert_eq!(
+                    actual, expected,
+                    "两个独立观测点必须一致：作业 PID 列表 = 根进程 + 进程树快照后代"
+                );
+                assert!(
+                    before.outside_controlled_set().is_empty(),
+                    "作业覆盖下的后代不应出现逃逸标记"
+                );
+
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                println!(
+                    "[evidence] descendant_snapshot after terminate={outcome:?} descendants={:?} controlled={:?} unobservable={:?}",
+                    after.descendants, after.controlled_pids, after.unobservable
+                );
+                assert_eq!(outcome, CleanupOutcome::Cleaned);
+                assert!(after.unobservable.is_none(), "终止后快照必须可观测");
+                assert!(after.is_empty(), "终止后不得有存活后代");
+                assert_eq!(after.controlled_pids, Some(Vec::new()));
+            }
+
+            // 交叉核对必须能识别"后代不在受控集合"：未加入作业的进程树要被标出
+            #[test]
+            fn descendant_snapshot_flags_descendants_outside_controlled_set() {
+                let supervisor = Supervisor::new();
+                assert!(supervisor.job.is_some(), "作业应创建成功");
+                let mut command = Command::new("cmd");
+                command
+                    .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                let mut child = command.spawn().expect("spawn detached cmd");
+                let root = child.id();
+
+                let mut observed = None;
+                for _ in 0..150 {
+                    let snapshot = supervisor.snapshot_descendants(root);
+                    if snapshot.unobservable.is_none() && !snapshot.descendants.is_empty() {
+                        observed = Some(snapshot);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = observed.expect("未加入作业的进程树也必须可枚举");
+                let outside = before.outside_controlled_set();
+                println!(
+                    "[evidence] descendant_snapshot outside_controlled root={root} descendants={:?} outside={:?} controlled={:?}",
+                    before.descendants, outside, before.controlled_pids
+                );
+                assert!(
+                    !before.observed_descendants_are_controlled(),
+                    "未加入作业的进程树不得被判为受控"
+                );
+                assert_eq!(
+                    outside.len(),
+                    before.descendants.len(),
+                    "快照里每个后代都必须被标为作业外"
+                );
+
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &root.to_string()])
+                    .output();
+                let _ = child.wait();
+            }
         }
     }
 
     #[cfg(not(any(unix, windows)))]
     mod imp {
-        use super::CleanupOutcome;
+        use super::{CleanupOutcome, DescendantSnapshot};
         use std::process::{Child, Command};
 
         pub(crate) struct Supervisor;
@@ -3104,6 +3696,14 @@ mod process_scope {
 
             pub(crate) fn attach_error(&self) -> Option<&str> {
                 None
+            }
+            pub(crate) fn snapshot_descendants(&self, root: u32) -> DescendantSnapshot {
+                DescendantSnapshot {
+                    root,
+                    descendants: Vec::new(),
+                    controlled_pids: None,
+                    unobservable: Some("descendant_snapshot_unsupported_platform".to_string()),
+                }
             }
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
                 let _ = child.kill();
@@ -3135,7 +3735,7 @@ fn timeout_reason(timeout_secs: u64, outcome: Option<process_scope::CleanupOutco
             }
         }
         Some(CleanupOutcome::StillAlive) => format!(
-            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程；逃逸进程是否仍在运行未验证"
+            "timeout：超过 {timeout_secs}s 未结束，已向受控集合发送终止信号，但受控集合内仍有存活进程，或父链快照仍枚举到存活后代；换父被收养的逃逸进程是否仍在运行不可观测"
         ),
         _ => format!(
             "timeout：超过 {timeout_secs}s 未结束，受控集合未能建立或无法查询，仅向直接子进程发送终止信号；其派生的子进程是否仍在运行未验证"
@@ -4904,26 +5504,49 @@ fn capabilities_payload() -> Value {
         capability_entry(
             "timeout.cleans_entire_process_tree",
             Some(false),
-            "not_proven",
-            "受控集合之外：BREAKAWAY、加入作业失败、setsid / 双 fork 等逃逸后代",
-            Some("no_complete_descendant_enumeration"),
+            "partial",
+            "Windows：作业覆盖全部后代，终止后父链快照与作业记账同时为空；POSIX：仅保证进程组清空，setsid / 双 fork 换父后被收养的后代不可枚举也不可终止",
+            Some("posix_escaped_after_reparent_unobservable"),
             false,
             &both,
             &[],
-            &["timeout_cleanup_three_states"],
-            "不承诺终止整棵进程树；逃逸进程是否仍在运行未验证。",
+            &[
+                "timeout_cleanup_three_states",
+                "descendant_snapshot_cross_checks_job_accounting",
+                "descendant_snapshot_cross_checks_process_group",
+            ],
+            "Windows 侧已用「作业 PID 列表 × 进程树快照」交叉验证终止后无存活后代；POSIX 侧逃逸后代换父后失去观测，不能宣称整棵树。",
         ),
         capability_entry(
             "timeout.enumerates_escaped_descendants",
             Some(false),
-            "not_proven",
-            "无法枚举受控集合之外的进程，只能观测集合内成员",
-            Some("no_complete_descendant_enumeration"),
+            "partial",
+            "Windows：按创建时父链可枚举作业外后代（父链不因父进程退出而改写）；POSIX：逃逸进程在根存活期间可枚举，换父被收养后失去父链",
+            Some("posix_escaped_after_reparent_unobservable"),
             false,
             &both,
             &[],
-            &["timeout_cleanup_three_states"],
-            "没有逃逸后代的完整枚举能力，因此不能把「无残留」写成保证。",
+            &[
+                "descendant_snapshot_flags_descendants_outside_controlled_set",
+                "setsid_escape_is_flagged_then_unobservable_after_reparent",
+            ],
+            "逃逸枚举能力按平台分裂：Windows 可枚举；POSIX 只覆盖仍可通过父链枚举的阶段，收养后不可观测。",
+        ),
+        capability_entry(
+            "timeout.descendant_snapshot_cross_check",
+            Some(true),
+            "proven",
+            "从任务根 PID 按创建时父链枚举存活后代，并与受控集合成员（Windows 作业 PID 列表 / Linux 进程组成员）交叉核对；任一查询失败记 Unavailable",
+            None,
+            true,
+            &both,
+            &[],
+            &[
+                "descendant_snapshot_cross_checks_job_accounting",
+                "descendant_snapshot_cross_checks_process_group",
+                "descendant_snapshot_flags_descendants_outside_controlled_set",
+            ],
+            "只回答「枚举到的后代是否都在受控集合内、终止后是否仍可枚举到」；不覆盖换父后被收养、PID 复用与集合未能建立的情形。",
         ),
         capability_entry(
             "path.argv_scope_enforced",

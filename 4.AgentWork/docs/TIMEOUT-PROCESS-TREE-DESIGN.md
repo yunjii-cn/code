@@ -436,14 +436,16 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 3. **三态可分**：观测点必须能区分"确实不存在"与"不可观测"；查询失败只能记 `Unavailable`，不得当 0（现有 C1/C2 已遵守）。
 4. **平台闭合**：POSIX 需要 cgroup v2 委派且进程不能被移出，或 `PR_SET_CHILD_SUBREAPER` + 带启动时间的全量 `/proc` 扫描；Windows 需要作业覆盖全部后代、禁止 `BREAKAWAY`/嵌套逃逸，并能枚举"作业外候选"。
 
-现状逐条核对：
+现状逐条核对（v1.34 新增观测点后；实测见 §6.10）：
 
 | 平台 | 1 完整枚举 | 2 全时段 | 3 三态可分 | 4 平台闭合 | 结论 |
 |---|---|---|---|---|---|
-| POSIX | 否（`/proc` 是 TOCTOU，subreaper 只覆盖孤儿，macOS 无） | 否 | 是（`ESRCH`/`EPERM` 可分） | 否（cgroup v2 未验证，可被移出） | 继续 `未验证` |
-| Windows | 否（`ActiveProcesses` 只数作业成员，无后代枚举） | 否 | 是（查询失败按 `Unavailable`） | 否（`BREAKAWAY`/加入失败/嵌套作业） | 继续 `未验证` |
+| POSIX | 否（`/proc` 父链在孤儿被收养时断开；subreaper 只覆盖孤儿，macOS 无） | 否（换父后无法追；根退出后快照必为空，属于假空） | 是（`ESRCH`/`EPERM` 可分；`unobservable` 与空快照分离） | 否（cgroup v2 未验证，进程可被移出） | 继续 `partial / NOT_PROVEN`（PD-3 剩余） |
+| Windows | 是（Toolhelp 父链快照；`ParentProcessID` 不因父进程退出而改写，PID 复用只会多报不会漏报） | 是（终止后快照为空即不存在可继续派生的存活后代） | 是（快照/作业列表查询失败一律 `Unavailable`） | 是（`CREATE_SUSPENDED` + 恢复前入作业；本作业未设 `BREAKAWAY_OK`，嵌套作业仍在外层作业内） | 整树清理可在 Windows 证明 |
 
 v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不提供逃逸观测点**，因此不改变上表任何一格，也不改变 `#3 = NOT_PROVEN`。四条中任何一条不满足，"逃逸未验证"就必须保留。
+
+v1.34 补上了观测点后，Windows 四格全部满足：`timeout.descendant_snapshot_cross_check` 为 `proven`，`timeout.cleans_entire_process_tree` 在 Windows 侧成立；POSIX 仍卡在"换父被收养"这一格，因此整条 claim 只能写 `holds=false / partial / posix_escaped_after_reparent_unobservable`，**不是**放宽判据换来的绿。
 
 ### 6.9 单次终止尝试是否足够（v1.24 实测；结论：一次即足够，不加重试）
 
@@ -485,6 +487,63 @@ v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不�
 
 - POSIX 把 `kill(-pgid, SIGKILL)` 改成只杀组长 `kill(pgid, SIGKILL)`：`outcome=StillAlive elapsed_ms=3524`，断言失败原文 `left: StillAlive / right: Cleaned`。
 - Windows 把 `TerminateJobObject` 改成只 `child.kill()`：trial 1 `outcome=StillAlive ActiveProcesses_after=Some(4) elapsed_ms=3019`，同一断言失败。
+
+### 6.10 后代观测点（v1.34 实测：Windows 可证整树，POSIX 仍缺换父一段）
+
+设计（`process_scope::DescendantSnapshot`，只读观测，不新增终止逻辑）：
+
+- 统一输出：`root` / `descendants[]{pid, in_controlled_set}` / `controlled_pids` / `unobservable`；`unobservable` 非空时 `is_empty()` 恒为 false，调用方不得读成"没有后代"。
+- Windows：`CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` 一次读出 `(pid, parent_pid)`，按父链闭环求后代；再用 `QueryInformationJobObject(JobObjectBasicProcessIdList)` 读作业成员；两集合交叉核对。
+- Linux：扫描 `/proc/<pid>/stat`，以最后一个 `)` 为界解析 `pid (comm) state ppid pgrp`（兼容 `comm` 含空格/括号）；按 `ppid` 闭环求后代、按 `pgrp` 求组成员；`NotFound` 跳过，其余读失败一律 `unobservable`。
+- 生产路径：终止后先看 `ActiveProcesses == 0` / `kill(-pgid, 0) == ESRCH`，再用快照复核；快照不可观测 → `Unavailable`，快照仍有后代 → `StillAlive`，只有两者都空才 `Cleaned`。这是收紧判据，不是放宽。POSIX 的快照复核在根退出后通常必然为空（换父已完成），因此它只可能把结论收紧为 `StillAlive`，不可能把 POSIX 的空快照当成"整树已清"的证据。
+
+实测（真实进程）：
+
+- Windows `descendant_snapshot_cross_checks_job_accounting`：
+
+```
+[evidence] descendant_snapshot before root=124800 descendants=[DescendantProcess { pid: 113168, in_controlled_set: true }] controlled=Some([124800, 113168])
+[evidence] descendant_snapshot after terminate=Cleaned descendants=[] controlled=Some([]) unobservable=None
+```
+
+  作业 PID 列表 = 根进程 + 父链快照后代；终止后两个观测点同时为空。
+
+- Windows 负例 `descendant_snapshot_flags_descendants_outside_controlled_set`：
+
+```
+[evidence] descendant_snapshot outside_controlled root=172680 descendants=[DescendantProcess { pid: 187288, in_controlled_set: false }] outside=[187288] controlled=Some([])
+```
+
+  未加入作业的后代会被标成集合外，证明交叉核对不是"恒接受控"。
+
+- Linux `descendant_snapshot_cross_checks_process_group`：
+
+```
+[evidence] posix_descendant_snapshot before root=701 descendants=[DescendantProcess { pid: 702, in_controlled_set: true }, DescendantProcess { pid: 703, in_controlled_set: true }] controlled=Some([701, 702, 703])
+[evidence] posix_descendant_snapshot after terminate=Cleaned descendants=[] controlled=Some([]) unobservable=None
+```
+
+- Linux 边界 `setsid_escape_is_flagged_then_unobservable_after_reparent`：
+
+```
+[evidence] setsid_snapshot before escaped=874 descendants=[DescendantProcess { pid: 874, in_controlled_set: false }] outside=[874]
+[evidence] setsid_snapshot after outcome=Cleaned escaped_alive=true descendants=[] unobservable=None
+```
+
+  根存活时逃逸可被标出；根退出后逃逸进程被收养，快照为空而进程仍存活——这正是 POSIX 仍不可证整树的实测依据。
+
+红→绿（真实输出）：
+
+- POSIX 首轮（占位实现）：`test result: FAILED. 9 passed; 2 failed`，失败原文 `必须能观测到进程组内的后代` / `根存活期间，逃逸后代必须能被父链快照标出`。
+- Windows 变异红灯（临时停用作业 PID 列表观测点，已逐字还原）：`test result: FAILED. 0 passed; 2 failed`，失败原文 `必须能观测到作业内的后代` / `未加入作业的进程树也必须可枚举`。
+- 绿：Windows `12 lib + 122 integration`、WSL Ubuntu 24.04（`cargo 1.88.0`）`11 lib + 120 integration` 全绿。
+
+残余边界（明确不覆盖）：
+
+1. Linux 孤儿被 init/子收割者收养后父链断开（实测），无法枚举；
+2. macOS 无 `/proc`，快照恒为 `unobservable`；
+3. Windows 的 PID 复用可能让快照多报"后代"——方向保守（会报 `StillAlive`，不会报假 `Cleaned`）；
+4. 观测是终止后的采样，不是内核级订阅；平台若允许后代脱离父链并继续存活（POSIX 换父正是此类），采样无法证明"不存在"。
 
 ---
 

@@ -3289,3 +3289,62 @@ running 120 tests -> test result: ok. 120 passed; 0 failed
 - 判活与删除之间仍可能有新进程加入：清扫只依据扫描时的 `stale`，不排他锁住目录。
 - 坏标记不自愈：`unreadable` 永久保留，只能人工删除；没有任何后台线程会重试。
 - 触发点有限：没有调用方操作（不重启同 `task_id`、不 prune、不 clean）时，残标仍不会自行消失。
+
+## 36. v1.34：后代进程观测点（`#3` 按平台分裂）
+
+### 36.1 红
+
+先加观测点 API（占位返回 `descendant_snapshot_not_implemented`）与用例，再跑：
+
+- WSL Ubuntu 24.04（`cargo 1.88.0`，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-101000.log`）：
+
+```
+thread 'server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group' panicked at apps/mcp-bridge/src/server.rs:2778:39:
+必须能观测到进程组内的后代
+test server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group ... FAILED
+
+thread 'server::process_scope::imp::tests::setsid_escape_is_flagged_then_unobservable_after_reparent' panicked at apps/mcp-bridge/src/server.rs:2877:38:
+根存活期间，逃逸后代必须能被父链快照标出
+test result: FAILED. 9 passed; 2 failed
+```
+
+- Windows 变异红灯（临时停用 `job_pid_list` 观测点，运行后已逐字还原）：
+
+```
+thread 'server::process_scope::imp::tests::descendant_snapshot_cross_checks_job_accounting' panicked at apps\mcp-bridge\src\server.rs:3607:39:
+必须能观测到作业内的后代
+thread 'server::process_scope::imp::tests::descendant_snapshot_flags_descendants_outside_controlled_set' panicked at apps\mcp-bridge\src\server.rs:3661:39:
+未加入作业的进程树也必须可枚举
+test result: FAILED. 0 passed; 2 failed
+```
+
+### 36.2 绿
+
+- Windows：`12 lib + 122 integration` 全绿。
+- WSL：`11 lib + 120 integration` 全绿（日志 `posix-verify-20261107-101517.log`）。
+
+关键证据行（真实进程）：
+
+```
+[evidence] descendant_snapshot before root=124800 descendants=[DescendantProcess { pid: 113168, in_controlled_set: true }] controlled=Some([124800, 113168])
+[evidence] descendant_snapshot after terminate=Cleaned descendants=[] controlled=Some([]) unobservable=None
+[evidence] descendant_snapshot outside_controlled root=172680 descendants=[DescendantProcess { pid: 187288, in_controlled_set: false }] outside=[187288] controlled=Some([])
+[evidence] posix_descendant_snapshot before root=701 descendants=[DescendantProcess { pid: 702, in_controlled_set: true }, DescendantProcess { pid: 703, in_controlled_set: true }] controlled=Some([701, 702, 703])
+[evidence] posix_descendant_snapshot after terminate=Cleaned descendants=[] controlled=Some([]) unobservable=None
+[evidence] setsid_snapshot before escaped=874 descendants=[DescendantProcess { pid: 874, in_controlled_set: false }] outside=[874]
+[evidence] setsid_snapshot after outcome=Cleaned escaped_alive=true descendants=[] unobservable=None
+```
+
+### 36.3 观测点口径
+
+- 统一结构 `DescendantSnapshot { root, descendants[{pid,in_controlled_set}], controlled_pids, unobservable }`；`unobservable` 非空时 `is_empty()` 恒为 false，禁止把"查不到"读成"没有"。
+- Windows：`CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` 父链传递闭包 × `JobObjectBasicProcessIdList`；两者集合相等才说明"枚举到的后代都在作业内"。父链在 Windows 上不因父进程退出而改写，这是整树可证的平台前提。
+- Linux：`/proc/<pid>/stat` 的 `pid (comm) state ppid pgrp`（以最后一个 `)` 为界），父链闭包 × 同 `pgrp` 成员集合；`NotFound` 跳过，其余读失败（权限/hidepid）一律 `unobservable`。
+- 生产终止路径在原有判据后追加复核：快照不可观测 → `Unavailable`；仍有可枚举后代 → `StillAlive`；两观测点都空才 `Cleaned`。属于收紧，不放宽原有三态。`StillAlive` 回执措辞同步扩为"受控集合内仍有存活进程，或父链快照仍枚举到存活后代"，避免把逃逸后代误报成集合内成员（`tools/list` 描述未改，`tools_sha256` 不变）。
+- `capabilities` 新增 `timeout.descendant_snapshot_cross_check=true/proven/automatic=true`；`timeout.cleans_entire_process_tree` 与 `timeout.enumerates_escaped_descendants` 由 `not_proven` 改为 `holds=false/partial/posix_escaped_after_reparent_unobservable`；条目 13→14，`not_proven_total` 仍 4。
+
+### 36.4 结论与仍然缺的那一段
+
+- Windows：作业覆盖全部后代（`CREATE_SUSPENDED` 先入作业、恢复前不派生、本作业未设 `BREAKAWAY_OK`、嵌套作业仍在外层作业内），父链快照可枚举全部存活后代，终止后快照与 `ActiveProcesses` 同时为空 → **整树清理在 Windows 侧成立**。
+- POSIX：`setsid` / 双 fork 换父后被 init/子收割者收养，父链断开；`setsid_escape_is_flagged_then_unobservable_after_reparent` 实测 `escaped_alive=true` 而快照 `descendants=[]`，即"快照为空 ≠ 无逃逸"。因此 POSIX **不能**宣称整树，`cleans_entire_process_tree` 只能保持 `holds=false`。
+- 仍缺的边界：Linux 收养后的后代枚举（需 cgroup v2 委派或 subreaper + 启动时间全量扫描，均未实现）；macOS 无 `/proc`；Windows PID 复用可能多报后代（保守方向）；观测是终止后采样而非内核级订阅。

@@ -6081,23 +6081,29 @@ fn capabilities_declares_machine_readable_boundaries() {
         );
     }
 
-    // #3 窄判据：只保证清空受控集合，明确不保证整棵树与逃逸后代
+    // #3 判据按平台分裂：Windows 已证明整树，POSIX 仍缺"换父后被收养"这一段
     let controlled = claim(&payload, "timeout.terminates_controlled_set");
     assert_eq!(controlled["holds"], true, "{controlled}");
     assert_eq!(controlled["status"], "proven", "{controlled}");
     let whole_tree = claim(&payload, "timeout.cleans_entire_process_tree");
     assert_eq!(whole_tree["holds"], false, "{whole_tree}");
-    assert_eq!(whole_tree["status"], "not_proven", "{whole_tree}");
+    assert_eq!(whole_tree["status"], "partial", "{whole_tree}");
     assert_eq!(
-        whole_tree["reason_code"], "no_complete_descendant_enumeration",
+        whole_tree["reason_code"], "posix_escaped_after_reparent_unobservable",
         "{whole_tree}"
     );
     let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
     assert_eq!(escaped["holds"], false, "{escaped}");
+    assert_eq!(escaped["status"], "partial", "{escaped}");
     assert_eq!(
-        escaped["reason_code"], "no_complete_descendant_enumeration",
+        escaped["reason_code"], "posix_escaped_after_reparent_unobservable",
         "{escaped}"
     );
+    // 新增观测点本身必须可证：枚举到的后代与受控集合成员可交叉核对
+    let snapshot = claim(&payload, "timeout.descendant_snapshot_cross_check");
+    assert_eq!(snapshot["holds"], true, "{snapshot}");
+    assert_eq!(snapshot["status"], "proven", "{snapshot}");
+    assert!(snapshot["reason_code"].is_null(), "{snapshot}");
 
     // POSIX 未覆盖
     let posix = claim(&payload, "platform.posix_inflight_semantics_verified");
