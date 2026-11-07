@@ -297,7 +297,13 @@ run_tests() {
     "exited_process_group_has_no_members ... ok" \
     "stopped_process_still_counts_as_alive ... ok" \
     "setsid_escape_is_outside_the_observed_group ... ok" \
-    "timeout_cleans_controlled_set_including_grandchild ... ok"
+    "timeout_cleans_controlled_set_including_grandchild ... ok" \
+    "[evidence] cgroup_scope adopted escaped_alive=" \
+    "[evidence] cgroup_left before root=" \
+    "[evidence] cgroup_left after outcome=" \
+    "[evidence] cgroup_unreadable scope=" \
+    "cgroup_kill_terminates_escapee_that_left_cgroup_procs ... ok" \
+    "cgroup_members_unreadable_is_not_empty ... ok"
   do
     grep -qF -- "$token" "$LOG_FILE" || missing="$missing
   - $token"

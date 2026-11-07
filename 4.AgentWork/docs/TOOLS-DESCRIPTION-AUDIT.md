@@ -4172,5 +4172,84 @@ handshake=before_timeout observed=1 survivors=[] ...
 
 ### 48.5 能力位与剩余 `not_proven`
 
-- `timeout.cleans_entire_process_tree` 的 evidence 增加 `timeout_cleans_controlled_set_including_grandchild`，但 **holds 仍 `false/partial`**：本次只证成 Windows 受控集合内的孙进程，证不到作业外进程。
-- 剩余两条 `not_proven` 的可证路径已在契约 §2.7 后逐条写明（`timeout.cleans_entire_process_tree`、`timeout.enumerates_escaped_descendants`）：Linux 分支在本机可证（cgroup v2 + `cgroup.kill`），Windows 的"整树/逃逸后代权威枚举"在本机无 OS 原语，结构性不可证。
+- `timeout.cleans_entire_process_tree` 的 evidence 增加 `timeout_cleans_controlled_set_including_grandchild`，但 **v1.44 当时 holds 仍 `false/partial`**：本次只证成 Windows 受控集合内的孙进程，证不到作业外进程。**v1.45 已按平台拆分，见 §49。**
+- v1.44 当时的剩余两条 `not_proven` 的可证路径已在契约 §2.7 后逐条写明（`timeout.cleans_entire_process_tree`、`timeout.enumerates_escaped_descendants`）：Linux 分支在本机可证（cgroup v2 + `cgroup.kill`），Windows 的"整树/逃逸后代权威枚举"在本机无 OS 原语，结构性不可证。v1.45 已按平台拆分并证掉 Linux 侧，见 §49。
+
+## §49 v1.45：逃出 `cgroup.procs` 的整树清理与平台拆分（2026-11-08）
+
+### 49.1 判据
+
+修前只证到「`setsid` 逃逸但仍在本 cgroup」：`cgroup.kill` 能打到它。真正离开本作用域 `cgroup.procs`（把自己写进旁路 cgroup）的进程，既不在 `cgroup.kill` 的打击范围，`setsid` 后也不在进程组内；根退出被收养后父链也断了。终止必须仍覆盖它，四个观测量同时成立才允许 `Cleaned`：
+
+1. `cgroup.procs` 为空；
+2. `cgroup.events` 为 `populated 0`；
+3. 逃逸 PID 不存在；
+4. 快照无后代。
+
+### 49.2 夹具与红证据
+
+`cgroup_kill_terminates_escapee_that_left_cgroup_procs`（Linux-only，WSL）：
+
+- 父 `sh root.sh` → 子 `sh child.sh` → 孙 `setsid sh grandchild.sh`；
+- 孙脚本 `echo $$ > grand.pid`，随后 `echo $$ > <sink>/cgroup.procs`（旁路 cgroup 与作用域同父目录，委派权限一致），`exec sleep 30`；
+- 测试断言孙进程已不在 `scope.members()`、`sink_members=[pid]`、`move_status=moved`，且父链快照仍能看到它（`in_controlled_set=false`）。
+
+HEAD 实现红（原样）：
+
+```text
+[evidence] cgroup_left before root=1895 child=Some("1906") escaped=1913 scope=CgroupV2 sink_members=[1913] move_status=Some("moved\n") descendants=[DescendantProcess { pid: 1906, in_controlled_set: true }, DescendantProcess { pid: 1913, in_controlled_set: false }] outside=[1913]
+[evidence] cgroup_left after outcome=Cleaned escaped_alive=true members=Ok([]) populated=Ok(0) descendants=[] unobservable=None
+thread 'server::process_scope::imp::tests::cgroup_kill_terminates_escapee_that_left_cgroup_procs' panicked at apps/mcp-bridge/src/server.rs:4266:17:
+逃出 cgroup.procs 的后代在终止后必须不再存活（cgroup.kill 打不到它，必须另行收口）
+test result: FAILED. 25 passed; 1 failed
+```
+
+这是真缺陷：`cgroup.kill` 只作用于成员，逃逸进程存活而结果误报 `Cleaned`，且快照 `descendants=[]` 让读方以为无残留。
+
+### 49.3 修复
+
+`Supervisor::terminate`（POSIX）：
+
+- 动手前 `tracked_descendants(root)` = `/proc` 父链闭包 ∪ `cgroup.procs` 成员，每项附 `starttime`（`/proc/<pid>/stat` 第 22 字段）。
+- `SIGKILL` 进程组前再抓一次（根仍存活，父链还在）；`child.wait()` 后父链断，不再抓。
+- 每轮循环：先 `expand_tracked`（存活名单成员在 `/proc` 里的新后代并入），再对 `tracked_pid_alive(pid, start)` 为真者逐个 `SIGKILL`；`starttime` 不一致（PID 复用）绝不发信号。
+- 判定：`cgroup.procs` 空、`populated 0`、名单全部消失、快照空，四者同时成立才 `Cleaned`；deadline 到仍有名单存活 → `StillAlive`。
+
+### 49.4 绿证据
+
+WSL Ubuntu 24.04 LTS（root，cgroup2fs，`cgroup.kill` 存在，内核 `6.18.33.2-microsoft-standard-WSL2`，日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-033331.log`）：
+
+```text
+[evidence] cgroup_left before root=33075 child=Some("33082") escaped=33087 scope=CgroupV2 sink_members=[33087] move_status=Some("moved\n") descendants=[DescendantProcess { pid: 33082, in_controlled_set: true }, DescendantProcess { pid: 33087, in_controlled_set: false }] outside=[33087]
+[evidence] cgroup_left after outcome=Cleaned escaped_alive=false members=Ok([]) populated=Ok(0) descendants=[] unobservable=None
+test server::process_scope::imp::tests::cgroup_kill_terminates_escapee_that_left_cgroup_procs ... ok
+test result: ok. 27 passed; 0 failed
+```
+
+### 49.5 枚举权威性与退化条件
+
+- 权威：`cgroup_scope_enumerates_adopted_escapee` 增断言——根退出、逃逸者被收养（`escaped_ppid` 不再是根）后，`members == vec![escaped]`。成员集合本身点名，不依赖父链。证据 `[evidence] cgroup_scope adopted escaped_alive=true escaped_ppid=Some(32364) root=33029 members=Some(Ok([33071])) descendants=[DescendantProcess { pid: 33071, in_controlled_set: false }] controlled=Some([]) scope=CgroupV2`。
+- 退化：
+  1. 无 cgroup 写权限 / 非 root / 容器未委派 / cgroup v1 → 作用域建不起来，`escaped_scope_unobservable`，退回进程组旁证；
+  2. Active 但 `cgroup.procs` 读不出 → 整份快照 `unobservable`，绝不当空（`cgroup_members_unreadable_is_not_empty`：`[evidence] cgroup_unreadable scope=ProcessGroup unobservable=Some("cgroup_procs_unreadable:No such file or directory (os error 2)") is_empty=false`）；
+  3. 进程已离开 `cgroup.procs` → 作用域不含它，只在脱离前靠父链可见（旁证），根退出被收养后不可见；
+  4. 无 `cgroup.kill` 不影响枚举权威性，只影响终止；v1.45 由终止前名单补足已知逃逸者。
+
+### 49.6 无 `cgroup.kill` 用例口径同步
+
+`cgroup_without_kill_reports_still_alive`：静态伪造作用域（无 `cgroup.kill`、`cgroup.procs` 非空、`populated 1`、记账不更新）。v1.45 起 `terminate` 会按名单杀掉已知逃逸者（`escaped_alive=false`），但独立观测点仍显示成员 → 如实 `StillAlive`，**不因自己的名单放行**。
+
+### 49.7 能力位（平台拆分）
+
+| 条目 | holds | status | reason_code | 平台 |
+| --- | --- | --- | --- | --- |
+| `timeout.cleans_entire_process_tree` | true | proven | null | `platforms_verified=[linux]`，unverified `[windows, macos]` |
+| `timeout.cleans_entire_process_tree_windows` | false | not_proven | `requires_out_of_job_enumerable_terminable_os_primitive` | `[windows]` |
+| `timeout.enumerates_escaped_descendants` | true | proven | null | `[linux]`，unverified `[windows, macos]` |
+| `timeout.enumerates_escaped_descendants_windows` | false | not_proven | `requires_out_of_job_enumerable_terminable_os_primitive` | `[windows]` |
+
+- Linux 两条的 scope/detail 明写 `platform=linux`、cgroup v2 可写、`cgroup.kill`、内核 `6.18.33.2-microsoft-standard-WSL2` 实测与残余边界。
+- Windows 两条 detail 明写「需要作业外进程可枚举可终止的 OS 原语，本机不存在」；受控集合内孙进程结论只覆盖作业内，不上调整树。
+- 条目 17→19，`not_proven_total` 仍 2（均为 Windows 结构性条目）。
+- `mcp_contract` 平台断言同步：Linux 两条 `holds=true/proven/reason_code=null`，Windows 两条 `false/not_proven` + 上述 reason。
+- 未改 `tools/list` 描述，`tools_sha256` 不变（`85da030305024ac405c9fdecb6cfc0e9d4c46fdc7f2dd4aa000314d346e6a3bc`），门禁通过。

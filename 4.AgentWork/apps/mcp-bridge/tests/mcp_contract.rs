@@ -6629,23 +6629,31 @@ fn capabilities_declares_machine_readable_boundaries() {
         );
     }
 
-    // #3 判据按平台分裂：Windows 结构上证不到整树；Linux 仅在 cgroup v2 + cgroup.kill 可用时
-    // 证成作用域，条件性能力不上调；reason 点名真正卡点（作用域外进程可能存活），
-    // 不再用「需要 cgroup v2 且内核有 cgroup.kill」笼统概括（v1.41，审计 §44）。
+    // #3 能力位按平台拆分（v1.45）：Windows 的结构性不可证不再拖着 Linux 一起 false。
+    // Linux 限定在 cgroup v2 可写 + cgroup.kill 分支上 proven；Windows 单独条目保持
+    // not_proven 并点名真正卡点（需要作业外进程可枚举可终止的 OS 原语）。
     let controlled = claim(&payload, "timeout.terminates_controlled_set");
     assert_eq!(controlled["holds"], true, "{controlled}");
     assert_eq!(controlled["status"], "proven", "{controlled}");
     let whole_tree = claim(&payload, "timeout.cleans_entire_process_tree");
-    assert_eq!(whole_tree["holds"], false, "{whole_tree}");
-    assert_eq!(whole_tree["status"], "partial", "{whole_tree}");
+    assert_eq!(whole_tree["holds"], true, "{whole_tree}");
+    assert_eq!(whole_tree["status"], "proven", "{whole_tree}");
+    assert!(whole_tree["reason_code"].is_null(), "{whole_tree}");
     assert_eq!(
-        whole_tree["reason_code"], "processes_outside_controlled_scope_may_survive",
+        whole_tree["platforms_verified"],
+        json!(["linux"]),
+        "{whole_tree}"
+    );
+    assert_eq!(
+        whole_tree["platforms_unverified"],
+        json!(["windows", "macos"]),
         "{whole_tree}"
     );
     let whole_tree_evidence = whole_tree["evidence"]
         .as_array()
         .expect("evidence 必须是数组");
     for case in [
+        "cgroup_kill_terminates_escapee_that_left_cgroup_procs",
         "cgroup_kill_terminates_adopted_escapee",
         "cgroup_without_kill_reports_still_alive",
         "cgroup_degraded_terminate_is_group_only",
@@ -6655,12 +6663,47 @@ fn capabilities_declares_machine_readable_boundaries() {
             "整树能力位必须引用 {case}：{whole_tree}"
         );
     }
-    let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
-    assert_eq!(escaped["holds"], false, "{escaped}");
-    assert_eq!(escaped["status"], "partial", "{escaped}");
+    let whole_tree_windows = claim(&payload, "timeout.cleans_entire_process_tree_windows");
+    assert_eq!(whole_tree_windows["holds"], false, "{whole_tree_windows}");
     assert_eq!(
-        escaped["reason_code"], "posix_escaped_scope_requires_writable_cgroup_v2",
-        "{escaped}"
+        whole_tree_windows["status"], "not_proven",
+        "{whole_tree_windows}"
+    );
+    assert_eq!(
+        whole_tree_windows["reason_code"], "requires_out_of_job_enumerable_terminable_os_primitive",
+        "{whole_tree_windows}"
+    );
+    assert_eq!(
+        whole_tree_windows["platforms_verified"],
+        json!(["windows"]),
+        "{whole_tree_windows}"
+    );
+    let escaped = claim(&payload, "timeout.enumerates_escaped_descendants");
+    assert_eq!(escaped["holds"], true, "{escaped}");
+    assert_eq!(escaped["status"], "proven", "{escaped}");
+    assert!(escaped["reason_code"].is_null(), "{escaped}");
+    assert_eq!(escaped["platforms_verified"], json!(["linux"]), "{escaped}");
+    let escaped_evidence = escaped["evidence"].as_array().expect("evidence 必须是数组");
+    for case in [
+        "cgroup_scope_enumerates_adopted_escapee",
+        "cgroup_members_unreadable_is_not_empty",
+    ] {
+        assert!(
+            escaped_evidence.iter().any(|item| item == case),
+            "逃逸枚举能力位必须引用 {case}：{escaped}"
+        );
+    }
+    let escaped_windows = claim(&payload, "timeout.enumerates_escaped_descendants_windows");
+    assert_eq!(escaped_windows["holds"], false, "{escaped_windows}");
+    assert_eq!(escaped_windows["status"], "not_proven", "{escaped_windows}");
+    assert_eq!(
+        escaped_windows["reason_code"], "requires_out_of_job_enumerable_terminable_os_primitive",
+        "{escaped_windows}"
+    );
+    assert_eq!(
+        escaped_windows["platforms_verified"],
+        json!(["windows"]),
+        "{escaped_windows}"
     );
     // cgroup v2 观测点本身必须可证，且明确只在 linux 上验证过
     let cgroup = claim(&payload, "timeout.cgroup_v2_scope_observation");

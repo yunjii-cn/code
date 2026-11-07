@@ -2939,11 +2939,44 @@ mod process_scope {
                 }
             }
 
+            /// 终止前建立「仍可归属本任务」的后代名单：父链闭包 ∪ cgroup 成员，每项附
+            /// `/proc/<pid>/stat` 的 `starttime`。逃出 `cgroup.procs` 且 `setsid` 的进程
+            /// 不在 `cgroup.kill` 与进程组的作用范围内，根退出后父链也断了——这份终止前
+            /// 的名单是唯一还能指认它的依据。
+            #[cfg(target_os = "linux")]
+            fn tracked_descendants(&self, root: u32) -> Vec<(u32, Option<u64>)> {
+                let Some(rows) = proc_table() else {
+                    return Vec::new();
+                };
+                let mut pids = descendants_of(root, self.root_start, &rows);
+                if matches!(self.cgroup.status, CgroupStatus::Active) {
+                    if let Some(scope) = self.cgroup.scope.as_ref() {
+                        if let Ok(members) = scope.members() {
+                            pids.extend(members);
+                        }
+                    }
+                }
+                pids.push(root);
+                pids.sort_unstable();
+                pids.dedup();
+                let starts: std::collections::HashMap<u32, u64> =
+                    rows.iter().map(|row| (row.pid, row.start_time)).collect();
+                pids.into_iter()
+                    .map(|pid| (pid, starts.get(&pid).copied()))
+                    .collect()
+            }
+
             pub(crate) fn terminate(&mut self, child: &mut Child) -> CleanupOutcome {
                 let Some(pgid) = self.pgid else {
                     let _ = child.kill();
                     return CleanupOutcome::Unavailable;
                 };
+                // v1.45：动手前先记下「当前仍可归属本任务」的后代（父链闭包 ∪ cgroup 成员），
+                // 附 `/proc/<pid>/stat` 的 `starttime` 防 PID 复用。逃出 `cgroup.procs` 且
+                // `setsid` 的后代既不在 `cgroup.kill` 的打击范围、也不在进程组里；根退出被
+                // 收养后父链断开，事后无法再枚举，所以名单必须在终止前建立。
+                #[cfg(target_os = "linux")]
+                let mut tracked: Vec<(u32, Option<u64>)> = self.tracked_descendants(child.id());
                 // 先礼后兵：SIGTERM 给宽限期，再 SIGKILL
                 unsafe {
                     libc::kill(-pgid, libc::SIGTERM);
@@ -2953,6 +2986,9 @@ mod process_scope {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 if group_exists(pgid) {
+                    // 宽限期窗口内仍可能新派生并逃逸，SIGKILL 前再抓一次（此时根仍存活，父链还在）
+                    #[cfg(target_os = "linux")]
+                    merge_tracked(&mut tracked, self.tracked_descendants(child.id()));
                     unsafe {
                         libc::kill(-pgid, libc::SIGKILL);
                     }
@@ -2969,6 +3005,20 @@ mod process_scope {
                             if scope.kill_supported() {
                                 // 每轮重试：fork 压力下首次 kill 可能漏掉正在派生的后代
                                 let _ = scope.kill_members();
+                            }
+                        }
+                    }
+                    // 名单里的逃逸后代不在作用域内，`cgroup.kill` 打不到：逐个 SIGKILL 收口。
+                    // 先按父链把存活逃逸进程新派生的子进程并入名单，再动手；只有启动时刻
+                    // 一致才发信号，避免打到 PID 复用后的无关进程。
+                    #[cfg(target_os = "linux")]
+                    {
+                        expand_tracked(&mut tracked);
+                        for (pid, start) in &tracked {
+                            if tracked_pid_alive(*pid, *start) {
+                                unsafe {
+                                    libc::kill(*pid as i32, libc::SIGKILL);
+                                }
                             }
                         }
                     }
@@ -2995,6 +3045,17 @@ mod process_scope {
                                     Ok(_) => return CleanupOutcome::StillAlive,
                                     Err(_) => return CleanupOutcome::Unavailable,
                                 }
+                            }
+                            // v1.45：名单里仍有存活的逃逸后代（不在 cgroup / 进程组内）→ 不得宣称清空
+                            if tracked
+                                .iter()
+                                .any(|(pid, start)| tracked_pid_alive(*pid, *start))
+                            {
+                                if Instant::now() >= deadline {
+                                    return CleanupOutcome::StillAlive;
+                                }
+                                std::thread::sleep(Duration::from_millis(20));
+                                continue;
                             }
                             // 组记账为空后再用独立观测点复核：仍有可枚举后代 → 不宣称清空
                             let snapshot = self.snapshot_descendants(child.id());
@@ -3258,6 +3319,52 @@ mod process_scope {
         fn proc_start_time(pid: u32) -> Option<u64> {
             let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
             parse_stat(&text, pid).map(|row| row.start_time)
+        }
+
+        /// 「启动时刻一致」才算同一个进程：PID 被复用后返回 `false`，绝不误杀无关进程。
+        /// `start` 为 `None`（当时读不到启动时刻）时只按存在性判断。
+        #[cfg(target_os = "linux")]
+        fn tracked_pid_alive(pid: u32, start: Option<u64>) -> bool {
+            match (proc_start_time(pid), start) {
+                (Some(current), Some(expected)) => current == expected,
+                (Some(_), None) => true,
+                (None, _) => false,
+            }
+        }
+
+        /// 合并两份「PID + 启动时刻」名单，同一 PID 只保留第一次读到的启动时刻。
+        #[cfg(target_os = "linux")]
+        fn merge_tracked(into: &mut Vec<(u32, Option<u64>)>, extra: Vec<(u32, Option<u64>)>) {
+            for (pid, start) in extra {
+                if let Some(slot) = into.iter_mut().find(|(known, _)| *known == pid) {
+                    if slot.1.is_none() {
+                        slot.1 = start;
+                    }
+                } else {
+                    into.push((pid, start));
+                }
+            }
+        }
+
+        /// 名单里每个仍存活进程在 `/proc` 里的后代也并入名单：逃逸进程在终止过程中继续
+        /// fork 时，新子进程同样不在 cgroup / 进程组内，必须一起收口。
+        #[cfg(target_os = "linux")]
+        fn expand_tracked(into: &mut Vec<(u32, Option<u64>)>) {
+            let Some(rows) = proc_table() else {
+                return;
+            };
+            let starts: std::collections::HashMap<u32, u64> =
+                rows.iter().map(|row| (row.pid, row.start_time)).collect();
+            let mut extra = Vec::new();
+            for (pid, start) in into.iter() {
+                if !tracked_pid_alive(*pid, *start) {
+                    continue;
+                }
+                for child in descendants_of(*pid, *start, &rows) {
+                    extra.push((child, starts.get(&child).copied()));
+                }
+            }
+            merge_tracked(into, extra);
         }
 
         /// 读某进程当前父 PID；进程不存在或读不到返回 `None`（测试用于确认"已被收养"）。
@@ -3866,8 +3973,13 @@ mod process_scope {
                 }
                 let _ = child.wait();
                 let adopted = supervisor.snapshot_descendants(root);
+                let adopted_members = supervisor
+                    .cgroup
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.members());
                 println!(
-                    "[evidence] cgroup_scope adopted escaped_alive={} escaped_ppid={:?} root={root} descendants={:?} controlled={:?} scope={:?}",
+                    "[evidence] cgroup_scope adopted escaped_alive={} escaped_ppid={:?} root={root} members={adopted_members:?} descendants={:?} controlled={:?} scope={:?}",
                     pid_exists(escaped as i32),
                     proc_ppid(escaped),
                     adopted.descendants,
@@ -3887,6 +3999,15 @@ mod process_scope {
                 assert!(
                     adopted.descendants.iter().any(|entry| entry.pid == escaped),
                     "被收养的逃逸后代必须仍被 cgroup 作用域枚举到"
+                );
+                // 权威性：枚举来源是 `cgroup.procs` 成员集合本身，不依赖父链。
+                // 此刻父链已断（ppid 不再是根），成员集合仍点名该 PID。
+                assert_eq!(
+                    adopted_members
+                        .expect("终止前作用域仍应存在")
+                        .expect("cgroup.procs 应可读"),
+                    vec![escaped],
+                    "被收养的逃逸后代必须仍在 cgroup.procs 成员集合里"
                 );
                 assert_eq!(adopted.controlled_pids, Some(Vec::new()), "进程组已清空");
 
@@ -4073,6 +4194,228 @@ mod process_scope {
                 let _ = std::fs::remove_dir_all(&dir);
             }
 
+            // v1.45 判据：后代可以主动把自己写进**别的** cgroup，从而离开本作用域的
+            // `cgroup.procs`。这样的进程既不在 `cgroup.kill` 的打击范围，`setsid` 后也不在
+            // 进程组内；根退出被收养后父链也断了。终止仍必须覆盖它，否则就是真缺陷——
+            // 「逃逸进程存活 + 误报 Cleaned」。
+            //
+            // 观测量（全部成立才允许 Cleaned）：
+            // (a) `cgroup.procs` 空、(b) `populated 0`、(c) 逃逸 PID 不存在、(d) 快照无后代。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn cgroup_kill_terminates_escapee_that_left_cgroup_procs() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-cgroup-left-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let grand_pid_file = dir.join("grand.pid");
+                let child_pid_file = dir.join("child.pid");
+                let move_status = dir.join("move.status");
+                let grand_script = dir.join("grandchild.sh");
+                let child_script = dir.join("child.sh");
+                let root_script = dir.join("root.sh");
+
+                let mut supervisor = Supervisor::new();
+                let mut command = Command::new("sh");
+                command
+                    .arg(&root_script)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                supervisor.configure(&mut command);
+
+                // 前置：本机必须真的建起 cgroup v2 作用域并支持 `cgroup.kill`；
+                // 建不起来就如实失败，不把"没覆盖"写成"已证"。
+                let scope_dir = {
+                    let scope = supervisor
+                        .cgroup
+                        .scope
+                        .as_ref()
+                        .expect("cgroup 作用域未建立");
+                    scope.dir.clone()
+                };
+                let base = scope_dir.parent().expect("作用域父目录").to_path_buf();
+                let kill_supported = supervisor
+                    .cgroup
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.kill_supported())
+                    .unwrap_or(false);
+                assert!(
+                    kill_supported,
+                    "本机内核未提供 cgroup.kill（需 cgroup v2 非 root 作用域 + 内核 >= 5.14）"
+                );
+
+                // 旁路 cgroup：孙进程主动把自己写进去，等于离开本作用域的 cgroup.procs。
+                // 建在同一个父目录下，委派权限与作用域本身一致。
+                let sink = base.join(format!(
+                    "aw-escape-sink-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir(&sink).expect("创建旁路 cgroup");
+                let sink_procs = sink.join("cgroup.procs");
+
+                std::fs::write(
+                    &grand_script,
+                    format!(
+                        "#!/bin/sh\necho \"$$\" > '{}'\nif echo \"$$\" > '{}'; then echo moved > '{}'; else echo failed > '{}'; fi\nexec sleep 30\n",
+                        grand_pid_file.display(),
+                        sink_procs.display(),
+                        move_status.display(),
+                        move_status.display()
+                    ),
+                )
+                .expect("写孙进程脚本");
+                std::fs::write(
+                    &child_script,
+                    format!(
+                        "#!/bin/sh\nif command -v setsid >/dev/null 2>&1; then\n  setsid sh '{}' &\n  wait\nelse\n  echo skip > '{}'\nfi\n",
+                        grand_script.display(),
+                        grand_pid_file.display()
+                    ),
+                )
+                .expect("写子进程脚本");
+                std::fs::write(
+                    &root_script,
+                    format!(
+                        "#!/bin/sh\nsh '{}' &\necho $! > '{}'\nwait\n",
+                        child_script.display(),
+                        child_pid_file.display()
+                    ),
+                )
+                .expect("写根进程脚本");
+
+                let mut child = command.spawn().expect("spawn 三层进程树");
+                supervisor.attach(&mut child);
+                let root = child.id();
+
+                let mut content = None;
+                for _ in 0..150 {
+                    if let Ok(text) = std::fs::read_to_string(&grand_pid_file) {
+                        let text = text.trim().to_string();
+                        if text == "skip" {
+                            break;
+                        }
+                        if let Ok(pid) = text.parse::<u32>() {
+                            content = Some(pid);
+                            break;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let Some(escaped) = content else {
+                    eprintln!(
+                        "[evidence] cgroup_left skipped：本机无 setsid 或孙进程未写出 PID（不构成裁决依据）"
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&sink);
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return;
+                };
+
+                // 等孙进程真正离开本作用域：既不在 scope.members，也仍被父链枚举到。
+                let mut before = None;
+                let mut sink_members = Vec::new();
+                for _ in 0..200 {
+                    let snapshot = supervisor.snapshot_descendants(root);
+                    let in_scope = supervisor
+                        .cgroup
+                        .scope
+                        .as_ref()
+                        .map(|scope| scope.contains(escaped))
+                        .unwrap_or(false);
+                    sink_members = std::fs::read_to_string(&sink_procs)
+                        .map(|text| {
+                            text.lines()
+                                .filter_map(|line| line.trim().parse::<u32>().ok())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if !in_scope
+                        && sink_members.contains(&escaped)
+                        && snapshot
+                            .descendants
+                            .iter()
+                            .any(|entry| entry.pid == escaped)
+                    {
+                        before = Some(snapshot);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                let before = before.expect(
+                    "孙进程必须离开本作用域 cgroup.procs（并进入旁路 cgroup）且仍可由父链枚举",
+                );
+                let move_status_text = std::fs::read_to_string(&move_status).ok();
+                println!(
+                    "[evidence] cgroup_left before root={root} child={:?} escaped={escaped} scope={:?} sink_members={sink_members:?} move_status={move_status_text:?} descendants={:?} outside={:?}",
+                    std::fs::read_to_string(&child_pid_file)
+                        .ok()
+                        .map(|text| text.trim().to_string()),
+                    before.scope,
+                    before.descendants,
+                    before.outside_controlled_set()
+                );
+                assert!(
+                    before.outside_controlled_set().contains(&escaped),
+                    "逃出 cgroup.procs 的孙进程必须被标为终止作用域外"
+                );
+                assert_eq!(
+                    move_status_text.as_deref().map(str::trim),
+                    Some("moved"),
+                    "孙进程必须成功把自己写进旁路 cgroup"
+                );
+
+                let outcome = supervisor.terminate(&mut child);
+                let after = supervisor.snapshot_descendants(root);
+                let scope = supervisor
+                    .cgroup
+                    .scope
+                    .as_ref()
+                    .expect("终止后作用域仍应存在");
+                let members = scope.members();
+                let populated = scope.populated();
+                println!(
+                    "[evidence] cgroup_left after outcome={outcome:?} escaped_alive={} members={members:?} populated={populated:?} descendants={:?} unobservable={:?}",
+                    pid_exists(escaped as i32),
+                    after.descendants,
+                    after.unobservable
+                );
+
+                assert!(
+                    !pid_exists(escaped as i32),
+                    "逃出 cgroup.procs 的后代在终止后必须不再存活（cgroup.kill 打不到它，必须另行收口）"
+                );
+                assert_eq!(
+                    members.as_deref(),
+                    Ok(&[][..]),
+                    "cgroup.procs 必须为空：{members:?}"
+                );
+                assert_eq!(populated, Ok(0), "cgroup.events 必须 populated 0");
+                assert_eq!(
+                    outcome,
+                    CleanupOutcome::Cleaned,
+                    "四个观测量同时成立时才允许报告 Cleaned"
+                );
+                assert!(after.unobservable.is_none(), "终止后快照必须可观测");
+                assert!(after.descendants.is_empty(), "终止后不得再枚举到后代");
+
+                unsafe {
+                    libc::kill(escaped as i32, libc::SIGKILL);
+                }
+                let _ = std::fs::remove_dir_all(&sink);
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+
             // 降级必须如实：cgroup v1 / 无权限时记原因，退回进程组观测且不得当成"没有后代"
             #[cfg(target_os = "linux")]
             #[test]
@@ -4113,9 +4456,60 @@ mod process_scope {
                 );
             }
 
-            // v1.41 判据：内核没有 `cgroup.kill` 时，终止不得误报 Cleaned。
-            // 用临时目录伪造一个"仍有成员"的作用域（`cgroup.procs` 非空、`populated 1`、无 `cgroup.kill`），
-            // 配合真实 setsid 逃逸进程；受控进程组被杀后作用域成员仍存活 → 必须 StillAlive。
+            // v1.45 反例：作用域存在但 `cgroup.procs` 读不出（权限/卸载/竞态）时，
+            // 快照必须整份标记不可观测，绝不能退化成「没有后代」。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn cgroup_members_unreadable_is_not_empty() {
+                let dir = std::env::temp_dir().join(format!(
+                    "aw-cgroup-unreadable-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                std::fs::create_dir_all(&dir).expect("创建临时目录");
+                let scope = CgroupScope {
+                    procs: dir.join("missing-cgroup.procs"),
+                    dir: dir.clone(),
+                    writer: std::cell::RefCell::new(None),
+                };
+                let me = std::process::id();
+                let mut supervisor = Supervisor::new();
+                supervisor.pgid = i32::try_from(me).ok();
+                supervisor.root_start = proc_start_time(me);
+                supervisor.cgroup.scope = Some(scope);
+                supervisor.cgroup.status = CgroupStatus::Active;
+                let snapshot = supervisor.snapshot_descendants(me);
+                println!(
+                    "[evidence] cgroup_unreadable scope={:?} unobservable={:?} is_empty={}",
+                    snapshot.scope,
+                    snapshot.unobservable,
+                    snapshot.is_empty()
+                );
+                assert!(
+                    snapshot.unobservable.is_some(),
+                    "cgroup.procs 读不出时必须整份标记不可观测"
+                );
+                assert!(!snapshot.is_empty(), "不可观测绝不能读成空集合");
+                assert!(
+                    snapshot
+                        .unobservable
+                        .as_deref()
+                        .unwrap_or_default()
+                        .starts_with("cgroup_procs_unreadable:"),
+                    "原因码必须点名读失败：{:?}",
+                    snapshot.unobservable
+                );
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+
+            // v1.41/v1.45 判据：内核没有 `cgroup.kill` 时，终止不得因为「自己杀掉了名单里的
+            // 进程」就报告 Cleaned。用临时目录伪造一个「记账永不更新」的作用域（`cgroup.procs`
+            // 非空、`populated 1`、无 `cgroup.kill`），配合真实 setsid 逃逸进程：
+            // v1.45 起 terminate 会按终止前名单逐个 SIGKILL，进程确实会死；但独立观测点
+            // （`cgroup.procs` / `populated`）仍显示有成员 → 必须 StillAlive。
             #[cfg(target_os = "linux")]
             #[test]
             fn cgroup_without_kill_reports_still_alive() {
@@ -4185,13 +4579,13 @@ mod process_scope {
                     "临时目录必须没有 cgroup.kill，才覆盖无 kill 分支"
                 );
                 assert!(
-                    pid_exists(escaped as i32),
-                    "无 cgroup.kill 时逃逸进程必然存活"
+                    !pid_exists(escaped as i32),
+                    "v1.45：无 cgroup.kill 时，终止前名单里的逃逸成员仍会被逐个 SIGKILL 收口"
                 );
                 assert_eq!(
                     outcome,
                     CleanupOutcome::StillAlive,
-                    "作用域内仍有存活成员时不得报告 Cleaned"
+                    "独立观测点仍显示有成员时不得报告 Cleaned（不因自己杀掉了名单就放行）"
                 );
                 assert!(
                     after.descendants.iter().any(|entry| entry.pid == escaped),
@@ -7473,13 +7867,13 @@ fn capabilities_payload() -> Value {
         ),
         capability_entry(
             "timeout.cleans_entire_process_tree",
-            Some(false),
-            "partial",
-            "Windows：作业只覆盖加入作业的进程，作业外进程（BREAKAWAY、加入失败、不进作业的 conhost.exe 等）可能在终止后存活，整树不成立；Linux：cgroup v2 可写且内核提供 `cgroup.kill`（>=5.14）时已用真实 setsid 逃逸进程证成整作用域终止（cgroup.procs 空 + populated 0 + 逃逸进程消失 + 快照空）；无 `cgroup.kill` 时成员仍存活并如实报 StillAlive；作用域建不起来时退回进程组窄判据，被收养的逃逸进程既打不到也枚举不到；macOS 未验证",
-            Some("processes_outside_controlled_scope_may_survive"),
-            false,
-            &both,
-            &["macos"],
+            Some(true),
+            "proven",
+            "仅 Linux（platform=linux）：需可写 cgroup v2 且内核提供 `cgroup.kill`（>=5.14）。整树 = 终止开始时可归属本任务的全部后代（/proc 父链闭包 ∪ cgroup.procs 成员）及其在终止过程中派生的子进程；四个观测量（cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代）同时成立才报 Cleaned。Windows 侧由 `timeout.cleans_entire_process_tree_windows` 单独声明，不并入本条",
+            None,
+            true,
+            &["linux"],
+            &["windows", "macos"],
             &[
                 "timeout_cleanup_three_states",
                 "descendant_snapshot_cross_checks_job_accounting",
@@ -7487,26 +7881,61 @@ fn capabilities_payload() -> Value {
                 "timeout_cleans_controlled_set_including_grandchild",
                 "cgroup_scope_enumerates_adopted_escapee",
                 "cgroup_kill_terminates_adopted_escapee",
+                "cgroup_kill_terminates_escapee_that_left_cgroup_procs",
                 "cgroup_without_kill_reports_still_alive",
                 "cgroup_degraded_terminate_is_group_only",
             ],
-            "证成范围按平台与内核分支拆开（v1.41，审计 §44）。Linux 满足条件（cgroup v2 可写 + 内核 >= 5.14 提供 cgroup.kill）：终止后 cgroup.procs 为空、cgroup.events populated 0、被收养的 setsid 逃逸进程不再存活、父链快照无可枚举后代，四个观测量同时成立才报 Cleaned；WSL Ubuntu 24.04（root，cgroup v2）实测成立。内核没有 cgroup.kill：不写 cgroup.kill，作用域成员仍在，终止以 StillAlive 结束，不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：只终止进程组，被收养的逃逸进程既收不到信号也枚举不到，结果是受控集合口径的 Cleaned——这是本能力位的残余缺口；降级原因写入快照 escaped_scope_unobservable，超时回执明写「逃逸进程是否仍在运行未验证」，不是静默漏杀，但也不能读成「无残留」。Windows 侧作业外进程（BREAKAWAY、加入作业失败、不进作业的 conhost.exe）仍可能在终止后存活，结构性证不到整树。macOS 未验证。",
+            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：退回进程组窄判据，降级原因记 escaped_scope_unobservable。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
+        ),
+        capability_entry(
+            "timeout.cleans_entire_process_tree_windows",
+            Some(false),
+            "not_proven",
+            "仅 Windows：Job Object 只覆盖加入作业的进程；作业外进程（BREAKAWAY、加入作业失败、不进作业的 conhost.exe 等）可能在终止后存活，整树不成立",
+            Some("requires_out_of_job_enumerable_terminable_os_primitive"),
+            false,
+            &["windows"],
+            &[],
+            &[
+                "timeout_cleanup_three_states",
+                "descendant_snapshot_cross_checks_job_accounting",
+                "timeout_cleans_controlled_set_including_grandchild",
+            ],
+            "需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。受控集合内的孙进程已由握手夹具证成（timeout_cleans_controlled_set_including_grandchild，ready_delay_ms 实测），但这只覆盖作业内成员，不上调为整树。作业外进程的父链快照只是旁证：conhost.exe 等不进作业的进程、创建时间/存活状态读不到时都可能误判。",
         ),
         capability_entry(
             "timeout.enumerates_escaped_descendants",
-            Some(false),
-            "partial",
-            "Windows：父链快照可枚举作业外后代；v1.39 起每条父链边要求「子进程创建时间 ≥ 父进程创建时间」、根→直接子进程加「≤ 根退出时间」上界，并剔除已终止或 PID 已不存在的行，同号 PID 复用后的无关树与枚举残行不再被误连（审计 §42），但作业外进程（如 conhost.exe）、创建时间或存活状态读不到时仍可能误报，因此只作旁证；Linux：cgroup v2 可写时成员集合不随换父消失，已能枚举被收养后代，但该作用域在容器/非 root/ cgroup v1 下建不起来，此时如实标 unobservable",
-            Some("posix_escaped_scope_requires_writable_cgroup_v2"),
-            false,
-            &both,
-            &["macos"],
+            Some(true),
+            "proven",
+            "仅 Linux（platform=linux）：cgroup v2 可写时，cgroup.procs 成员集合是逃逸后代的权威枚举，不依赖父链，换父被收养后仍可枚举。退化条件：作用域建不起来（无写权限/非 root/容器未委派/cgroup v1）→ 记 escaped_scope_unobservable 并退回进程组旁证；运行期 cgroup.procs 读不出 → 整份快照 unobservable，绝不当空；进程已离开 cgroup.procs（写进别的作用域）→ 作用域枚举不含它，只有仍挂在父链上时由父链快照可见（旁证），根退出被收养后不可见。Windows 侧由 `timeout.enumerates_escaped_descendants_windows` 单独声明",
+            None,
+            true,
+            &["linux"],
+            &["windows", "macos"],
             &[
                 "descendant_snapshot_flags_descendants_outside_controlled_set",
                 "cgroup_scope_enumerates_adopted_escapee",
+                "cgroup_members_unreadable_is_not_empty",
+                "cgroup_kill_terminates_escapee_that_left_cgroup_procs",
                 "setsid_escape_is_flagged_then_unobservable_after_reparent",
+                "cgroup_unavailable_degrades_with_reason",
             ],
-            "枚举能力按平台分裂：Windows 恒可枚举；Linux 依赖 cgroup v2 委派，建立失败时记 escaped_scope_unobservable 而不是当成没有后代。",
+            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs），内核 6.18.33.2-microsoft-standard-WSL2 实测。`cgroup_scope_enumerates_adopted_escapee`：根退出、逃逸后代被收养（ppid 不再指向根）后，cgroup.procs 成员集合仍精确点名该 PID（members=[escaped]，assert_eq），这是成员集合本身的权威性，不是父链旁证。反例实测：`cgroup_unavailable_degrades_with_reason`（作用域建不起来 → Degraded + escaped_scope_unobservable，退回进程组旁证）；`cgroup_members_unreadable_is_not_empty`（Active 但 cgroup.procs 读不出 → 整份 unobservable，不读成空）；`cgroup_kill_terminates_escapee_that_left_cgroup_procs`（进程把自己写进旁路 cgroup 后不在作用域成员里，只能在脱离前靠父链枚举——已脱离即降级为不可见）。无 cgroup.kill 不影响枚举权威性，只影响终止：v1.45 由终止前名单补足已知逃逸者。Windows 见 timeout.enumerates_escaped_descendants_windows；macOS 未验证。",
+        ),
+        capability_entry(
+            "timeout.enumerates_escaped_descendants_windows",
+            Some(false),
+            "not_proven",
+            "仅 Windows：Toolhelp 父链快照是旁证，不是作业外进程的权威枚举；作业外进程（如 conhost.exe）、创建时间或存活状态读不到时仍可能误报",
+            Some("requires_out_of_job_enumerable_terminable_os_primitive"),
+            false,
+            &["windows"],
+            &[],
+            &[
+                "descendant_snapshot_flags_descendants_outside_controlled_set",
+                "descendant_snapshot_cross_checks_job_accounting",
+            ],
+            "需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。v1.39 起每条父链边要求「子进程创建时间 ≥ 父进程创建时间」、根→直接子进程加「≤ 根退出时间」上界，并剔除已终止或 PID 已不存在的行，同号 PID 复用后的无关树与枚举残行不再被误连（审计 §42），但仍只是旁证：作业外进程与读不到存活状态的进程无法给出权威结论。",
         ),
         capability_entry(
             "timeout.cgroup_v2_scope_observation",
