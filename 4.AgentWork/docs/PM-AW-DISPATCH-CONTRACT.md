@@ -397,7 +397,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | `automatic` | 是否无需调用方额外操作即自动发生 |
 | `evidence` | 对应的集成用例名，可复核 |
 
-当前 13 条（`not_proven_total=5`），关键条目：
+当前 13 条（`not_proven_total=4`），关键条目：
 
 | id | holds | status | reason_code | 边界 |
 |---|---|---|---|---|
@@ -408,7 +408,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | `concurrency.check_then_delete_atomic` | false | not_proven | `check_then_delete_not_atomic` | snapshot 与 rename 之间的 TOCTOU 仍存在 |
 | `inflight.stale_marker_observable` | true | supported | null | `runs.inflight action=list` |
 | `inflight.stale_marker_cleanable` | true | supported | null | `action=clean`，需显式调用（`automatic=false`） |
-| `inflight.stale_markers_auto_swept` | false | not_proven | `explicit_cleanup_required` | 不会自行消失 |
+| `inflight.stale_markers_auto_swept` | false | partial | `path_triggered_only` | 仅在既有路径顺带清扫（同 `task_id` 重启 / `runs.prune` 真删前 / `clean`），无后台定时器 |
 
 调用方判定规则：`holds=true` 才可依赖；`holds=false` 必须读 `reason_code` 并据此降级；`holds=null` 不得当成已保证。
 
@@ -416,7 +416,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 
 **`runs.inflight`（`action=list|clean`）**
 
-- `list`：只读枚举 `runs/.inflight/*.json`（非 `.json` 临时文件、符号链接不参与），每个标记给出 `task_id`、`file`、`pid`、`pid_alive`、`stale`、`stale_reason`（`pid_alive` / `pid_missing_grace` / `pid_missing` / `deadline_in_grace` / `deadline_expired` / `unreadable`）、`startedAt`、`deadlineAt`、`age_secs`、`deadline_overdue_secs`、`removable`；顶层给出 `total` / `stale_total` / `active_total` / `unreadable_total` / `state`（`missing|empty|ready`）与机器可读的 `stale_rule`（`pid_alive=never_stale`、`pid_missing_grace_secs=5`、`deadline_grace_secs=120`、`live_pid_wins_over_deadline=true`、`cleanable_only_when=stale=true`、`unreadable=kept_never_deleted`）。
+- `list`：只读枚举 `runs/.inflight/*.json`（非 `.json` 临时文件、符号链接不参与），每个标记给出 `task_id`、`file`、`pid`、`pid_alive`、`stale`、`stale_reason`（`pid_alive` / `pid_missing_grace` / `pid_missing` / `deadline_in_grace` / `deadline_expired` / `unreadable`）、`startedAt`、`deadlineAt`、`age_secs`、`deadline_overdue_secs`、`removable`；顶层给出 `total` / `stale_total` / `active_total` / `unreadable_total` / `state`（`missing|empty|ready`）与机器可读的 `stale_rule`（`pid_alive=never_stale`、`pid_missing_grace_secs=5`、`deadline_grace_secs=120`、`live_pid_wins_over_deadline=true`、`cleanable_only_when=stale=true`、`unreadable=kept_never_deleted`）及 `sweep_rule`（见 §2.9）。
 - `clean`：默认 `dry_run=true`，只回 `would_remove[]`、零删除；真删必须同时 `dry_run=false` 与 `confirm=true`，否则 `confirm_required` 且不删。只处理 `stale=true` 的标记；`pid` 存活（`pid_alive=true`）**永不进入可删集合，即使 deadline 已过**。
 - 删除安全：先把标记原子 rename 为 `.inflight/*.clean-*.tmp`，再读回并复核 `task_id`+`pid`+`startedAt` 与判定时一致才删；不一致说明被并发替换，立即还原并记 `marker_changed`。文件已消失记 `marker_disappeared`；读不懂的 JSON 保留并记 `unreadable`，绝不按残留删除。
 - 可选 `task_id`：只处理该标记，命名校验与任务目录同源；非法 id 返回 `invalid_arguments`，零写入。
@@ -424,7 +424,7 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 
 **PM 只需看到什么**：能力边界看 `capabilities.entries[].id/holds/reason_code`；残留看 `runs.inflight` 的 `markers[].stale/stale_reason`，清理调用 `action=clean` + `dry_run=false` + `confirm=true`。不需要读 AW 源码，也不依赖人工删文件。
 
-**仍然存在的限制**：清理是显式动作，不是后台自动清扫（`inflight.stale_markers_auto_swept=false`）；外部删除方若不读标记，TOCTOU 窗口仍存在（`concurrency.check_then_delete_atomic=false`）；POSIX 的标记/rename 语义仍为 `partial`。
+**仍然存在的限制**：清理不是后台自动清扫（`inflight.stale_markers_auto_swept=false/partial/path_triggered_only`，只在 §2.9 的三个既有路径顺带发生）；外部删除方若不读标记，TOCTOU 窗口仍存在（`concurrency.check_then_delete_atomic=false`）；POSIX 的标记/rename 语义仍为 `partial`。
 
 ### 2.8 PM 判活口径（v1.32.1，唯一约定）
 
@@ -443,6 +443,24 @@ AW 提供 `runs.inflight` 后，PM **只允许**用 `action=list` 的以下字�
 
 - “无标记/残留标记”只证明**当前没有活跃执行者**，不证明任务未执行、未完成或记录不可用；任务结果仍以 `receipt.get` / `verdict.json` / `standalone-result.json` 为准。
 - 仅当 `runs.inflight` 不存在（旧版 AW）时，才允许退回“任一 attempt 缺 handback/dispatch 视为可能活跃”的启发式，且必须在输出里标注为降级判定；新版 AW 禁止该回退。
+
+### 2.9 残留 inflight 标记的顺带清扫（v1.33，无后台线程）
+
+不新增定时器或启动扫线程，只在三条既有动作路径上顺带执行，判据完全复用 `stale_rule`：
+
+| 触发点 | 触发条件 | 作用范围 |
+|---|---|---|
+| `task_start` | 同一 `task_id` 的标记已存在且 `stale=true` | 只清扫该 `task_id` 的标记；清掉后重新 `create_new` 占位 |
+| `runs.prune` | `dry_run=false` 且 `confirm=true` | 枚举候选前清扫全部残标，清完后该 task 不再被 `task_inflight_stale` 跳过；`dry_run` 只报 `would_remove`、零删除 |
+| `runs.inflight.clean` | `dry_run=false` 且 `confirm=true` | 全部残标（给了 `task_id` 时只清该条） |
+
+- **判据与永不删除项**：只有 `stale=true` 参与清扫；`pid` 存活（`pid_alive=true`）优先于 `deadline`，永不删除；坏 JSON/读不出的标记保留并在 `unreadable` 报告，不参与清扫。
+- **审计**：每次实际清扫写 `runs/inflight-sweep.jsonl`（append-only，`inflight-sweep/1`），先写 `phase=plan` 再删、删完写 `phase=result`；字段含 `trigger`（`task_start|prune|clean`）、`removed[]` 的 `task_id` / `pid` / `stale_reason` / `path`、`removed_total` / `kept_total` / `failed_total` / `unreadable_total`。审计写不进去时**一条都不删**。
+- **幂等**：没有可清残标时零删除、不追加审计；重复触发返回 `removed_total=0`，不报错。
+- **TOCTOU 不退化为盲删**：与 `clean` 同一实现——删除前原子 rename 为 `.tmp`，再复核 `task_id`+`pid`+`startedAt` 一致才删；不一致立即还原并记 `marker_changed`，文件已消失记 `marker_disappeared`。
+- **仍然存在的边界**：跨进程无事务（`concurrency.check_then_delete_atomic=false`）；判活与删除之间仍可能有新进程加入（以 `create_new` 决出唯一持有者）；坏标记不自愈，只能人工处理。
+
+`list` 的 `sweep_rule` 是本节机器可读副本：`triggers` / `trigger_conditions` / `audit` / `criteria` / `never_removed`（`active_pid_alive`、`unreadable`）/ `atomic_delete` / `idempotent` / `limits`（`cross_process_no_transaction`、`new_process_may_join_between_check_and_delete`、`unreadable_not_self_healing`）。
 
 ## 3. 幂等
 
@@ -936,3 +954,4 @@ v1.25 在不改变接受/拒绝的前提下把"忽略"变成**可观测**：多�
 | v1.31.1 | 2026-11-07 | **仅修 POSIX 测试夹具，不改实现、契约语义与断言强度**：`standalone_argv_scope_rejects_escapes_before_execution` 的 `argv-backslash` 夹具改为 `--out=..{sep}..{sep}escape.txt`（`sep = std::path::MAIN_SEPARATOR`）——Windows 仍是原来的 `..\..\escape.txt`，POSIX 变为真实的 `../../escape.txt`；不添加 `cfg` 豁免分支，仍断言 `status=blocked`、原因码 `standalone_argv_path_escape`、原因包含具体参数、拒绝发生在占号前。红原文（HEAD `97e76b3`，WSL）：`left: String("ok") / right: "blocked"`，`test result: FAILED. 107 passed; 1 failed`；绿：Windows 单项 `1 passed`，WSL 全量 `9 lib + 108 integration` 全绿，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-053436.log`；详见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §32 |
 | v1.32 | 2026-11-07 | **把已知边界做成调用方可查的事实 + 残留标记可观察可清（§2.7）**：新增只读工具 `capabilities`，13 条 claim 每条给出 `id`/`holds`（`true|false|null`）/`status`/`scope`/`reason_code`/`platforms_verified`/`platforms_unverified`/`automatic`/`evidence`；`holds=false` 必带非空原因码，`not_proven_total=5`；`#3` 窄判据（`timeout.cleans_entire_process_tree`/`timeout.enumerates_escaped_descendants` → `no_complete_descendant_enumeration`）、POSIX 覆盖（`platform.posix_inflight_semantics_verified=false`/`partial`/`posix_unverified`）、TOCTOU（`concurrency.check_then_delete_atomic=false`/`check_then_delete_not_atomic`）、不自动清（`inflight.stale_markers_auto_swept=false`/`explicit_cleanup_required`）均可机器判定。新增 `runs.inflight`（`action=list|clean`）：`list` 只读列出 `runs/.inflight/*.json` 的 `pid`/`pid_alive`/`stale`/`stale_reason`（`pid_alive`/`pid_missing_grace`/`pid_missing`/`deadline_in_grace`/`deadline_expired`/`unreadable`）/时间窗与 `stale_rule`；`clean` 默认 `dry_run=true` 只回 `would_remove`，真删需 `dry_run=false`+`confirm=true`，只删 `stale=true`（pid 存活优先于 deadline，活跃标记永不删除），删除前原子改名为 `.tmp` 并复核 `task_id+pid+startedAt`，坏 JSON 保留记 `unreadable`；不触碰 attempt 目录，不进入 `runs.list`/`runs.prune` 候选。证据：5 条新用例先红后绿（HEAD 红原文 `{"error":"未知工具：capabilities"}` / `{"error":"未知工具：runs.inflight"}`），另加强既有工具名单断言到 8 个工具；Windows `10 lib + 115 integration` 全绿；真实 stdio 独立进程实跑（正常结束 `total=0`、构造 `pid=999999999`+超期标记被 `stale_reason=pid_missing` 识别并清掉、`pid` 存活的活跃标记保留）原样回执见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §33；`tools/list` 新增 G17–G19 行，`tools_sha256` 更新为 `37f7f9b0ee7d121e3f588bb65459fdedb7266d17ed744028204f915499dbcd5b`；**整树 `#3` 仍 `NOT_PROVEN`，POSIX 标记/rename 语义仍 `partial`，TOCTOU 未消除**；v1.32 新用例仅在 Windows 实跑（WSL 当时无 cargo，未复跑 POSIX），故这 4 条新能力的 `platforms_verified` 只写 `["windows"]`、`platforms_unverified` 写 `["linux","macos"]`；该 Windows-only 口径已由 v1.32.1 更新（见下行） |
 | v1.32.1 | 2026-11-07 | **POSIX 双侧复跑 + PM 判活口径收敛（§2.7 / §2.8，不改执行语义）**：WSL Ubuntu 24.04 上确认 `cargo` 缺失是 Linux rustup shim 未安装（`which cargo` 无输出/rc=1、`/root/.cargo/bin` 不存在/rc=2，PATH 里只有 Windows 挂载），rustup 最小安装卡在 `rustup-init` 下载（原始报错 `curl: (28) Operation timed out after 120001 milliseconds with 1136884 out of 21347088 bytes received`），改用已存在的 `cargo 1.88.0` 实跑；四条 `inflight.*` 与 `platform.posix_inflight_semantics_verified` 的 `platforms_verified` 更新为 `["windows","linux"]`、`platforms_unverified` 仅 `["macos"]`，POSIX claim 仍 `holds=false/partial/posix_unverified`（rename 活跃 attempt 未单独复核）。新增 `runs.inflight action=list` 的机器可读 `liveness_rule`（`inflight-liveness/1`）：PM 判活**只认** `markers[].task_id`+`markers[].stale`；`removable` 仅用于清理；`pid`/`pid_alive`/`stale_reason`/时间字段仅作诊断；attempt 缺 `handback`/`dispatch`、裸看 `.inflight`、`pid` 数字、标记年龄均**不得**用于判活；`fallback.allowed=false`（仅旧版 AW 可降级并标注）；§2.8 写死同一口径。证据：WSL 上以 HEAD 旧代码跑新断言先红（`platforms_verified` 仅 `["windows"]`、`liveness_rule` 为 `Null`），换当前实现后两条用例均绿；WSL `9 lib + 115 integration` 全绿、Windows `10 lib + 117 integration` 全绿；描述门禁 `3 + 4` 绿，`tools_sha256` 更新为 `a3591dbfe339e2ddb61400bd810ca58e17faf7b098756b044f186cb4cce88084`；详见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §34 |
+| v1.33 | 2026-11-07 | **残留 inflight 标记顺带清扫（§2.7 / §2.9，无后台线程）**：不新增定时器，只在三条既有路径触发——同 `task_id` 重启（只清自身标记后重试 `create_new`）、`runs.prune` 真删前（清完候选不再被 `task_inflight_stale` 跳过）、`runs.inflight action=clean`；判据复用 `stale_rule`（`pid` 存活优先于 `deadline`，活跃永不删；坏 JSON 保留并报 `unreadable`）；每次实际清扫写 `runs/inflight-sweep.jsonl`（`inflight-sweep/1`，先 `phase=plan` 后 `phase=result`，含 `trigger`/`task_id`/`stale_reason`/`path`），审计写失败则零删除，无残标时零删除且不追加审计（幂等）；删除沿用原子 rename + 复核 `task_id`+`pid`+`startedAt`，不一致还原记 `marker_changed`；`list` 新增 `sweep_rule`。能力位如实改为 `inflight.stale_markers_auto_swept=false/partial/path_triggered_only/automatic=false`（`not_proven_total` 5→4），明确“只做到特定路径顺带清扫”。边界仍保留：跨进程无事务、判活与删除间可能加入新进程、坏标记不自愈。证据：5 条新用例先红后绿（Windows `10 lib + 122 integration`、WSL `9 lib + 120 integration`），`tools_sha256=36dbcfc9c9ac83eede1a4ef581801b0b4dcb9b955761d5e3fcb085ea093af993`；详见审计 §35 |

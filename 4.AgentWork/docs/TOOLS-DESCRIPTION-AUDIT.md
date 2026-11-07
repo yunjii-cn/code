@@ -1255,7 +1255,7 @@ cargo test -p aw-mcp-bridge description_gate
 ```json
 {
   "version": "description-gate/1",
-  "tools_sha256": "a3591dbfe339e2ddb61400bd810ca58e17faf7b098756b044f186cb4cce88084",
+  "tools_sha256": "36dbcfc9c9ac83eede1a4ef581801b0b4dcb9b955761d5e3fcb085ea093af993",
   "command": "cargo test -p aw-mcp-bridge description_gate",
   "rows": [
     {
@@ -1417,6 +1417,7 @@ cargo test -p aw-mcp-bridge description_gate
 | 能力边界可判定（v1.32） | `capabilities.entries[]` 必须逐条含 `id`/`holds`/`status`/`scope`/`reason_code`/`platforms_verified`/`platforms_unverified`/`automatic`；`status` 必须落在枚举内；`holds=false` 必须有非空原因码；`#3` 整树、逃逸枚举、POSIX 覆盖、TOCTOU、自动清扫五个限制必须有具名条目；`entries_total`/`not_proven_total` 可核对 |
 | 残留标记可观察可清（v1.32） | `runs.inflight action=list` 必须对构造的 `pid` 消失+超时标记给出 `stale=true`/`stale_reason=pid_missing`；`pid` 存活的活跃标记即使 deadline 已过也必须 `stale=false`；默认 `clean` 只出 `would_remove`；真删需 `confirm`；清理后残留文件消失、活跃文件保留、二次清理幂等；正常执行结束无残留；坏 JSON 保留并记 `unreadable` |
 | PM 判活口径统一（v1.32.1） | `runs.inflight action=list` 必须回传 `liveness_rule`：`authoritative_fields` 恰为 `["markers[].task_id","markers[].stale"]`；`cleanup_fields` 恰为 `["markers[].removable"]`；`diagnostic_fields` 含 `pid`/`pid_alive`/`stale_reason`/`age_secs`；`not_liveness_evidence` 含 `attempt_missing_handback`/`attempt_missing_dispatch`/`raw_marker_file_presence`；`fallback.allowed=false`；契约 §2.8 写死同一口径 |
+| 残标顺带清扫（v1.33） | `runs.inflight action=list` 必须回传 `sweep_rule`：`triggers` 恰含 `task_start`/`runs.prune`/`runs.inflight.clean`；`never_removed` 含 `active_pid_alive`/`unreadable`；`audit=runs/inflight-sweep.jsonl`；`idempotent=true`；`limits` 含跨进程无事务/判活与删除之间可加入新进程/坏标记不自愈；三条路径必须实跑：同 `task_id` 重启只清自身残标、`prune` 真删前清残标后候选不再被跳过、`clean` 写 plan+result 且重复触发零删除零新增审计；坏 JSON 在启动路径保留 |
 
 ### 21.5 仍然只能靠人的部分（不做自动覆盖）
 
@@ -3234,3 +3235,57 @@ WSL：见 §34.3（`9 lib + 115 integration` 全绿）。`tools_sha256` 因 `run
 - `platform.posix_inflight_semantics_verified` 保持 `holds=false / status=partial / reason_code=posix_unverified`：POSIX 上 rename 活跃 attempt 目录的语义未单独构造复核，不因功能用例跑通而上调为 `proven`。
 - rustup shim 未安装：WSL 复跑依赖已存在的 `/root/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu`；换一台没有预置工具链、且下载带宽同样受限的机器，仍会卡在 §34.2 的同一步骤。
 - 自动清扫仍不成立（`inflight.stale_markers_auto_swept=false`），TOCTOU 未消除（`concurrency.check_then_delete_atomic=false`）。
+
+## 35. v1.33：残留 inflight 标记顺带清扫（无后台线程）
+
+### 35.1 红
+
+新增 5 条集成用例，实现前 4 条红、1 条守护性绿（不可读标记“保留”本来就是既有语义）：
+
+```text
+inflight_sweep_on_task_start_removes_only_target_stale_marker ... FAILED
+  重启后同 task_id 残标仍在，runs/inflight-sweep.jsonl 不存在
+
+inflight_sweep_on_prune_removes_stale_marker_and_unblocks_candidate ... FAILED
+  回执无 inflight_sweep（left: Null），残标仍在，候选仍被 task_inflight_stale 跳过
+
+inflight_clean_writes_audit_and_is_idempotent ... FAILED
+  runs/inflight-sweep.jsonl 不存在：clean 只删不记账，无法回答“谁触发、依据哪个 stale_reason”
+
+runs_inflight_list_exposes_sweep_contract ... FAILED
+  assertion `left == right` failed: left: Null, right: "inflight-sweep/1"
+
+inflight_sweep_on_task_start_preserves_unreadable_marker ... ok（红阶段即绿，守护既有语义）
+```
+
+### 35.2 绿
+
+实现后 5 条用例在 Windows 上逐条绿，随后全量：
+
+```text
+running 10 tests  -> test result: ok. 10 passed; 0 failed
+running 122 tests -> test result: ok. 122 passed; 0 failed
+```
+
+WSL 同步 `server.rs` 后全量：
+
+```text
+running 9 tests   -> test result: ok. 9 passed; 0 failed
+running 120 tests -> test result: ok. 120 passed; 0 failed
+```
+
+### 35.3 实现口径
+
+- 共用一个 `sweep_inflight_markers(trigger, filter, dry_run)`：`clean` 真删改为走它；`runs.prune` 在枚举候选前调用（`dry_run` 只报 `would_remove`）；`task.execute` 在 `create_new` 返回 `AlreadyExists` 时按同一 `task_id` 调用，清掉后重试占位，无残标或不可读则按既有语义返回 `None`。
+- 判据完全复用 `assess_inflight_marker`：`pid` 存活优先于 `deadline`；只有 `stale=true` 进入删除集合；`unreadable` 保留并在 `kept[]`/`unreadable_total` 报告。
+- 审计 `runs/inflight-sweep.jsonl`：`phase=plan` 先落盘，写失败则零删除；删完写 `phase=result`（`removed[]` 带 `task_id`/`pid`/`stale_reason`/`path`，`trigger` 标明 `task_start|prune|clean`）；无残标时零删除且不追加审计，重复触发幂等。
+- 删除沿用既有 TOCTOU 防护：原子 rename 到 `.tmp` 后复核 `task_id`+`pid`+`startedAt`，不一致还原并记 `marker_changed`，消失记 `marker_disappeared`，rename/删除失败进 `failed[]`。
+- 能力位改为 `inflight.stale_markers_auto_swept=false / partial / path_triggered_only / automatic=false`：只做到特定路径顺带清扫，不宣称“自动定期清扫”；`capabilities` 的 `not_proven_total` 由 5 降为 4。
+- `runs.inflight action=list` 增加 `sweep_rule`（触发条件、审计文件、永不删除项、原子删除与三条跨进程边界）；工具描述同步追加该行为，`tools_sha256` 更新为 `36dbcfc9c9ac83eede1a4ef581801b0b4dcb9b955761d5e3fcb085ea093af993`。
+
+### 35.4 仍然存在的边界
+
+- 跨进程无事务（`concurrency.check_then_delete_atomic=false`）：扫描与 rename 之间仍可能插入新进程；最终由 `create_new` 决出唯一持有者，但两侧动作不是同一事务。
+- 判活与删除之间仍可能有新进程加入：清扫只依据扫描时的 `stale`，不排他锁住目录。
+- 坏标记不自愈：`unreadable` 永久保留，只能人工删除；没有任何后台线程会重试。
+- 触发点有限：没有调用方操作（不重启同 `task_id`、不 prune、不 clean）时，残标仍不会自行消失。

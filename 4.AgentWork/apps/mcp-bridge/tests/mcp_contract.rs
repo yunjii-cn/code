@@ -6135,7 +6135,8 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(cleanable["automatic"], false, "清理需要调用方显式执行：{cleanable}");
     let auto = claim(&payload, "inflight.stale_markers_auto_swept");
     assert_eq!(auto["holds"], false, "{auto}");
-    assert_eq!(auto["reason_code"], "explicit_cleanup_required", "{auto}");
+    assert_eq!(auto["status"], "partial", "只做到特定路径顺带清扫：{auto}");
+    assert_eq!(auto["reason_code"], "path_triggered_only", "{auto}");
 }
 
 /// 已在当前平台实跑的能力必须把当前平台写进 platforms_verified，不能只标 Windows
@@ -6535,5 +6536,238 @@ fn runs_inflight_real_stdio_observes_and_cleans_stale_marker() {
     let _ = child.kill();
     let _ = child.wait();
     let _ = fs::remove_dir_all(&task_dir);
+}
+
+// ---- v1.33：残留 inflight 标记在既有动作路径上顺带清扫（无后台线程） ----
+
+fn read_inflight_sweep_audit(runs: &Path) -> Vec<Value> {
+    let path = runs.join("inflight-sweep.jsonl");
+    if !path.exists() {
+        return Vec::new();
+    }
+    fs::read_to_string(&path)
+        .expect("读取 inflight-sweep.jsonl")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("审计行必须是 JSON"))
+        .collect()
+}
+
+/// 同一 task_id 再次启动时只清扫自己的残标：别的 task 的残标不动，审计必须留痕
+#[test]
+fn inflight_sweep_on_task_start_removes_only_target_stale_marker() {
+    let (server, _settings, runs) = server_with_runs();
+    write_inflight_marker(
+        runs.path(),
+        "sweep-start",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    write_inflight_marker(
+        runs.path(),
+        "other-residue",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "sweep-start", "cmd": "echo done", "timeout_secs": 30 }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert!(
+        !inflight_marker(runs.path(), "sweep-start").exists(),
+        "重启前必须清掉同一 task_id 的残标"
+    );
+    assert!(
+        inflight_marker(runs.path(), "other-residue").exists(),
+        "启动清扫只作用于当前 task_id，不得波及其他 task"
+    );
+
+    let audit = read_inflight_sweep_audit(runs.path());
+    assert!(!audit.is_empty(), "清扫必须写审计：{audit:?}");
+    assert_eq!(audit[0]["version"], "inflight-sweep/1", "{audit:?}");
+    assert_eq!(audit[0]["phase"], "plan", "先记账后删除：{audit:?}");
+    assert_eq!(audit[0]["trigger"], "task_start", "{audit:?}");
+    let result = audit
+        .iter()
+        .find(|line| line["phase"] == "result" && line["trigger"] == "task_start")
+        .unwrap_or_else(|| panic!("必须写清扫结果行：{audit:?}"));
+    assert_eq!(result["removed_total"], 1, "{result}");
+    assert_eq!(result["removed"][0]["task_id"], "sweep-start", "{result}");
+    assert_eq!(result["removed"][0]["stale_reason"], "pid_missing", "{result}");
+    assert!(
+        result["removed"][0]["path"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("runs/.inflight/"),
+        "审计必须写明清理对象路径：{result}"
+    );
+}
+
+/// prune 真删前先清残标，清完后该 task 不再被 task_inflight_stale 挡住
+#[test]
+fn inflight_sweep_on_prune_removes_stale_marker_and_unblocks_candidate() {
+    let (server, _settings, runs) = server_with_runs();
+    prune_attempt(
+        runs.path(),
+        "prune-sweep",
+        1,
+        true,
+        Some(&days_ago_stamp(30)),
+        true,
+    );
+    prune_attempt(runs.path(), "prune-sweep", 2, false, None, true);
+    write_inflight_marker(
+        runs.path(),
+        "prune-sweep",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+
+    let pruned = tool_payload(&call_tool(
+        &server,
+        "runs.prune",
+        json!({ "older_than_days": 30, "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(pruned["inflight_sweep"]["trigger"], "prune", "{pruned}");
+    assert_eq!(pruned["inflight_sweep"]["removed_total"], 1, "{pruned}");
+    assert!(
+        !inflight_marker(runs.path(), "prune-sweep").exists(),
+        "prune 前必须清掉残标：{pruned}"
+    );
+    assert!(
+        pruned["deleted"]
+            .as_array()
+            .expect("deleted 必须是数组")
+            .iter()
+            .any(|entry| entry["task_id"] == "prune-sweep" && entry["attempt"] == 1),
+        "清掉残标后 prune 不得再跳过该 task：{pruned}"
+    );
+
+    let audit = read_inflight_sweep_audit(runs.path());
+    let result = audit
+        .iter()
+        .find(|line| line["phase"] == "result" && line["trigger"] == "prune")
+        .unwrap_or_else(|| panic!("必须写 prune 清扫结果行：{audit:?}"));
+    assert_eq!(result["removed_total"], 1, "{result}");
+    assert_eq!(result["removed"][0]["stale_reason"], "pid_missing", "{result}");
+}
+
+/// 显式 clean 也写审计；坏标记保留并报 unreadable；重复 clean 幂等且不再追加审计
+#[test]
+fn inflight_clean_writes_audit_and_is_idempotent() {
+    let (server, _settings, runs) = server_with_runs();
+    write_inflight_marker(
+        runs.path(),
+        "audit-stale",
+        DEAD_PID,
+        &days_ago_stamp(2),
+        &days_ago_stamp(1),
+    );
+    write_inflight_marker(
+        runs.path(),
+        "audit-active",
+        std::process::id() as u64,
+        &days_ago_stamp(0),
+        &days_ago_stamp(1),
+    );
+    let dir = runs.path().join(".inflight");
+    fs::write(dir.join("audit-bad.json"), "{not-json").expect("写入坏标记");
+
+    let cleaned = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean", "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(cleaned["removed_total"], 1, "{cleaned}");
+    assert!(
+        inflight_marker(runs.path(), "audit-active").exists(),
+        "活跃标记不得被误删：{cleaned}"
+    );
+    assert!(dir.join("audit-bad.json").exists(), "不可读标记不得被删除：{cleaned}");
+
+    let audit = read_inflight_sweep_audit(runs.path());
+    assert_eq!(audit.len(), 2, "一次真清必须写 plan+result 两行：{audit:?}");
+    let result = audit
+        .iter()
+        .find(|line| line["phase"] == "result")
+        .unwrap_or_else(|| panic!("必须写清扫结果行：{audit:?}"));
+    assert_eq!(result["trigger"], "clean", "{result}");
+    assert_eq!(result["removed_total"], 1, "{result}");
+    assert_eq!(result["removed"][0]["task_id"], "audit-stale", "{result}");
+    assert_eq!(result["removed"][0]["stale_reason"], "pid_missing", "{result}");
+    assert_eq!(result["unreadable_total"], 1, "{result}");
+
+    let again = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "clean", "dry_run": false, "confirm": true }),
+    ));
+    assert_eq!(again["removed_total"], 0, "重复清理必须幂等：{again}");
+    assert_eq!(
+        read_inflight_sweep_audit(runs.path()).len(),
+        2,
+        "无删除发生不得追加审计"
+    );
+}
+
+/// 启动路径遇到不可读标记：保留原文件、任务照常执行，不得把坏标记当残标删掉
+#[test]
+fn inflight_sweep_on_task_start_preserves_unreadable_marker() {
+    let (server, _settings, runs) = server_with_runs();
+    let dir = runs.path().join(".inflight");
+    fs::create_dir_all(&dir).expect("创建 .inflight");
+    fs::write(dir.join("bad-start.json"), "{not-json").expect("写入坏标记");
+
+    let response = call_tool(
+        &server,
+        "task.execute",
+        json!({ "task_id": "bad-start", "cmd": "echo done", "timeout_secs": 30 }),
+    );
+    assert_eq!(response["result"]["isError"], false, "{}", tool_text(&response));
+    assert!(
+        dir.join("bad-start.json").exists(),
+        "不可读标记必须保留，不能当作残标删除"
+    );
+    assert!(
+        read_inflight_sweep_audit(runs.path()).is_empty(),
+        "没有可清扫的残标时不得写审计"
+    );
+}
+
+/// list 必须机器可读地给出顺带清扫的触发条件、审计位置与仍然存在的边界
+#[test]
+fn runs_inflight_list_exposes_sweep_contract() {
+    let (server, _settings, _runs) = server_with_runs();
+    let listed = tool_payload(&call_tool(
+        &server,
+        "runs.inflight",
+        json!({ "action": "list" }),
+    ));
+    let rule = &listed["sweep_rule"];
+    assert_eq!(rule["version"], "inflight-sweep/1", "{listed}");
+    assert_eq!(rule["audit"], "runs/inflight-sweep.jsonl", "{rule}");
+    assert_eq!(rule["idempotent"], true, "{rule}");
+    let triggers = rule["triggers"].as_array().expect("triggers 必须是数组");
+    for trigger in ["task_start", "runs.prune", "runs.inflight.clean"] {
+        assert!(triggers.contains(&json!(trigger)), "{trigger} 必须写明：{rule}");
+    }
+    let never = rule["never_removed"].as_array().expect("never_removed 必须是数组");
+    for item in ["active_pid_alive", "unreadable"] {
+        assert!(never.contains(&json!(item)), "{item} 必须写明：{rule}");
+    }
+    let limits = rule["limits"].as_array().expect("limits 必须是数组");
+    for item in [
+        "cross_process_no_transaction",
+        "new_process_may_join_between_check_and_delete",
+        "unreadable_not_self_healing",
+    ] {
+        assert!(limits.contains(&json!(item)), "{item} 必须写明：{rule}");
+    }
 }
 

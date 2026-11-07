@@ -20,6 +20,9 @@ const INFLIGHT_VERSION: &str = "inflight-marker/1";
 /// 标记过期宽限：超过 deadlineAt 且 pid 已不可见才判定为残留
 const INFLIGHT_STALE_GRACE_SECS: i64 = 120;
 const INFLIGHT_REPORT_VERSION: &str = "inflight-report/1";
+const INFLIGHT_SWEEP_VERSION: &str = "inflight-sweep/1";
+/// 顺带清扫的 append-only 审计：谁触发、清了哪些 task_id、依据哪个 stale_reason
+const INFLIGHT_SWEEP_AUDIT: &str = "inflight-sweep.jsonl";
 const CAPABILITIES_VERSION: &str = "capabilities/1";
 /// pid 已消失后的残留宽限：给正常退出留出收尾时间，避免把刚结束的守卫误判为残留
 const INFLIGHT_PID_MISSING_GRACE_SECS: i64 = 5;
@@ -445,6 +448,8 @@ impl Server {
         };
 
         let evaluated_at = now_stamp();
+        // prune 真删前先按既有判据顺带清扫残标：先记账后删除，审计失败则不继续删目录
+        let inflight_sweep = self.sweep_inflight_markers("prune", None, dry_run)?;
         let now = chrono::Utc::now();
         let PruneScan {
             candidates,
@@ -486,6 +491,7 @@ impl Server {
                 "exclude_filter": exclude_filter,
                 "evaluated_at": evaluated_at,
                 "limit": limit,
+                "inflight_sweep": inflight_sweep,
                 "candidates_total": total_candidates,
                 "batch_candidates_total": batch_candidates_total,
                 "not_processed_total": not_processed_total,
@@ -510,6 +516,7 @@ impl Server {
                 "exclude_filter": exclude_filter,
                 "evaluated_at": evaluated_at,
                 "limit": limit,
+                "inflight_sweep": inflight_sweep,
                 "candidates_total": total_candidates,
                 "batch_candidates_total": batch_candidates_total,
                 "not_processed_total": not_processed_total,
@@ -668,6 +675,7 @@ impl Server {
             "exclude_filter": exclude_filter,
             "evaluated_at": evaluated_at,
             "limit": limit,
+            "inflight_sweep": inflight_sweep,
             "candidates_total": total_candidates,
             "batch_candidates_total": batch_candidates_total,
             "not_processed_total": not_processed_total,
@@ -1026,14 +1034,14 @@ impl Server {
                     return Ok(Some(InflightGuard { path }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    match read_json(&path) {
-                        Ok(existing) if marker_is_stale(&existing, chrono::Utc::now()) => {
-                            // 残留：清理后重试占位；并发清理时由 create_new 决出唯一持有者
-                            let _ = fs::remove_file(&path);
-                            continue;
-                        }
-                        _ => return Ok(None),
+                    // 同一 task_id 再次启动：先按既有判据顺带清扫残标并留审计；
+                    // 清掉后重试 create_new，并发清理时仍由 create_new 决出唯一持有者。
+                    let sweep = self.sweep_inflight_markers("task_start", Some(task_id), false)?;
+                    if sweep["removed_total"].as_u64().unwrap_or(0) > 0 {
+                        continue;
                     }
+                    // 活跃或不可读（无法判定）一律不删，本次按既有语义视为已在执行
+                    return Ok(None);
                 }
                 Err(error) => {
                     return Err(format!("inflight_marker_failed: 创建活跃标记失败：{error}"))
@@ -1122,6 +1130,7 @@ impl Server {
                 "directory": "runs/.inflight",
                 "stale_rule": inflight_stale_rule(),
                 "liveness_rule": inflight_liveness_rule(),
+                "sweep_rule": inflight_sweep_rule(),
                 "total": markers.len() as u64,
                 "stale_total": stale_total,
                 "active_total": markers.len() as u64 - stale_total,
@@ -1131,33 +1140,155 @@ impl Server {
             }));
         }
 
-        let mut would_remove: Vec<Value> = Vec::new();
-        let mut removed: Vec<Value> = Vec::new();
-        let mut kept: Vec<Value> = Vec::new();
-        let mut failed: Vec<Value> = Vec::new();
-        for marker in &markers {
-            let stale = marker.assessment["stale"].as_bool().unwrap_or(false);
-            if !stale {
-                kept.push(json!({
-                    "task_id": marker.task_id,
-                    "file": marker.file,
-                    "pid": marker.assessment["pid"],
-                    "stale_reason": marker.assessment["stale_reason"],
-                    "reason": "not_stale"
-                }));
-                continue;
-            }
-            if dry_run {
-                would_remove.push(json!({
+        if dry_run {
+            let sweep = self.sweep_inflight_markers("clean", task_filter.as_deref(), true)?;
+            return Ok(json!({
+                "version": INFLIGHT_REPORT_VERSION,
+                "action": "clean",
+                "dry_run": true,
+                "state": sweep["state"],
+                "directory": "runs/.inflight",
+                "stale_rule": inflight_stale_rule(),
+                "sweep_rule": inflight_sweep_rule(),
+                "total": sweep["total"],
+                "stale_total": sweep["stale_total"],
+                "active_total": sweep["active_total"],
+                "unreadable_total": sweep["unreadable_total"],
+                "would_remove_total": sweep["would_remove_total"],
+                "removed_total": 0,
+                "would_remove": sweep["would_remove"],
+                "kept": sweep["kept"]
+            }));
+        }
+
+        let sweep = self.sweep_inflight_markers("clean", task_filter.as_deref(), false)?;
+        Ok(json!({
+            "version": INFLIGHT_REPORT_VERSION,
+            "action": "clean",
+            "dry_run": false,
+            "trigger": "clean",
+            "state": sweep["state"],
+            "directory": "runs/.inflight",
+            "stale_rule": inflight_stale_rule(),
+            "sweep_rule": inflight_sweep_rule(),
+            "total": sweep["total"],
+            "stale_total": sweep["stale_total"],
+            "active_total": sweep["active_total"],
+            "unreadable_total": sweep["unreadable_total"],
+            "would_remove_total": sweep["would_remove_total"],
+            "removed_total": sweep["removed_total"],
+            "kept_total": sweep["kept_total"],
+            "failed_total": sweep["failed_total"],
+            "would_remove": sweep["would_remove"],
+            "removed": sweep["removed"],
+            "kept": sweep["kept"],
+            "failed": sweep["failed"]
+        }))
+    }
+
+    /// 顺带清扫：只在既有动作路径上触发（同 task_id 重启 / prune 真删前 / clean），
+    /// 不新起后台线程。判据沿用 assess_inflight_marker：pid 存活优先于 deadline；
+    /// unreadable 一律保留。真删前先写 plan，逐条 rename 到 .tmp 并复核
+    /// task_id+pid+startedAt，变化则还原并记 marker_changed。
+    fn sweep_inflight_markers(
+        &self,
+        trigger: &str,
+        filter: Option<&str>,
+        dry_run: bool,
+    ) -> Result<Value, String> {
+        let (markers, unreadable, dir_exists) = self.scan_inflight_markers(filter);
+        let total = markers.len() as u64;
+        let stale_total = markers
+            .iter()
+            .filter(|marker| marker.assessment["stale"] == json!(true))
+            .count() as u64;
+        let active_total = total - stale_total;
+        let unreadable_total = unreadable.len() as u64;
+        let state = if !dir_exists {
+            "missing"
+        } else if markers.is_empty() && unreadable.is_empty() {
+            "empty"
+        } else {
+            "ready"
+        };
+        let would_remove: Vec<Value> = markers
+            .iter()
+            .filter(|marker| marker.assessment["stale"] == json!(true))
+            .map(|marker| {
+                json!({
                     "task_id": marker.task_id,
                     "file": marker.file,
                     "pid": marker.assessment["pid"],
                     "stale_reason": marker.assessment["stale_reason"],
                     "path": format!("runs/.inflight/{}", marker.file)
-                }));
+                })
+            })
+            .collect();
+        let mut kept: Vec<Value> = Vec::new();
+        for marker in &markers {
+            if marker.assessment["stale"] == json!(true) {
                 continue;
             }
+            kept.push(json!({
+                "task_id": marker.task_id,
+                "file": marker.file,
+                "pid": marker.assessment["pid"],
+                "stale_reason": marker.assessment["stale_reason"],
+                "reason": "not_stale"
+            }));
+        }
+        for entry in &unreadable {
+            kept.push(json!({
+                "task_id": entry["task_id"],
+                "file": entry["file"],
+                "pid": Value::Null,
+                "stale_reason": "unreadable",
+                "reason": "unreadable"
+            }));
+        }
 
+        if dry_run || stale_total == 0 {
+            return Ok(json!({
+                "version": INFLIGHT_SWEEP_VERSION,
+                "trigger": trigger,
+                "dry_run": dry_run,
+                "state": state,
+                "directory": "runs/.inflight",
+                "total": total,
+                "stale_total": stale_total,
+                "active_total": active_total,
+                "unreadable_total": unreadable_total,
+                "would_remove_total": would_remove.len() as u64,
+                "removed_total": 0,
+                "kept_total": kept.len() as u64,
+                "failed_total": 0,
+                "would_remove": would_remove,
+                "removed": [],
+                "kept": kept,
+                "failed": []
+            }));
+        }
+
+        // 先记账后删除：plan 行写不进去就一条都不删
+        let plan = json!({
+            "version": INFLIGHT_SWEEP_VERSION,
+            "phase": "plan",
+            "at": now_stamp(),
+            "trigger": trigger,
+            "task_id_filter": filter,
+            "stale_total": stale_total,
+            "unreadable_total": unreadable_total,
+            "candidates": would_remove
+        });
+        self.append_inflight_sweep_record(&plan)
+            .map_err(|error| format!("{error}；本轮未删除任何标记"))?;
+
+        let mut removed: Vec<Value> = Vec::new();
+        let mut failed: Vec<Value> = Vec::new();
+        for marker in &markers {
+            if marker.assessment["stale"] != json!(true) {
+                continue;
+            }
             // 先原子改名为 .tmp：真正被判定删除的就是 rename 到的这一份文件；
             // 若期间被并发清理者替换成新标记，读到的 pid/startedAt 不同，必须还原而不是删。
             let tmp = self.runs_dir.join(INFLIGHT_DIR).join(format!(
@@ -1239,36 +1370,71 @@ impl Server {
                 }
             }
         }
-        for entry in &unreadable {
-            kept.push(json!({
-                "task_id": entry["task_id"],
-                "file": entry["file"],
-                "pid": Value::Null,
-                "stale_reason": "unreadable",
-                "reason": "unreadable"
-            }));
-        }
 
-        Ok(json!({
-            "version": INFLIGHT_REPORT_VERSION,
-            "action": "clean",
-            "dry_run": dry_run,
-            "state": state,
-            "directory": "runs/.inflight",
-            "stale_rule": inflight_stale_rule(),
-            "total": markers.len() as u64,
-            "stale_total": stale_total,
-            "active_total": markers.len() as u64 - stale_total,
-            "unreadable_total": unreadable.len() as u64,
-            "would_remove_total": would_remove.len() as u64,
-            "removed_total": removed.len() as u64,
+        let removed_total = removed.len() as u64;
+        let result = json!({
+            "version": INFLIGHT_SWEEP_VERSION,
+            "phase": "result",
+            "at": now_stamp(),
+            "trigger": trigger,
+            "task_id_filter": filter,
+            "removed_total": removed_total,
             "kept_total": kept.len() as u64,
             "failed_total": failed.len() as u64,
-            "would_remove": would_remove,
+            "unreadable_total": unreadable_total,
             "removed": removed,
             "kept": kept,
             "failed": failed
+        });
+        if let Err(error) = self.append_inflight_sweep_record(&result) {
+            return Err(format!(
+                "inflight_sweep_audit_failed: 已清理 {removed_total} 条、失败 {} 条，但结果行写入 {INFLIGHT_SWEEP_AUDIT} 失败：{error}",
+                result["failed_total"].as_u64().unwrap_or(0)
+            ));
+        }
+
+        Ok(json!({
+            "version": INFLIGHT_SWEEP_VERSION,
+            "trigger": trigger,
+            "dry_run": false,
+            "state": state,
+            "directory": "runs/.inflight",
+            "total": total,
+            "stale_total": stale_total,
+            "active_total": active_total,
+            "unreadable_total": unreadable_total,
+            "would_remove_total": stale_total,
+            "removed_total": result["removed_total"],
+            "kept_total": result["kept_total"],
+            "failed_total": result["failed_total"],
+            "would_remove": result["removed"],
+            "removed": result["removed"],
+            "kept": result["kept"],
+            "failed": result["failed"]
         }))
+    }
+
+    /// 清扫审计落盘：append-only JSONL，写一行并 fsync；失败必须让调用方看到
+    fn append_inflight_sweep_record(&self, record: &Value) -> Result<(), String> {
+        use std::io::Write;
+        let path = self.runs_dir.join(INFLIGHT_SWEEP_AUDIT);
+        let line = serde_json::to_string(record).map_err(|error| {
+            format!("inflight_sweep_audit_failed: 序列化审计记录失败：{error}")
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| {
+                format!("inflight_sweep_audit_failed: 打开 runs/{INFLIGHT_SWEEP_AUDIT} 失败：{error}")
+            })?;
+        writeln!(file, "{line}").map_err(|error| {
+            format!("inflight_sweep_audit_failed: 写入 runs/{INFLIGHT_SWEEP_AUDIT} 失败：{error}")
+        })?;
+        file.sync_all().map_err(|error| {
+            format!("inflight_sweep_audit_failed: 同步 runs/{INFLIGHT_SWEEP_AUDIT} 失败：{error}")
+        })?;
+        Ok(())
     }
 
     /// 只读扫描 `.inflight/*.json`；非 .json 的临时文件不参与枚举，符号链接不跟随
@@ -3989,6 +4155,31 @@ fn inflight_liveness_rule() -> Value {
     })
 }
 
+/// 顺带清扫自描述：只在这些既有动作路径上触发，没有后台定时器与自动自愈
+fn inflight_sweep_rule() -> Value {
+    json!({
+        "version": "inflight-sweep/1",
+        "triggers": ["task_start", "runs.prune", "runs.inflight.clean"],
+        "trigger_conditions": {
+            "task_start": "同一 task_id 的标记已存在且按 stale_rule 判定 stale=true 时，先清残标再 create_new",
+            "runs.prune": "dry_run=false 且 confirm=true 时，枚举候选前先清全部残标",
+            "runs.inflight.clean": "dry_run=false 且 confirm=true 时清全部残标（或 task_id 过滤范围内）"
+        },
+        "audit": "runs/inflight-sweep.jsonl",
+        "audit_version": INFLIGHT_SWEEP_VERSION,
+        "criteria": "markers[].stale（pid 存活优先于 deadlineAt）",
+        "never_removed": ["active_pid_alive", "unreadable"],
+        "atomic_delete": "rename to .tmp + recheck task_id+pid+startedAt; mismatch restore & report marker_changed",
+        "idempotent": true,
+        "idempotent_semantics": "无可清残标时不删除、不追加审计；重复触发返回 removed_total=0",
+        "limits": [
+            "cross_process_no_transaction",
+            "new_process_may_join_between_check_and_delete",
+            "unreadable_not_self_healing"
+        ]
+    })
+}
+
 /// 残留判据自描述：调用方不需要读源码即可复算 stale
 fn inflight_stale_rule() -> Value {
     json!({
@@ -4823,19 +5014,23 @@ fn capabilities_payload() -> Value {
             &both,
             &["macos"],
             &["runs_inflight_lists_and_cleans_only_stale_markers"],
-            "只删 stale=true 的标记；清理需调用方显式执行，不是自动清扫。",
+            "只删 stale=true 的标记；除显式 clean 外，仅在 task 重启与 prune 真删前顺带清扫，均写 runs/inflight-sweep.jsonl。",
         ),
         capability_entry(
             "inflight.stale_markers_auto_swept",
             Some(false),
-            "not_proven",
-            "无调用方操作时的自动清扫",
-            Some("explicit_cleanup_required"),
+            "partial",
+            "在既有动作路径上顺带清扫残标（同 task_id 重启 / prune 真删前 / clean），无后台定时器",
+            Some("path_triggered_only"),
             false,
             &both,
             &["macos"],
-            &["runs_inflight_clean_requires_explicit_confirmation"],
-            "残留标记不会自行消失；必须调用 runs.inflight action=clean。",
+            &[
+                "inflight_sweep_on_task_start_removes_only_target_stale_marker",
+                "inflight_sweep_on_prune_removes_stale_marker_and_unblocks_candidate",
+                "inflight_clean_writes_audit_and_is_idempotent",
+            ],
+            "只有上述三个触发点会清残标并写 runs/inflight-sweep.jsonl；没有调用方操作时残标仍不会自行消失，活跃与 unreadable 标记永不删除，跨进程仍无事务。",
         ),
         capability_entry(
             "inflight.clean_preserves_active_markers",
@@ -4989,7 +5184,7 @@ fn tools() -> Value {
         },
         {
             "name": "runs.inflight",
-            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选；并给出 PM 判活约定 liveness_rule：判活只认 markers[].task_id + markers[].stale，pid/age_secs/stale_reason 仅作诊断，attempt 缺 handback/dispatch 启发式与裸看标记文件不得用于判活，fallback.allowed=false",
+            "description": "活跃标记（runs/.inflight/<task_id>.json）的只读查询与残留清理：action=list 返回每个标记的 pid、pid_alive、stale、stale_reason（pid_alive/pid_missing_grace/pid_missing/deadline_in_grace/deadline_expired/unreadable）、startedAt、deadlineAt、age_secs、deadline_overdue_secs、removable，并给出机器可读的 stale_rule 判据；action=clean 默认 dry_run=true 只报告 would_remove、零删除，真删必须 dry_run=false 与 confirm=true，只删 stale=true 的标记，pid 存活的活跃标记永不删除；删除前把标记原子改名为临时文件并复核 pid+startedAt 未变化，变化则还原并记 marker_changed；不可读标记保留并在 unreadable[] 报告；清理不触碰 attempt 目录，也不进入 runs.prune 候选；并给出 PM 判活约定 liveness_rule：判活只认 markers[].task_id + markers[].stale，pid/age_secs/stale_reason 仅作诊断，attempt 缺 handback/dispatch 启发式与裸看标记文件不得用于判活，fallback.allowed=false；顺带清扫只在既有动作路径触发（同 task_id 重启、prune 真删前、clean），每次写 runs/inflight-sweep.jsonl（plan+result，含 trigger/task_id/stale_reason），无可清残标时不追加审计且重复触发幂等；list 的 sweep_rule 机器可读给出触发条件、永不删除项（活跃/不可读）与跨进程边界",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5004,7 +5199,7 @@ fn tools() -> Value {
         },
         {
             "name": "runs.prune",
-            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。系统内没有定时/启动自动清理",
+            "description": "显式证据清理：默认 dry_run=true 只列出候选、零写入；真删必须同时 dry_run=false 与 confirm=true。只删非最新 attempt 的整个目录，最新 attempt 永不进入候选；年龄只认 handback 的 finishedAt（缺字段一律不删）；`status` 是可选的状态多值白名单，显式传入才生效，缺省不过滤、无默认状态、无服务端分档，与 older_than_days 为 AND；`exclude` 是可选按条目精确排除（按 task_id，并可精确到某次 attempt），在候选枚举入口生效：命中项只进 excluded[]、不进 candidates[]，PM 可用它把「不可自动判定」的条目留在档内而批量处理其余条目。计数不变式：deleted + failed + trashed + excluded_total == batch_candidates_total，且 candidates_total == batch_candidates_total + not_processed_total（limit 截断部分），回执可直接核对。exclude 的 task_id 与任务目录同一命名校验，越界一律 invalid_exclusion；排除不存在或本就不在候选集的 id 记 not_in_candidates（不报错、不静默忽略）。删除前先写 runs/prune.jsonl 记账；部分失败如实报 partial 且 isError=true。真删（dry_run=false+confirm=true）时会在枚举候选前先按既有 inflight 判据顺带清残标并写 runs/inflight-sweep.jsonl，dry_run 只报告 would-remove、零删除；清扫审计失败则不删任何目录。系统内没有定时/启动自动清理",
             "inputSchema": {
                 "type": "object",
                 "properties": {
