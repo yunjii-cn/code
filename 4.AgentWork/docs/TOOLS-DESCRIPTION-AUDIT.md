@@ -3524,4 +3524,62 @@ test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 - **Drop 残留**：作用域目录在成员仍存活时删不掉（不杀进程），会留下空目录。
 - macOS 无 cgroup、无 `/proc`，恒不可观测（`platforms_unverified=["macos"]`）。
 
+## 40. v1.38：POSIX rename 活跃 attempt 目录语义闭合（可观测判据 + 红→绿）
+
+改动位置：`apps/mcp-bridge/src/server.rs` 的 Linux 单测 `process_scope::imp::tests::posix_rename_active_attempt_semantics` 与 `capabilities_payload` 的 `platform.posix_inflight_semantics_verified` 条目；`apps/mcp-bridge/tests/mcp_contract.rs` 的 `capabilities_declares_machine_readable_boundaries` 断言；`scripts/posix-timeout-verify/verify.sh` 的退出码取值。不新增工具、不改 `tools/list` 描述、`tools_sha256` 不变。
+
+### 40.1 先把可观测量说清（不先动实现）
+
+`runs.prune` 的 `delete_attempt_dir` 是「`fs::rename(attempt-<N> → .prune-trash/<batch>/<task>-attempt-N)` 成功后 `remove_dir_all`」。要证的是 POSIX 上这一步在「目录里还有活跃进程」时仍然成立，而不是凭 v1.30 的 Windows 观测外推。判据 5 条同时成立：
+
+1. 进程 `cwd` 指向 attempt 目录、且持有目录内文件 fd 时，`rename` 返回 `Ok`；
+2. `rename` 后 `/proc/<pid>/cwd` 指向 trash 新路径；
+3. 该进程已打开的 fd 仍能读到原内容（换路径不打断已打开的 fd）；
+4. 旧路径不存在、新路径存在；
+5. 随后对 trash 路径 `remove_dir_all` 返回 `Ok`，进程仍存活，且 fd 仍能读到原内容（unlink 后已打开 fd 仍有效）。
+
+任一不成立就不允许把 claim 上调。
+
+### 40.2 红（HEAD 契约断言原样失败）
+
+用例本身是对 OS 语义的断言（新代码，不存在"先红"）；红由能力位断言承担——先改 `mcp_contract.rs` 期望 `holds=true/proven/null`，在未改 `server.rs` 的 HEAD 上跑 WSL：
+
+```
+thread 'capabilities_declares_machine_readable_boundaries' panicked at apps/mcp-bridge/tests/mcp_contract.rs:6391:5:
+assertion `left == right` failed: {"automatic":false,"detail":"POSIX 与 Windows 均跑通 inflight 标记、stale 判定、prune 跳过与清理保护用例；POSIX 上 rename 活跃 attempt 目录的语义未单独构造复核，macOS 未验证。","evidence":["standalone_inflight_marker_is_visible_then_removed","prune_skips_task_with_live_inflight_marker","runs_inflight_lists_and_cleans_only_stale_markers"],"holds":false,"id":"platform.posix_inflight_semantics_verified","platforms_unverified":["macos"],"platforms_verified":["windows","linux"],"reason_code":"posix_unverified","scope":"POSIX 上的 inflight create_new、stale 判定、prune 跳过与标记删除保护","status":"partial"}
+  left: Bool(false)
+ right: true
+test capabilities_declares_machine_readable_boundaries ... FAILED
+test result: FAILED. 119 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.30s
+```
+
+同一轮里新用例已通过（说明 POSIX 语义本身成立，红的只是"未宣称"）：
+
+```
+[evidence] posix_rename before cwd="/tmp/aw-posix-rename-1142-1794058543881886029/t-task/attempt-1" fd3=".../attempt-1/keep.txt"
+[evidence] posix_rename rename result=Ok(()) old_exists=false new_exists=true
+[evidence] posix_rename after cwd=".../.prune-trash/b-1/t-task-attempt-1" fd3=".../.prune-trash/b-1/t-task-attempt-1/keep.txt" content="original" old_exists=false new_exists=true
+[evidence] posix_rename remove result=Ok(()) alive=true fd_content_after_delete=Some("original")
+test server::process_scope::imp::tests::posix_rename_active_attempt_semantics ... ok
+```
+
+### 40.3 绿
+
+- 能力位改为 `holds=true/status=proven/reason_code=null`，`evidence` 增加 `posix_rename_active_attempt_semantics`，detail 写实；`platforms_verified=["windows","linux"]`、`platforms_unverified=["macos"]` 均不变；条目仍 17，`not_proven_total` 5→4。
+- WSL Ubuntu 24.04（`cargo 1.88.0`）：`16 lib + 120 integration` 全绿，日志 `/root/.aw-posix-verify/logs/posix-verify-20261107-213638.log`；契约断言通过。
+- Windows：`13 lib + 122 integration` 全绿。首次全量时 `descendant_snapshot_cross_checks_job_accounting` 在并发负载下抖动（`after terminate=StillAlive descendants=[] controlled=Some([])`），单跑 `Cleaned` 通过、二次全量通过；与本轮 Linux-only 改动路径无关，未改判据。
+- `cargo fmt -p aw-mcp-bridge -- --check` 对本轮改动无差异（`build.rs` / `main.rs` 的既有差异未触碰）。
+
+### 40.4 实现口径
+
+- 新用例用 `sh -c 'cd <attempt> && exec 3<keep.txt && echo ready > <ready> && sleep 30; :'` 固定「cwd 在目录内 + 持有文件 fd」两个条件，`ready` 文件只用于同步，随后逐条断言 40.1 的 (1)-(5)。
+- 能力位只上调 `platform.posix_inflight_semantics_verified` 一条；`timeout.cleans_entire_process_tree`、`timeout.enumerates_escaped_descendants`、`concurrency.check_then_delete_atomic`、`inflight.stale_markers_auto_swept` 全部保持原 `holds=false`，reason 不变。
+- `verify.sh`：`local rc=${PIPESTATUS[0]}`。原写法先执行 `local rc` 再读 `PIPESTATUS`，读到的是 `local` 自身的 0，导致本轮红阶段 integration 已 `1 failed` 而脚本仍输出 `[INFO] 四类 POSIX 用例全部通过`。
+
+### 40.5 仍然存在的边界
+
+- 该用例证明的是 POSIX 文件系统语义与 `delete_attempt_dir` 的 rename-then-delete 假设，不证明 macOS（`platforms_unverified=["macos"]` 保留）。
+- 仍不等于「prune 与执行无并发问题」：`concurrency.check_then_delete_atomic` 的 TOCTOU 仍 `holds=false`；本条只说明「rename/删除不会被活跃进程的 cwd/fd 阻止」。
+- Windows 仍走 `RetainedAtSource`（v1.30 实测 rename 被拒 `WinError 5`），本条不上调 Windows 相关结论。
+
 

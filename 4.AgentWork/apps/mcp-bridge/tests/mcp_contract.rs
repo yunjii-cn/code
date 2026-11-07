@@ -6386,24 +6386,26 @@ fn capabilities_declares_machine_readable_boundaries() {
     assert_eq!(snapshot["status"], "proven", "{snapshot}");
     assert!(snapshot["reason_code"].is_null(), "{snapshot}");
 
-    // POSIX 未覆盖
+    // POSIX inflight 语义已单独复核：rename 活跃 attempt 目录的语义
     let posix = claim(&payload, "platform.posix_inflight_semantics_verified");
-    assert_eq!(posix["holds"], false, "{posix}");
-    assert_eq!(posix["status"], "partial", "{posix}");
-    assert_eq!(posix["reason_code"], "posix_unverified", "{posix}");
-    assert!(
-        posix["platforms_verified"]
-            .as_array()
-            .expect("platforms_verified")
-            .contains(&json!("linux")),
-        "POSIX 已跑通的用例必须机器可见：{posix}"
+    assert_eq!(posix["holds"], true, "{posix}");
+    assert_eq!(posix["status"], "proven", "{posix}");
+    assert!(posix["reason_code"].is_null(), "{posix}");
+    assert_eq!(
+        posix["platforms_verified"],
+        json!(["windows", "linux"]),
+        "{posix}"
     );
-    assert!(
-        posix["platforms_unverified"]
-            .as_array()
-            .expect("platforms_unverified")
-            .contains(&json!("macos")),
-        "未覆盖的 macOS 必须机器可见：{posix}"
+    assert_eq!(posix["platforms_unverified"], json!(["macos"]), "{posix}");
+    assert_eq!(
+        posix["evidence"],
+        json!([
+            "standalone_inflight_marker_is_visible_then_removed",
+            "prune_skips_task_with_live_inflight_marker",
+            "runs_inflight_lists_and_cleans_only_stale_markers",
+            "posix_rename_active_attempt_semantics",
+        ]),
+        "{posix}"
     );
 
     // TOCTOU：检查与删除不是原子操作

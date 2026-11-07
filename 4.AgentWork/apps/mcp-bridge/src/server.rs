@@ -3822,6 +3822,119 @@ mod process_scope {
                     "降级后空快照不得读成整树已清"
                 );
             }
+
+            // v1.38 判据：POSIX 上 rename 活跃 attempt 目录的语义必须单独复核。
+            // 观测量（全部成立才允许宣称已复核）：
+            // (a) 进程 cwd 指向该目录、且持有目录内文件 fd 时，rename 仍成功；
+            // (b) /proc/<pid>/cwd 随之指向 trash 新路径；
+            // (c) 已打开的 fd 仍读到原内容；
+            // (d) 旧路径不存在、新路径存在；
+            // (e) 随后对其 remove_dir_all 成功，进程仍存活且 fd 内容不变。
+            #[cfg(target_os = "linux")]
+            #[test]
+            fn posix_rename_active_attempt_semantics() {
+                let root = std::env::temp_dir().join(format!(
+                    "aw-posix-rename-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(0)
+                ));
+                let attempt = root.join("t-task").join("attempt-1");
+                let staged = root
+                    .join(".prune-trash")
+                    .join("b-1")
+                    .join("t-task-attempt-1");
+                std::fs::create_dir_all(&attempt).expect("创建 attempt 目录");
+                std::fs::create_dir_all(staged.parent().expect("暂存父目录"))
+                    .expect("创建暂存目录");
+                std::fs::write(attempt.join("keep.txt"), b"original").expect("写入文件");
+                let ready = root.join("ready.txt");
+                let script = format!(
+                    "cd '{}' && exec 3<keep.txt && echo ready > '{}' && sleep 30; :",
+                    attempt.display(),
+                    ready.display()
+                );
+                let mut child = Command::new("sh")
+                    .arg("-c")
+                    .arg(script)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("spawn holder");
+                for _ in 0..100 {
+                    if ready.exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                assert!(ready.exists(), "持有 cwd/fd 的进程未就绪");
+
+                let pid = child.id();
+                let cwd_before = std::fs::read_link(format!("/proc/{pid}/cwd")).expect("cwd");
+                let fd_before = std::fs::read_link(format!("/proc/{pid}/fd/3")).expect("fd3");
+                let canonical_attempt = std::fs::canonicalize(&attempt).expect("canonical attempt");
+                let canonical_keep =
+                    std::fs::canonicalize(attempt.join("keep.txt")).expect("canonical keep.txt");
+                println!("[evidence] posix_rename before cwd={cwd_before:?} fd3={fd_before:?}");
+                assert_eq!(
+                    cwd_before, canonical_attempt,
+                    "前置：cwd 必须指向 attempt 目录"
+                );
+                assert_eq!(fd_before, canonical_keep, "前置：fd 3 必须指向该目录内文件");
+
+                let renamed = std::fs::rename(&attempt, &staged);
+                println!(
+                    "[evidence] posix_rename rename result={renamed:?} old_exists={} new_exists={}",
+                    attempt.exists(),
+                    staged.exists()
+                );
+                renamed.expect("POSIX 上 rename 被活跃进程占用的目录必须成功");
+
+                let cwd_after = std::fs::read_link(format!("/proc/{pid}/cwd")).expect("cwd after");
+                let fd_after = std::fs::read_link(format!("/proc/{pid}/fd/3")).expect("fd3 after");
+                let content_after =
+                    std::fs::read_to_string(format!("/proc/{pid}/fd/3")).expect("read fd3");
+                println!(
+                    "[evidence] posix_rename after cwd={cwd_after:?} fd3={fd_after:?} content={content_after:?} old_exists={} new_exists={}",
+                    attempt.exists(),
+                    staged.exists()
+                );
+                assert!(!attempt.exists(), "rename 后旧路径必须不存在");
+                assert!(staged.exists(), "rename 后新路径必须存在");
+                assert_eq!(
+                    cwd_after,
+                    std::fs::canonicalize(&staged).expect("canonical staged"),
+                    "rename 后 cwd 必须落在 trash 新路径"
+                );
+                assert_eq!(
+                    fd_after,
+                    std::fs::canonicalize(staged.join("keep.txt")).expect("canonical staged keep"),
+                    "rename 后 fd 必须落在新路径"
+                );
+                assert_eq!(content_after, "original", "已打开的 fd 必须仍读到原内容");
+
+                let removed = std::fs::remove_dir_all(&staged);
+                let alive_after_delete = child.try_wait().expect("try_wait").is_none();
+                let content_deleted = std::fs::read_to_string(format!("/proc/{pid}/fd/3")).ok();
+                println!(
+                    "[evidence] posix_rename remove result={removed:?} alive={alive_after_delete} fd_content_after_delete={content_deleted:?}"
+                );
+                removed.expect("prune 的删除步骤在 POSIX 上对活跃目录必须成功");
+                assert!(alive_after_delete, "目录被删除后持有 fd 的进程应仍存活");
+                assert_eq!(
+                    content_deleted.as_deref(),
+                    Some("original"),
+                    "已打开 fd 在 unlink 后仍应读到原内容"
+                );
+
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&root);
+            }
         }
     }
 
@@ -6441,10 +6554,10 @@ fn capabilities_payload() -> Value {
         ),
         capability_entry(
             "platform.posix_inflight_semantics_verified",
-            Some(false),
-            "partial",
+            Some(true),
+            "proven",
             "POSIX 上的 inflight create_new、stale 判定、prune 跳过与标记删除保护",
-            Some("posix_unverified"),
+            None,
             false,
             &both,
             &["macos"],
@@ -6452,8 +6565,9 @@ fn capabilities_payload() -> Value {
                 "standalone_inflight_marker_is_visible_then_removed",
                 "prune_skips_task_with_live_inflight_marker",
                 "runs_inflight_lists_and_cleans_only_stale_markers",
+                "posix_rename_active_attempt_semantics",
             ],
-            "POSIX 与 Windows 均跑通 inflight 标记、stale 判定、prune 跳过与清理保护用例；POSIX 上 rename 活跃 attempt 目录的语义未单独构造复核，macOS 未验证。",
+            "POSIX 与 Windows 均跑通 inflight 标记、stale 判定、prune 跳过与清理保护用例；POSIX 上已单独复核 rename 活跃 attempt 目录：进程 cwd 指向该目录且持有目录内文件 fd 时 rename 与随后的 remove_dir_all 均成功，cwd/fd 跟随新路径且 fd 仍读到原内容。macOS 未验证。",
         ),
         capability_entry(
             "concurrency.prune_skips_known_active_task",

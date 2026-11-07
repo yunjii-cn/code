@@ -276,8 +276,9 @@ run_tests() {
     CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$WORK_DIR/target" \
       cargo test --offline -p aw-mcp-bridge -- --nocapture
   ) 2>&1 | tee "$LOG_FILE"
-  local rc
-  rc=${PIPESTATUS[0]}
+  # 必须在 local 自身的赋值展开里取 PIPESTATUS：单独一行 `local rc` 会先把 PIPESTATUS 重置为 0，
+  # 导致测试失败仍打印"全部通过"。
+  local rc=${PIPESTATUS[0]}
   [ "$rc" -eq 0 ] || fail test_failed "cargo test 退出码 ${rc}；见日志 $LOG_FILE"
 
   local missing="" token
