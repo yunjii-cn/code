@@ -49,3 +49,6 @@ aw.7z
 
 # Windows 保留设备名误生成（cwd 下 `> nul` 的残留）
 nul
+
+# 品牌预览截图（本地留证，未被文档引用，不入库）
+4.AgentWork/docs/brand/*-screenshot.png
