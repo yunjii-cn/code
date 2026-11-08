@@ -4917,7 +4917,7 @@ not_proven_total=2
 
 - 两条 Linux 专属能力（`proven`）在 Windows 上带 `unverified=['windows','macos']`，不会被读成 Windows 已证；cgroup 逃逸终止同此。
 - 两条 `*_windows` 条目保留在列表里，状态 `not_proven`，原因码 `requires_out_of_job_enumerable_terminable_os_primitive`；**没有删除、也没有标成通过**。作业内成员由握手夹具证成，作业外进程仍只是旁证。
-- 同脚本在 WSL 上实跑：`entries_total=21 platform={"arch": "x86_64", "os": "linux"} not_proven_total=2`——同样两条 Windows 作用域条目仍未证，未因「在 Linux 上跑不到」改写状态。
+- 同脚本在 WSL 上实跑：`entries_total=21 platform={"arch": "x86_64", "os": "linux"} not_proven_total=2`——同样两条 Windows 作用域条目仍未证，未因「在 Linux 上跑不到」改写状态。两条为什么没有 Windows 等价原语、替代路径与调用方口径，见 §56.1；cgroup 三条为什么不升级到 Windows，见 §56.2。
 
 ### 55.10 收尾实跑新发现：prune 并发败者被误判为 `retained_at_source`（已修）
 
@@ -4931,4 +4931,96 @@ not_proven_total=2
   - 两次判定都要求输出里出现 `test result: ok. 1 passed` 才算通过——`--exact` 名字写错时 cargo 会以 0 个用例退出码 0，只看退出码会得到假绿（本轮实测踩到过一次，已改判定方式）。
   - 全量门禁复跑结果见 §55.5。
 - **为什么不加进 quarantine**：这不是「已知不稳定」，是分类错误——败者本就没有任何东西留在源目录，把它记成「原样未动」会让 PM/审计看到假状态，属于必须修的行为。
+
+## 56. Windows 不受控进程与 cgroup 等价性：调查结论（v1.51）
+
+本轮把两个此前含糊的地方做实：两条 `not_proven` 到底缺什么原语、Windows 上有没有等价物；三条 cgroup 能力能不能按「作业对象配额/内存限制」升级到 Windows。结论是**不升级、不删除**：两条继续 `not_proven`，三条继续 `verified=['linux']`，但 `capabilities` 的 `detail` 已写清「为什么不可得 / 替代路径 / 调用方口径 / 为什么不冒充」，不再停留在三个字。
+
+### 56.1 两条 `not_proven`：Windows 没有「作业外进程可枚举 + 可终止 + 存活有权威来源」的三合一原语
+
+两条条目（`timeout.cleans_entire_process_tree_windows`、`timeout.enumerates_escaped_descendants_windows`）的 `reason_code` 是 `requires_out_of_job_enumerable_terminable_os_primitive`。逐 API 核查：
+
+| Windows API / 机制 | 覆盖范围 | 枚举作业外进程 | 终止作业外进程 | 存活有权威来源 | 结论 |
+|---|---|---|---|---|---|
+| `QueryInformationJobObject(JobObjectBasicProcessIdList)` | 只列**作业内**成员 PID | 否 | — | 只证明作业内成员是否还在 | 不满足 |
+| `TerminateJobObject` | 只杀与作业关联的成员（含嵌套子作业） | — | 否 | — | 不满足 |
+| 作业完成端口（`JOBOBJECT_MSG_*`） | 只在成员入作业 / 退出时投递事件 | 否（作业外进程不产生事件） | 否 | 事件不是存活快照 | 不满足 |
+| `CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)` / `EnumProcesses` / WMI `Win32_Process` / `NtQuerySystemInformation` | 可列全系统进程 | 能列「进程」，不能列「归属」 | 否 | 归属靠 ppid；ppid 不携带所有权、退出后不归零、PID 可复用 | 只是旁证 |
+| `JOB_OBJECT_LIMIT_BREAKAWAY_OK` / `SILENT_BREAKAWAY` | 允许进程**离开**作业 | 离开后立即不可见 | 否 | — | 反向能力，不是追回能力 |
+| 容器 / Windows 服务边界 | 宿主级隔离，不是进程级原语 | 否 | 否 | 由宿主保证 | 不是同一层语义 |
+
+为什么必须三合一：整树结论要求同时满足（1）枚举全（含 BREAKAWAY、加入作业失败、不进作业的 `conhost.exe` 等）；（2）可终止；（3）存活判定有权威来源、能排除 PID 复用。任一环缺失都会把「没看到」误读成「不存在」，因此不能拿单项拼成整树证明。
+
+**替代路径与调用方口径**（已写入两条条目的 `detail`）：
+
+1. **受控集合清理**：`timeout.terminates_controlled_set` 两平台 `proven`，保证作业内成员终止并观测集合内无存活。`cleaned` 只读成「受控集合已清理」，**不要**用它推导「系统无残留」。
+2. **独立旁证**：`timeout.descendant_snapshot_cross_check` 两平台 `proven`，用父链快照与作业成员交叉核对，能报「集合外仍有枚举到的后代」；v1.39 起父链边带创建时间/PID 复用过滤（审计 §42），但仍是旁证，不作权威存活结论。
+3. **强隔离**：需要「一定无残留」的场景请把任务放进容器或 Windows 服务边界，由宿主保证；AW 不宣称自己提供该保证。
+4. **调用方动作**：读 `capabilities` 时按 `id` + `platforms_verified` 判定，不要按平台名猜；需要更强证据时读 `receipt.get` 的后代快照并自行在作业外核查。
+
+**可复跑命令**（无需额外环境，Windows / WSL 均可）：
+
+```text
+cargo test --offline -p aw-mcp-bridge --test mcp_contract capabilities_declares_machine_readable_boundaries
+cargo test --offline -p aw-mcp-bridge --test mcp_contract timeout_cleans_controlled_set_including_grandchild
+```
+
+第一条钉死两条条目仍为 `holds=false` / `status=not_proven` / 同一 `reason_code` / `platforms_verified=["windows"]`，防止「顺手升级」；第二条证明受控集合内的孙进程确实被终止，同时不越界宣称整树。实测（2026-11-08）：前者 `1 passed`；后者在 Windows 门禁里输出 `grandchild_case=pass ready_seen=true ready_delay_ms=1045 survivors=Some([])` 并 `ok`。
+
+### 56.2 三条 cgroup 条目：Windows 无同类语义，不升级、不冒充
+
+对 `timeout.cgroup_v2_scope_observation`、`timeout.cgroup_kill_terminates_scope`、`lifecycle.startup_reclaims_abandoned_cgroup_scopes` 逐条判定：
+
+| 条目 | Linux 语义（判据） | Windows 侧候选 | 判定 |
+|---|---|---|---|
+| `timeout.cgroup_v2_scope_observation` | 进程属于且仅属于一个作用域；成员集合独立于父链，换父被收养后仍可枚举 | 作业成员枚举只覆盖作业内；BREAKAWAY 出去的进程立刻不可见，没有「作用域成员集合」 | 不够格 |
+| `timeout.cgroup_kill_terminates_scope` | 写 `cgroup.kill` 后作用域内全部进程（含终止过程中派生）被杀，子作用域传播 | `TerminateJobObject` 只杀与作业关联的成员（嵌套子作业可连带），对 BREAKAWAY / 未加入作业的进程无效；AW 也未建立嵌套作业 | 不够格 |
+| `lifecycle.startup_reclaims_abandoned_cgroup_scopes` | 可持久化的作用域目录 + sidecar 记录 owner/成员，启动时可枚举并回收孤儿 | 作业对象随句柄消失，没有可枚举的持久作用域目录，也没有「孤儿回收」语义；`KILL_ON_JOB_CLOSE` 只是句柄生命周期副作用 | 不够格 |
+
+**作业对象配额/内存限制是否够格**：`JOBOBJECT_EXTENDED_LIMIT_INFORMATION` 的 `ProcessMemoryLimit` / `JobMemoryLimit` / `ActiveProcessLimit` 是**资源上限**，不是**成员集合与生命周期**语义：
+
+- 只限制分配或阻止新进程加入作业，**不枚举当前成员**，也**不终止已有进程**；
+- 不覆盖已经 BREAKAWAY 出去的进程；
+- 超配额的表现是分配失败，不是「作用域已清空」。
+
+因此不能拿配额当 cgroup 的同类判据。三条保持 `status=proven` 仅对 Linux，`platforms_verified=["linux"]`、`platforms_unverified=["windows","macos"]`；`detail` 明写「Windows 无 cgroup v2 / 无 `cgroup.kill` 等价物 / 不升级」，**不冒充**。
+
+**可复跑命令**：
+
+```text
+# Linux（WSL）：跑出 cgroup 证据行
+AW_VENDOR=/root/vendor bash scripts/posix-timeout-verify/verify.sh run
+# 两平台：钉死平台覆盖字段
+cargo test --offline -p aw-mcp-bridge --test mcp_contract capabilities_declares_machine_readable_boundaries
+```
+
+WSL 实测（2026-11-08）证据行含 `cgroup_scope ... members=Some(Ok([66569]))`（被收养逃逸后代仍被成员集合点名）与 `cgroup_kill ... after outcome=Cleaned members=Ok([]) populated=Ok(0)`；Windows 上同一条目仍只声明 Linux，`unverified` 含 `windows`。
+
+### 56.3 门禁与指纹未变（本轮不放松任何门禁）
+
+本轮只改 `capabilities` 的 `detail` 文本与本审计章节；`detail` 不在 `tools/list` 描述与 schema 里，因此指纹不变：
+
+```text
+tools_sha256 = 95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316
+cargo test --offline -p aw-mcp-bridge --lib description_gate
+  test result: ok. 3 passed; 0 failed
+```
+
+两平台门禁（默认档，`RaceRepeat=1`）：
+
+```text
+Windows  gate.ps1   rc=0 elapsed=54.3s  SELFTEST pass=7 fail=0 | lib 27 passed | integration 130 passed | warn=0 fail=0 | [RACE] repeat=1（默认，未启用连跑）
+WSL      verify.sh  rc=0 elapsed=14s    lib 39 passed + 1 ignored | integration 128 passed | warn=0 fail=0 | [RACE] repeat=1（默认）
+quarantine.txt 非注释行 = 0
+```
+
+`capabilities` 实跑（同一份二进制）两平台均为 `entries_total=21 not_proven_total=2`；三条 cgroup 仍 `verified=['linux']`，两条 `*_windows` 仍 `not_proven` + 原 `reason_code`——**没有删除、没有标通过、没有新增 verified**。
+
+### 56.4 顺带修复：setsid 夹具读空文件的竞态（未用 quarantine）
+
+本轮复跑 WSL 门禁时，`setsid_escape_is_flagged_then_unobservable_after_reparent` 红一次，报 `setsid 子进程 PID: ParseIntError { kind: Empty }`。不是产品缺陷，也不是「已知不稳定」：夹具脚本 `setsid sleep 30 & echo $! > pid.txt` 的**重定向先创建空文件**，`echo` 稍后才写入；测试轮询只要文件存在就 break，读到空内容后直接 `parse()`。首次运行靠时序侥幸通过，整机并发高时暴露。
+
+- **修复**（`apps/mcp-bridge/src/server.rs`，两处同样的 `pid_file` 轮询夹具）：读到空内容视为「尚未就绪」继续轮询，非空才取值；不缩短超时、不放宽断言。
+- **验证**（WSL，最终代码）：精确连跑 12 次 `ok=12 bad=0`；全量 lib 套件并行连跑 5 次，每次均 `39 passed; 0 failed; 1 ignored`，无 `FAILED`。
+- **为什么不进 quarantine**：这是夹具的竞态读，修一行就消除；用 quarantine 会把它变成长期 WARN，掩盖真实信号。
 

@@ -5459,8 +5459,12 @@ mod process_scope {
                 let mut content = None;
                 for _ in 0..100 {
                     if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                        content = Some(text.trim().to_string());
-                        break;
+                        let trimmed = text.trim();
+                        // 重定向会先创建空文件，`echo $!` 稍后才写入；读到空内容不算就绪。
+                        if !trimmed.is_empty() {
+                            content = Some(trimmed.to_string());
+                            break;
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -5911,8 +5915,12 @@ mod process_scope {
                 let mut content = None;
                 for _ in 0..100 {
                     if let Ok(text) = std::fs::read_to_string(&pid_file) {
-                        content = Some(text.trim().to_string());
-                        break;
+                        let trimmed = text.trim();
+                        // 重定向会先创建空文件，`echo $!` 稍后才写入；读到空内容不算就绪。
+                        if !trimmed.is_empty() {
+                            content = Some(trimmed.to_string());
+                            break;
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
@@ -10433,7 +10441,7 @@ fn capabilities_payload() -> Value {
                 "descendant_snapshot_cross_checks_job_accounting",
                 "timeout_cleans_controlled_set_including_grandchild",
             ],
-            "需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。受控集合内的孙进程已由握手夹具证成（timeout_cleans_controlled_set_including_grandchild，ready_delay_ms 实测），但这只覆盖作业内成员，不上调为整树。作业外进程的父链快照只是旁证：conhost.exe 等不进作业的进程、创建时间/存活状态读不到时都可能误判。",
+            "需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。已核查 Windows API：`QueryInformationJobObject(JobObjectBasicProcessIdList)` 与 `TerminateJobObject` 都只作用于作业内成员；`CreateToolhelp32Snapshot`/`EnumProcesses`/WMI 能列全系统进程，但父 PID 不携带所有权且会被复用，无法权威归属到本任务。受控集合内的孙进程已由握手夹具证成（timeout_cleans_controlled_set_including_grandchild，ready_delay_ms 实测），但这只覆盖作业内成员，不上调为整树。审计 §56.1 给了替代路径与调用方口径：把 timeout 理解为「受控集合清理」，不要用 cleaned 推导无残留；需要强隔离请放到容器/Windows 服务边界。",
         ),
         capability_entry(
             "timeout.enumerates_escaped_descendants",
@@ -10467,7 +10475,7 @@ fn capabilities_payload() -> Value {
                 "descendant_snapshot_flags_descendants_outside_controlled_set",
                 "descendant_snapshot_cross_checks_job_accounting",
             ],
-            "需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。v1.39 起每条父链边要求「子进程创建时间 ≥ 父进程创建时间」、根→直接子进程加「≤ 根退出时间」上界，并剔除已终止或 PID 已不存在的行，同号 PID 复用后的无关树与枚举残行不再被误连（审计 §42），但仍只是旁证：作业外进程与读不到存活状态的进程无法给出权威结论。",
+            "需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。v1.39 起每条父链边要求「子进程创建时间 ≥ 父进程创建时间」、根→直接子进程加「≤ 根退出时间」上界，并剔除已终止或 PID 已不存在的行，同号 PID 复用后的无关树与枚举残行不再被误连（审计 §42），但仍只是旁证：作业外进程与读不到存活状态的进程无法给出权威结论。Windows 侧作业成员枚举只能证明「作业内成员是否还在」，不是作业外进程的权威枚举；审计 §56.1 说明为什么没有等价原语、以及调用方应改用哪些判据。",
         ),
         capability_entry(
             "timeout.cgroup_v2_scope_observation",
@@ -10482,7 +10490,7 @@ fn capabilities_payload() -> Value {
                 "cgroup_scope_enumerates_adopted_escapee",
                 "cgroup_unavailable_degrades_with_reason",
             ],
-            "只声明观测能力；终止能力由 `timeout.cgroup_kill_terminates_scope` 单独声明。实测 WSL Ubuntu 24.04（cgroup v2，root）下被收养逃逸后代仍被枚举。",
+            "只声明观测能力；终止能力由 `timeout.cgroup_kill_terminates_scope` 单独声明。实测 WSL Ubuntu 24.04（cgroup v2，root）下被收养逃逸后代仍被枚举。Windows 无 cgroup v2：Job Object 成员枚举只覆盖作业内进程，且无法观测 BREAKAWAY 出去的进程，因此不把本条升级到 windows；Windows 的独立成员枚举由 `timeout.descendant_snapshot_cross_check` 单独声明。审计 §56.2。",
         ),
         capability_entry(
             "timeout.cgroup_kill_terminates_scope",
@@ -10494,7 +10502,7 @@ fn capabilities_payload() -> Value {
             &["linux"],
             &["windows", "macos"],
             &["cgroup_kill_terminates_adopted_escapee"],
-            "写 `cgroup.kill` 后按三个独立观测量复核：`cgroup.procs` 为空、`cgroup.events` 为 `populated 0`、逃逸 PID 已不存在；任一不满足或读不出即报 StillAlive/Unavailable，绝不当成已清理。",
+            "写 `cgroup.kill` 后按三个独立观测量复核：`cgroup.procs` 为空、`cgroup.events` 为 `populated 0`、逃逸 PID 已不存在；任一不满足或读不出即报 StillAlive/Unavailable，绝不当成已清理。Windows 无 `cgroup.kill` 等价物：`TerminateJobObject` 只杀与作业关联的成员（含嵌套子作业），无法覆盖已离开作业或从未加入作业的进程，AW 也未建立嵌套作业，故不升级到 windows。审计 §56.2。",
         ),
         capability_entry(
             "timeout.descendant_snapshot_cross_check",
@@ -10667,7 +10675,7 @@ fn capabilities_payload() -> Value {
                 "cgroup_reclaim_keeps_scope_when_owner_alive",
                 "cgroup_reclaim_keeps_scope_without_attempt_evidence",
             ],
-            "实跑：real-chain B5（bridge kill -9 → 孙进程留存 → 下一次启动后消失），审计 runs/cgroup-reclaim.jsonl 带 trigger=startup、scope、members_before/members_after。无 sidecar 的同类目录只报不删。边界：仅在启动时执行（AW_INFLIGHT_SWEEP_SECS=off 时关闭）；cgroup v2 不可用/只读时 state=unsupported，不宣称收敛；内核无 cgroup.kill 时逐成员 SIGKILL 并每轮重读 cgroup.procs，仍有 PID 复用窗口。Windows 无 cgroup v2，由 Job Object 在桥句柄关闭时整树回收；macOS 未验证。",
+            "实跑：real-chain B5（bridge kill -9 → 孙进程留存 → 下一次启动后消失），审计 runs/cgroup-reclaim.jsonl 带 trigger=startup、scope、members_before/members_after。无 sidecar 的同类目录只报不删。边界：仅在启动时执行（AW_INFLIGHT_SWEEP_SECS=off 时关闭）；cgroup v2 不可用/只读时 state=unsupported，不宣称收敛；内核无 cgroup.kill 时逐成员 SIGKILL 并每轮重读 cgroup.procs，仍有 PID 复用窗口。Windows 无 cgroup v2：`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 会在桥句柄关闭时清理**作业内**成员，但没有可回收的作用域目录与 sidecar 语义（也不覆盖 BREAKAWAY 出去的进程），故不升级到 windows；macOS 未验证。审计 §56.2。",
         ),
         capability_entry(
             "cancel.cross_process_request_visible",
