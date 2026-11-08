@@ -1,14 +1,14 @@
 """
 tests/test_all_phases_verification.py
-2026-06-10 引入：全计划 35 任务端到端验证（现为 34 项，TASK-1.8 已移除）
+2026-06-10 引入：全计划 35 任务端到端验证（TASK-1.8 曾因断言不存在的路径移除，现按真实 workflow 路径加回）
 2026-11 重写：按 4 代目录结构取路径（<产品>/api + <产品>/ui），并同步归档后的文档位置
 
 验证所有 Phase 1/2/3/4 任务的实际文件存在 + 关键 API 存在。
 不是单元测试，是"项目状态验证"脚本，确保所有 TASK 没虚标。
 
-TASK-1.8（GitHub Actions CI）已移除：本产品没有 CI 配置，仓库里唯一的
-ci.yml 在 1.PC/.github/ 且只覆盖 1.PC；断言一个不存在的产物会恒红，
-不能当门禁。详见 IMPROVEMENT-PLAN.md 的 BACKLOG 条目。
+TASK-1.8 断言的是 <产品>/.github/workflows/ci.yml（与 1.PC 同一种组织方式）。
+GitHub Actions 只读取仓库根 .github/workflows/，因此这份配置要等根级 workflow
+调用或拆仓后才会被远端执行；断言只保证配置内容指向真实目录与真实命令。
 """
 import sys
 from pathlib import Path
@@ -41,7 +41,7 @@ sys.path.insert(0, str(APP))
 
 
 class TestPhase1:
-    """TASK-1.1~1.9 基础工程化（1.8 已移除，见模块 docstring）"""
+    """TASK-1.1~1.9 基础工程化"""
 
     def test_task_1_1_agents_md(self):
         """TASK-1.1: AGENTS.md 存在并通过审查"""
@@ -103,6 +103,24 @@ class TestPhase1:
         assert tsconfig.exists()
         text = tsconfig.read_text(encoding="utf-8")
         assert "strict" in text, "tsconfig.app.json 应开启 strict"
+
+    def test_task_1_8_ci_workflow(self):
+        """TASK-1.8: 本产品的 CI workflow 存在且指向真实目录与真实命令
+
+        位置按 1.PC 的既有组织方式放在 <产品>/.github/workflows/。GitHub Actions
+        只读取仓库根 .github/workflows/，所以这份配置要等根级 workflow 调用或拆仓
+        后才会被远端执行；这里断言配置内容本身正确——目录必须是本产品的 api/，
+        命令必须是 pytest，且不能残留已删除的 dev/app、dev/web。
+        """
+        ci = PRODUCT / ".github" / "workflows" / "ci.yml"
+        assert ci.exists(), f"CI workflow 缺失: {ci}"
+        text = ci.read_text(encoding="utf-8")
+        assert "jobs:" in text, "workflow 没有 jobs"
+        assert f"{PRODUCT.name}/api" in text, "workflow 未指向本产品的 api 目录"
+        assert "pytest" in text, "workflow 未执行 pytest"
+        assert "dev/app" not in text and "dev/web" not in text, "workflow 仍指向已删除的旧目录"
+        # 被指向的目录与 pytest 配置必须真实存在
+        assert (APP / "pytest.ini").exists()
 
     def test_task_1_9_design_system(self):
         """TASK-1.9: Design System 5 个原子组件"""
@@ -307,7 +325,7 @@ class TestAllApiRoutes:
 
 
 def test_summary_of_all_tasks():
-    """34 任务全过 — 项目状态报告（TASK-1.8 已移除，见模块 docstring）"""
+    """35 任务全过 — 项目状态报告"""
     task_files = {
         # Phase 1
         "1.1": [ROOT / "AGENTS.md"],
@@ -320,6 +338,7 @@ def test_summary_of_all_tasks():
         "1.5": [WEB / "eslint.config.mjs", WEB / ".prettierrc.js"],
         "1.6": [APP / "tests"],  # directory
         "1.7": [WEB / "tsconfig.app.json"],
+        "1.8": [PRODUCT / ".github" / "workflows" / "ci.yml"],
         "1.9": [SHARED_WEB / "components" / "YJButton.vue",
                 SHARED_WEB / "components" / "YJModal.vue",
                 SHARED_WEB / "components" / "YJPopover.vue",
@@ -372,4 +391,4 @@ def test_summary_of_all_tasks():
                 missing.append(f"{task_id}: {f}")
 
     assert len(missing) == 0, "缺失文件：\n" + "\n".join(missing[:20])
-    assert len(task_files) == 34, f"应有 34 个 TASK（1.8 已移除），实际 {len(task_files)}"
+    assert len(task_files) == 35, f"应有 35 个 TASK，实际 {len(task_files)}"

@@ -1459,9 +1459,9 @@ v2.1 阶段划分（命名延续 M0-M8）：
 ### 🗄️ BACKLOG（跨产品，暂不动）
 
 - [x] 2.WEB / 3.dev 的旧 35-TASK 验证脚本已按 4 代目录重写（`<产品>/api` + `<产品>/ui`，代码地图指向 `doc/archive/`），两产品各 44 passed，并做过抽文件扰动红证明
-- [ ] 2.WEB / 3.dev 缺 CI 门禁：仓库里唯一的 `ci.yml` 在 `1.PC/.github/` 且只覆盖 1.PC，这两个产品没有任何自动化检查
-  - 原 TASK-1.8 断言的是根 `.github/workflows/ci.yml`，该文件从未存在，属恒红，已从验证脚本移除
-  - 补齐时按产品加 workflow，再把 1.8 以真实路径加回验证脚本
+- [ ] 2.WEB / 3.dev 的 CI 门禁只做了一半：已在各自目录加 `.github/workflows/ci.yml`（后端 pytest，本地验证 251 passed），但**远端还不会执行**
+  - GitHub Actions 只读取仓库根 `.github/workflows/`，产品目录下的 workflow 不会被发现；要真正生效需在根目录加 caller 或拆仓
+  - 前端 lint / typecheck 未接线：本机未安装 Node.js（`node.exe` 缺失，只有指向它的 `npm.ps1` shim），无法本地验证一次，故没有硬塞进流水线
 
 ---
 
