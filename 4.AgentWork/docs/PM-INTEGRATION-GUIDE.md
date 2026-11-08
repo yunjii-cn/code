@@ -331,7 +331,9 @@ PM 的另一个进程可以只靠文件取消，无需 MCP 连接：
 - `cleanup_status` 缺失/`null`：旧版 bridge 或回执不可读 → 按「未验证」处理，不得宣布已清理。
 - `request_state=pending/acknowledged`、`not_running`、`completed_before_cancel` 都意味着「没有发生过本次取消的、已确认的清理」。
 
-> **与 PM 判定模块对齐**：PM 侧把 `request_state=acknowledged` 归为 `cleaning`（不代表已清理），把「`status=canceled` + `cleanup_claimed=true` + `handback_status=canceled`」三条同时成立判为 `cleaned`，把 `not_started` 判为 `cleanup_unconfirmed`——与本节的 `cleanup_status` 口径等价。唯一需要留意的是**旧回执**：v1.51 之前的记录没有 `cleanup_status`，且旧版 `cleanup_claimed` 只要 `canceled` 就为 true；PM 模块为兼容把「三条成立 + `cleanup_status` 缺省」判为 `cleaned`，这可能把旧版「取消成功但未验证残留」误判。新回执不会缺省该字段；若要读旧记录，先用 `status.contract_version` 区分，`< 1.51` 的旧记录不要当作已清理证据。
+> **与 PM 判定模块对齐**：PM 侧把 `request_state=acknowledged` 归为 `cleaning`（不代表已清理），并只在 `status=canceled`、`cleanup_claimed=true`、`handback_status=canceled`、`contract_version ≥ 1.51`、`cleanup_status=cleaned` 五者同时成立时判 `cleaned`；`not_started` 判 `cleanup_unconfirmed`。本节上文三条是 AW 给出的**对外宣布**口径；PM 侧判定模块在其之上再加 `contract_version` 与 `cleanup_claimed` 两道校验，**只会更严、不会更宽**。
+>
+> **旧回执（2026-11-09 订正）**：v1.51 之前的记录没有 `cleanup_status`，且旧版 `cleanup_claimed` 只要 `canceled` 就为 true。PM 侧（云集项目管家仓库的 `src/core/aw-cancel-policy.mjs`，由 `test/aw-cancel-policy.test.mjs` 的版本门槛用例钉死）对这类旧回执**一律判 `cleanup_unconfirmed`，不会误判为已清理**；此前本文写成「PM 为兼容把三条成立 + `cleanup_status` 缺省判为 `cleaned`、可能误判」，描述的是 PM 收紧之前的行为，已作废。新回执不会缺省该字段；若要读旧记录，先用 `status.contract_version` 区分，`< 1.51` 的旧记录不要当作已清理证据。
 
 只满足其中一部分（例如 `status=canceled` 但 `cleanup_status=still_alive`，或文件里 `status=done` 但缺 `cleanup_status`）**不算已清理**。AW 的回归用例 `cancel_request_terminal_state_never_overclaims_cleanup` 用真实终态做变异，逐一验证这五种「只满足部分条件」都不会被判成已清理。
 
