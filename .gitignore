@@ -38,3 +38,14 @@ Thumbs.db
 
 # 数据目录（用户运行时产生）
 data/
+
+# 第三方参考源码（只作本地查阅，不是本项目代码）
+CodexMonitor/
+
+# 打包归档与工具工作目录
+aw.7z
+.workbuddy/
+4.AgentWork/img/
+
+# Windows 保留设备名误生成（cwd 下 `> nul` 的残留）
+nul
