@@ -1,231 +1,129 @@
-# 云集智能 - AGENTS.md（3 代架构契约）
+# 云集智能 - AGENTS.md（4 代架构契约）
 
-> **目的**：所有 AI 协作（Trae / Cursor / Claude Code / 任意 agent）必须遵守的项目契约。
-> **生效日期**：2026-06-10
-> **取代**：旧 `dev/AGENTS.md`（路径已变更）
+> 目的：所有 AI 协作必须遵守的项目契约。  
+> 生效日期：2026-06-24  
+> 取代：2026-06-10 的 3 代架构契约。
 
----
+## 0. 产品线契约
 
-## 0. 3 代产品线契约
+本仓库是 **云集智能**（Yunji）的产品矩阵仓库，当前包含 4 条产品线和 2 个官网站点：
 
-本项目是 **云集智能**（Yunji）—— 一家做 **AI 原生编程工作空间** 的公司，旗下 3 个产品线：
+| 代 | 目录 | 产品 | 档位 | 状态 |
+|:---:|:---|:---|:---:|:---|
+| 1 | `1.PC/` | 云集 PC 版 | Free | 完整可跑 |
+| 2 | `2.WEB/` | 云集 Web 版 | Pro | 半成品 |
+| 3 | `3.dev/`（迁移目标：`3.Team/`） | 云集团队版 | Business | 继续维护 |
+| 4 | `4.AgentWork/` | 云集智能体工作台 / AgentWork | Enterprise | 新主力 |
+| - | `work.yunjii.cn/` | 云集工作台门户 | - | 待开发 |
+| - | `aw.yunjii.cn/` | AgentWork 官网 | - | 待开发 |
 
-| 代 | 目录 | 产品 | 档位 | 价格 | 状态 |
-|:---:|:---|------|:---:|:---:|------|
-| 1 | `1.PC/` | 云集桌面 | Free | ¥0 | ✅ 完整可跑 |
-| 2 | `2.WEB/` | 云集 Web | Pro | ¥9.9/月 | 🟡 半成品 |
-| 3 | `3.dev/` | 云集旗舰 | Business | ¥99/月 | 🟢 全力开发 |
+所有 agent 必须：
 
-**所有 agent 必须**：
+1. 明确自己工作在哪个范围：`1.PC` / `2.WEB` / `3.dev` / `4.AgentWork` / `work.yunjii.cn` / `aw.yunjii.cn` / 跨产品。
+2. 明确自己工作在哪个层：产品、API、UI、平台层、企业服务、文档、官网。
+3. 新的 AI 员工、AI 团队、行业模板、自进化能力优先在 `4.AgentWork/` 落地。
+4. `1.PC/` 是独立产品，不依赖 `3.dev/` 或 `4.AgentWork/`。
+5. `2.WEB/` 和 `3.dev/` 代码独立维护，可以复制思想，不能形成隐式强耦合。
+6. 根级 `doc/` 只放全局文档；产品专属文档必须放回对应产品目录。
 
-1. **明确自己工作在哪个代**（1.PC / 2.WEB / 3.dev / 跨代）
-2. **明确自己工作在哪个层**（platformkit / api / ui / enterprise-services）
-3. **新功能先在 3.dev 落地**，再考虑是否同步到 2.WEB
-4. **1.PC 是独立产品**，不动 platformkit / 不依赖 3.dev
-5. **企业服务**（私有化 / 授权 / 培训）独立议价
-
----
-
-## 1. 路径契约（2026-06-10 重写）
-
-> **旧路径已废弃**：`dev/app/`、`dev/dev/app/`、`dev/dev/web/`、根目录 `*.bat` 散落
-
-### 1.1 项目根
+## 1. 路径契约
 
 ```
-云集智能/                          <-- 项目根
-├── 1.PC/                          第 1 代：云集桌面
-├── 2.WEB/                         第 2 代：云集 Web
-├── 3.dev/                         第 3 代：云集旗舰
-├── BAK/                           历史归档（保留参照）
-├── doc/                           根级共享文档
-├── 启动.bat                       ⭐ 总入口
-├── 启动-云集桌面.bat
-├── 启动-云集Web.bat
-├── 启动-云集旗舰.bat
-├── 一键环境部署.bat
-└── AGENTS.md                      本文件
+云集智能编程工作站/
+├── 1.PC/                 第 1 代：云集 PC 版
+├── 2.WEB/                第 2 代：云集 Web 版
+├── 3.dev/                第 3 代：云集团队版（迁移目标：3.Team/）
+├── 4.AgentWork/          第 4 代：云集智能体工作台 / AgentWork
+├── work.yunjii.cn/       云集工作台门户站点
+├── aw.yunjii.cn/         AgentWork 旗舰产品站
+├── doc/                  根级全局文档
+├── BAK/                  历史归档
+├── AGENTS.md             本文件
+└── README.md             项目入口
 ```
 
-### 1.2 1.PC/ 结构
+旧路径 `dev/app/`、`dev/dev/app/`、`dev/dev/web/` 已废弃。旧文档若仍引用这些路径，应标注为历史参考，不能作为当前实现依据。
 
-```
-1.PC/
-├── app/                <-- PyQt6 启动器（**代码与原 dev/app/ 1:1 一致**）
-│   ├── main.py
-│   ├── backend.py
-│   ├── services/
-│   ├── api/            qwen2api / zhipu2api 子应用
-│   ├── platformkit/    桌面版平台层（与 3.dev 独立）
-│   ├── routes/
-│   ├── scripts/        install-env.ps1
-│   ├── uv/             便携版 uv
-│   ├── python/         便携版 Python
-│   ├── nodejs/         便携版 Node.js
-│   ├── bun/            便携版 Bun
-│   └── icon.ico / icon.png
-├── build/              PyInstaller 脚本
-├── data/  _internal/  dist/  ver/  temp/
-└── AGENTS.md  tier.yaml  README.md
-```
+## 2. 文档契约
 
-**重要**：1.PC 内部结构**与原 dev/app/ 1:1 一致**，**所有 import 路径不需修改**。
+文档归属规则见 [doc/文档治理规范.md](doc/文档治理规范.md)。产品命名和品牌表达见 [doc/品牌与命名规范.md](doc/品牌与命名规范.md)。
 
-### 1.3 2.WEB/ 结构
+- 根级 `doc/`：产品矩阵、品牌、商业模式、全局路线、站点计划、跨产品架构。
+- `1.PC/doc/`：PyQt6、本地桌面、打包、进程控制、单实例、便携环境。
+- `2.WEB/doc/`：Web 化、多端、PWA、轻量 Pro 版。
+- `3.dev/doc/`：云集团队版、Platformkit、团队协作、旧 3 代规范。
+- `4.AgentWork/docs/`：AgentWork 架构、AI 员工、AI 团队、行业模板、Tauri/Rust。
+- `BAK/`：无维护价值或低频查阅的历史计划、原始对话、临时旧文件。
 
-```
-2.WEB/
-├── api/                FastAPI 后端（**结构照搬 3.dev/api/**）
-│   ├── api_main.py
-│   ├── backend.py
-│   ├── services/
-│   ├── routes/         17 个 API（与 3.dev 同步）
-│   └── tests/
-├── ui/                 Vue 3 + Vite 前端（**结构照搬 3.dev/ui/**）
-│   ├── src/views/  src/components/  src/stores/  src/platform/
-│   └── package.json
-├── build/
-└── tier.yaml  README.md
-```
+## 3. 产品工作流
 
-### 1.4 3.dev/ 结构
+### 3.1 修改 `1.PC/`
 
-```
-3.dev/
-├── platformkit/        <-- 共享层（**3 代技术精华，最大最全**）
-│   ├── shared/         12+ 核心模块
-│   │   ├── ai_engine.py
-│   │   ├── knowledge_core.py
-│   │   ├── responsive_core.py
-│   │   ├── team_core.py
-│   │   ├── yjs_server.py
-│   │   ├── auth_core.py
-│   │   ├── durable_store.py
-│   │   ├── model_router.py
-│   │   ├── github_core.py
-│   │   ├── whisper_core.py
-│   │   ├── skill_market.py
-│   │   ├── tailscale_core.py
-│   │   ├── billing_core.py          🆕
-│   │   ├── tenant_core.py           🆕
-│   │   └── audit_core.py            🆕
-│   └── daemon/         独立 daemon 进程
-├── api/                FastAPI 后端（**最全**）
-│   ├── api_main.py
-│   ├── backend.py
-│   ├── services/
-│   ├── routes/         全部 17 个 API
-│   └── tests/          250+ pytest
-├── ui/                 Vue 3 + Vite 前端（**最全**）
-│   ├── src/features/   15 features
-│   ├── src/shared/     设计系统 5 组件
-│   └── src/views/
-├── enterprise-services/  <-- 🟣 企业服务
-│   ├── deployment/     私有化部署
-│   ├── licensing/      商业授权
-│   └── support/        SLA / 培训
-├── .github/workflows/  CI
-└── tier.yaml  README.md
-```
+- 保持独立可运行。
+- 不引入 `3.dev/` 或 `4.AgentWork/` 依赖。
+- PyQt6、QWebEngineView、便携 Python/uv/Node/Bun 相关文档放 `1.PC/doc/`。
 
-### 1.5 文档
+### 3.2 修改 `2.WEB/`
 
-```
-doc/                    根级共享文档
-├── 产品线矩阵.md       <-- 商业 + 技术双轨入口
-├── 全面超越-参考CodexMonitor改造计划.md
-├── Web化跨平台改造规划.md
-├── 智能编程工作站产品规划.md
-└── 云集智能平台产品蓝图.md
-```
+- 面向低价、轻量、多端使用场景。
+- 从 `3.dev/` 借鉴时复制设计，不直接引用代码。
+- 去掉复杂企业能力，优先保持简单可用。
 
----
+### 3.3 修改 `3.dev/`
 
-## 2. 工作流契约
+- 面向 Business 档中小企业团队。
+- 维护 Python/FastAPI/Vue/Platformkit 路线。
+- Platformkit 变动要检查 `2.WEB/` 是否需要同步思想或能力。
 
-### 2.1 修改 1.PC（PyQt6）
+### 3.4 修改 `4.AgentWork/`
 
-- ✅ **不动** platformkit（与 3.dev 独立）
-- ✅ **不动** routes 之外的跨代引用
-- ⚠️ PyQt6 + QWebEngineView 自带 Chromium（~200MB）
-- ⚠️ `dev/` 旧路径已废弃
+- 面向 Enterprise 档和 2026 下半年主力方向。
+- 独立技术栈：Tauri 2 + Rust + React。
+- 不依赖 `1.PC/2.WEB/3.dev` 的运行时代码。
+- 必须优先考虑 AI 员工、行业模板、任务驱动 + 互动机制双引擎。
 
-### 2.2 修改 2.WEB
+### 3.5 修改官网站点
 
-- ⚠️ 与 3.dev 共享思想，**代码独立维护**
-- ✅ 从 3.dev 借鉴时，**复制而非引用**（避免强耦合）
-- ✅ 简化版优先（去掉复杂的企业特性）
+- `work.yunjii.cn/` 是矩阵门户和统一身份入口，不承载具体产品重业务。
+- `aw.yunjii.cn/` 是 AgentWork 产品站，不自建独立用户数据库。
+- 两个站点可以在当前仓库孵化，但目录、构建和部署从第一天保持可拆分。
 
-### 2.3 修改 3.dev
+## 4. 构建与测试
 
-- ✅ 主力开发目录
-- ✅ 新功能先在 3.dev 落地
-- ✅ Platformkit 共享层变动需同步检查 2.WEB
-
-### 2.4 修改企业服务
-
-- 🟣 `3.dev/enterprise-services/` 独立维护
-- 💰 价格单独议价，不进 tier.yaml
-- 📞 涉及金额时回到产品线矩阵
-
----
-
-## 3. 构建契约
-
-### 3.1 打包命令
-
-| 产品 | 命令 | 输出位置 |
-|------|------|----------|
-| 1.PC | `cd 1.PC\app && uv\uv.exe run main.py` | 开发模式 |
-| 1.PC EXE | `cd 1.PC\build && python build_pc.py` | `1.PC/dist/云集智能编程工作站-v*.exe` (单EXE自部署) |
-| 2.WEB | `cd 2.WEB\api && uv run api_main.py` | 开发模式 |
-| 2.WEB EXE | `cd 2.WEB\build && python build.py` | `2.WEB/dist/云集Web-v*/` |
-| 3.dev | `cd 3.dev\api && uv run api_main.py --flagship` | 开发模式 |
-| 3.dev EXE | `cd 3.dev\build && python build.py` | `3.dev/dist/云集旗舰-v*/` |
-
-### 3.2 EXE 输出位置
-
-- 1.PC EXE → `1.PC/dist/云集智能编程工作站-v2026.06.10.HHMM.exe` (单EXE自部署)
-- 2.WEB EXE → `2.WEB/dist/云集Web-v2026.06.10.HHMM/`
-- 3.dev EXE → `3.dev/dist/云集旗舰-v2026.06.10.HHMM/`
-- 统一归档到根 `build_artifacts/`（未来）
-
-### 3.3 打包模式
-
-- **1.PC 使用 `--onefile`**（单 EXE 自部署，首次运行自动展开目录结构，无 `_internal`）
-- **2.WEB / 3.dev 使用 `--onedir`**（分散输出）
-- PyInstaller + Vite 双轨
-
----
-
-## 4. 测试契约
-
-| 产品 | 测试命令 |
-|------|----------|
-| 1.PC | `cd 1.PC\app && pytest tests/` |
-| 2.WEB | `cd 2.WEB\api && pytest tests/` |
-| 3.dev | `cd 3.dev\api && pytest tests/` |
-| 3.dev UI | `cd 3.dev\ui && npm test` |
-
----
+| 范围 | 命令 |
+|---|---|
+| 1.PC 开发 | `cd 1.PC\app && uv\uv.exe run main.py` |
+| 1.PC 测试 | `cd 1.PC\app && pytest tests/` |
+| 2.WEB API | `cd 2.WEB\api && uv run api_main.py` |
+| 2.WEB 测试 | `cd 2.WEB\api && pytest tests/` |
+| 3.dev API | `cd 3.dev\api && uv run api_main.py --flagship` |
+| 3.dev API 测试 | `cd 3.dev\api && pytest tests/` |
+| 3.dev UI 测试 | `cd 3.dev\ui && npm test` |
+| 4.AgentWork 桌面 | `cd 4.AgentWork\apps\desktop && pnpm tauri dev` |
+| 4.AgentWork Rust | `cd 4.AgentWork && cargo test` |
+| 4.AgentWork 前端 | `cd 4.AgentWork && pnpm test` |
 
 ## 5. Git 契约
 
-- **提交**：`1.PC/app/`、`2.WEB/api/`、`2.WEB/ui/`、`3.dev/api/`、`3.dev/ui/`、`3.dev/platformkit/`、`doc/`
-- **不提交**：EXE、`_internal/`、`build/`、`dist/`、`node_modules/`、`.pytest_cache/`、`__pycache__/`
+可提交：
 
----
+- `1.PC/app/`、`1.PC/doc/`
+- `2.WEB/api/`、`2.WEB/ui/`、`2.WEB/doc/`
+- `3.dev/api/`、`3.dev/ui/`、`3.dev/platformkit/`、`3.dev/doc/`
+- `4.AgentWork/`
+- `work.yunjii.cn/`、`aw.yunjii.cn/`
+- `doc/`
+
+不提交：
+
+- `dist/`、`build_artifacts/`、`node_modules/`
+- `.pytest_cache/`、`__pycache__/`
+- 临时文件、下载缓存、生成 EXE、运行时数据
 
 ## 6. 变更历史
 
-| 日期 | 变更 | 负责人 |
-|------|------|--------|
-| 2026-06-10 | 3 代产品线从根目录分离：`dev/app/` → `1.PC/app/`、`dev/dev/` → `2.WEB/` + `3.dev/`、根 `AGENTS.md` 重写 | Trae |
-| 2026-06-10 | 删除 Electron / Ink UI / Claude Code 残留 | Trae |
-| 2026-06-10 | 新建 `启动.bat` / `启动-云集桌面.bat` / `启动-云集Web.bat` / `启动-云集旗舰.bat` / `一键环境部署.bat` | Trae |
-| 2026-06-10 | 新建 3 个产品 README + tier.yaml | Trae |
-| 2026-06-13 | 1.PC 打包模式从 `--onedir` 改为 `--onefile` 自部署，新增 `launcher.py` 入口，`build_pc.py` 重写 | Qoder |
-
----
-
-> **最后**：本文件是项目宪法。所有 agent 修改前请**先读**本文件，**再行动**。
+| 日期 | 变更 |
+|---|---|
+| 2026-06-10 | 根目录拆分为 1.PC / 2.WEB / 3.dev 三代产品线 |
+| 2026-06-17 | 新增 4.AgentWork 第 4 代产品线 |
+| 2026-06-24 | 根级契约升级为 4 代 + 双站点；文档按全局/产品/归档重新分层 |
