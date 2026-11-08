@@ -30,10 +30,11 @@
 | `work.yunjii.cn` | [../work.yunjii.cn/README.md](../work.yunjii.cn/README.md) | 产品矩阵门户和统一入口 |
 | `aw.yunjii.cn` | [../aw.yunjii.cn/README.md](../aw.yunjii.cn/README.md) | AgentWork 旗舰产品站 |
 
-## 低频历史材料
+## 归档材料
 
 | 目录 | 说明 |
 |---|---|
-| [../BAK/文档归档-20260624/](../BAK/文档归档-20260624/) | 低频历史规划、原始对话和已被现行文档替代的大型计划 |
+| [archive/](archive/) | 仍被现行索引引用的少量历史文档（旧路径开发指南、旧代码地图、CodexMonitor 改造计划），仓库内可查 |
+| [../BAK/文档归档-20260624/](../BAK/文档归档-20260624/) | 低频历史规划、原始对话和已被现行文档替代的大型计划，仅本地保存，不入库 |
 
 备份文档默认不是当前规范。引用备份内容时，必须说明它是历史参考，并用现行 README / AGENTS / 产品文档校验。

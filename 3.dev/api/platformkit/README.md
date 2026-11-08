@@ -136,5 +136,5 @@ cp -r BAK/app_pre_platform_20260608/platformkit 3.dev/api/
 
 - [根 AGENTS.md](../../../AGENTS.md) — AI 协作者契约
 - [3.dev 文档索引](../../doc/README.md) — 第 3 代产品文档入口
-- [3.dev 旧代码地图归档](../../../BAK/文档归档-20260624/3.dev/doc/codebase-map-旧路径参考.md) — 旧路径参考，不能直接作为现行路径依据
-- [CodexMonitor 改造计划归档](../../../BAK/文档归档-20260624/doc/archive/全面超越-参考CodexMonitor改造计划.md) — 低频历史计划，不能直接作为现行规范
+- [3.dev 旧代码地图归档](../../../doc/archive/codebase-map-旧路径参考.md) — 旧路径参考，不能直接作为现行路径依据
+- [CodexMonitor 改造计划归档](../../../doc/archive/全面超越-参考CodexMonitor改造计划.md) — 低频历史计划，不能直接作为现行规范
