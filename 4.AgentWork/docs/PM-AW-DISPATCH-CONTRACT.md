@@ -406,13 +406,13 @@ standalone 回执在既有字段之外**仅追加**：`mode`、`argv`、`max_att
 | `automatic` | 是否无需调用方额外操作即自动发生 |
 | `evidence` | 对应的用例名（集成或单元），可复核 |
 
-当前 19 条（v1.45 平台拆分：Linux 侧两条可证的改为 `proven`，Windows 侧各立独立 `not_proven` 条目；`not_proven_total=2`，即两条 Windows 条目），关键条目：
+当前 21 条（`entries_total=21`，`not_proven_total=2`）。其中 v1.45 的改动是平台拆分：Linux 侧两条可证的改为 `proven`，Windows 侧各立独立 `not_proven` 条目；两条 `not_proven` 均为 Windows 条目，见 §2.7.1-A。关键条目（非全量，全量以 `capabilities` 响应为准）：
 
 | id | holds | status | reason_code | 边界 |
 |---|---|---|---|---|
 | `timeout.terminates_controlled_set` | true | proven | null | POSIX 进程组 / Windows Job Object |
 | `timeout.descendant_snapshot_cross_check` | true | proven | null | 父链快照 × 受控集合成员；cgroup 可建时并入 cgroup 成员，查询失败记 `Unavailable`；v1.39 起 Windows 父链边带「子创建时间 ≥ 父创建时间」校验、根→直接子进程再加「≤ 根退出时间」上界，并剔除已终止或 `OpenProcess` 返回 `ERROR_INVALID_PARAMETER`（PID 已不存在）的行；v1.40 起 Linux 父链边同样按 `/proc/<pid>/stat` 的 `starttime` 做「子启动时刻 ≥ 父启动时刻」校验，只放宽「父边启动时刻读不到」的那条边；创建时间/存活状态不可读时仍按旧行为保留（审计 §42、§43） |
-| `timeout.cgroup_v2_scope_observation` | true | proven | null | 仅 Linux；需 cgroup v2 可写委派，建不起来只降级记原因，不阻断执行 |
+| `timeout.cgroup_v2_scope_observation` | true | proven | null | 仅 Linux；需 cgroup v2 可写委派。作用域不可观测时（cgroup v1 / 非 root / 容器未委派 / 无 `/proc` 快照）**在动手前** fail-closed：只向直接子进程发送终止信号、不动进程组，返回 `Unavailable`（`cleanup_status=unavailable`、`cleanup_claimed=false`）。调用方读 `cleanup_status=unavailable` 即知本次未对进程组动手，不得当作 `cleaned`，也不得据此推断「无残留」（v1.51 修正，取代 v1.41 的「降级后按进程组判 `Cleaned`」，见 §2.7.1-C） |
 | `timeout.cgroup_kill_terminates_scope` | true | proven | null | 仅 Linux；需可写 cgroup v2 且内核提供 `cgroup.kill`（>=5.14），可终止被收养的逃逸后代 |
 | `timeout.cleans_entire_process_tree` | true | proven | null | **仅 Linux**（`platforms_verified=[linux]`）：需可写 cgroup v2 + `cgroup.kill`。整树 = 终止开始时可归属本任务的全部后代（父链闭包 ∪ `cgroup.procs` 成员）及其终止过程中派生的子进程；逃出 `cgroup.procs` 的进程由终止前名单逐个 SIGKILL 收口（v1.45，`cgroup_kill_terminates_escapee_that_left_cgroup_procs`）。四观测量（`cgroup.procs` 空、`populated 0`、逃逸 PID 不存在、快照无后代）同时成立才报 `Cleaned`。残余边界：进程若在 terminate 开始前已同时离开 `cgroup.procs` 且父链被收养，本机无 OS 原语可指认；快照/回执标 unobservable |
 | `timeout.cleans_entire_process_tree_windows` | false | not_proven | `requires_out_of_job_enumerable_terminable_os_primitive` | **仅 Windows**（`platforms_verified=[windows]`）：作业只覆盖加入作业的进程，作业外进程（`BREAKAWAY`、加入失败、不进作业的 `conhost.exe`）可能在终止后存活；需要「作业外进程可枚举 + 可终止 + 存活有权威来源」的 OS 原语，本机不存在。受控集合内孙进程已证成（`timeout_cleans_controlled_set_including_grandchild`），不上调整树 |
@@ -466,6 +466,8 @@ v1.44 的结论是「两条都保持 `false/partial`」，把 Windows 的结构�
 
 条目 17→19（两条 Linux 条目 + 两条 Windows 条目替换原来的两条跨平台条目），`not_proven_total` 仍为 2，且这 2 条现在都是明确的 Windows 结构性条目。macOS 两条 Linux 条目的 `platforms_unverified` 含 `macos`（未验证）。
 
+**结论口径（v1.51）**：本节 4 条的可引用结论已收在 §2.7.1-A / §2.7.1-B；本节保留 v1.45 的变更过程与实测证据，原文不改。
+
 平台覆盖（v1.34，v1.38 更新）：`inflight.*` 四条与 `platform.posix_inflight_semantics_verified` 的 `platforms_verified` 已含 `windows`+`linux`（WSL Ubuntu 24.04 实跑），`platforms_unverified` 只剩 `macos`。v1.38 起 `platform.posix_inflight_semantics_verified` 为 `holds=true/proven/reason_code=null`：POSIX 上已单独复核 rename 活跃 attempt 目录——进程 cwd 指向该目录且持有目录内文件 fd 时，`rename` 与随后的 `remove_dir_all` 均成功，cwd/fd 跟随新路径、fd 仍读到原内容（用例 `posix_rename_active_attempt_semantics`）。该上调只限本条，`timeout.*` 与 TOCTOU 条目不受影响。
 
 后代观测（v1.35）：观测结构改为「父链快照 ∪ 作用域成员」，并新增 `scope` 与 `escaped_scope_unobservable` 两个字段。Windows 用 Toolhelp 父链快照 × `JobObjectBasicProcessIdList`；Linux 用 `/proc/<pid>/stat` 父链快照 × `pgrp` 成员，cgroup v2 可建时再并入 `cgroup.procs` 成员（子进程在 exec 前由 `pre_exec` 把自己写入独立 cgroup，无「先派生后入组」窗口）。`controlled_pids` 始终表示**终止作用域**（真正会被 `kill(-pgid)` / 作业终止打到的集合），因此 `in_controlled_set=false` 就是「会被观测到但杀不到」的逃逸后代。
@@ -478,6 +480,8 @@ v1.44 的结论是「两条都保持 `false/partial`」，把 Windows 的结构�
 **为什么 Linux 的 `enumerates_escaped_descendants` 能升为 `proven`（v1.45）**：该能力在 **`platforms_verified=[linux]` + cgroup v2 可写** 的限定下成立——`cgroup.procs` 成员集合本身是权威枚举，不依赖父链（被收养后仍精确点名，见上节证据）。容器/非 root/cgroup v1 建不起作用域时不是「无条件成立」而是**如实降级**：`escaped_scope_unobservable` 记原因、退回进程组旁证；运行期读不出 `cgroup.procs` 时整份快照 `unobservable`，绝不当空。窗口/判据未放宽，只把「条件」写进 `scope`、`platforms_verified`、`platforms_unverified` 与 detail；Windows 的旁证性质由独立条目 `timeout.enumerates_escaped_descendants_windows` 表达。
 
 **终止判据（v1.37 实测）**：Linux 可写 cgroup v2 且内核提供 `cgroup.kill`（v5.14+；root cgroup 没有该文件，子 cgroup 才有）时，`terminate` 在原有进程组信号之后向作用域写 `cgroup.kill`，并按**三个独立观测量**判定：`cgroup.procs` 为空、`cgroup.events` 为 `populated 0`、逃逸 PID 已不存在；任一不满足或读不出即报 `StillAlive`/`Unavailable`，只有三者都成立且快照无可枚举后代才写 `Cleaned`。`cgroup.kill` 在 fork 压力下可能漏掉正在派生的后代，因此每轮轮询重试写入（重复写返回 0，幂等；实测 13 个成员 + 持续 fork 的进程在写入后 `procs=0`、`populated 0`）。v1.37 当时只新增条件性窄结论 `timeout.cgroup_kill_terminates_scope=true/proven`，未上调整树条目（**历史**）；v1.45 起见上节：Linux 条目在「cgroup v2 可写 + `cgroup.kill`」限定下 `true/proven`，Windows 侧独立 `false/not_proven`。
+
+**结论口径（v1.51）**：以上 v1.35–v1.45 的观测边界、父链校验与终止判据叙述是过程记录，原文不改。可引用结论集中在 §2.7.1-A / §2.7.1-B / §2.7.1-C：Windows 两条 `not_proven` 的平台原因、三条 cgroup 的平台范围、以及作用域不可观测时的 fail-closed 行为。特别注意本节「降级路径」第二条已由 v1.51 改写——「降级后按进程组判 `Cleaned`」是历史，现行是 `Unavailable`。
 
 **Linux 整树清理的证成范围与残余卡点（v1.41）**：在满足条件的环境（cgroup v2 可写 + 内核提供 `cgroup.kill`）里，Linux 侧整作用域终止**能证成**，不再是「笼统地需要 cgroup」。WSL Ubuntu 24.04（root，cgroup v2，内核 `6.18.33.2-microsoft-standard-WSL2`）的真实进程证据（日志 `/root/.aw-posix-verify/logs/posix-verify-20261108-013052.log`）：
 
@@ -493,7 +497,7 @@ v1.44 的结论是「两条都保持 `false/partial`」，把 Windows 的结构�
 **降级路径（v1.41 实测，v1.45 更新两个确定性用例）**：
 
 - 内核没有 `cgroup.kill`：`terminate` 不写 `cgroup.kill`；v1.45 起仍按「父链闭包 ∪ `cgroup.procs`」名单把已知逃逸成员逐个 `SIGKILL`（进程会死），但判定只认独立观测点——伪造的静态作用域记账仍显示成员（`cgroup.procs` / `populated` 不更新），轮询到 3s 截止后报 `StillAlive`。实测 `[evidence] cgroup_no_kill root=33056 escaped=33038 kill_supported=false outcome=StillAlive escaped_alive=false members=Some(Ok([33038])) populated=Some(Ok(1)) descendants=[DescendantProcess { pid: 33038, in_controlled_set: false }]`（用例 `cgroup_without_kill_reports_still_alive`）。**不因「自己杀掉了名单」就谎报 `Cleaned`**。
-- 作用域建不起来（`Degraded`，如 cgroup v1 / 非 root / 容器未委派）：`terminate` 只按进程组判据，被收养的逃逸进程既收不到信号、也不在父链快照里，结果是受控集合口径的 `Cleaned`。实测 `[evidence] cgroup_degraded after outcome=Cleaned escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")`（用例 `cgroup_degraded_terminate_is_group_only`）。这是**降级分支**的残余缺口：`Cleaned` 只表示「受控集合已清」，不等于「无残留」。它**不是静默**——降级原因写在快照 `escaped_scope_unobservable`，能力位 `scope`/detail 明写该分支；`Cleaned` 回执固定写「逃逸进程是否仍在运行未验证」，读方必须同时读回执与能力位。
+- 作用域建不起来（`Degraded`，如 cgroup v1 / 非 root / 容器未委派 / 无 `/proc` 快照）：v1.51 起**在动手前** fail-closed——`terminate` 只向直接子进程发送终止信号、**不动进程组**，返回 `Unavailable`，回执写 `cleanup_status=unavailable`、`cleanup_claimed=false`。**不冒充 `Cleaned`**：作用域不可观测时既不宣称「受控集合已清」，也不宣称「无残留」；调用方据 `cleanup_status=unavailable` 只按「直接子进程」口径记账。v1.41 的旧行为（降级后仍按进程组判据、报受控集合口径的 `Cleaned`）已被本次修复取代，历史实测保留在此：`[evidence] cgroup_degraded after outcome=Cleaned escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")`（旧用例名 `cgroup_degraded_terminate_is_group_only`）。现行用例为 `cgroup_degraded_terminate_reports_unavailable`，红/绿证据见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §57.2 / §57.4。
 
 **bridge 非正常退出时的直接子进程回收（v1.47，platform split）**
 
@@ -518,6 +522,30 @@ v1.44 的结论是「两条都保持 `false/partial`」，把 Windows 的结构�
 **并发判据（v1.36）**：跨进程窗口不再用「一次 rename 就是原子」这种说法。可观测量定为：给定被判 `stale` 的记录 R0，若 W1 在「检查→认领」之间替换同名文件、W2 在「认领→复核」之间再次占住原名，则清扫结束后**原位置必须是 W2 的完整记录**（`pid`+`startedAt` 一致），`removed_total=0`，`kept[]` 具名 `marker_changed`/`marker_superseded`，且目录里不留 `.tmp` 副本。实现上还原改用 `create_new`（O_EXCL）而不是 `rename`。这条只证「不删、不覆盖与判定快照不同的标记」（`concurrency.sweep_restore_never_clobbers=true/proven`）；**不证**「检查到认领之间没有窗口」——文件系统没有 compare-and-rename，认领前后仍可能出现短暂的文件名空缺，第三方仍可能在该空缺里开跑。`removed[]` 的 `path` 只表示「本次删掉了这个文件名下的那份标记」，读方不得据此断言该路径当前不存在标记。
 
 **v1.43 收紧**：认领后不再只比身份三元组，而是对认领副本重跑同一份 `stale_rule`。仍 `stale` 才删（`outcome=deleted`）；已不 `stale`（例如刷新者只延长 `deadlineAt`、`task_id/pid/startedAt` 全不变）就地 create-if-absent 还原并记 `outcome=not_mine`；认领副本已不存在记 `outcome=lost_race`（不算错误）。并发清扫同一残标的可观测量：`deleted_total=1`、`lost_race_total=N-1`；N 个清扫者与被刷新标记并发时 `deleted_total=0` 且 `not_mine_total>=1`，原位必须是刷新后的记录。Windows 上并发 `rename` 可能全部返回成功但只有一个目的地产生文件，故以「认领副本是否存在」判定归属。
+
+### 2.7.1 平台能力结论（v1.51，可直接引用）
+
+本节只写结论口径，不复述变更过程。条目状态以 §2.7 的能力表与 `capabilities` 响应为准；逐条核查、红/绿证据与「为什么不可得」见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §56（Windows 原语核查、cgroup 三条不升级）与 §57（未支持平台的 fail-closed 审计）。
+
+**A. 两条 Windows `not_proven`**（`timeout.cleans_entire_process_tree_windows`、`timeout.enumerates_escaped_descendants_windows`）
+
+1. **Windows 没有「作业外进程可枚举 + 可终止 + 存活有权威来源」的三合一 OS 原语。** 因此「整棵进程树清理」与「作业外逃逸后代的权威枚举」在 Windows 上结构性不可证，两条保持 `holds=false / status=not_proven / reason_code=requires_out_of_job_enumerable_terminable_os_primitive`。**这是平台没有这个能力，不是本项目未实现、也不是待办项。**
+2. 适用平台：`platforms_verified=["windows"]`、`platforms_unverified=[]`——结论本身在 Windows 实跑得出。macOS 不在该两条的验证范围，**未验证**。
+3. 已证的替代范围：加入作业的进程（含其孙进程）可终止、可观测（`timeout.terminates_controlled_set`、`timeout_cleans_controlled_set_including_grandchild`）；`BREAKAWAY`、`Assign` 失败、不进作业的 `conhost.exe` 等作业外进程只能作旁证，不越界宣称整树。
+4. 调用方口径：需要「整树」或「作业外枚举」时按 `not_proven` 降级；不得把 `StillAlive` 读成误报，也不得把「无残留」读成已证；`cleanup_status=unavailable` 时只按「直接子进程」口径记账。
+
+**B. 三条 cgroup 能力**（`timeout.cgroup_v2_scope_observation`、`timeout.cgroup_kill_terminates_scope`、`timeout.cleans_entire_process_tree`）
+
+1. **三条只在 Linux 成立：`platforms_verified=["linux"]`、`platforms_unverified=["windows","macos"]`。Windows 与 macOS 不提供同类语义（可写 cgroup v2 作用域 + `cgroup.kill`），不提供同类判据，也不据此升级 `verified`。**
+2. Windows：作业对象（Job Object）的作用域是作业树，`JobObjectBasicProcessIdList` 与 `TerminateJobObject` 都只覆盖作业成员，没有「作用域成员权威枚举 + 一次性终止整个作用域」的等价物。**没有做等价实现，也没有在 Windows 上跑过等价判据。**
+3. macOS：**全程未验证**——无 `/proc`、未接入 cgroup v2；三条在 macOS 上既未跑过，也**不是「已证不成立」**。调用方不得把 `platforms_unverified=["macos"]` 读成「已验证不适用」。
+4. 调用方口径：Windows / macOS 上只按「受控集合 + 直接子进程」口径读结果；`cleanup_status=unavailable` 表示作用域不可观测且进程组未被动过，不得据此推断「无残留」。
+
+**C. 作用域不可观测时的行为（与当前代码一致）**
+
+- 作用域建不起来或无法观测（cgroup v1 / 非 root / 容器未委派 / 无 `/proc` 快照）时，`terminate` **在动手前** fail-closed：只向直接子进程发送终止信号，**不动进程组**，返回 `Unavailable`，回执写 `cleanup_status=unavailable`、`cleanup_claimed=false`。
+- **不冒充 `Cleaned`**：作用域不可观测时既不宣称「受控集合已清」，也不宣称「无残留」。读方据 `cleanup_status=unavailable` 只按「直接子进程」口径记账。
+- v1.41 的旧行为（降级后仍按进程组判据、报受控集合口径的 `Cleaned`）已由 v1.51 取代；现行用例 `cgroup_degraded_terminate_reports_unavailable`，历史红/绿证据见 `docs/TOOLS-DESCRIPTION-AUDIT.md` §57.2 / §57.4。
 
 ### 2.8 PM 判活口径（v1.32.1，唯一约定）
 

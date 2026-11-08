@@ -6637,6 +6637,20 @@ fn capabilities_declares_machine_readable_boundaries() {
     let controlled = claim(&payload, "timeout.terminates_controlled_set");
     assert_eq!(controlled["holds"], true, "{controlled}");
     assert_eq!(controlled["status"], "proven", "{controlled}");
+    // macOS 未实跑：unix 分支在 procfs 不可读时 fail-closed（只杀直接子进程、报 Unavailable），
+    // 因此这两条必须把 macos 写进 platforms_unverified，不允许被读成「macOS 也能按进程组清理」。
+    assert_eq!(
+        controlled["platforms_unverified"],
+        json!(["macos"]),
+        "{controlled}"
+    );
+    let once = claim(&payload, "timeout.terminates_once_no_retry");
+    assert_eq!(once["holds"], true, "{once}");
+    assert_eq!(
+        once["platforms_unverified"],
+        json!(["macos"]),
+        "{once}"
+    );
     let whole_tree = claim(&payload, "timeout.cleans_entire_process_tree");
     assert_eq!(whole_tree["holds"], true, "{whole_tree}");
     assert_eq!(whole_tree["status"], "proven", "{whole_tree}");

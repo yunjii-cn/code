@@ -476,7 +476,7 @@ python3 scripts/pm-integration-selftest/pm_selftest.py --binary target/debug/aw-
 | --- | --- | --- | --- | --- |
 | `health` | 无 | 无 | 存活状态、服务名、版本、构建时间 | 只读，不落盘 |
 | `status` | 无 | 无 | `contract_version`、`desktop`、`session`、`connections`、`server` | 只读；不回显任何配置值 |
-| `capabilities` | 无 | 无 | `version="capabilities/1"`、`entries[]`、`entries_total`、`not_proven_total`、`platform`、`status_enum`、`decision_rule` | 只读，不落盘 |
+| `capabilities` | 无 | 无 | `version="capabilities/1"`、`entries[]`、`entries_total`、`not_proven_total`、`platform`、`status_enum`、`decision_rule`；平台能力结论与降级口径见契约 §2.7.1 | 只读，不落盘 |
 | `task.execute` | `task_id` | `mode`、`cmd`、`cwd`、`env`、`path_prepend`、`timeout_secs`（dispatched）；`argv`、`acceptance`、`max_attempts`（standalone） | 回执 JSON（`status` 四态、`exit_code`、`blocked_reason`、`cleanup_status`、`artifacts[]`…） | 写 `runs/<task_id>/attempt-<n>/`（dispatch、stdout、stderr、handback；standalone 另有 verdict） |
 | `task.cancel` | `task_id` | `reason`、`requested_by` | 见 §4.3（`status`、`cleanup_status`、`cleanup_claimed`、`handback`、`message`…） | 写 `runs/.cancel/<task_id>.json`；读回执 |
 | `receipt.get` | `task_id` | `include_history` | 单份回执；`include_history=true` 时 `{task_id, attempts, latest, history[]}` | 只读；无回执时工具错误 `回执不存在：` |

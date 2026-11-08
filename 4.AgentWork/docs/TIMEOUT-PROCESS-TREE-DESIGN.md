@@ -380,6 +380,8 @@ TerminateJobObject 成功后，轮询 O4：
 
 **结论：`#3` 应保持 `NOT_PROVEN`。** v1.16 实现 C1/C2 后，能诚实宣称的只有："已清理**受控集合**（进程组/作业）；逃逸进程是否仍在运行未验证"。该句在 v1.17 状态门满足后**已进入回执**（只有 `Cleaned` 分支使用），且它**不等于**整棵树，状态不升级。
 
+> **现行结论（v1.51）**：本节是 v1.16–v1.44 的设计结论。v1.45 起按平台拆分——Windows 仍 `NOT_PROVEN`（平台无三合一原语），Linux 在可写 cgroup v2 + `cgroup.kill` 下为 `proven`。逐条可引用句见 §6.8.1。
+
 ### 6.5 判据的可执行性：已落地的用例（v1.16 实现，v1.17 两平台实跑）
 
 | 测试目的 | 用例（位置） | 夹具 | 断言 | Windows 结果 | POSIX 结果 |
@@ -444,9 +446,20 @@ wsl -d <WSL 发行版> -e bash /mnt/e/软件开发/云集编程工作站/4.Agent
 | POSIX（cgroup 不可用 / 内核 < 5.14） | 否（`/proc` 父链在孤儿被收养时断开；macOS 无 `/proc`） | 否（换父后无法追；根退出后快照必为空，属于假空） | 是 | 否 | `partial`，且 `escaped_scope_unobservable` 必须带原因 |
 | Windows | 是（Toolhelp 父链快照；`ParentProcessID` 不因父进程退出而改写，PID 复用只会多报不会漏报） | 是（终止后快照为空即不存在可继续派生的存活后代） | 是（快照/作业列表查询失败一律 `Unavailable`） | 是（`CREATE_SUSPENDED` + 恢复前入作业；本作业未设 `BREAKAWAY_OK`，嵌套作业仍在外层作业内） | 整树清理可在 Windows 证明 |
 
+> **结论口径（v1.51）**：本表与下文是 v1.20–v1.37 的历史核对记录，原文不改。Windows 行「整树清理可在 Windows 证明」只指受控集合（加入作业的进程及其孙进程）；作业外进程（`BREAKAWAY`、`Assign` 失败、不进作业的 `conhost.exe`）不可证，v1.45 起已收回。可引用结论见 §6.8.1。
+
 v1.20 的挂起创建只满足"恢复执行前不产生后代"这一条，**不提供逃逸观测点**，因此不改变上表任何一格，也不改变 `#3 = NOT_PROVEN`。四条中任何一条不满足，"逃逸未验证"就必须保留。
 
 v1.34 补上了父链/作业观测点后，Windows 四格全部满足；POSIX 卡在"换父被收养"这一格。v1.35 在 Linux 上用 cgroup v2 把第 1、2 格补成"是"（实测见 §6.11）；v1.37 再用 `cgroup.kill` 把第 4 格补成"部分"——终止不再只打进程组，而是按三个独立观测量确认作用域清空（`cgroup.procs` 空、`cgroup.events` `populated 0`、逃逸 PID 不存在）。但整树 claim 仍为 `holds=false / partial / posix_escaped_scope_requires_cgroup_v2_and_kill`：`cgroup.kill` 依赖内核 ≥5.14 与非 root 可写作用域，容器/非 root/cgroup v1 下建不起来；macOS 无等价物；有权限的外部进程仍可把成员移出 cgroup。新增的 `timeout.cgroup_kill_terminates_scope=true/proven` 只声明这一条件性窄结论。
+
+### 6.8.1 现行平台能力结论（v1.51，可引用）
+
+本节是现行结论；§6.4–§6.8 的表格与叙述是 v1.16–v1.44 的历史记录。其中 Windows 行「整树清理可在 Windows 证明」是 v1.34 在**受控集合**口径下的结论，v1.45 起已收回为「受控集合可证、作业外不可证」，不改原文，仅在此处更正口径。
+
+- **Windows**：不提供「作业外进程可枚举 + 可终止 + 存活有权威来源」的三合一 OS 原语，`timeout.cleans_entire_process_tree_windows` 与 `timeout.enumerates_escaped_descendants_windows` 保持 `false/not_proven`（`requires_out_of_job_enumerable_terminable_os_primitive`）。受控集合（加入作业的进程及其孙进程）可证；作业外进程（`BREAKAWAY`、`Assign` 失败、不进作业的 `conhost.exe`）只能作旁证。**这是平台没有这个能力，不是本项目未实现。**
+- **Linux**：`timeout.cleans_entire_process_tree` 与 `timeout.enumerates_escaped_descendants` 在**可写 cgroup v2 + `cgroup.kill`（内核 ≥5.14）**下为 `true/proven`（`platforms_verified=["linux"]`）；`timeout.cgroup_v2_scope_observation`、`timeout.cgroup_kill_terminates_scope` 同为 `true/proven`。三条的 `platforms_unverified=["windows","macos"]`，**Windows / macOS 不提供同类语义，不冒充、不升级 `verified`**。
+- **macOS**：**全程未验证**——无 `/proc`、未接入 cgroup v2。上表 POSIX 行把 Linux 与 macOS 混写，macOS 侧属于「没跑过」，不是「已证不成立」；不得把 `platforms_unverified=["macos"]` 读成「已验证不适用」。
+- **作用域不可观测时**：`terminate` 在动手前 fail-closed——只向直接子进程发送终止信号、不动进程组，报 `Unavailable`（`cleanup_status=unavailable`、`cleanup_claimed=false`），**不冒充 `Cleaned`**（v1.51 修复）。
 
 ### 6.9 单次终止尝试是否足够（v1.24 实测；结论：一次即足够，不加重试）
 
