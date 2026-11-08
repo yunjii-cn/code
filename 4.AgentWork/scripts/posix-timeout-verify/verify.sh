@@ -13,6 +13,7 @@
 #   AW_WORK     工作目录，默认 $HOME/.aw-posix-verify
 #   AW_VENDOR   vendor 目录，默认 $AW_WORK/vendor
 #   AW_OFFLINE  1 = 禁止联网：prepare 遇到缺失 vendor 直接失败，run 始终 --offline
+#   AW_RACE_REPEAT  可选竞态连跑次数，默认 1 = 不连跑（建议夜间/发版前用 12）
 #
 # 离线预置清单见 --help 或 check 输出。
 set -uo pipefail
@@ -295,6 +296,37 @@ run_tests() {
   # 退出码非 0 且没有任何可归类的用例失败 → 编译/链接/环境错误，不能被 quarantine 吞掉。
   if [ "$rc" -ne 0 ] && ! grep -qE '^test .+ \.\.\. FAILED$' "$LOG_FILE"; then
     fail test_failed "cargo test 退出码 ${rc} 且无可归类用例失败（可能是编译/链接错误）；见日志 $LOG_FILE"
+  fi
+
+  # 可选竞态连跑：默认 1 = 不额外跑（主套件已含 1 次）。判定以「test result: ok. 1 passed」为准，
+  # 不能只看退出码——--exact 名字写错时 cargo 以 0 个用例、退出码 0 返回，只看退出码会得到假绿。
+  local race_repeat="${AW_RACE_REPEAT:-1}"
+  case "$race_repeat" in
+    '' | *[!0-9]*) fail race_repeat_invalid "AW_RACE_REPEAT 必须是非负整数（收到 $race_repeat）" ;;
+  esac
+  if [ "$race_repeat" -lt 1 ]; then
+    fail race_repeat_invalid "AW_RACE_REPEAT 必须 >= 1（收到 $race_repeat）"
+  fi
+  if [ "$race_repeat" -eq 1 ]; then
+    log "竞态连跑 repeat=1（默认，未启用）"
+  else
+    local race_target="server::prune_claim_race_tests::prune_concurrent_claimers_delete_once_others_lost_race"
+    local race_ok=0 race_bad=0 i=1 race_out race_rc
+    while [ "$i" -le "$race_repeat" ]; do
+      race_out="$( (cd "$SRC_DIR" || exit 1; CARGO_NET_OFFLINE=true CARGO_TARGET_DIR="$WORK_DIR/target" \
+        cargo test --offline -p aw-mcp-bridge --lib -- --exact "$race_target") 2>&1 )"
+      race_rc=$?
+      if [ "$race_rc" -eq 0 ] && printf '%s' "$race_out" | grep -q 'test result: ok\. 1 passed'; then
+        race_ok=$((race_ok + 1))
+        log "race $i/$race_repeat ok"
+      else
+        race_bad=$((race_bad + 1))
+        log "race $i/$race_repeat FAILED（rc=$race_rc，未见 1 passed）"
+      fi
+      i=$((i + 1))
+    done
+    log "竞态连跑 repeat=$race_repeat ok=$race_ok bad=$race_bad"
+    [ "$race_bad" -eq 0 ] || fail race_repeat_failed "竞态连跑未全绿：bad=$race_bad（repeat=$race_repeat）"
   fi
 
   local missing="" token

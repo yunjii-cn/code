@@ -7,6 +7,7 @@
 #   powershell -File scripts/test-gate/gate.ps1
 #   powershell -File scripts/test-gate/gate.ps1 -TestThreads 8
 #   powershell -File scripts/test-gate/gate.ps1 -LogFile <file>
+#   powershell -File scripts/test-gate/gate.ps1 -RaceRepeat 12   # 可选：竞态用例连跑 12 次（默认 1 = 不连跑）
 #   powershell -File scripts/test-gate/gate.ps1 -SkipSelfTest   # 仅供 selftest.ps1 内部调用
 param(
     [string]$LogFile = "",
@@ -14,12 +15,19 @@ param(
     [string]$Package = "aw-mcp-bridge",
     # 清单路径可覆盖：selftest.ps1 用固定 fixture，避免负向对照依赖生产清单是否非空。
     [string]$QuarantineFile = "",
+    # 竞态用例连跑次数：1 = 默认（主套件里已跑 1 次，不额外耗时）；>1 才连跑。
+    [int]$RaceRepeat = 1,
     [switch]$SkipSelfTest
 )
 
 $ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "../..")).Path
+$LogOnly = $LogFile -ne ""
+if ($RaceRepeat -lt 1) {
+    Write-Host "[GATE] fail=1 — -RaceRepeat 必须 >= 1（收到 $RaceRepeat）" -ForegroundColor Red
+    exit 2
+}
 if (-not $QuarantineFile) { $QuarantineFile = Join-Path $ScriptDir "quarantine.txt" }
 
 # v1.50 常驻负向对照：门禁自己先过一遍「无证据不判绿」的用例，否则本次结果不可信。
@@ -109,6 +117,44 @@ $hasFailedLine = @($results | Where-Object { $_ -match '\.\.\. FAILED$' }).Count
 if ($cargoRc -ne 0 -and -not $hasFailedLine) {
     Write-Host "[GATE] fail=1 — cargo 退出码 $cargoRc，且日志中无 FAILED 行（疑似编译/链接失败）" -ForegroundColor Red
     exit 2
+}
+
+# 可选竞态连跑：默认 1 = 不额外跑（主套件已含 1 次）。判定以「test result: ok. 1 passed」为准，
+# 不能只看退出码——--exact 名字写错时 cargo 以 0 个用例、退出码 0 返回，只看退出码会得到假绿。
+$raceTarget = "server::prune_claim_race_tests::prune_concurrent_claimers_delete_once_others_lost_race"
+if ($RaceRepeat -le 1) {
+    Write-Host "[RACE] repeat=1（默认，未启用连跑）"
+}
+elseif ($LogOnly) {
+    Write-Host "[RACE] repeat=$RaceRepeat 被忽略：-LogFile 只分类已有日志，不跑测试"
+}
+else {
+    $raceOk = 0
+    $raceBad = 0
+    $raceArgs = @("test", "--offline", "-p", $Package, "--lib", "--", "--exact", $raceTarget)
+    for ($i = 1; $i -le $RaceRepeat; $i++) {
+        Push-Location $RepoRoot
+        try {
+            $raceOut = (& cargo @raceArgs 2>&1 | Out-String)
+            $raceRc = $LASTEXITCODE
+        }
+        finally {
+            Pop-Location
+        }
+        if ($raceRc -eq 0 -and $raceOut -match 'test result: ok\. 1 passed') {
+            $raceOk++
+            Write-Host "[RACE] run $i/$RaceRepeat ok"
+        }
+        else {
+            $raceBad++
+            Write-Host "[FAIL] race run $i/$RaceRepeat（rc=$raceRc，未见 1 passed）" -ForegroundColor Red
+        }
+    }
+    Write-Host "[RACE] repeat=$RaceRepeat ok=$raceOk bad=$raceBad target=$raceTarget"
+    if ($raceBad -gt 0) {
+        Write-Host "[GATE] fail=$raceBad — 竞态连跑未全绿" -ForegroundColor Red
+        exit 2
+    }
 }
 Write-Host "[GATE] warn=$warnCount fail=0 — 非 quarantine 用例全部通过；已知不稳定按 WARN 呈现，不代表全绿结论" -ForegroundColor Yellow
 exit 0

@@ -4688,6 +4688,23 @@ date	platform	kind	run	threads	rc	ok	reason	cgroup
 - 第 6 条用 PATH 前缀注入假 `cargo`（打印一行 ok 后退出 1）验证，不需要真的制造编译失败。
 - **第 4/5 条改用固定 fixture**（v1.51）：生产清单合法地可能为空（§54.3 已把唯一条目移出），负向对照不能因此失去 WARN 分支。`selftest.sh` / `selftest.ps1` 各自在临时目录生成 `aw_gate_selftest::synthetic_quarantined_case`，分别经 `AW_GATE_QUARANTINE_FILE` 与 `-QuarantineFile` 传给门禁；门禁默认仍读 `scripts/test-gate/quarantine.txt`。改后两平台复跑仍 7/7（原始输出见 §55.8）。
 
+### 54.4.1 竞态连跑：可选档（默认关闭）
+
+- **参数**：Windows `-RaceRepeat N`（`gate.ps1`，默认 `1`）；POSIX `--race-repeat N` 或 `AW_RACE_REPEAT=N`（`gate.sh`）；`verify.sh run` 读 `AW_RACE_REPEAT`（默认 `1`）。
+- **语义**：`N=1` 与旧行为完全一致——主套件里本来就跑 1 次该用例，不额外耗时。`N>1` 时在主套件之后额外连跑 `N` 次单测 `server::prune_claim_race_tests::prune_concurrent_claimers_delete_once_others_lost_race`（每次内部 20 轮）。
+- **判定**：必须同时满足「退出码 0」和「输出出现 `test result: ok. 1 passed`」。只看退出码会假绿——`--exact` 名字写错时 cargo 以 0 个用例、退出码 0 返回。
+- **可观测**：每次打印 `[RACE] run i/N ok`，结尾打印 `[RACE] repeat=N ok=… bad=…`；默认档也打印 `[RACE] repeat=1（默认，未启用连跑）`，避免「以为跑了 12 次其实跑了 1 次」。
+- **实测（v1.51）**：
+
+  | 平台 | 默认档 | `N=12` |
+  | --- | --- | --- |
+  | Windows（`gate.ps1`，含 selftest） | 49.2s，`[RACE] repeat=1` | 56.8s，`ok=12 bad=0` |
+  | WSL（`verify.sh run`） | 12.03s，`repeat=1（默认，未启用）` | 26.86s，`ok=12 bad=0` |
+
+  两次 `N=12` 的 `[GATE] warn=0 fail=0` 均未变化；`quarantine.txt` 仍为空、`tools_sha256` 不变。
+- **建议用法**：日常提交跑默认档；夜间或发版前跑 `-RaceRepeat 12`（WSL 侧 `AW_RACE_REPEAT=12 … verify.sh run`）。成本约 +7.6s（Windows）/ +14.8s（WSL），不是数量级增长。
+- **不默认开启的原因**：单次门禁已经覆盖该用例 1 次；连跑的价值是压低偶发窗口，不该让所有人的每次提交都付这份成本。
+
 ### 54.5 PM 接入须知与自测入口
 
 - 文档：`docs/PM-INTEGRATION-GUIDE.md`。只依赖公开 MCP 接口与 `runs/` 目录约定，覆盖：初始化、派单参数/幂等、超时的三档清理措辞、MCP 取消与纯文件取消、`pending/acknowledged/done` 三态、「已清理」必须同时满足 `status=canceled && cleanup_claimed=true && handback_status=canceled`、回执字段与产物哈希、错误矩阵、多进程部署、验收清单。

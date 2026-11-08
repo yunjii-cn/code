@@ -8,12 +8,14 @@
 #   gate.sh                       # 跑 cargo test --offline -p aw-mcp-bridge -- --nocapture
 #   gate.sh --test-threads 16     # 追加测试二进制参数
 #   gate.sh --log <file>          # 只分类已有日志，不重跑
+#   gate.sh --race-repeat 12      # 可选：竞态用例连跑 12 次（默认 1 = 不连跑；也可用 AW_RACE_REPEAT）
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # 清单路径可用环境变量覆盖：selftest.sh 用固定 fixture，避免负向对照依赖生产清单是否非空。
 QUARANTINE_FILE="${AW_GATE_QUARANTINE_FILE:-$SCRIPT_DIR/quarantine.txt}"
+RACE_REPEAT="${AW_RACE_REPEAT:-1}"
 LOG_FILE=""
 RUN_ARGS=()
 
@@ -25,6 +27,14 @@ while [ "$#" -gt 0 ]; do
       ;;
     --log=*)
       LOG_FILE="${1#--log=}"
+      shift
+      ;;
+    --race-repeat)
+      RACE_REPEAT="${2:-1}"
+      shift 2
+      ;;
+    --race-repeat=*)
+      RACE_REPEAT="${1#--race-repeat=}"
       shift
       ;;
     --)
@@ -39,7 +49,20 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+case "$RACE_REPEAT" in
+  '' | *[!0-9]*)
+    printf '[GATE] fail=1 — --race-repeat 必须是非负整数（收到 %s）\n' "$RACE_REPEAT" >&2
+    exit 2
+    ;;
+esac
+if [ "$RACE_REPEAT" -lt 1 ]; then
+  printf '[GATE] fail=1 — --race-repeat 必须 >= 1（收到 %s）\n' "$RACE_REPEAT" >&2
+  exit 2
+fi
+
 cargo_rc=0
+LOG_ONLY=0
+[ -n "$LOG_FILE" ] && LOG_ONLY=1
 if [ -z "$LOG_FILE" ]; then
   LOG_FILE="$(mktemp -t aw-gate-XXXXXX.log)"
   printf '[INFO] 运行测试（日志 %s）\n' "$LOG_FILE"
@@ -131,5 +154,36 @@ if [ "$cargo_rc" -ne 0 ] && ! grep -qE '^test .+ \.\.\. FAILED$' "$LOG_FILE"; th
   printf '[GATE] fail=1 — cargo 退出码 %s，且日志中无 FAILED 行（疑似编译/链接失败）\n' "$cargo_rc" >&2
   exit 2
 fi
+
+# 可选竞态连跑：默认 1 = 不额外跑（主套件已含 1 次）。判定以「test result: ok. 1 passed」为准，
+# 不能只看退出码——--exact 名字写错时 cargo 以 0 个用例、退出码 0 返回，只看退出码会得到假绿。
+RACE_TARGET="server::prune_claim_race_tests::prune_concurrent_claimers_delete_once_others_lost_race"
+if [ "$RACE_REPEAT" -le 1 ]; then
+  printf '[RACE] repeat=1（默认，未启用连跑）\n'
+elif [ "$LOG_ONLY" -eq 1 ]; then
+  printf '[RACE] repeat=%s 被忽略：--log 只分类已有日志，不跑测试\n' "$RACE_REPEAT"
+else
+  race_ok=0
+  race_bad=0
+  i=1
+  while [ "$i" -le "$RACE_REPEAT" ]; do
+    race_out="$( (cd "$REPO_ROOT" || exit 1; cargo test --offline -p aw-mcp-bridge --lib -- --exact "$RACE_TARGET") 2>&1 )"
+    race_rc=$?
+    if [ "$race_rc" -eq 0 ] && printf '%s' "$race_out" | grep -q 'test result: ok\. 1 passed'; then
+      race_ok=$((race_ok + 1))
+      printf '[RACE] run %s/%s ok\n' "$i" "$RACE_REPEAT"
+    else
+      race_bad=$((race_bad + 1))
+      printf '[FAIL] race run %s/%s（rc=%s，未见 1 passed）\n' "$i" "$RACE_REPEAT" "$race_rc" >&2
+    fi
+    i=$((i + 1))
+  done
+  printf '[RACE] repeat=%s ok=%s bad=%s target=%s\n' "$RACE_REPEAT" "$race_ok" "$race_bad" "$RACE_TARGET"
+  if [ "$race_bad" -gt 0 ]; then
+    printf '[GATE] fail=%s — 竞态连跑未全绿\n' "$race_bad" >&2
+    exit 2
+  fi
+fi
+
 printf '[GATE] warn=%s fail=0 — 非 quarantine 用例全部通过；已知不稳定按 WARN 呈现，不代表全绿结论\n' "$warn_count"
 exit 0
