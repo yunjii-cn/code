@@ -1,0 +1,40 @@
+# 2.WEB CI
+# 检查项：后端 pytest 全量（tests/，含 34 项状态验证 test_all_phases_verification.py）
+#
+# 未纳入的检查及原因：
+#   - 前端 lint / typecheck：本机未安装 Node.js（D:\Programs\nodejs\node.exe 不存在，
+#     只有一个指向它的 npm.ps1 shim），无法在本地跑通一次，故不放进流水线。
+#     待 Node 可用并本地验证通过后再补 frontend-lint / frontend-typecheck 两个 job。
+#
+# 注意：GitHub Actions 只读取仓库根目录的 .github/workflows/。
+# 本文件按 1.PC 的既有组织方式放在产品目录下，需配合根级 workflow 或拆仓才会被远端执行。
+name: CI (2.WEB)
+
+on:
+  push:
+    branches: [main, develop, agentwork]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-test:
+    name: Backend Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - name: Install test deps
+        working-directory: 2.WEB/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pytest pytest-asyncio pytest-cov httpx fastapi sse_starlette pydantic_settings
+      - name: Run pytest
+        working-directory: 2.WEB/api
+        run: python -m pytest --no-cov
