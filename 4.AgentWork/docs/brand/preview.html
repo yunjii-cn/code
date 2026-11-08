@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentWork AW Icon Preview</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d12;
+      --surface: #121620;
+      --border: rgba(255,255,255,.12);
+      --text: #f8fafc;
+      --muted: #a1a8b3;
+      --aw: #1e6cf0;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 32px;
+    }
+    main { max-width: 1180px; margin: 0 auto; }
+    h1 { margin: 0 0 8px; font-size: 28px; letter-spacing: 0; }
+    p { margin: 0; color: var(--muted); line-height: 1.6; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 18px;
+      margin-top: 28px;
+    }
+    .card {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      border-radius: 8px;
+      padding: 18px;
+    }
+    .card h2 { margin: 0 0 14px; font-size: 16px; letter-spacing: 0; }
+    .hero {
+      width: 160px;
+      height: 160px;
+      display: block;
+      margin-bottom: 16px;
+    }
+    .sizes {
+      display: flex;
+      align-items: end;
+      gap: 14px;
+      min-height: 72px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+    }
+    .sizes span {
+      display: grid;
+      gap: 6px;
+      justify-items: center;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .spec {
+      margin-top: 26px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .chip {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      color: var(--muted);
+      background: rgba(255,255,255,.03);
+    }
+    .chip strong { display: block; color: var(--text); margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AgentWork AW Icon Preview</h1>
+    <p>主推 Agent Grid，圆角方形 App Icon，AW 蓝底，白色几何双字母。下方同时检查 16/32/64/128 尺寸。</p>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Agent Grid · 主推</h2>
+        <img class="hero" src="./aw-agent-grid.svg" alt="AW Agent Grid">
+        <div class="sizes">
+          <span><img src="./aw-agent-grid.svg" width="16" height="16" alt="">16</span>
+          <span><img src="./aw-agent-grid.svg" width="32" height="32" alt="">32</span>
+          <span><img src="./aw-agent-grid.svg" width="64" height="64" alt="">64</span>
+          <span><img src="./aw-agent-grid.svg" width="128" height="128" alt="">128</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Agent Grid · 小尺寸</h2>
+        <img class="hero" src="./aw-agent-grid-small.svg" alt="AW Agent Grid small">
+        <div class="sizes">
+          <span><img src="./aw-agent-grid-small.svg" width="16" height="16" alt="">16</span>
+          <span><img src="./aw-agent-grid-small.svg" width="32" height="32" alt="">32</span>
+          <span><img src="./aw-agent-grid-small.svg" width="64" height="64" alt="">64</span>
+          <span><img src="./aw-agent-grid-small.svg" width="128" height="128" alt="">128</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Agent Grid · 单色</h2>
+        <svg class="hero" viewBox="0 0 100 100" aria-label="AW mono">
+          <rect x="4" y="4" width="92" height="92" rx="22" fill="#f8fafc"/>
+          <path fill="#0b0d12" fill-rule="evenodd" clip-rule="evenodd" d="M17.6 77.5H29.1L32.9 64.5H46L49.8 77.5H61.2L44.5 22.5H34.4L17.6 77.5ZM35.5 55.2H43.4L39.5 41.8L35.5 55.2Z"/>
+          <path d="M52 23.5L59.8 77.5L68.3 47.5L76.4 77.5L84.2 23.5" stroke="#0b0d12" stroke-width="9.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <div class="sizes">
+          <span><svg width="16" height="16" viewBox="0 0 100 100"><path fill="#f8fafc" fill-rule="evenodd" clip-rule="evenodd" d="M17.6 77.5H29.1L32.9 64.5H46L49.8 77.5H61.2L44.5 22.5H34.4L17.6 77.5ZM35.5 55.2H43.4L39.5 41.8L35.5 55.2Z"/><path d="M52 23.5L59.8 77.5L68.3 47.5L76.4 77.5L84.2 23.5" stroke="#f8fafc" stroke-width="9.2" stroke-linecap="round" stroke-linejoin="round"/></svg>16</span>
+          <span><svg width="32" height="32" viewBox="0 0 100 100"><path fill="#f8fafc" fill-rule="evenodd" clip-rule="evenodd" d="M17.6 77.5H29.1L32.9 64.5H46L49.8 77.5H61.2L44.5 22.5H34.4L17.6 77.5ZM35.5 55.2H43.4L39.5 41.8L35.5 55.2Z"/><path d="M52 23.5L59.8 77.5L68.3 47.5L76.4 77.5L84.2 23.5" stroke="#f8fafc" stroke-width="9.2" stroke-linecap="round" stroke-linejoin="round"/></svg>32</span>
+          <span><svg width="64" height="64" viewBox="0 0 100 100"><path fill="#f8fafc" fill-rule="evenodd" clip-rule="evenodd" d="M17.6 77.5H29.1L32.9 64.5H46L49.8 77.5H61.2L44.5 22.5H34.4L17.6 77.5ZM35.5 55.2H43.4L39.5 41.8L35.5 55.2Z"/><path d="M52 23.5L59.8 77.5L68.3 47.5L76.4 77.5L84.2 23.5" stroke="#f8fafc" stroke-width="9.2" stroke-linecap="round" stroke-linejoin="round"/></svg>64</span>
+          <span><svg width="128" height="128" viewBox="0 0 100 100"><path fill="#f8fafc" fill-rule="evenodd" clip-rule="evenodd" d="M17.6 77.5H29.1L32.9 64.5H46L49.8 77.5H61.2L44.5 22.5H34.4L17.6 77.5ZM35.5 55.2H43.4L39.5 41.8L35.5 55.2Z"/><path d="M52 23.5L59.8 77.5L68.3 47.5L76.4 77.5L84.2 23.5" stroke="#f8fafc" stroke-width="9.2" stroke-linecap="round" stroke-linejoin="round"/></svg>128</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>AW Fold · 备选</h2>
+        <img class="hero" src="./aw-fold.svg" alt="AW Fold">
+        <div class="sizes">
+          <span><img src="./aw-fold.svg" width="16" height="16" alt="">16</span>
+          <span><img src="./aw-fold.svg" width="32" height="32" alt="">32</span>
+          <span><img src="./aw-fold.svg" width="64" height="64" alt="">64</span>
+          <span><img src="./aw-fold.svg" width="128" height="128" alt="">128</span>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Cloud Core AW · 备选</h2>
+        <img class="hero" src="./aw-cloud-core.svg" alt="AW Cloud Core">
+        <div class="sizes">
+          <span><img src="./aw-cloud-core.svg" width="16" height="16" alt="">16</span>
+          <span><img src="./aw-cloud-core.svg" width="32" height="32" alt="">32</span>
+          <span><img src="./aw-cloud-core.svg" width="64" height="64" alt="">64</span>
+          <span><img src="./aw-cloud-core.svg" width="128" height="128" alt="">128</span>
+        </div>
+      </article>
+    </section>
+
+    <section class="spec">
+      <div class="chip"><strong>Grid</strong>100 x 100 viewBox, 18-82 内容安全区。</div>
+      <div class="chip"><strong>Shape</strong>圆角方形，x=4 y=4 w=92 h=92 rx=22。</div>
+      <div class="chip"><strong>Monogram</strong>主版使用填充式几何 AW，不再用普通字体或线框描边。</div>
+      <div class="chip"><strong>Color</strong>AW Primary #1E6CF0，白色 monogram，小尺寸使用纯色简化版。</div>
+    </section>
+  </main>
+</body>
+</html>

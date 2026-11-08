@@ -1,0 +1,8 @@
+<svg width="512" height="512" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>AgentWork AW Fold icon</title>
+  <rect x="4" y="4" width="92" height="92" rx="22" fill="#1E6CF0"/>
+  <path d="M20 76L35 23L50 76L65 23L80 76" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M28 51H43" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+  <path d="M35 23L50 76L65 23" stroke="#B9D8FF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" opacity="0.65"/>
+  <path d="M20 76H80" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" opacity="0.18"/>
+</svg>
