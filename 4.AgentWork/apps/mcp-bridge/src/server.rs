@@ -1215,7 +1215,7 @@ impl Server {
             // 败者不一定拿到 NotFound：Windows 上并发改名的另一半可能返回
             // AccessDenied / SharingViolation。归属以事实为准——源已不在，
             // 就是被另一方认领带走，不能报成「原样未动」。
-            if error.kind() == std::io::ErrorKind::NotFound || !source.exists() {
+            if rename_failure_is_lost_race(&error, source.exists()) {
                 return DeleteOutcome::LostRace {
                     error: format!(
                         "claim_lost_source_missing: 源目录已被另一认领者改名带走（attempt-{attempt}），本进程零删除：{error}"
@@ -11670,6 +11670,13 @@ mod description_gate {
     }
 }
 
+/// rename 失败的归属判定：`NotFound` 或源已不在，都表示源被另一方认领带走。
+/// Windows 上并发 rename 的败者常拿到 `AccessDenied` / `SharingViolation`，
+/// 只看错误类型会把「源已被搬走」误记成「原样未动」。
+fn rename_failure_is_lost_race(error: &std::io::Error, source_still_present: bool) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound || !source_still_present
+}
+
 /// prune 认领竞态用例：验证「rename 返回 Ok」不被当成归属依据。
 #[cfg(test)]
 mod prune_claim_race_tests {
@@ -11846,6 +11853,36 @@ mod prune_claim_race_tests {
         );
         assert_eq!(deleted_rounds, rounds, "每轮都必须有一方真删");
         assert_eq!(other_rounds, 0, "败者只能是 lost_race");
+    }
+
+    /// 固定 §55.10 的修复口径：非 `NotFound` 的 rename 失败，只要源已不在，
+    /// 归属仍是 `lost_race`，不得报成 `retained_at_source`。
+    #[test]
+    fn rename_failure_treats_missing_source_as_lost_race() {
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        // Windows 的 ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION 都映射成非 NotFound。
+        let access_denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "AccessDenied");
+        let sharing_violation = std::io::Error::new(std::io::ErrorKind::Other, "SharingViolation");
+
+        assert!(rename_failure_is_lost_race(&not_found, true), "NotFound 必须判 lost_race");
+        assert!(rename_failure_is_lost_race(&not_found, false), "NotFound + 源缺失必须判 lost_race");
+        assert!(
+            rename_failure_is_lost_race(&access_denied, false),
+            "AccessDenied 且源已被搬走时必须判 lost_race"
+        );
+        assert!(
+            rename_failure_is_lost_race(&sharing_violation, false),
+            "SharingViolation 且源已被搬走时必须判 lost_race"
+        );
+        // 对照组：源仍在就是真的「原样未动」。
+        assert!(
+            !rename_failure_is_lost_race(&access_denied, true),
+            "源仍存在时不得记 lost_race"
+        );
+        assert!(
+            !rename_failure_is_lost_race(&sharing_violation, true),
+            "源仍存在时不得记 lost_race"
+        );
     }
 }
 

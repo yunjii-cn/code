@@ -4804,30 +4804,30 @@ assertion failed: !cleanup_claim_allowed(Some("canceled"), Some("still_alive"))
 test result: FAILED. 0 passed; 1 failed
 ```
 
-恢复后全部转绿：`description_gate` 4 passed；`pm_selftest.py` `pass=40 fail=0`；`--lib cleanup_claim` 2 passed。门禁指纹最终为 `95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316`。
+恢复后全部转绿：`description_gate` 3 passed；`pm_selftest.py` `pass=40 fail=0`；`--lib cleanup_claim` 2 passed。门禁指纹最终为 `95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316`。
 
 ### 55.5 两平台实跑（原始输出）
 
-全部在 §55.10 修复**之后**的代码上重跑。
+全部在 §55.10 修复**之后**的代码上重跑（v1.51 回归确认，含新增的 `rename_failure_treats_missing_source_as_lost_race`）。
 
 ```text
-# Windows：powershell -File scripts/test-gate/gate.ps1（含 selftest）
+# Windows：powershell -File scripts/test-gate/gate.ps1（含 selftest），墙钟 51.3s
 [SELFTEST] pass=7 fail=0
-running 26 tests
-test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.22s
+running 27 tests
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.51s
 running 130 tests
-test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.90s
+test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.51s
 [GATE] warn=0 fail=0 — 非 quarantine 用例全部通过；已知不稳定按 WARN 呈现，不代表全绿结论
 
 # Windows：cargo check -p aw-mcp-bridge
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.50s
 
-# WSL（POSIX）：AW_VENDOR=/root/vendor bash scripts/posix-timeout-verify/verify.sh run
-[INFO] 运行 POSIX 四类用例（离线，日志 /root/.aw-posix-verify/logs/posix-verify-20261108-081805.log）
-running 39 tests
-test result: ok. 38 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.69s
+# WSL（POSIX）：AW_VENDOR=/root/vendor bash scripts/posix-timeout-verify/verify.sh run，墙钟 11.7s
+[INFO] 运行 POSIX 四类用例（离线，日志 /root/.aw-posix-verify/logs/posix-verify-20261108-200449.log）
+running 40 tests
+test result: ok. 39 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.71s
 running 128 tests
-test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s
+test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.47s
 [GATE] warn=0 fail=0 — 非 quarantine 用例全部通过；已知不稳定按 WARN 呈现，不代表全绿结论
 [INFO] 四类 POSIX 用例：非 quarantine 全部通过，证据行齐全；已知不稳定按 WARN 呈现
 ```
@@ -4908,6 +4908,10 @@ not_proven_total=2
   `第 16 轮败者必须具名记为 lost_race：["retained_at_source", "deleted"]`，`left="retained_at_source" right="lost_race"`。
 - **根因**：`delete_attempt_dir` 只在 `fs::rename` 返回 `ErrorKind::NotFound` 时判 `LostRace`。Windows 上并发 rename 同一源时，败者可能拿到 `AccessDenied` / `SharingViolation`（非 NotFound），于是走进 `RetainedAtSource`（语义是「attempt 原样未动」）——与事实相反：源已被胜者搬走。
 - **修复**（`apps/mcp-bridge/src/server.rs`，`delete_attempt_dir`）：判据从「错误类型」改为「事实」——`NotFound` **或** 源已不存在（`!source.exists()`）都记 `LostRace`；源仍在才记 `RetainedAtSource`。归属仍以目的目录是否存在复核（既有 `symlink_metadata(&staged)` 分支不变）。
-- **验证**：修复后该用例连续 12 次单独复跑全绿（每次内部 20 轮并发，合计 240 轮），`ROUNDS ok=12 bad=0`；随后全量门禁复跑结果见 §55.5。
+- **验证**：
+  - 确定性用例 `prune_claim_race_tests::rename_failure_treats_missing_source_as_lost_race`：直接对判定函数喂 `NotFound` / `AccessDenied` / `SharingViolation` 三类错误，断言「非 NotFound + 源已不在 → lost_race」「源仍在 → 不是 lost_race」。不依赖并发时序，每次必触发。
+  - 并发用例 `prune_claim_race_tests::prune_concurrent_claimers_delete_once_others_lost_race`（单跑一次内部 20 轮）：Windows 12 次 × 20 轮 = 240 轮、WSL 12 次 × 20 轮 = 240 轮，全部 `ok=12 bad=0`。
+  - 两次判定都要求输出里出现 `test result: ok. 1 passed` 才算通过——`--exact` 名字写错时 cargo 会以 0 个用例退出码 0，只看退出码会得到假绿（本轮实测踩到过一次，已改判定方式）。
+  - 全量门禁复跑结果见 §55.5。
 - **为什么不加进 quarantine**：这不是「已知不稳定」，是分类错误——败者本就没有任何东西留在源目录，把它记成「原样未动」会让 PM/审计看到假状态，属于必须修的行为。
 
