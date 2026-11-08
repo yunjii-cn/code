@@ -6658,7 +6658,7 @@ fn capabilities_declares_machine_readable_boundaries() {
         "cgroup_kill_terminates_escapee_that_left_cgroup_procs",
         "cgroup_kill_terminates_adopted_escapee",
         "cgroup_without_kill_reports_still_alive",
-        "cgroup_degraded_terminate_is_group_only",
+        "cgroup_degraded_terminate_reports_unavailable",
     ] {
         assert!(
             whole_tree_evidence.iter().any(|item| item == case),

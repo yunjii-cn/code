@@ -4578,22 +4578,32 @@ mod process_scope {
                                 std::thread::sleep(Duration::from_millis(20));
                                 continue;
                             }
-                            // 组记账为空后再用独立观测点复核：仍有可枚举后代 → 不宣称清空
-                            let snapshot = self.snapshot_descendants(child.id());
-                            if let Some(_reason) = snapshot.unobservable.as_ref() {
-                                #[cfg(test)]
-                                trace_note(format!(
-                                    "terminate 结果=Unavailable round={round} 原因=snapshot:{_reason}"
-                                ));
-                                return CleanupOutcome::Unavailable;
-                            }
-                            if !snapshot.is_empty() {
-                                #[cfg(test)]
-                                trace_note(format!(
-                                    "terminate 结果=StillAlive round={round} 原因=snapshot_not_empty"
-                                ));
-                                return CleanupOutcome::StillAlive;
-                            }
+                        }
+                        // 所有 POSIX 平台共同判据（含 macOS）：组记账为空后必须再用独立快照复核。
+                        // 整份快照不可观测 → Unavailable；期望的逃逸作用域没建起来
+                        // （cgroup_v2_unavailable / procfs 缺失）→ 同样 Unavailable：
+                        // 不允许把「降级/看不见作用域」读成 Cleaned 后向 PM 宣称 cleanup_claimed。
+                        let snapshot = self.snapshot_descendants(child.id());
+                        if let Some(_reason) = snapshot.unobservable.as_ref() {
+                            #[cfg(test)]
+                            trace_note(format!(
+                                "terminate 结果=Unavailable round={round} 原因=snapshot:{_reason}"
+                            ));
+                            return CleanupOutcome::Unavailable;
+                        }
+                        if let Some(_reason) = snapshot.escaped_scope_unobservable.as_ref() {
+                            #[cfg(test)]
+                            trace_note(format!(
+                                "terminate 结果=Unavailable round={round} 原因=escaped_scope_unobservable:{_reason}"
+                            ));
+                            return CleanupOutcome::Unavailable;
+                        }
+                        if !snapshot.is_empty() {
+                            #[cfg(test)]
+                            trace_note(format!(
+                                "terminate 结果=StillAlive round={round} 原因=snapshot_not_empty"
+                            ));
+                            return CleanupOutcome::StillAlive;
                         }
                         #[cfg(test)]
                         trace_note(format!("terminate 结果=Cleaned round={round}"));
@@ -6761,12 +6771,12 @@ mod process_scope {
                 let _ = std::fs::remove_dir_all(&dir);
             }
 
-            // v1.41 判据：作用域建不起来（降级）时，终止只覆盖进程组；
-            // 被收养的逃逸进程既打不到也看不见——判定为受控集合口径的 Cleaned，
-            // 但降级原因必须一直带在快照里，不得静默。
+            // v1.52 判据：作用域建不起来（降级）时，终止仍只覆盖进程组，
+            // 但被收养的逃逸进程既打不到也看不见——**不得宣称 Cleaned**，
+            // 按 Unavailable 上报（cleanup_claimed=false），降级原因始终带在快照里。
             #[cfg(target_os = "linux")]
             #[test]
-            fn cgroup_degraded_terminate_is_group_only() {
+            fn cgroup_degraded_terminate_reports_unavailable() {
                 let dir = std::env::temp_dir().join(format!(
                     "aw-cgroup-degraded-{}-{}",
                     std::process::id(),
@@ -6830,8 +6840,8 @@ mod process_scope {
                 );
                 assert_eq!(
                     outcome,
-                    CleanupOutcome::Cleaned,
-                    "降级时只对进程组作判定，受控集合口径为 Cleaned"
+                    CleanupOutcome::Unavailable,
+                    "降级时不得宣称 Cleaned：作用域看不见就不能给 PM cleanup_claimed，按 Unavailable 上报"
                 );
                 assert!(after.is_empty(), "父链断开的逃逸进程不在降级快照里");
                 assert_eq!(
@@ -10423,9 +10433,9 @@ fn capabilities_payload() -> Value {
                 "cgroup_kill_terminates_adopted_escapee",
                 "cgroup_kill_terminates_escapee_that_left_cgroup_procs",
                 "cgroup_without_kill_reports_still_alive",
-                "cgroup_degraded_terminate_is_group_only",
+                "cgroup_degraded_terminate_reports_unavailable",
             ],
-            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。v1.49 起 `descendant_snapshot_cross_checks_process_group` 标记为已知不稳定（POSIX 全量并行时偶发 outcome=Unavailable，默认门禁按 WARN 呈现，见 scripts/test-gate/quarantine.txt）；本条 proven 结论由其余独立用例共同支撑，不单独依赖该条。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：退回进程组窄判据，降级原因记 escaped_scope_unobservable。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
+            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。v1.49 起 `descendant_snapshot_cross_checks_process_group` 标记为已知不稳定（POSIX 全量并行时偶发 outcome=Unavailable，默认门禁按 WARN 呈现，见 scripts/test-gate/quarantine.txt）；本条 proven 结论由其余独立用例共同支撑，不单独依赖该条。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：仍只按进程组窄判据清理，但**不宣称 Cleaned**——快照带 escaped_scope_unobservable，terminate 返回 Unavailable（cleanup_status=unavailable、cleanup_claimed=false），降级原因不静默。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
         ),
         capability_entry(
             "timeout.cleans_entire_process_tree_windows",

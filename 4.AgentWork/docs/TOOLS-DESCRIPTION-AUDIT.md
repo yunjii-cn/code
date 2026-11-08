@@ -5024,3 +5024,63 @@ quarantine.txt 非注释行 = 0
 - **验证**（WSL，最终代码）：精确连跑 12 次 `ok=12 bad=0`；全量 lib 套件并行连跑 5 次，每次均 `39 passed; 0 failed; 1 ignored`，无 `FAILED`。
 - **为什么不进 quarantine**：这是夹具的竞态读，修一行就消除；用 quarantine 会把它变成长期 WARN，掩盖真实信号。
 
+## 57. 未支持/未验证平台的 fail-open / fail-closed 审计（v1.51）
+
+本节回答一个问题：在 `verified` 没覆盖的平台上，清理逻辑会不会**照常动手并宣称已清理**。结论：Windows 侧全部 fail-closed（不适用或查询失败即 Unavailable）；macOS 此前存在一条 **fail-open**（组记账为空就报 Cleaned，从不检查后代快照，而 macOS 的 `snapshot_descendants` 恒为 unobservable）；Linux 降级的 cgroup 路径也有同类问题（`is_empty()` 忽略 `escaped_scope_unobservable`）。已修成 fail-closed，并给出红/绿证据。
+
+### 57.1 逐条结论
+
+| 能力 | Windows 运行时行为 | macOS 运行时行为 | 判定 |
+|---|---|---|---|
+| `timeout.cgroup_v2_scope_observation` | cgroup 代码全在 `#[cfg(target_os = "linux")]` 内，Windows 根本不编译、不执行；能力目录标 `unverified` | 同样不编译；unix 通用 `snapshot_descendants` 返回 `unobservable("procfs_unavailable")`，不作为 cgroup 观测 | fail-closed（拒绝执行/不适用），不冒充 |
+| `timeout.cgroup_kill_terminates_scope` | Windows 只用 `TerminateJobObject` 走独立 imp，未被当作 `cgroup.kill` 使用；能力目录标 `unverified` | 无 `cgroup.kill` 调用点 | fail-closed（拒绝执行/不适用） |
+| `lifecycle.startup_reclaims_abandoned_cgroup_scopes` | `reclaim_stale_cgroup_scopes` 非 Linux 实现直接返回 `state=unsupported, reason=platform_has_no_cgroup_v2`，`reclaimed_total=0`，不删任何目录 | 同 Windows 的 stub | fail-closed（拒绝执行） |
+| `timeout.cleans_entire_process_tree_windows`（`not_proven`） | 作业对象清理，动手前查作业记账与快照；查询失败/快照不可观测→`Unavailable`；作业外进程不可观测，运行时文案明写「未验证」 | 进程组清理；修复前组空即 `Cleaned`（见 57.2），修复后快照不可观测→`Unavailable` | Windows：显式降级（只声明受控集合）；macOS：已修为 fail-closed |
+| `timeout.enumerates_escaped_descendants_windows`（`not_proven`） | 只能枚举作业内成员；作业外不做权威枚举，能力目录 `not_proven` | 无 `/proc`，快照恒 `unobservable`；修复后不得据此宣称 Cleaned | Windows：显式降级；macOS：fail-closed |
+
+代码位置：cgroup 结构 `#[cfg(target_os = "linux")]` 见 [server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4671-L4683)；非 Linux 回收 stub 见 [server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L2412-L2419)；macOS 的不可观测快照见 [server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4398-L4401)；Windows terminate 的查询失败分支见 [server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L7141-L7172)；能力目录三处 cgroup 条目见 [server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L10491-L10520)。
+
+### 57.2 红证据（修复前确实 fail-open）
+
+用 Linux 的 cgroup 降级路径复现（这是 macOS「无作用域可观测」的可执行等价物），修复前实跑原文：
+
+```text
+[evidence] cgroup_degraded before root=132099 escaped=132098 scope=ProcessGroup escaped_scope_unobservable=Some("cgroup_v2_unavailable") descendants=[]
+[evidence] cgroup_degraded after outcome=Cleaned escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")
+test result: ok. 1 passed
+```
+
+即：作用域明确不可观测（`escaped_scope_unobservable` 非空）、逃逸进程 `escaped_alive=true`，但终止结果仍是 `Cleaned` → `cleanup_status=cleaned` → PM 侧 `cleanup_claimed=true`。根因两处：
+
+1. 判据用了 `snapshot.is_empty()`（只检查 `unobservable`，[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4078-L4082)），而结构注释已写明 `escaped_scope_unobservable` 非空时「**不代表**没有逃逸后代」（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4059-L4061)）——字段被声明为不可读成空，却在实际判定里被读成空。
+2. 全部快照复核都在 `#[cfg(target_os = "linux")]` 块内，macOS 分支只查「进程组是否为空」就返回 `Cleaned`；而 macOS 的 `snapshot_descendants` 恒返回 `unobservable("procfs_unavailable")`，等于「从不观测就宣称清空」。
+
+### 57.3 修复：Cleaned 必须有可观测且无降级的快照
+
+- 把快照复核移出 Linux cfg，变成**所有 POSIX 平台共同判据**（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4582-L4610)）：`unobservable` 非空 → `Unavailable`；`escaped_scope_unobservable` 非空 → `Unavailable`；快照非空 → `StillAlive`；三者都没有才 `Cleaned`。
+- macOS 因此恒为 `Unavailable`（`cleanup_status=unavailable`、`cleanup_claimed=false`），不再出现「看不见后代却宣称 cleaned」。
+- Linux cgroup 降级同理：仍只按进程组窄判据清理，但不再宣称 `Cleaned`；能力 `timeout.cleans_entire_process_tree` 的 detail 与 evidence 已同步改为 `cgroup_degraded_terminate_reports_unavailable`（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L10419-L10447)）。
+- 未新增 `verified`、未新增 `cleanup_status` 取值；`Unavailable` 本来就映射 `cleanup_status="unavailable"` 且 `cleanup_claimed=false`（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L8037-L8051)），PM 判定模块无需改动。
+- 用例改名与断言：`cgroup_degraded_terminate_reports_unavailable` 固定「逃逸仍存活 + outcome=Unavailable」（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L6774-L6854)）。
+
+### 57.4 修复后证据
+
+```text
+[evidence] cgroup_degraded after outcome=Unavailable escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")
+test result: ok. 1 passed
+```
+
+两平台门禁（默认档，最终代码）：
+
+```text
+Windows gate.ps1 : rc=0 64.8s | SELFTEST pass=7 fail=0 | lib 27 | integration 130 | warn=0 fail=0
+WSL verify.sh    : rc=0 13s  | lib 39 passed + 1 ignored | integration 128 | warn=0 fail=0
+description_gate : test result: ok. 3 passed; 0 failed（24 filtered out）
+tools_sha256     : 95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316（未变）
+quarantine.txt   : 非注释行 = 0
+```
+
+### 57.5 macOS 全程未验证（可检索）
+
+**macOS 全程未验证**：本仓库没有 macOS 构建、没有 macOS 用例、没有 macOS CI 或实跑记录；`capabilities` 中 macOS **只**出现在 `platforms_unverified`，不出现于任何 `platforms_verified`。任何 macOS 行为结论（包括本节 fail-closed 的推断）都只是代码路径分析，**不构成「已验证」**；首次在 macOS 实跑前，按未验证平台对待。
+
