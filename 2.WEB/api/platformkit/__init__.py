@@ -15,5 +15,5 @@
     - 旧 routes/、services/ 用 re-export 兼容 4 周，逐步废弃
 
 详细路线图:
-    doc/全面超越-参考CodexMonitor改造计划.md - TASK-1.3
+    BAK/文档归档-20260624/doc/archive/全面超越-参考CodexMonitor改造计划.md - TASK-1.3
 """

@@ -131,4 +131,4 @@ npm run dev
 
 - 产品线矩阵：[../doc/产品线矩阵.md](../doc/产品线矩阵.md)
 - 企业服务：[enterprise-services/README.md](enterprise-services/README.md)
-- 全面超越计划：[../doc/全面超越-参考CodexMonitor改造计划.md](../doc/全面超越-参考CodexMonitor改造计划.md)
+- 旧路线图归档：[../BAK/文档归档-20260624/doc/archive/全面超越-参考CodexMonitor改造计划.md](../BAK/文档归档-20260624/doc/archive/全面超越-参考CodexMonitor改造计划.md)

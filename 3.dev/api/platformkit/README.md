@@ -1,6 +1,11 @@
-# PlatformKit - 云集智能编程工作站共享核心层
+# PlatformKit - 云集旗舰共享核心层
 
-> ⚠️ **重要变更（2026-06-08）**: 本目录原计划名为 `platform/`，但 Python 3.12 标准库有一个 `platform` 模块，**包名冲突会导致整个项目无法启动**（`webview` 失败：`ImportError: cannot import name 'python_implementation' from 'platform'`）。已重命名为 `platformkit/`。详见 [AGENTS.md](file:///e:/%E8/BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/%E4%BA%91%E9%9B%86%E6%99%BA%E8%83%BD%E7%BC%96%E7%A8%8B%E5%B7%A5%E4%BD%9C%E7%AB%99/AGENTS.md)。
+> 状态：需复核  
+> 范围：3.dev / api / platformkit  
+> 最近复核：2026-06-24  
+> 说明：本文来自早期 `dev/app/platformkit` 规划，当前 3.dev 路径已调整为 `3.dev/api/platformkit/`；实现细节需按现目录校验。
+>
+> ⚠️ **重要变更（2026-06-08）**: 本目录原计划名为 `platform/`，但 Python 3.12 标准库有一个 `platform` 模块，**包名冲突会导致整个项目无法启动**（`webview` 失败：`ImportError: cannot import name 'python_implementation' from 'platform'`）。已重命名为 `platformkit/`。详见 [根 AGENTS.md](../../../AGENTS.md)。
 
 ---
 
@@ -25,7 +30,7 @@ PlatformKit 是项目"**跨进程共享的领域核心**"——
 ## 二、目录结构
 
 ```
-dev/app/platformkit/                    ← ⚠️ 注意是 platformkit 不是 platform
+3.dev/api/platformkit/                  ← ⚠️ 注意是 platformkit 不是 platform
 ├── __init__.py                          # 包入口
 ├── README.md                            # 本文档
 ├── shared/                              # 跨进程共享的领域核心
@@ -87,13 +92,13 @@ platformkit.shared 的内容**不应该维护任何进程级状态**。如需要
 
 ## 五、为什么用 importlib.util 直接加载
 
-**问题**：dev/app 同时有：
+**历史问题**：旧 `dev/app` 同时有：
 - `dev/app/backend.py`（主后端，PyQt6 启动器用）
 - `dev/app/api/qwen2api/backend/`（子应用，被 api_main 用）
 
 `import backend` 在 api_main 上下文里会**先匹配到子应用的 backend**（因为 sys.path 顺序）。
 
-**解决**：platformkit/shared 使用 `importlib.util.spec_from_file_location` 按**绝对路径**加载 `dev/app/backend.py`，并注册为 `sys.modules['yunji_main_backend']`，与子应用隔离。
+**解决**：platformkit/shared 使用 `importlib.util.spec_from_file_location` 按**绝对路径**加载主 backend，并注册为 `sys.modules['yunji_main_backend']`，与子应用隔离。当前 3.dev 代码需要按 `3.dev/api/` 实际路径复核。
 
 **好处**：
 - ✅ 100% 确定加载的是主 backend
@@ -106,8 +111,8 @@ platformkit.shared 的内容**不应该维护任何进程级状态**。如需要
 
 | 文件 | 状态 | 来源 |
 |------|------|------|
-| `platformkit/shared/constants.py` | ✅ 完成 | re-export 自 [dev/app/backend.py](file:///e:/%E8/BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/%E4%BA%91%E9%9B%86%E6%99%BA%E8%83%BD%E7%BC%96%E7%A8%8B%E5%B7%A5%E4%BD%9C%E7%AB%99/dev/app/backend.py) L35-L81 |
-| `platformkit/shared/config_core.py` | ✅ 完成 | re-export 自 [dev/app/backend.py](file:///e:/%E8/BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/%E4%BA%91%E9%9B%86%E6%99%BA%E8%83%BD%E7%BC%96%E7%A8%8B%E5%B7%A5%E4%BD%9C%E7%AB%99/dev/app/backend.py) L84-L150 (EnvFileManager) |
+| `platformkit/shared/constants.py` | ✅ 完成 | re-export 自 `3.dev/api/backend.py`，需按当前代码复核行号 |
+| `platformkit/shared/config_core.py` | ✅ 完成 | re-export 自 `3.dev/api/backend.py`，需按当前代码复核行号 |
 | `platformkit/shared/types.py` | ⏳ 占位 | 实际类型 W2 迁移 |
 | `platformkit/shared/workspace_core.py` | ⏳ 计划中 | W3 计划 |
 | `platformkit/shared/knowledge_core.py` | ⏳ 计划中 | Phase 3 W9 计划 |
@@ -121,14 +126,15 @@ platformkit.shared 的内容**不应该维护任何进程级状态**。如需要
 
 如需回滚：
 ```bash
-rm -rf dev/app/platformkit
-cp -r BAK/app_pre_platform_20260608/* dev/app/
+rm -rf 3.dev/api/platformkit
+cp -r BAK/app_pre_platform_20260608/platformkit 3.dev/api/
 ```
 
 ---
 
 ## 八、相关文档
 
-- [AGENTS.md](file:///e:/%E8/BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/%E4%BA%91%E9%9B%86%E6%99%BA%E8%83%BD%E7%BC%96%E7%A8%8B%E5%B7%A5%E4%BD%9C%E7%AB%99/AGENTS.md) — AI 协作者契约（包含 platformkit 命名原因）
-- [doc/codebase-map.md](file:///e:/%E8/BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/%E4%BA%91%E9%1B%86%E6%99%BA%E8%83%BD%E7%BC%96%E7%A8%8B%E5%B7%A5%E4%BD%9C%E7%AB%99/doc/codebase-map.md) — 任务地图
-- [doc/全面超越-参考CodexMonitor改造计划.md](file:///e:/%E8/BD%AF%E4%BB%B6%E5%BC%80%E5%8F%91/%E4%BA%91%E9%1B%86%E6%99%BA%E8%83%BD%E7%BC%96%E7%A8%8B%E5%B7%A5%E4%BD%9C%E7%AB%99/doc/%E5%85%A8%E9%9D%A2%E8%B6%85%E8%B6%8A-%E5%8F%82%E8%80%83CodexMonitor%E6%94%B9%E9%80%A0%E8%AE%A1%E5%88%92.md) — TASK-1.3 详细说明
+- [根 AGENTS.md](../../../AGENTS.md) — AI 协作者契约
+- [3.dev 文档索引](../../doc/README.md) — 第 3 代产品文档入口
+- [3.dev 旧代码地图归档](../../../BAK/文档归档-20260624/3.dev/doc/codebase-map-旧路径参考.md) — 旧路径参考，不能直接作为现行路径依据
+- [CodexMonitor 改造计划归档](../../../BAK/文档归档-20260624/doc/archive/全面超越-参考CodexMonitor改造计划.md) — 低频历史计划，不能直接作为现行规范
