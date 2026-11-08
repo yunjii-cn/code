@@ -2,17 +2,21 @@
 #
 # 用法：powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-gate/selftest.ps1
 param(
-    [string]$Gate = "",
-    [string]$QuarantineFile = ""
+    [string]$Gate = ""
 )
 
 $ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Gate) { $Gate = Join-Path $ScriptDir "gate.ps1" }
-if (-not $QuarantineFile) { $QuarantineFile = Join-Path $ScriptDir "quarantine.txt" }
 
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("aw-gate-selftest-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $Tmp -Force | Out-Null
+
+# 负向对照不读生产清单：清单合法地可能为空（条目全被移出），此时仍须能验证 WARN 分支。
+# 用 fixture 固定条目，路径经 -QuarantineFile 传给 gate.ps1。
+$Fixture = Join-Path $Tmp "quarantine-fixture.txt"
+Set-Content -Path $Fixture -Encoding utf8 -Value `
+    "aw_gate_selftest::synthetic_quarantined_case|windows|selftest|v1.51|负向对照固定条目（不进入生产清单）|仅 selftest"
 
 $pass = 0
 $failed = 0
@@ -30,10 +34,10 @@ function Invoke-GateCase {
     if ($PathPrefix) { $env:PATH = $PathPrefix + ";" + $oldPath }
     try {
         if ($LogFile) {
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $Gate -LogFile $LogFile -SkipSelfTest 2>&1 | Out-File -FilePath $out -Encoding utf8
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $Gate -LogFile $LogFile -QuarantineFile $Fixture -SkipSelfTest 2>&1 | Out-File -FilePath $out -Encoding utf8
         }
         else {
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $Gate -SkipSelfTest 2>&1 | Out-File -FilePath $out -Encoding utf8
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $Gate -QuarantineFile $Fixture -SkipSelfTest 2>&1 | Out-File -FilePath $out -Encoding utf8
         }
         $rc = $LASTEXITCODE
     }
@@ -53,16 +57,7 @@ function Invoke-GateCase {
     }
 }
 
-$qname = $null
-foreach ($line in Get-Content -Path $QuarantineFile) {
-    if ($line -match '^\s*#' -or $line.Trim() -eq '') { continue }
-    $qname = $line.Split('|')[0].Trim()
-    if ($qname) { break }
-}
-if (-not $qname) {
-    Write-Host "[SELFTEST][FAIL] quarantine.txt 中取不到条目名，无法做 WARN 对照" -ForegroundColor Red
-    exit 2
-}
+$qname = "aw_gate_selftest::synthetic_quarantined_case"
 
 # 1. 日志不存在
 Invoke-GateCase -Name "missing-log" -ExpectedRc 2 -ExpectedText "[GATE] fail=1 — 日志不存在" `

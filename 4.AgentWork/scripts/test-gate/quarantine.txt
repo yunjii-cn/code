@@ -6,6 +6,13 @@
 #   - 通过时同样打印 [WARN]（已知不稳定，不能作为新结论的证据）；
 #   - 未观测到（被过滤/改名）时也打印 [WARN]，防止清单悄悄失效。
 # 移出条件：连续 30 次默认门禁 + 10 次隔离 soak 全绿，且写下当时的根因结论。
-# 根因定向（v1.50，见 docs/TOOLS-DESCRIPTION-AUDIT.md §54.2）：/proc 退出竞态被观测器升级为整表不可用；
-# 两个确定性注入用例已钉死「跳过 vs 不可观测」分支。解除判据与当前进度见 §54.3。
-server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group|linux|timeout-scope|v1.49|POSIX 全量用例并行跑（test-threads>=16）时偶发 outcome=Unavailable；高并发 /proc 扫描与 cgroup 读并发|2026-11-08 全量 POSIX 出现 1 次；改后全量并行 20 轮、受控负载 2900 轮（峰值 21）均未复现
+#
+# 当前清单为空：2026-11-08 按判据移出
+# server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group
+#   根因（v1.50，见 docs/TOOLS-DESCRIPTION-AUDIT.md §54.2）：/proc 退出竞态被观测器升级为整表不可用，
+#     两个确定性注入用例已钉死「跳过 vs 不可观测」分支；本判据跑批期间该结论未被新证据推翻。
+#   证据：连续 30 次默认门禁 + 10 次隔离 soak（5×--test-threads=1、5×--test-threads=16）全绿，
+#     每次记录 原因= 全为「无」，全程未出现 cgroup_*；原始记录见 §54.3。
+#   恢复条件：再次失败时先看诊断 原因= 字段——
+#     procfs_unavailable → 按清单格式重新加回本条；
+#     cgroup_*           → 「观测器降级」结论作废，需重开根因分析，不能沿用 §54.2。

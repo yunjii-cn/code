@@ -12,13 +12,15 @@ param(
     [string]$LogFile = "",
     [int]$TestThreads = 0,
     [string]$Package = "aw-mcp-bridge",
+    # 清单路径可覆盖：selftest.ps1 用固定 fixture，避免负向对照依赖生产清单是否非空。
+    [string]$QuarantineFile = "",
     [switch]$SkipSelfTest
 )
 
 $ErrorActionPreference = "Continue"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "../..")).Path
-$QuarantineFile = Join-Path $ScriptDir "quarantine.txt"
+if (-not $QuarantineFile) { $QuarantineFile = Join-Path $ScriptDir "quarantine.txt" }
 
 # v1.50 常驻负向对照：门禁自己先过一遍「无证据不判绿」的用例，否则本次结果不可信。
 if (-not $SkipSelfTest) {

@@ -12,7 +12,8 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-QUARANTINE_FILE="$SCRIPT_DIR/quarantine.txt"
+# 清单路径可用环境变量覆盖：selftest.sh 用固定 fixture，避免负向对照依赖生产清单是否非空。
+QUARANTINE_FILE="${AW_GATE_QUARANTINE_FILE:-$SCRIPT_DIR/quarantine.txt}"
 LOG_FILE=""
 RUN_ARGS=()
 

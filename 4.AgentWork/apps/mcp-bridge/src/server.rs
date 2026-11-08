@@ -1212,7 +1212,10 @@ impl Server {
         Self::run_prune_before_rename_hook(&source, &staged);
         if let Err(error) = fs::rename(&source, &staged) {
             let _ = fs::remove_dir(&stage_root);
-            if error.kind() == std::io::ErrorKind::NotFound {
+            // 败者不一定拿到 NotFound：Windows 上并发改名的另一半可能返回
+            // AccessDenied / SharingViolation。归属以事实为准——源已不在，
+            // 就是被另一方认领带走，不能报成「原样未动」。
+            if error.kind() == std::io::ErrorKind::NotFound || !source.exists() {
                 return DeleteOutcome::LostRace {
                     error: format!(
                         "claim_lost_source_missing: 源目录已被另一认领者改名带走（attempt-{attempt}），本进程零删除：{error}"

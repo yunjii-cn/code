@@ -4612,11 +4612,67 @@ WSL Ubuntu 24.04 / 16 核 / bare-metal(VM) / cgroup=Active，每 worker 100 轮�
   - `proc_read_failure_for_live_process_is_unavailable`：读失败 + 进程仍存活 → 整表判 `Unavailable`（安全侧不变量不放宽）。
 - **为什么改后抓不到**：v1.49 的 `proc_entry_gone` 跳过恰好移除了「进程在 readdir 与 read 之间退出」这条最常见的触发路径，失败率从偶发降到本轮 0/2900。因此 quarantine 保留，但性质从「原因不明」变为「机制已定向、样本不再出现」。
 
-### 54.3 quarantine 仍是临时状态
+### 54.3 quarantine 已按判据解除（2026-11-08）
 
-- 清单条目不变（仍以 WARN 呈现，不记 PASS）。
+- **清单条目已移出**：`server::process_scope::imp::tests::descendant_snapshot_cross_checks_process_group`。`scripts/test-gate/quarantine.txt` 现在为空（只保留移出记录与恢复条件），该用例改按普通用例判绿/判红；再红时门禁直接 exit 2，不再降级成 WARN。
 - **解除判据**（与 §53.7 一致，写死在这里）：连续 30 次默认门禁 + 10 次隔离 soak（`--test-threads=1` 与 16 各半）全绿，且本文的根因结论未被新证据推翻。
-- **当前进度**：全量并行 20/20 绿；受控负载 2900/2900 绿；机制已由两个注入用例覆盖。下一次红时必须先看诊断里的 `原因=`：若为 `procfs_unavailable` → /proc 侧；若为 `cgroup_*` → 侧别判断需重开，不能沿用本节结论。
+- **达标记录**：30/30 次默认门禁 + 10/10 次隔离 soak（5 次 `--test-threads=1`、5 次 `--test-threads=16`），全部 `rc=0`、`test result: ok`，逐次记录 `原因=` 全为「无」，`cgroup` 列全为「无」；任一次红即 streak 归零重计，本次全程未触发重计。跑批期间未出现 `cgroup_*`，§54.2 的「观测器把 /proc 读竞态升级为整表不可用」结论未被推翻；机制仍由两个确定性注入用例覆盖。
+- **原始记录**：
+  - 默认门禁 30 次：`/root/.aw-posix-verify/logs/quarantine-batch-20261108-080540/summary.tsv`（该目录另含 10 次默认线程 soak，作为附加证据，不计入判据）。
+  - 隔离 soak 10 次：`/root/.aw-posix-verify/logs/quarantine-soak-20261108-081408/summary.tsv`。
+  - 两份 `summary.tsv` 原文：
+
+```tsv
+# quarantine-batch-20261108-080540/summary.tsv（Linux / 2026-11-08）
+date	platform	kind	run	rc	ok	reason	cgroup
+2026-11-08	Linux	gate	1	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	2	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	3	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	4	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	5	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	6	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	7	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	8	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	9	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	10	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	11	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	12	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	13	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	14	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	15	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	16	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	17	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	18	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	19	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	20	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	21	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	22	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	23	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	24	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	25	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	26	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	27	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	28	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	29	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	gate	30	rc=0	ok=1	原因=无	无
+# quarantine-soak-20261108-081408/summary.tsv（Linux / 2026-11-08）
+date	platform	kind	run	threads	rc	ok	reason	cgroup
+2026-11-08	Linux	soak	1	1	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	2	1	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	3	1	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	4	1	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	5	1	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	6	16	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	7	16	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	8	16	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	9	16	rc=0	ok=1	原因=无	无
+2026-11-08	Linux	soak	10	16	rc=0	ok=1	原因=无	无
+```
+
+- **恢复条件**：下一次红时先看诊断里的 `原因=`：`procfs_unavailable` → 按原格式把条目加回清单；`cgroup_*` → 「观测器降级」结论作废，需重开根因分析，不能沿用 §54.2。
+- **跑批脚本的两个坑（已修，记录在此避免复发）**：
+  1. WSL 非登录 shell 的 PATH 不含 Rust，`/root/.cargo/bin/cargo` 也不存在；必须显式 `export PATH="/root/.rustup/toolchains/1.88.0-x86_64-unknown-linux-gnu/bin:$PATH"`，否则每次都是 `cargo: command not found`（rc=2）。
+  2. soak 带 `--nocapture` 时 `[evidence]` 会打在 `test <name> ...` 同一行，`grep 'test <name> ... ok'` 永远不匹配（首版 37 次全被误判为红）。判绿必须用 cargo 汇总行 `test result: ok. 1 passed; 0 failed`。
 
 ### 54.4 门禁负向对照：从「验过一次」变成常驻用例
 
@@ -4630,6 +4686,7 @@ WSL Ubuntu 24.04 / 16 核 / bare-metal(VM) / cgroup=Active，每 worker 100 轮�
   7. 干净日志 → exit 0 `[GATE] warn=0 fail=0`。
 - 接线：`verify.sh run` 在跑测试前先执行 `selftest.sh`，失败即 `reason=gate_selftest_failed` 终止；`gate.ps1` 默认先跑 `selftest.ps1`（`selftest.ps1` 内部用 `-SkipSelfTest` 防止递归）。两平台各 7/7 通过。
 - 第 6 条用 PATH 前缀注入假 `cargo`（打印一行 ok 后退出 1）验证，不需要真的制造编译失败。
+- **第 4/5 条改用固定 fixture**（v1.51）：生产清单合法地可能为空（§54.3 已把唯一条目移出），负向对照不能因此失去 WARN 分支。`selftest.sh` / `selftest.ps1` 各自在临时目录生成 `aw_gate_selftest::synthetic_quarantined_case`，分别经 `AW_GATE_QUARANTINE_FILE` 与 `-QuarantineFile` 传给门禁；门禁默认仍读 `scripts/test-gate/quarantine.txt`。改后两平台复跑仍 7/7（原始输出见 §55.8）。
 
 ### 54.5 PM 接入须知与自测入口
 
@@ -4751,19 +4808,37 @@ test result: FAILED. 0 passed; 1 failed
 
 ### 55.5 两平台实跑（原始输出）
 
+全部在 §55.10 修复**之后**的代码上重跑。
+
 ```text
-# Windows 10：cargo test -p aw-mcp-bridge
-lib        26 passed;  0 failed
-integration 130 passed; 0 failed
-cargo check -p aw-mcp-bridge：Finished，无错误
+# Windows：powershell -File scripts/test-gate/gate.ps1（含 selftest）
+[SELFTEST] pass=7 fail=0
+running 26 tests
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.22s
+running 130 tests
+test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.90s
+[GATE] warn=0 fail=0 — 非 quarantine 用例全部通过；已知不稳定按 WARN 呈现，不代表全绿结论
+
+# Windows：cargo check -p aw-mcp-bridge
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.50s
 
 # WSL（POSIX）：AW_VENDOR=/root/vendor bash scripts/posix-timeout-verify/verify.sh run
-lib        38 passed;  0 failed;  1 ignored（既有 quarantine）
-integration 128 passed; 0 failed
+[INFO] 运行 POSIX 四类用例（离线，日志 /root/.aw-posix-verify/logs/posix-verify-20261108-081805.log）
+running 39 tests
+test result: ok. 38 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 3.69s
+running 128 tests
+test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s
+[GATE] warn=0 fail=0 — 非 quarantine 用例全部通过；已知不稳定按 WARN 呈现，不代表全绿结论
+[INFO] 四类 POSIX 用例：非 quarantine 全部通过，证据行齐全；已知不稳定按 WARN 呈现
+```
 
-# PM 行为自测（同一脚本，两平台各 40 项断言）
+- `1 ignored` 是既有复现驱动（`#[ignore]`，手动触发），不是 quarantine；清单已清空后 WSL 门禁的 `warn=0` 证明该用例已按普通用例判绿。
+- `--nocapture` 下 evidence 行（`[evidence] timeout_reason=…`、`cgroup_*`、`setsid escaped_pid=…` 等）全部命中，`verify.sh` 未报 `missing_evidence`。
+
+```text
+# PM 行为自测（scripts/pm-integration-selftest/pm_selftest.py --binary …，两平台各 40 项断言）
 Windows: [SELFTEST] pass=40 fail=0
-WSL:     [SELFTEST] pass=40 fail=0     （含 status.contract_version=1.51 断言）
+WSL:     [SELFTEST] pass=40 fail=0     （含 status.contract_version=1.51 / cleanup_status / 请求文件 cleanup_claimed 断言）
 ```
 
 ### 55.6 其余 12 条逐条处理状态
@@ -4789,4 +4864,50 @@ WSL:     [SELFTEST] pass=40 fail=0     （含 status.contract_version=1.51 断�
 - **不把 `task.execute` 的 schema 改成按 mode 动态 required**：JSON Schema 无法表达 dispatched/standalone 互斥，改为代码内校验并以 `blocked` 回执表达，文档已说明。
 - **不实现分档、不重开 W2c、`#3` 维持 `NOT_PROVEN`**：与本次缺陷无关。
 - **不改 PM 侧仓库**：只改 AW 侧文档与代码。
+
+### 55.8 门禁负向对照 7/7（两平台）
+
+`scripts/test-gate/selftest.ps1`（Windows）与 `selftest.sh`（POSIX）各跑一遍，逐条证明门禁会红：
+
+```text
+[SELFTEST][PASS] missing-log (rc=2)
+[SELFTEST][PASS] compile-failure-no-results (rc=2)
+[SELFTEST][PASS] non-quarantined-failure (rc=2)
+[SELFTEST][PASS] quarantined-failure-is-warn (rc=0)
+[SELFTEST][PASS] quarantined-ok-is-warn (rc=0)
+[SELFTEST][PASS] cargo-nonzero-without-failed (rc=2)
+[SELFTEST][PASS] clean-log-is-green (rc=0)
+[SELFTEST] pass=7 fail=0
+```
+
+两平台输出逐行一致，均为 `pass=7 fail=0`。该输出是在**生产清单已清空**、selftest 改用固定 fixture（§54.4）之后复跑的，第 4/5 条 WARN 分支仍被真实命中。
+
+### 55.9 Windows 上 Linux 专属能力如实标注 `not_proven`
+
+`capabilities` 实跑（Windows，x86_64，最终二进制），21 条里 2 条 `not_proven`，均带同一原因码字段 `reason_code`：
+
+```text
+entries_total=21 platform={"arch": "x86_64", "os": "windows"}
+timeout.cleans_entire_process_tree | proven | verified=['linux'] unverified=['windows', 'macos']
+timeout.cleans_entire_process_tree_windows | not_proven | verified=['windows'] unverified=[] | reason_code=requires_out_of_job_enumerable_terminable_os_primitive
+timeout.enumerates_escaped_descendants | proven | verified=['linux'] unverified=['windows', 'macos']
+timeout.enumerates_escaped_descendants_windows | not_proven | verified=['windows'] unverified=[] | reason_code=requires_out_of_job_enumerable_terminable_os_primitive
+timeout.cgroup_v2_scope_observation | proven | verified=['linux'] unverified=['windows', 'macos']
+timeout.cgroup_kill_terminates_scope | proven | verified=['linux'] unverified=['windows', 'macos']
+lifecycle.startup_reclaims_abandoned_cgroup_scopes | proven | verified=['linux'] unverified=['windows', 'macos']
+not_proven_total=2
+```
+
+- 两条 Linux 专属能力（`proven`）在 Windows 上带 `unverified=['windows','macos']`，不会被读成 Windows 已证；cgroup 逃逸终止同此。
+- 两条 `*_windows` 条目保留在列表里，状态 `not_proven`，原因码 `requires_out_of_job_enumerable_terminable_os_primitive`；**没有删除、也没有标成通过**。作业内成员由握手夹具证成，作业外进程仍只是旁证。
+- 同脚本在 WSL 上实跑：`entries_total=21 platform={"arch": "x86_64", "os": "linux"} not_proven_total=2`——同样两条 Windows 作用域条目仍未证，未因「在 Linux 上跑不到」改写状态。
+
+### 55.10 收尾实跑新发现：prune 并发败者被误判为 `retained_at_source`（已修）
+
+- **现象**：Windows 全量门禁 `gate.ps1` 首次跑到 `server::prune_claim_race_tests::prune_concurrent_claimers_delete_once_others_lost_race` 红：
+  `第 16 轮败者必须具名记为 lost_race：["retained_at_source", "deleted"]`，`left="retained_at_source" right="lost_race"`。
+- **根因**：`delete_attempt_dir` 只在 `fs::rename` 返回 `ErrorKind::NotFound` 时判 `LostRace`。Windows 上并发 rename 同一源时，败者可能拿到 `AccessDenied` / `SharingViolation`（非 NotFound），于是走进 `RetainedAtSource`（语义是「attempt 原样未动」）——与事实相反：源已被胜者搬走。
+- **修复**（`apps/mcp-bridge/src/server.rs`，`delete_attempt_dir`）：判据从「错误类型」改为「事实」——`NotFound` **或** 源已不存在（`!source.exists()`）都记 `LostRace`；源仍在才记 `RetainedAtSource`。归属仍以目的目录是否存在复核（既有 `symlink_metadata(&staged)` 分支不变）。
+- **验证**：修复后该用例连续 12 次单独复跑全绿（每次内部 20 轮并发，合计 240 轮），`ROUNDS ok=12 bad=0`；随后全量门禁复跑结果见 §55.5。
+- **为什么不加进 quarantine**：这不是「已知不稳定」，是分类错误——败者本就没有任何东西留在源目录，把它记成「原样未动」会让 PM/审计看到假状态，属于必须修的行为。
 

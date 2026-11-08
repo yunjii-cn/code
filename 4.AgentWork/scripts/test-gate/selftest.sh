@@ -15,7 +15,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$SCRIPT_DIR/gate.sh"
-QUARANTINE="$SCRIPT_DIR/quarantine.txt"
 TMP="$(mktemp -d -t aw-gate-selftest-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -45,12 +44,13 @@ run_case() {
   fi
 }
 
-# 从清单取一个真实条目名，避免硬编码测试路径
-QNAME="$(awk -F'|' '!/^[[:space:]]*#/ && NF > 1 {gsub(/^[ \t]+|[ \t]+$/, "", $1); print $1; exit}' "$QUARANTINE")"
-[ -n "$QNAME" ] || {
-  printf '[SELFTEST][FAIL] quarantine.txt 中取不到条目名，无法做 WARN 对照\n' >&2
-  exit 2
-}
+# 负向对照不读生产清单：清单合法地可能为空（条目全被移出），此时仍须能验证 WARN 分支。
+# 用 fixture 固定条目，路径经 AW_GATE_QUARANTINE_FILE 传给 gate.sh。
+FIXTURE="$TMP/quarantine-fixture.txt"
+printf '%s|linux|selftest|v1.51|负向对照固定条目（不进入生产清单）|仅 selftest\n' \
+  "aw_gate_selftest::synthetic_quarantined_case" > "$FIXTURE"
+export AW_GATE_QUARANTINE_FILE="$FIXTURE"
+QNAME="aw_gate_selftest::synthetic_quarantined_case"
 
 # 1. 日志不存在
 run_case "missing-log" 2 "[GATE] fail=1 — 日志不存在" "$TMP/does-not-exist.log"
