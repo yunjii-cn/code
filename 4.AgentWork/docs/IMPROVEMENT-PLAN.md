@@ -1456,6 +1456,13 @@ v2.1 阶段划分（命名延续 M0-M8）：
 - [ ] M5.3 内部 Beta
 - [ ] GA 1.0（待定）
 
+### 🗄️ BACKLOG（跨产品，暂不动）
+
+- [ ] 2.WEB / 3.dev 的旧 35-TASK 验证脚本（`api/tests/test_all_phases_verification.py`）
+  - 断言 `doc/codebase-map.md` 存在，但该文件已归档为 `doc/archive/codebase-map-旧路径参考.md`
+  - 路径写死 `dev/app`、`dev/web`，这两个目录在 4 代目录结构里已不存在
+  - 本次文档重组之前就不是绿的，不作为门禁；重写时按 4 代目录和现行归档位置重新取路径
+
 ---
 
 ## 6. 反向承诺（明确不做的事）🔴
