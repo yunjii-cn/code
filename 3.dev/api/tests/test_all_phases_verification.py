@@ -1,39 +1,37 @@
 """
 tests/test_all_phases_verification.py
-2026-06-10 引入：全计划 35 任务端到端验证
+2026-06-10 引入：全计划 35 任务端到端验证（现为 34 项，TASK-1.8 已移除）
+2026-11 重写：按 4 代目录结构取路径（<产品>/api + <产品>/ui），并同步归档后的文档位置
 
 验证所有 Phase 1/2/3/4 任务的实际文件存在 + 关键 API 存在。
 不是单元测试，是"项目状态验证"脚本，确保所有 TASK 没虚标。
+
+TASK-1.8（GitHub Actions CI）已移除：本产品没有 CI 配置，仓库里唯一的
+ci.yml 在 1.PC/.github/ 且只覆盖 1.PC；断言一个不存在的产物会恒红，
+不能当门禁。详见 IMPROVEMENT-PLAN.md 的 BACKLOG 条目。
 """
-import os
 import sys
 from pathlib import Path
 
 import pytest
 
-# 项目根：用环境变量或固定探测，避免 pytest rootdir 改变 cwd 引起的歧义
-# 实际 ROOT = dev/（含 AGENTS.md, doc/, .github/）
-import os
+# 目录契约（4 代）：
+#   <仓库根>/<产品>/api     后端（原 dev/app）
+#   <仓库根>/<产品>/ui      前端（原 dev/web）
+#   <仓库根>/<产品>/doc     产品文档（原根 doc/ 中的产品文档）
+#   <仓库根>/doc            全局文档；被现行索引引用的历史文档在 doc/archive/
 _HERE = Path(__file__).resolve()
-# 探测：从 _HERE 向上找含 AGENTS.md 的目录
-def _find_root(here: Path) -> Path:
-    cur = here
-    for _ in range(8):  # 最多向上 8 层
-        if (cur / "AGENTS.md").exists():
-            return cur
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    raise RuntimeError(f"找不到项目根（{_HERE} 向上 8 层无 AGENTS.md）")
+PRODUCT = _HERE.parents[2]
+ROOT = PRODUCT.parent
 
-ROOT = _find_root(_HERE)
-WEB = ROOT / "dev" / "web"
-APP = ROOT / "dev" / "app"
+APP = PRODUCT / "api"
+WEB = PRODUCT / "ui"
 SHARED = APP / "platformkit" / "shared"
 ROUTES = APP / "routes"
 FEATURES = WEB / "src" / "features"
 SHARED_WEB = WEB / "src" / "shared"
-DOCS = ROOT / "doc"
+DOCS = PRODUCT / "doc"
+ARCHIVE = ROOT / "doc" / "archive"
 
 # 把 app 目录加到 sys.path
 sys.path.insert(0, str(APP))
@@ -43,7 +41,7 @@ sys.path.insert(0, str(APP))
 
 
 class TestPhase1:
-    """TASK-1.1~1.9 基础工程化"""
+    """TASK-1.1~1.9 基础工程化（1.8 已移除，见模块 docstring）"""
 
     def test_task_1_1_agents_md(self):
         """TASK-1.1: AGENTS.md 存在并通过审查"""
@@ -52,9 +50,14 @@ class TestPhase1:
         assert p.stat().st_size > 1000, "AGENTS.md 不应太小"
 
     def test_task_1_2_codebase_map(self):
-        """TASK-1.2: codebase-map.md 存在"""
-        p = DOCS / "codebase-map.md"
-        assert p.exists()
+        """TASK-1.2: 代码地图可追溯（已归档，只保证不被误删）
+
+        原断言的是 doc/codebase-map.md；该文档在 4 代文档重组中归档为
+        doc/archive/codebase-map-旧路径参考.md。这里只断言归档件存在，
+        不代表地图内容仍然新鲜。
+        """
+        p = ARCHIVE / "codebase-map-旧路径参考.md"
+        assert p.exists(), f"归档的代码地图缺失: {p}"
         assert p.stat().st_size > 5000
 
     def test_task_1_3_platformkit_shared(self):
@@ -95,21 +98,11 @@ class TestPhase1:
 
     def test_task_1_7_typescript_strict(self):
         """TASK-1.7: TypeScript 严格模式"""
-        # tsconfig.app.json 含 strict
+        # tsconfig.app.json 继承 @vue/tsconfig（含 strict: true）
         tsconfig = WEB / "tsconfig.app.json"
         assert tsconfig.exists()
         text = tsconfig.read_text(encoding="utf-8")
         assert "strict" in text, "tsconfig.app.json 应开启 strict"
-
-    def test_task_1_8_github_actions(self):
-        """TASK-1.8: GitHub Actions CI"""
-        ci_yml = ROOT / ".github" / "workflows" / "ci.yml"
-        assert ci_yml.exists()
-        text = ci_yml.read_text(encoding="utf-8")
-        assert "jobs:" in text
-        # 至少 3 个 job
-        job_count = text.count("    name:") + text.count("  name:")
-        assert job_count >= 3, f"CI jobs 太少: {job_count}"
 
     def test_task_1_9_design_system(self):
         """TASK-1.9: Design System 5 个原子组件"""
@@ -195,12 +188,7 @@ class TestPhase3:
 
     def test_task_3_5_responsive_api(self):
         assert (ROUTES / "responsive.py").exists()
-        # websocket 可选
-        ws = ROUTES / "ws.py"
-        if not ws.exists():
-            # 可能集成在 responsive.py 内部
-            text = (ROUTES / "responsive.py").read_text(encoding="utf-8")
-            assert "websocket" in text.lower() or "ws" in text.lower()
+        assert (ROUTES / "ws.py").exists()
 
     def test_task_3_6_responsive_ui(self):
         assert (FEATURES / "responsive" / "ResponsivePanel.vue").exists()
@@ -294,7 +282,7 @@ class TestPhase4:
 
     def test_task_4_8_release(self):
         """TASK-4.8: v2.0 发布 + 宣发"""
-        # doc/ 目录存在且含至少 1 个 markdown
+        # 产品 doc/ 目录存在且含至少 1 个 markdown
         assert DOCS.exists(), f"doc/ 不存在: {DOCS}"
         md_files = list(DOCS.glob("*.md"))
         assert len(md_files) >= 1, f"doc/ 至少 1 个 .md，实际 {len(md_files)}"
@@ -311,22 +299,19 @@ class TestAllApiRoutes:
         "agent.py", "team.py", "github.py", "env.py", "ws.py",
     ])
     def test_route_file_exists(self, route_file):
-        p = ROUTES / route_file
-        if route_file == "ws.py":
-            # ws 是可选（可能集成在 responsive.py 中）
-            return
-        assert p.exists(), f"路由文件缺失: {route_file}"
+        # ws.py 曾经是可选项（可能并入 responsive.py）；现为独立文件，按普通路由断言
+        assert (ROUTES / route_file).exists(), f"路由文件缺失: {route_file}"
 
 
 # ==================== 总结 ====================
 
 
-def test_summary_35_tasks():
-    """35 任务全过 — 项目状态报告"""
+def test_summary_of_all_tasks():
+    """34 任务全过 — 项目状态报告（TASK-1.8 已移除，见模块 docstring）"""
     task_files = {
         # Phase 1
         "1.1": [ROOT / "AGENTS.md"],
-        "1.2": [DOCS / "codebase-map.md"],
+        "1.2": [ARCHIVE / "codebase-map-旧路径参考.md"],
         "1.3": [SHARED / "knowledge_core.py", SHARED / "responsive_core.py",
                  SHARED / "durable_store.py", SHARED / "team_core.py",
                  SHARED / "whisper_core.py", SHARED / "daemon_core.py",
@@ -335,7 +320,6 @@ def test_summary_35_tasks():
         "1.5": [WEB / "eslint.config.mjs", WEB / ".prettierrc.js"],
         "1.6": [APP / "tests"],  # directory
         "1.7": [WEB / "tsconfig.app.json"],
-        "1.8": [ROOT / ".github" / "workflows" / "ci.yml"],
         "1.9": [SHARED_WEB / "components" / "YJButton.vue",
                 SHARED_WEB / "components" / "YJModal.vue",
                 SHARED_WEB / "components" / "YJPopover.vue",
@@ -361,7 +345,7 @@ def test_summary_35_tasks():
         "3.2": [ROUTES / "knowledge.py"],
         "3.3": [FEATURES / "knowledge" / "KnowledgePanel.vue"],
         "3.4": [SHARED / "responsive_core.py"],
-        "3.5": [ROUTES / "responsive.py"],
+        "3.5": [ROUTES / "responsive.py", ROUTES / "ws.py"],
         "3.6": [FEATURES / "responsive" / "ResponsivePanel.vue"],
         "3.7": [SHARED / "durable_store.py"],
         "3.8": [ROUTES / "agent.py", FEATURES / "agent" / "AgentView.vue"],
@@ -387,5 +371,5 @@ def test_summary_35_tasks():
             if not f.exists():
                 missing.append(f"{task_id}: {f}")
 
-    assert len(missing) == 0, f"缺失文件：\n" + "\n".join(missing[:20])
-    assert len(task_files) == 35, f"应有 35 个 TASK，实际 {len(task_files)}"
+    assert len(missing) == 0, "缺失文件：\n" + "\n".join(missing[:20])
+    assert len(task_files) == 34, f"应有 34 个 TASK（1.8 已移除），实际 {len(task_files)}"

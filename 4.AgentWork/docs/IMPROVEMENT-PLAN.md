@@ -1458,10 +1458,10 @@ v2.1 阶段划分（命名延续 M0-M8）：
 
 ### 🗄️ BACKLOG（跨产品，暂不动）
 
-- [ ] 2.WEB / 3.dev 的旧 35-TASK 验证脚本（`api/tests/test_all_phases_verification.py`）
-  - 断言 `doc/codebase-map.md` 存在，但该文件已归档为 `doc/archive/codebase-map-旧路径参考.md`
-  - 路径写死 `dev/app`、`dev/web`，这两个目录在 4 代目录结构里已不存在
-  - 本次文档重组之前就不是绿的，不作为门禁；重写时按 4 代目录和现行归档位置重新取路径
+- [x] 2.WEB / 3.dev 的旧 35-TASK 验证脚本已按 4 代目录重写（`<产品>/api` + `<产品>/ui`，代码地图指向 `doc/archive/`），两产品各 44 passed，并做过抽文件扰动红证明
+- [ ] 2.WEB / 3.dev 缺 CI 门禁：仓库里唯一的 `ci.yml` 在 `1.PC/.github/` 且只覆盖 1.PC，这两个产品没有任何自动化检查
+  - 原 TASK-1.8 断言的是根 `.github/workflows/ci.yml`，该文件从未存在，属恒红，已从验证脚本移除
+  - 补齐时按产品加 workflow，再把 1.8 以真实路径加回验证脚本
 
 ---
 
