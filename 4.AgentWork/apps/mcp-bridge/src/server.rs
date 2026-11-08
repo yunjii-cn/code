@@ -1215,7 +1215,20 @@ impl Server {
             // 败者不一定拿到 NotFound：Windows 上并发改名的另一半可能返回
             // AccessDenied / SharingViolation。归属以事实为准——源已不在，
             // 就是被另一方认领带走，不能报成「原样未动」。
-            if rename_failure_is_lost_race(&error, source.exists()) {
+            let mut lost_race = rename_failure_is_lost_race(&error, source.exists());
+            if !lost_race && error.kind() != std::io::ErrorKind::NotFound {
+                // 并发窗口：败者拿到 SharingViolation 时，胜者的 MoveFile 可能还没收尾，
+                // 此刻 source.exists() 仍为 true。给胜者一个很短的就位窗口再定归属；
+                // 窗口内源消失 = 被认领带走（lost_race），始终不消失 = 真·原样未动。
+                for _ in 0..50 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if !source.exists() {
+                        lost_race = true;
+                        break;
+                    }
+                }
+            }
+            if lost_race {
                 return DeleteOutcome::LostRace {
                     error: format!(
                         "claim_lost_source_missing: 源目录已被另一认领者改名带走（attempt-{attempt}），本进程零删除：{error}"
@@ -1255,6 +1268,25 @@ impl Server {
                 return DeleteOutcome::LostRace {
                     error: format!(
                         "claim_lost_after_rename: {staged_rel} 在删除前已被另一方清走，本进程零删除：{error}"
+                    ),
+                };
+            }
+            // Windows 并发改名可能让两方都拿到 Ok、暂存名指向同一目录；另一方先删成功时，
+            // 本方的 remove_dir_all 会报 AccessDenied，但目录随即消失。归属仍以事实为准：
+            // 暂存已不存在 = 本方零删除（lost_race）；仍存在 = 数据确实留在暂存（保留上报）。
+            let mut vanished = false;
+            for _ in 0..50 {
+                if !staged.exists() {
+                    vanished = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if vanished {
+                let _ = fs::remove_dir(&stage_root);
+                return DeleteOutcome::LostRace {
+                    error: format!(
+                        "claim_lost_after_rename: {staged_rel} 在删除失败后消失（被另一方清走），本进程零删除：{error}"
                     ),
                 };
             }
@@ -4453,6 +4485,25 @@ mod process_scope {
                     trace_note("terminate 结果=Unavailable 原因=pgid_unknown");
                     return CleanupOutcome::Unavailable;
                 };
+                // fail-closed：作用域不可观测时不动进程组，只终止直接子进程并如实报 Unavailable。
+                // 与契约措辞「仅向直接子进程发送终止信号」一致；宁可少清理，也不盲杀。
+                #[cfg(target_os = "linux")]
+                let blind_scope_reason = self.cgroup_degradation().or_else(|| {
+                    proc_table()
+                        .is_none()
+                        .then(|| "procfs_unavailable".to_string())
+                });
+                #[cfg(not(target_os = "linux"))]
+                let blind_scope_reason = Some("procfs_unavailable".to_string());
+                if let Some(reason) = blind_scope_reason {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    #[cfg(test)]
+                    trace_note(format!(
+                        "terminate 结果=Unavailable 原因=scope_unobservable:{reason}"
+                    ));
+                    return CleanupOutcome::Unavailable;
+                }
                 // v1.45：动手前先记下「当前仍可归属本任务」的后代（父链闭包 ∪ cgroup 成员），
                 // 附 `/proc/<pid>/stat` 的 `starttime` 防 PID 复用。逃出 `cgroup.procs` 且
                 // `setsid` 的后代既不在 `cgroup.kill` 的打击范围、也不在进程组里；根退出被
@@ -6771,9 +6822,9 @@ mod process_scope {
                 let _ = std::fs::remove_dir_all(&dir);
             }
 
-            // v1.52 判据：作用域建不起来（降级）时，终止仍只覆盖进程组，
-            // 但被收养的逃逸进程既打不到也看不见——**不得宣称 Cleaned**，
-            // 按 Unavailable 上报（cleanup_claimed=false），降级原因始终带在快照里。
+            // v1.52 判据：作用域建不起来（降级）时**不动进程组**，只向直接子进程发送终止信号，
+            // 被收养的逃逸进程既打不到也看不见——按 Unavailable 上报（cleanup_claimed=false），
+            // 降级原因始终带在快照里。宁可少清理，也不盲杀不可观测的作用域。
             #[cfg(target_os = "linux")]
             #[test]
             fn cgroup_degraded_terminate_reports_unavailable() {
@@ -10435,7 +10486,7 @@ fn capabilities_payload() -> Value {
                 "cgroup_without_kill_reports_still_alive",
                 "cgroup_degraded_terminate_reports_unavailable",
             ],
-            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。v1.49 起 `descendant_snapshot_cross_checks_process_group` 标记为已知不稳定（POSIX 全量并行时偶发 outcome=Unavailable，默认门禁按 WARN 呈现，见 scripts/test-gate/quarantine.txt）；本条 proven 结论由其余独立用例共同支撑，不单独依赖该条。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：仍只按进程组窄判据清理，但**不宣称 Cleaned**——快照带 escaped_scope_unobservable，terminate 返回 Unavailable（cleanup_status=unavailable、cleanup_claimed=false），降级原因不静默。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
+            "platform=linux，WSL Ubuntu 24.04 LTS（root，cgroup2fs，cgroup.kill 存在），内核 6.18.33.2-microsoft-standard-WSL2 实测。v1.49 起 `descendant_snapshot_cross_checks_process_group` 标记为已知不稳定（POSIX 全量并行时偶发 outcome=Unavailable，默认门禁按 WARN 呈现，见 scripts/test-gate/quarantine.txt）；本条 proven 结论由其余独立用例共同支撑，不单独依赖该条。`cgroup_kill_terminates_escapee_that_left_cgroup_procs`：父→子→孙，孙进程 setsid 后把自己写进旁路 cgroup（离开本作用域 cgroup.procs），`cgroup.kill` 打不到它；终止后 cgroup.procs 空、populated 0、逃逸 PID 不存在、快照无后代，四观测量同时成立才报 Cleaned。v1.45 起终止前用「父链闭包 ∪ cgroup.procs」建立名单并附 /proc/<pid>/stat 的 starttime，逃逸进程逐个 SIGKILL 收口；终止过程中新派生的子进程每轮并入名单；starttime 不一致（PID 复用）绝不发信号。内核没有 cgroup.kill：不写 cgroup.kill，v1.45 仍按名单杀掉已知逃逸者，但作用域记账不空时如实 StillAlive（cgroup_without_kill_reports_still_alive），不会谎报 Cleaned。作用域建不起来（cgroup v1 / 非 root / 容器未委派）：不动进程组，只向直接子进程发送终止信号并报 Unavailable（cleanup_status=unavailable、cleanup_claimed=false）；快照仍带 escaped_scope_unobservable，降级原因不静默。残余边界：进程若在 terminate 开始前就同时离开 cgroup.procs 且父链被收养，本机没有 OS 原语可指认它——这是 Linux 侧仅剩的缺口，快照与回执标 unobservable，不读成「无残留」。Windows 见 timeout.cleans_entire_process_tree_windows；macOS 未验证。",
         ),
         capability_entry(
             "timeout.cleans_entire_process_tree_windows",
@@ -11710,6 +11761,18 @@ mod prune_claim_race_tests {
         }
     }
 
+    /// 失败证据用：带上错误原文与暂存路径，避免只看到 "retained_at_source" 三个字。
+    fn describe_outcome(outcome: &DeleteOutcome) -> String {
+        match outcome {
+            DeleteOutcome::Deleted { trash_path } => format!("deleted:{trash_path}"),
+            DeleteOutcome::RetainedAtSource { error } => format!("retained_at_source:{error}"),
+            DeleteOutcome::RetainedInTrash { trash_path, error } => {
+                format!("trashed_not_deleted:{trash_path}:{error}")
+            }
+            DeleteOutcome::LostRace { error } => format!("lost_race:{error}"),
+        }
+    }
+
     /// 模拟 Windows 实测：rename 返回 Ok，但目的目录并不存在（被同源的另一方认领）。
     fn simulate_peer_won(_source: &Path, staged: &Path) {
         let _ = fs::remove_dir_all(staged);
@@ -11818,11 +11881,20 @@ mod prune_claim_race_tests {
                     std::thread::spawn(move || server.delete_attempt_dir("t", 1, &batch))
                 })
                 .collect();
-            let states: Vec<&'static str> = handles
+            let outcomes: Vec<String> = handles
                 .into_iter()
                 .map(|handle| {
                     let outcome = handle.join().expect("认领线程不得 panic");
-                    outcome_state(&outcome)
+                    describe_outcome(&outcome)
+                })
+                .collect();
+            let states: Vec<String> = outcomes
+                .iter()
+                .map(|text| {
+                    text.split(':')
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_string()
                 })
                 .collect();
 
@@ -11831,19 +11903,22 @@ mod prune_claim_race_tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 
-            let deleted = states.iter().filter(|state| **state == "deleted").count();
-            assert_eq!(deleted, 1, "第 {round} 轮必须恰好一方真删，实际 {states:?}");
+            let deleted = states.iter().filter(|state| state.as_str() == "deleted").count();
+            assert_eq!(
+                deleted, 1,
+                "第 {round} 轮必须恰好一方真删，实际 {outcomes:?}"
+            );
             let loser = states
                 .iter()
-                .find(|state| **state != "deleted")
+                .find(|state| state.as_str() != "deleted")
                 .expect("必须存在未删除的一方");
             assert_eq!(
-                *loser, "lost_race",
-                "第 {round} 轮败者必须具名记为 lost_race：{states:?}"
+                loser.as_str(), "lost_race",
+                "第 {round} 轮败者必须具名记为 lost_race：{outcomes:?}"
             );
             assert!(
                 !fixture.attempt.exists(),
-                "第 {round} 轮源目录必须已被搬走：{states:?}"
+                "第 {round} 轮源目录必须已被搬走：{outcomes:?}"
             );
             for index in 0..2 {
                 let stage_root = fixture
@@ -11857,7 +11932,7 @@ mod prune_claim_race_tests {
                 );
             }
 
-            match *loser {
+            match loser.as_str() {
                 "lost_race" => lost_rounds += 1,
                 _ => other_rounds += 1,
             }

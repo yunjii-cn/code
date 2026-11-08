@@ -5055,17 +5055,19 @@ test result: ok. 1 passed
 1. 判据用了 `snapshot.is_empty()`（只检查 `unobservable`，[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4078-L4082)），而结构注释已写明 `escaped_scope_unobservable` 非空时「**不代表**没有逃逸后代」（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4059-L4061)）——字段被声明为不可读成空，却在实际判定里被读成空。
 2. 全部快照复核都在 `#[cfg(target_os = "linux")]` 块内，macOS 分支只查「进程组是否为空」就返回 `Cleaned`；而 macOS 的 `snapshot_descendants` 恒返回 `unobservable("procfs_unavailable")`，等于「从不观测就宣称清空」。
 
-### 57.3 修复：Cleaned 必须有可观测且无降级的快照
+### 57.3 修复：不可观测作用域 → 不动进程组，只杀直接子进程
 
-- 把快照复核移出 Linux cfg，变成**所有 POSIX 平台共同判据**（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4582-L4610)）：`unobservable` 非空 → `Unavailable`；`escaped_scope_unobservable` 非空 → `Unavailable`；快照非空 → `StillAlive`；三者都没有才 `Cleaned`。
+- **终止前闸门**（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4488-L4506)）：Linux `cgroup_degradation()` 非空、或 Linux `proc_table()` 不可读、或非 Linux POSIX（macOS 无 `/proc`）时，**不向进程组发信号**，只 `child.kill()` + `wait()`，返回 `Unavailable`。与契约措辞「仅向直接子进程发送终止信号」逐字一致——宁可少清理，也不盲杀不可观测的作用域。
+- **终止后复核保底**（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L4633-L4661)）：所有 POSIX 平台共同检查快照；`unobservable` 或 `escaped_scope_unobservable` 非空 → `Unavailable`，快照非空 → `StillAlive`，三者皆无才 `Cleaned`。
 - macOS 因此恒为 `Unavailable`（`cleanup_status=unavailable`、`cleanup_claimed=false`），不再出现「看不见后代却宣称 cleaned」。
-- Linux cgroup 降级同理：仍只按进程组窄判据清理，但不再宣称 `Cleaned`；能力 `timeout.cleans_entire_process_tree` 的 detail 与 evidence 已同步改为 `cgroup_degraded_terminate_reports_unavailable`（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L10419-L10447)）。
+- Linux cgroup 降级同理：不再动进程组，只杀直接子进程并报 `Unavailable`；能力 `timeout.cleans_entire_process_tree` 的 detail 与 evidence 已同步改为 `cgroup_degraded_terminate_reports_unavailable`（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L10419-L10447)）。
 - 未新增 `verified`、未新增 `cleanup_status` 取值；`Unavailable` 本来就映射 `cleanup_status="unavailable"` 且 `cleanup_claimed=false`（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L8037-L8051)），PM 判定模块无需改动。
 - 用例改名与断言：`cgroup_degraded_terminate_reports_unavailable` 固定「逃逸仍存活 + outcome=Unavailable」（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L6774-L6854)）。
 
 ### 57.4 修复后证据
 
 ```text
+[evidence] cgroup_degraded before root=153635 escaped=153621 scope=ProcessGroup escaped_scope_unobservable=Some("cgroup_v2_unavailable") descendants=[]
 [evidence] cgroup_degraded after outcome=Unavailable escaped_alive=true descendants=[] scope=ProcessGroup unobservable=None escaped_scope_unobservable=Some("cgroup_v2_unavailable")
 test result: ok. 1 passed
 ```
@@ -5073,8 +5075,8 @@ test result: ok. 1 passed
 两平台门禁（默认档，最终代码）：
 
 ```text
-Windows gate.ps1 : rc=0 64.8s | SELFTEST pass=7 fail=0 | lib 27 | integration 130 | warn=0 fail=0
-WSL verify.sh    : rc=0 13s  | lib 39 passed + 1 ignored | integration 128 | warn=0 fail=0
+Windows gate.ps1 : rc=0 52.5s | SELFTEST pass=7 fail=0 | lib 27 | integration 130 | warn=0 fail=0
+WSL verify.sh    : rc=0 14s   | lib 39 passed + 1 ignored | integration 128 | warn=0 fail=0
 description_gate : test result: ok. 3 passed; 0 failed（24 filtered out）
 tools_sha256     : 95062dad5bc83f4c19e2abb0adfb7010269975f3277445cfaf50d18bba78e316（未变）
 quarantine.txt   : 非注释行 = 0
@@ -5083,4 +5085,14 @@ quarantine.txt   : 非注释行 = 0
 ### 57.5 macOS 全程未验证（可检索）
 
 **macOS 全程未验证**：本仓库没有 macOS 构建、没有 macOS 用例、没有 macOS CI 或实跑记录；`capabilities` 中 macOS **只**出现在 `platforms_unverified`，不出现于任何 `platforms_verified`。任何 macOS 行为结论（包括本节 fail-closed 的推断）都只是代码路径分析，**不构成「已验证」**；首次在 macOS 实跑前，按未验证平台对待。
+
+### 57.6 门禁复跑暴露的并发改名归属问题（顺手修，未进 quarantine）
+
+本轮复跑 Windows 门禁时，`prune_concurrent_claimers_delete_once_others_lost_race` 间歇红两次，两次都不是产品数据问题，而是**归属分类**错：
+
+1. 败者 rename 拿到 `AccessDenied` 时，胜者的 `MoveFile` 还没收尾，`source.exists()` 仍为 true → 被记成 `retained_at_source`。修复：非 `NotFound` 错误给胜者 250ms 收尾窗口，源消失即 `lost_race`（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L1213-L1241)）。
+2. Windows 并发改名可能让两方都返回 Ok；胜者先删共享暂存目录后，败者的 `remove_dir_all` 报 `AccessDenied`，但目录随即消失 → 被记成 `trashed_not_deleted`。修复：删除失败后再给 250ms 窗口，暂存消失即 `lost_race`（零删除）；仍存在才报 `RetainedInTrash`（数据确实保留在暂存）（[server.rs](file:///E:/软件开发/云集编程工作站/4.AgentWork/apps/mcp-bridge/src/server.rs#L1265-L1299)）。
+3. 两处都只改「失败后的归属判定」，不放宽 `delete_attempt_dir` 的前置闸门，也不动 `quarantine.txt`。
+
+验证（Windows，最终代码）：精确连跑 **50 次 × 每次 20 轮 = 1000 轮** `failures=0/50`；门禁默认档再跑 20 轮全绿（`[GATE] warn=0 fail=0`）。
 
